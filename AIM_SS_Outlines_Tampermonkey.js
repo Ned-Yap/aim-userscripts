@@ -827,7 +827,11 @@
             p.setAttribute('stroke-linejoin', 'round');
             p.setAttribute('stroke-linecap', 'round');
             p.setAttribute('pointer-events', 'none');
-            g.appendChild(p);
+            // Insert at the START of the group so the shielding renders
+            // UNDER the FFZ/FP/asset outlines (which were appended later).
+            // Appending puts at end = on top.
+            if (g.firstChild) g.insertBefore(p, g.firstChild);
+            else g.appendChild(p);
         });
     }
 
