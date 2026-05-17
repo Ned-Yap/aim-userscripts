@@ -2,6 +2,8 @@
 // @name         AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
 // @version      1.9
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*

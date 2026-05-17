@@ -2,7 +2,9 @@
 // @name         AIM Sidebar Resizer
 // @namespace    http://tampermonkey.net/
 // @version      3.2
-// @description  v3.2: Map Recovery. Restores map visibility by forcing sibling height and flex-growth.
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js
+// @description  Restores map visibility by forcing sibling height and flex-growth.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*
 // @grant        none

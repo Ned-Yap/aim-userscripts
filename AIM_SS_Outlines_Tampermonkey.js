@@ -2,6 +2,8 @@
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
 // @version      30.1
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O.
 // @author       Payden
 // @match        *://percepto.app/*

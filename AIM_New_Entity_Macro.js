@@ -2,6 +2,8 @@
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
 // @version      1.3
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
 // @description  Hotkeys 1-6 create entities; Shift+S Save, Shift+D Delete, Shift+Z Cancel, Shift+X Finish.
 // @author       Payden
 // @match        *://percepto.app/*

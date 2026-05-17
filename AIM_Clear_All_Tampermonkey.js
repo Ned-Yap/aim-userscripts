@@ -2,6 +2,8 @@
 // @name         AIM Clear All
 // @namespace    http://tampermonkey.net/
 // @version      1.1
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
 // @description  Adds Shift+C hotkey for the Clear All button.
 // @author       Payden
 // @match        *://percepto.app/*

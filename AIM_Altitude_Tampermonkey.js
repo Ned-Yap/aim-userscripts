@@ -2,6 +2,8 @@
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
 // @version      1.2
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup.
 // @author       Payden
 // @match        *://percepto.app/*

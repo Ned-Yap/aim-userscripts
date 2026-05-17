@@ -2,6 +2,8 @@
 // @name         AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
 // @version      2.4
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
 // @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup.
 // @author       Payden
 // @match        *://percepto.app/*

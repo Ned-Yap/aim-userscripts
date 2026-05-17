@@ -2,6 +2,8 @@
 // @name         AIM Bulk Altitude Updater
 // @namespace    http://tampermonkey.net/
 // @version      4.8
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.js
 // @description  Pause-enabled bulk altitude updater with double-check logic. Prep Pass -> Pause (Update Data) -> Final Pass.
 // @author       Payden
 // @match        *://percepto.app/*
