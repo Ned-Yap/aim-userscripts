@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.12';
+    const VERSION = '1.13';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -701,6 +701,21 @@
             `;
         }
 
+        if (type === 'button') {
+            // Action button — broadcasts TRIGGER_ACTION (actionId from t.action
+            // or t.id). The owning script listens and runs whatever is wired up.
+            return `
+                <div style="padding:4px 10px">
+                    <button data-control="button"
+                            data-script="${escapeAttr(scriptId)}"
+                            data-action="${escapeAttr(t.action || t.id)}"
+                            style="width:100%;background:rgba(20,210,220,0.18);border:1px solid rgba(20,210,220,0.5);color:rgb(20,210,220);padding:4px 8px;border-radius:3px;font:inherit;cursor:pointer">
+                        ${escapeHtml(t.label || t.id)}
+                    </button>
+                </div>
+            `;
+        }
+
         if (type === 'number') {
             const v = (value === undefined || value === null) ? (t.default ?? '') : value;
             return `
@@ -805,6 +820,19 @@
                 // get the type they expect.
                 if (!isNaN(parseFloat(v)) && isFinite(v)) v = parseFloat(v);
                 broadcastToggle(e.target.dataset.script, e.target.dataset.toggle, v);
+            });
+        });
+        // Wire action buttons
+        state.panelEl.querySelectorAll('button[data-control="button"]').forEach(b => {
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (state.channel) {
+                    state.channel.postMessage({
+                        type: 'TRIGGER_ACTION',
+                        scriptId: b.dataset.script,
+                        actionId: b.dataset.action,
+                    });
+                }
             });
         });
         // Wire color inputs

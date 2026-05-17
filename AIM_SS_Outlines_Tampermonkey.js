@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      32.0
+// @version      32.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '32.0';
+    const SCRIPT_VERSION = '32.1';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -158,6 +158,21 @@
             ],
         },
         {
+            type: 'category',
+            id: 'validator-cat',
+            label: 'Coverage Validator',
+            meta: '(200ft FAA rule — on-demand)',
+            master: { id: 'validator.show', default: true },
+            children: [
+                { id: 'validator.distance', label: 'Required coverage', type: 'number',
+                  min: 50, max: 500, step: 10, default: 200, unit: 'ft' },
+                { id: 'validator.sample-spacing', label: 'Sample every', type: 'number',
+                  min: 2, max: 50, step: 1, default: 10, unit: 'ft' },
+                { id: 'validator-run', label: 'Run coverage check', type: 'button', action: 'run-validator' },
+                { id: 'validator-clear', label: 'Clear pins', type: 'button', action: 'clear-validator' },
+            ],
+        },
+        {
             type: 'advanced',
             id: 'styler-advanced',
             label: 'Advanced',
@@ -264,6 +279,13 @@
     const kmlMissing = new Set();
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
+
+    // Coverage Validator state — results stored as lat/lng so they survive
+    // zoom/pan (we re-project to SVG user space every render tick).
+    const validatorState = {
+        results: [], // [{ lat, lng, number }]
+        lastRun: null, // { count, at, durationMs, error? }
+    };
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
     // GM storage is per-script in Tampermonkey, so the token saved by the
@@ -565,9 +587,11 @@
         renderAltitudeShields(globalBaseWidth, lineThickness, standardRatio);
         // 6. KML shielding overlays (loaded async — render whatever's currently in kmlFeatures).
         renderShielding();
-        // 7. Violation dots — assets within Xft of FFZ/FP/shielding.
+        // 7. Violation dots — assets within Xft of FFZ/FP.
         renderViolations(globalBaseWidth, lineThickness, standardRatio);
-        // 8. Round altitude + make values copyable in altitude popups.
+        // 8. Coverage Validator pins (re-projected from stored lat/lng).
+        renderValidatorPins();
+        // 9. Round altitude + make values copyable in altitude popups.
         enhanceAltitudePopups();
     }
 
@@ -868,6 +892,210 @@
         for (let i = 1; i < pts.length; i++) d += ` L ${pts[i].x} ${pts[i].y}`;
         if (closed) d += ' Z';
         return d;
+    }
+
+    // ============================================================
+    // COVERAGE VALIDATOR — on-demand check that every flight path
+    // segment and FFZ perimeter point has shielding (distro OR trans
+    // KML) within the FAA-required distance (default 200ft).
+    //
+    // Algorithm:
+    //   1. Walk every FFZ outline + FP main line, sampling along each
+    //   2. For each sample, find min distance (haversine, via Leaflet
+    //      map.distance) to ANY shielding point
+    //   3. Group contiguous failing samples into "gaps"
+    //   4. Drop a numbered red pin at the midpoint of each gap
+    //
+    // Results are stored as lat/lng so they persist across zoom/pan
+    // and the regular wipe & rebuild cycle (renderValidatorPins is
+    // called on every runUpdate tick and re-projects).
+    // ============================================================
+    function runCoverageValidator() {
+        const map = getLeafletMap();
+        if (!map || typeof map.distance !== 'function' || typeof map.layerPointToLatLng !== 'function') {
+            console.warn(`${TAG} validator: Leaflet map not accessible`);
+            validatorState.lastRun = { error: 'Leaflet map not accessible', at: Date.now() };
+            return;
+        }
+        const siteID = getCurrentSiteID();
+        if (!siteID) {
+            validatorState.lastRun = { error: 'No site ID in URL', at: Date.now() };
+            return;
+        }
+
+        // Collect every shielding point (both types) as lat/lng.
+        const shielding = [];
+        KML_TYPES.forEach(t => {
+            const feats = kmlFeatures[kmlKey(siteID, t)] || [];
+            feats.forEach(f => f.coords.forEach(c => shielding.push(c)));
+        });
+        if (!shielding.length) {
+            console.warn(`${TAG} validator: no shielding loaded for site ${siteID}`);
+            validatorState.lastRun = { error: 'No shielding KMLs loaded for this site', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        const thresholdFt = Number(toggleState['validator.distance']) || 200;
+        const thresholdM = thresholdFt * 0.3048;
+        const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
+        if (!targetEls.length) {
+            console.warn(`${TAG} validator: no flight paths or FFZs to check`);
+            validatorState.lastRun = { error: 'No flight paths or FFZs on this map', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        const startTime = Date.now();
+        const gaps = [];
+        targetEls.forEach(el => {
+            const total = el.getTotalLength();
+            if (!total) return;
+            // Oversample — ~1 sample per 3 SVG user units, capped. Most
+            // samples will short-circuit on the first nearby shielding point
+            // so cost stays reasonable even for big missions.
+            const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
+            let currentGap = null;
+
+            for (let i = 0; i <= sampleCount; i++) {
+                const t = total * i / sampleCount;
+                let svgPt;
+                try { svgPt = el.getPointAtLength(t); } catch (e) { continue; }
+                // SVG user-space coords ARE Leaflet's layer-point coords.
+                let sampleLatLng;
+                try { sampleLatLng = map.layerPointToLatLng({ x: svgPt.x, y: svgPt.y }); } catch (e) { continue; }
+                if (!sampleLatLng) continue;
+
+                // Find min distance to any shielding point. Early-exit the
+                // moment we find one within threshold (any one within = pass).
+                let isFailing = true;
+                for (let j = 0; j < shielding.length; j++) {
+                    const d = map.distance(sampleLatLng, [shielding[j].lat, shielding[j].lng]);
+                    if (d <= thresholdM) { isFailing = false; break; }
+                }
+
+                if (isFailing) {
+                    if (!currentGap) currentGap = { samples: [] };
+                    currentGap.samples.push({ lat: sampleLatLng.lat, lng: sampleLatLng.lng });
+                } else if (currentGap) {
+                    gaps.push(currentGap);
+                    currentGap = null;
+                }
+            }
+            if (currentGap) gaps.push(currentGap);
+        });
+
+        // One pin per gap at the midpoint sample.
+        const results = gaps.map((g, i) => {
+            const mid = g.samples[Math.floor(g.samples.length / 2)];
+            return { lat: mid.lat, lng: mid.lng, number: i + 1 };
+        });
+
+        validatorState.results = results;
+        validatorState.lastRun = {
+            count: results.length,
+            at: Date.now(),
+            durationMs: Date.now() - startTime,
+        };
+        if (results.length === 0) {
+            console.log(`${TAG} validator: ✓ no coverage gaps found (${validatorState.lastRun.durationMs}ms)`);
+        } else {
+            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) in ${validatorState.lastRun.durationMs}ms — see numbered pins`);
+        }
+        runUpdate();
+    }
+
+    function clearCoverageValidator() {
+        const had = validatorState.results.length;
+        validatorState.results = [];
+        validatorState.lastRun = null;
+        console.log(`${TAG} validator: cleared ${had} pin(s)`);
+        runUpdate();
+    }
+
+    function renderValidatorPins() {
+        if (!toggleState['validator.show']) return;
+        if (!validatorState.results.length) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return;
+        const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
+        if (!container) return;
+        const svg = document.querySelector('.leaflet-overlay-pane svg');
+        if (!svg) return;
+        const g = svg.querySelector('g');
+        if (!g) return;
+        let ctm;
+        try { ctm = svg.getScreenCTM(); } catch (e) { return; }
+        if (!ctm) return;
+        const inv = ctm.inverse();
+        const cRect = container.getBoundingClientRect();
+
+        const latLngToSVG = (lat, lng) => {
+            const cp = map.latLngToContainerPoint([lat, lng]);
+            const sp = svg.createSVGPoint();
+            sp.x = cRect.left + cp.x;
+            sp.y = cRect.top + cp.y;
+            return sp.matrixTransform(inv);
+        };
+
+        // Coverage circle radius — convert 200ft to SVG units AT THIS PIN
+        // location, by offsetting latitude by 200ft and measuring the delta.
+        // (200ft latitude offset ≈ 200/362776 degrees — 1 deg lat is ~362,776 ft.)
+        const thresholdFt = Number(toggleState['validator.distance']) || 200;
+        const latOffsetDeg = thresholdFt / 362776;
+
+        validatorState.results.forEach(r => {
+            const c = latLngToSVG(r.lat, r.lng);
+            const c2 = latLngToSVG(r.lat + latOffsetDeg, r.lng);
+            const dx = c2.x - c.x, dy = c2.y - c.y;
+            const radiusUnits = Math.sqrt(dx * dx + dy * dy);
+
+            // Coverage circle (translucent red — shows the 200ft scope)
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            circle.setAttribute('data-buffer-kind', 'validator-coverage');
+            circle.setAttribute('cx', String(c.x));
+            circle.setAttribute('cy', String(c.y));
+            circle.setAttribute('r', String(radiusUnits));
+            circle.setAttribute('fill', '#ff0033');
+            circle.setAttribute('fill-opacity', '0.10');
+            circle.setAttribute('stroke', '#ff0033');
+            circle.setAttribute('stroke-opacity', '0.55');
+            circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.018)));
+            circle.setAttribute('stroke-dasharray', String(radiusUnits * 0.04) + ' ' + String(radiusUnits * 0.04));
+            circle.setAttribute('pointer-events', 'none');
+            g.appendChild(circle);
+
+            // Pin marker — solid red circle with number, sized relative to
+            // the coverage radius so it stays legible at any zoom.
+            const pinR = Math.max(8, radiusUnits * 0.07);
+            const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            pin.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            pin.setAttribute('data-buffer-kind', 'validator-pin');
+            pin.setAttribute('cx', String(c.x));
+            pin.setAttribute('cy', String(c.y));
+            pin.setAttribute('r', String(pinR));
+            pin.setAttribute('fill', '#cc0029');
+            pin.setAttribute('stroke', '#ffffff');
+            pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
+            pin.setAttribute('pointer-events', 'none');
+            g.appendChild(pin);
+
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+            text.setAttribute('data-buffer-kind', 'validator-num');
+            text.setAttribute('x', String(c.x));
+            text.setAttribute('y', String(c.y));
+            text.setAttribute('text-anchor', 'middle');
+            text.setAttribute('dominant-baseline', 'central');
+            text.setAttribute('fill', '#ffffff');
+            text.setAttribute('font-size', String(pinR * 1.25));
+            text.setAttribute('font-weight', 'bold');
+            text.setAttribute('font-family', 'sans-serif');
+            text.setAttribute('pointer-events', 'none');
+            text.textContent = String(r.number);
+            g.appendChild(text);
+        });
     }
 
     // --- Violation detection ---
@@ -1301,6 +1529,10 @@
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
                 }
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) {
+                // Button-type controls in the panel broadcast this when clicked.
+                if (msg.actionId === 'run-validator') runCoverageValidator();
+                else if (msg.actionId === 'clear-validator') clearCoverageValidator();
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 if (msg.hotkeyId === 'toggle-master') {
                     const next = !isActive;
