@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -9,7 +9,11 @@
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      raw.githubusercontent.com
+// @connect      api.github.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -51,12 +55,15 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.8';
+    const VERSION = '1.11';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PREFS_KEY = 'aim-control-prefs';
     const HOTKEYS_KEY = 'aim-control-hotkeys';
+    const TOKEN_KEY = 'aim-github-token';
+    const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
+    const KMLS_BRANCH = 'main';
     const INJECT_RETRY_MS = 500;
     const INJECT_MAX_TRIES = 60; // 30s of retries then give up
 
@@ -77,6 +84,11 @@
         rebindingFor: null, // { scriptId, hotkeyId } while capturing a new key combo
         injectTries: 0,
         expanded: {},       // Advanced section keys -> bool (open/closed)
+        // GitHub PAT for fetching private-repo KMLs.
+        // 'unknown' | 'missing' | 'testing' | 'valid' | 'invalid' | 'error'
+        tokenStatus: 'unknown',
+        tokenStatusMsg: '',
+        tokenInputVisible: false, // only true after Edit click — keeps PAT off-screen by default
     };
 
     console.log(`${TAG} v${VERSION} loading`);
@@ -112,6 +124,74 @@
         if (combo == null) delete state.hotkeys[scriptId][hotkeyId];
         else state.hotkeys[scriptId][hotkeyId] = combo;
         savePrefs();
+    }
+
+    // ============================================================
+    // 3b. GITHUB TOKEN (GM_setValue — per-extension storage,
+    //     not localStorage. Other scripts on the same page can
+    //     read localStorage but not GM storage.)
+    // ============================================================
+    function gmGet(key, def) {
+        try {
+            if (typeof GM_getValue === 'function') return GM_getValue(key, def);
+        } catch (e) {}
+        return def;
+    }
+    function gmSet(key, value) {
+        try {
+            if (typeof GM_setValue === 'function') { GM_setValue(key, value); return true; }
+        } catch (e) {}
+        return false;
+    }
+    function getToken() {
+        const t = gmGet(TOKEN_KEY, '');
+        return typeof t === 'string' ? t : '';
+    }
+    function setToken(value) {
+        gmSet(TOKEN_KEY, value || '');
+        state.tokenStatus = value ? 'unknown' : 'missing';
+        state.tokenStatusMsg = '';
+        // Tell scripts that depend on the token (currently just the styler)
+        // to re-fetch any data they pulled with the old credentials.
+        if (state.channel) state.channel.postMessage({ type: 'REFETCH_KMLS' });
+    }
+    // Verifies the PAT by hitting the contents API for the KMLs repo root.
+    // Uses GM_xmlhttpRequest so the request bypasses page CORS rules.
+    function testToken(value, cb) {
+        if (!value) { cb('missing', 'No token entered'); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            cb('error', 'GM_xmlhttpRequest unavailable (check @grant headers)');
+            return;
+        }
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://api.github.com/repos/${KMLS_REPO}/contents/?ref=${KMLS_BRANCH}`,
+                headers: {
+                    'Authorization': `Bearer ${value}`,
+                    'Accept': 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+                onload: (resp) => {
+                    if (resp.status >= 200 && resp.status < 300) {
+                        let count = 0;
+                        try { count = (JSON.parse(resp.responseText) || []).length; } catch (e) {}
+                        cb('valid', `${count} file${count === 1 ? '' : 's'} in repo`);
+                    } else if (resp.status === 401) {
+                        cb('invalid', 'Token rejected (401) — check it has Contents: Read');
+                    } else if (resp.status === 404) {
+                        cb('invalid', 'Repo not found (404) — check token has access to this repo');
+                    } else {
+                        cb('error', `HTTP ${resp.status}`);
+                    }
+                },
+                onerror: () => cb('error', 'Network error'),
+                ontimeout: () => cb('error', 'Timed out'),
+                timeout: 8000,
+            });
+        } catch (e) {
+            cb('error', e.message || 'Unknown error');
+        }
     }
 
     // ============================================================
@@ -407,6 +487,124 @@
     function escapeAttr(s) { return escapeHtml(s); }
 
     // Renders one control row based on the toggle's type. Supported types:
+    // Renders the GitHub PAT section that sits between the panel header and
+    // the per-script controls. The actual token is never rendered to the DOM
+    // — once saved, we show only a masked indicator (••••) and the status.
+    function renderTokenSection() {
+        const hasToken = !!getToken();
+        const status = state.tokenStatus;
+        let pillColor = '#888', pillText = 'Not configured';
+        if (status === 'valid') { pillColor = '#5fff5f'; pillText = '✓ Valid'; }
+        else if (status === 'invalid') { pillColor = '#ff6060'; pillText = '✗ Invalid'; }
+        else if (status === 'testing') { pillColor = '#ffd591'; pillText = 'Testing…'; }
+        else if (status === 'error') { pillColor = '#ff8c00'; pillText = '⚠ Error'; }
+        else if (status === 'missing') { pillColor = '#888'; pillText = 'Not configured'; }
+        else if (hasToken) { pillText = 'Saved (untested)'; pillColor = '#bbb'; }
+
+        const statusMsgHtml = state.tokenStatusMsg
+            ? `<div style="padding:0 10px 4px;color:#888;font-size:11px;font-style:italic">${escapeHtml(state.tokenStatusMsg)}</div>`
+            : '';
+
+        const showInput = state.tokenInputVisible || !hasToken;
+        const inputHtml = showInput ? `
+            <div style="display:flex;gap:6px;padding:4px 10px;align-items:center">
+                <input type="password" data-token-input
+                       placeholder="github_pat_…"
+                       autocomplete="off" spellcheck="false"
+                       style="flex:1;background:rgb(20,20,20);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6;padding:3px 6px;border-radius:3px;font-family:ui-monospace,monospace;font-size:11px" />
+                <button data-token-save
+                        style="background:rgba(20,210,220,0.18);border:1px solid rgba(20,210,220,0.5);color:rgb(20,210,220);padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">Save & Test</button>
+                ${hasToken ? `<button data-token-cancel style="background:transparent;border:1px solid rgba(255,255,255,0.18);color:#bbb;padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">Cancel</button>` : ''}
+            </div>
+        ` : `
+            <div style="display:flex;gap:6px;padding:4px 10px;align-items:center">
+                <span style="flex:1;font-family:ui-monospace,monospace;font-size:11px;color:#bbb">••••••••••••••••</span>
+                <button data-token-edit
+                        style="background:transparent;border:1px solid rgba(255,255,255,0.18);color:#bbb;padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">Edit</button>
+                <button data-token-test
+                        style="background:transparent;border:1px solid rgba(20,210,220,0.5);color:rgb(20,210,220);padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">Test</button>
+                <button data-token-clear
+                        style="background:transparent;border:1px solid rgba(255,96,96,0.5);color:#ff6060;padding:2px 8px;border-radius:3px;font-size:11px;cursor:pointer">Clear</button>
+            </div>
+        `;
+
+        return `
+            <div style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.02)">
+                <div style="padding:6px 10px 2px;display:flex;align-items:center;justify-content:space-between">
+                    <span style="color:#e6e6e6;font-weight:600;font-size:12px">GitHub PAT <span style="color:#888;font-weight:400">(shielding KMLs)</span></span>
+                    <span style="font-size:10px;color:${pillColor};font-weight:600">${escapeHtml(pillText)}</span>
+                </div>
+                ${inputHtml}
+                ${statusMsgHtml}
+            </div>
+        `;
+    }
+
+    // Hooks up the buttons/inputs created by renderTokenSection. Called once
+    // per render — the panel re-renders on any state change, so re-binding
+    // is cheap and avoids stale closures.
+    function wireTokenSection() {
+        const root = state.panelEl;
+        if (!root) return;
+        const setStatus = (status, msg) => {
+            state.tokenStatus = status;
+            state.tokenStatusMsg = msg || '';
+            renderPanel();
+        };
+        const saveBtn = root.querySelector('[data-token-save]');
+        const input = root.querySelector('[data-token-input]');
+        if (saveBtn && input) {
+            // Stop hotkey router from grabbing keys while typing into the field.
+            input.addEventListener('keydown', (e) => e.stopPropagation());
+            const save = () => {
+                const val = (input.value || '').trim();
+                if (!val) { setStatus('missing', 'Please paste a token first'); return; }
+                setToken(val);
+                state.tokenInputVisible = false;
+                setStatus('testing', 'Verifying…');
+                testToken(val, (status, msg) => setStatus(status, msg));
+            };
+            saveBtn.addEventListener('click', (e) => { e.stopPropagation(); save(); });
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); save(); }
+            });
+        }
+        const cancelBtn = root.querySelector('[data-token-cancel]');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                state.tokenInputVisible = false;
+                renderPanel();
+            });
+        }
+        const editBtn = root.querySelector('[data-token-edit]');
+        if (editBtn) {
+            editBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                state.tokenInputVisible = true;
+                renderPanel();
+            });
+        }
+        const testBtn = root.querySelector('[data-token-test]');
+        if (testBtn) {
+            testBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const tok = getToken();
+                if (!tok) { setStatus('missing', 'No token saved'); return; }
+                setStatus('testing', 'Verifying…');
+                testToken(tok, (status, msg) => setStatus(status, msg));
+            });
+        }
+        const clearBtn = root.querySelector('[data-token-clear]');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setToken('');
+                setStatus('missing', 'Token cleared');
+            });
+        }
+    }
+
     //   boolean (default)  — checkbox
     //   select             — dropdown of {value,label} options
     //   number             — numeric input with optional unit suffix
@@ -528,6 +726,8 @@
             </div>
         `;
 
+        const tokenHtml = renderTokenSection();
+
         const emptyHtml = scripts.length === 0 ? `
             <div style="padding:20px 16px;text-align:center;color:#888">
                 <div style="margin-bottom:6px">No AIM scripts registered yet.</div>
@@ -572,7 +772,8 @@
             `;
         }).join('');
 
-        state.panelEl.innerHTML = headerHtml + emptyHtml + sectionsHtml;
+        state.panelEl.innerHTML = headerHtml + tokenHtml + emptyHtml + sectionsHtml;
+        wireTokenSection();
 
         // Wire checkboxes (boolean controls)
         state.panelEl.querySelectorAll('input[data-control="boolean"]').forEach(cb => {
@@ -648,6 +849,10 @@
     // ============================================================
     function init() {
         loadPrefs();
+        // Token status starts as 'missing' if nothing's saved, otherwise
+        // 'unknown' — the UI shows "Saved (untested)" until the user
+        // clicks Test (or another script reports success/failure).
+        state.tokenStatus = getToken() ? 'unknown' : 'missing';
         setupChannel();
         installHotkeyRouter();
         const start = () => {
