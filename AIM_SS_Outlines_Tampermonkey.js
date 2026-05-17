@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      32.1
+// @version      32.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '32.1';
+    const SCRIPT_VERSION = '32.2';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -647,25 +647,40 @@
     //   1. Cached ref (validated still in DOM)
     //   2. Container .__aim_map__ from our prototype patch
     //   3. Container _leaflet_map (set by some Leaflet wrappers)
-    //   4. Walks own properties of the container for one that quacks like a map
+    //   4. Walks own properties of the container for one with the FULL map API
+    //   5. Walks ALL .leaflet-container nodes (covers iframe / multi-map cases)
+    //
+    // The walk requires multiple methods to avoid latching onto a stripped
+    // Leaflet helper that has e.g. latLngToLayerPoint but not distance().
+    function looksLikeLeafletMap(v) {
+        return v && typeof v === 'object'
+            && typeof v.latLngToLayerPoint === 'function'
+            && typeof v.latLngToContainerPoint === 'function'
+            && typeof v.layerPointToLatLng === 'function'
+            && typeof v.distance === 'function'
+            && typeof v.getContainer === 'function';
+    }
+
     function getLeafletMap() {
         if (leafletMapRef && leafletMapRef._container && document.body.contains(leafletMapRef._container)) {
             return leafletMapRef;
         }
         leafletMapRef = null;
-        const container = document.querySelector('.leaflet-container');
-        if (!container) return null;
-        const candidates = [container.__aim_map__, container._leaflet_map, container._leaflet];
-        for (const c of candidates) {
-            if (c && typeof c.latLngToLayerPoint === 'function') { leafletMapRef = c; return c; }
-        }
-        for (const k in container) {
-            try {
-                const v = container[k];
-                if (v && typeof v === 'object' && typeof v.latLngToLayerPoint === 'function') {
-                    leafletMapRef = v; return v;
-                }
-            } catch (e) {}
+        const containers = document.querySelectorAll('.leaflet-container');
+        for (const container of containers) {
+            const candidates = [container.__aim_map__, container._leaflet_map, container._leaflet];
+            for (const c of candidates) {
+                if (looksLikeLeafletMap(c)) { leafletMapRef = c; return c; }
+            }
+            for (const k in container) {
+                try {
+                    const v = container[k];
+                    if (looksLikeLeafletMap(v)) {
+                        console.log(`${TAG} captured Leaflet map via container.${k}`);
+                        leafletMapRef = v; return v;
+                    }
+                } catch (e) {}
+            }
         }
         return null;
     }
@@ -912,9 +927,12 @@
     // ============================================================
     function runCoverageValidator() {
         const map = getLeafletMap();
-        if (!map || typeof map.distance !== 'function' || typeof map.layerPointToLatLng !== 'function') {
-            console.warn(`${TAG} validator: Leaflet map not accessible`);
-            validatorState.lastRun = { error: 'Leaflet map not accessible', at: Date.now() };
+        if (!map) {
+            // Diagnose: did the prototype patch run? Are there .leaflet-container
+            // nodes at all? This message is the next thing we follow when it fires.
+            const containers = document.querySelectorAll('.leaflet-container');
+            console.warn(`${TAG} validator: Leaflet map not accessible (patched=${leafletPatched}, .leaflet-container count=${containers.length})`);
+            validatorState.lastRun = { error: 'Leaflet map not accessible — see console for diagnostics', at: Date.now() };
             return;
         }
         const siteID = getCurrentSiteID();
