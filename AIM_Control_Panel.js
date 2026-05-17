@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.11';
+    const VERSION = '1.12';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -151,9 +151,14 @@
         gmSet(TOKEN_KEY, value || '');
         state.tokenStatus = value ? 'unknown' : 'missing';
         state.tokenStatusMsg = '';
-        // Tell scripts that depend on the token (currently just the styler)
-        // to re-fetch any data they pulled with the old credentials.
-        if (state.channel) state.channel.postMessage({ type: 'REFETCH_KMLS' });
+        // GM storage is per-script in Tampermonkey — other scripts cannot
+        // read this panel's namespace. So we broadcast the token over the
+        // control channel for any script that needs it. BroadcastChannel
+        // is same-origin, in-browser only; nothing leaves the machine.
+        if (state.channel) {
+            state.channel.postMessage({ type: 'TOKEN_VALUE', token: value || '' });
+            state.channel.postMessage({ type: 'REFETCH_KMLS' });
+        }
     }
     // Verifies the PAT by hitting the contents API for the KMLs repo root.
     // Uses GM_xmlhttpRequest so the request bypasses page CORS rules.
@@ -210,6 +215,12 @@
         const msg = event.data || {};
         if (msg.type === 'REGISTER') {
             handleRegister(msg);
+            // New script just came online — if we have a token, hand it
+            // over so the script can use it for any private-repo fetches.
+            const token = getToken();
+            if (token && state.channel) {
+                state.channel.postMessage({ type: 'TOKEN_VALUE', token });
+            }
         } else if (msg.type === 'UNREGISTER' && msg.scriptId) {
             state.registry.delete(msg.scriptId);
             if (state.panelOpen) renderPanel();
@@ -219,6 +230,11 @@
             const v = msg.value !== undefined ? msg.value : msg.enabled;
             setToggle(msg.scriptId, msg.toggleId, v);
             if (state.panelOpen) renderPanel();
+        } else if (msg.type === 'REQUEST_TOKEN') {
+            const token = getToken();
+            if (token && state.channel) {
+                state.channel.postMessage({ type: 'TOKEN_VALUE', token });
+            }
         }
     }
 

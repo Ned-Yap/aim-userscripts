@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      31.0
+// @version      31.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '31.0';
+    const SCRIPT_VERSION = '31.1';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -250,6 +250,10 @@
     const kmlMissing = new Set();
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
+    // GM storage is per-script in Tampermonkey, so the token saved by the
+    // control panel can't be read from here directly. We get it via the
+    // control channel (TOKEN_VALUE message) and cache it in memory.
+    let cachedToken = '';
 
     // --- Utility ---
     // Debounce with a maxWait safety net. Plain debounce starves under a
@@ -649,9 +653,15 @@
             }
         }
 
-        const token = gmGet(TOKEN_KEY, '');
+        // Try in-memory cache first (set via TOKEN_VALUE broadcast from the
+        // control panel), then fall back to our own GM storage (would only
+        // help if some future script wrote it there for us).
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
         if (!token) {
-            console.warn(`${TAG} no GitHub token saved — open AIM Controls and paste a PAT to load shielding`);
+            console.warn(`${TAG} no GitHub token cached yet — waiting for TOKEN_VALUE from control panel (or open AIM Controls and re-save your PAT)`);
+            // Ask the control panel to send it now in case it missed our
+            // initial REQUEST_TOKEN (e.g. registration race on first load).
+            if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
             return;
         }
         if (typeof GM_xmlhttpRequest !== 'function') {
@@ -1254,6 +1264,16 @@
                     delete kmlFeatures[sid];
                     fetchKMLForSite(sid, true);
                 }
+            } else if (msg.type === 'TOKEN_VALUE') {
+                // Control panel handed us the PAT (either on our REQUEST_TOKEN,
+                // or proactively after the user saved a new one). Cache in
+                // memory and kick off a fetch if we don't have data yet.
+                const prev = cachedToken;
+                cachedToken = msg.token || '';
+                if (cachedToken && cachedToken !== prev) {
+                    const sid = getCurrentSiteID();
+                    if (sid && !kmlFeatures[sid]) fetchKMLForSite(sid, true);
+                }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 if (msg.hotkeyId === 'toggle-master') {
                     const next = !isActive;
@@ -1282,6 +1302,10 @@
             toggles: TOGGLES,
             hotkeys: HOTKEYS,
         });
+        // Also ask for the PAT — the control panel responds with TOKEN_VALUE
+        // if it has one. (The panel also auto-sends on REGISTER, but asking
+        // explicitly covers the case where this script loaded first.)
+        controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
     }
 
     setupControlPanel();
