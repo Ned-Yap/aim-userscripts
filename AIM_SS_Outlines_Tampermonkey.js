@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      31.1
+// @version      32.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '31.1';
+    const SCRIPT_VERSION = '32.0';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -129,20 +129,32 @@
         },
         {
             type: 'category',
-            id: 'shielding-user-cat',
-            label: 'Shielding (User KML)',
-            meta: '(orange — power lines etc.)',
-            master: { id: 'kml.show', default: true },
+            id: 'distro-cat',
+            label: 'Distribution Lines (User KML)',
+            meta: '(yellow)',
+            master: { id: 'distro.show', default: true },
             children: [
-                { id: 'kml.outline', label: 'Show outlines', type: 'boolean', default: true },
-                { id: 'kml.color', label: 'Outline color', type: 'color', default: '#ff8c00' },
-                { id: 'kml.opacity', label: 'Outline opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 0.85, unit: 'fill' },
-                { id: 'kml.thickness', label: 'Outline thickness', type: 'number',
+                { id: 'distro.outline', label: 'Show outlines', type: 'boolean', default: true },
+                { id: 'distro.color', label: 'Outline color', type: 'color', default: '#ffd700' },
+                { id: 'distro.opacity', label: 'Outline opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
+                { id: 'distro.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 3, unit: 'px' },
-                { id: 'kml.violations', label: 'Flag violations (assets within Xft)', type: 'boolean', default: true },
-                { id: 'kml.violation-distance', label: 'Violation distance', type: 'number',
-                  min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
+            ],
+        },
+        {
+            type: 'category',
+            id: 'trans-cat',
+            label: 'Transmission Lines (User KML)',
+            meta: '(red — taller / more hazardous)',
+            master: { id: 'trans.show', default: true },
+            children: [
+                { id: 'trans.outline', label: 'Show outlines', type: 'boolean', default: true },
+                { id: 'trans.color', label: 'Outline color', type: 'color', default: '#ff3030' },
+                { id: 'trans.opacity', label: 'Outline opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
+                { id: 'trans.thickness', label: 'Outline thickness', type: 'number',
+                  min: 1, max: 12, step: 1, default: 4, unit: 'px' },
             ],
         },
         {
@@ -241,13 +253,17 @@
     let observerTarget = null; // node the observer is currently attached to
     let heartbeatInterval = null; // periodic runUpdate fallback (see attachObserverWhenReady)
 
-    // KML / shielding state.
-    // kmlFeatures: { [siteID]: [{ type: 'line'|'polygon', coords: [{lat,lng}, ...] }] }
-    // kmlFetching: Set of siteIDs currently in flight (avoid duplicate fetches)
-    // kmlMissing:  Set of siteIDs we already 404'd on (don't keep re-trying within session)
+    // KML / shielding state — keyed by `${siteID}|${type}` where type is
+    // 'distro' or 'trans'. Each entry holds an array of parsed features.
+    //
+    // kmlFeatures: { [`${siteID}|${type}`]: [{ type: 'line'|'polygon', coords: [{lat,lng}, ...] }] }
+    // kmlFetching: Set of `${siteID}|${type}` keys currently in flight
+    // kmlMissing:  Set of `${siteID}|${type}` keys we already 404'd on this session
     const kmlFeatures = {};
     const kmlFetching = new Set();
     const kmlMissing = new Set();
+    const KML_TYPES = ['distro', 'trans'];
+    const kmlKey = (siteID, type) => `${siteID}|${type}`;
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
     // GM storage is per-script in Tampermonkey, so the token saved by the
@@ -638,29 +654,34 @@
     // Caching: parsed features are persisted via GM storage so subsequent
     // page loads start from cache. The network fetch still runs in the
     // background and refreshes the cache on success.
+    // Fetches BOTH distro and trans KMLs for a site (parallel requests).
+    // No-op for any type already loaded, in flight, or known-missing — unless
+    // `force` is true (used after a token change or manual refresh).
     function fetchKMLForSite(siteID, force) {
         if (!siteID) return;
-        if (kmlFetching.has(siteID)) return;
-        if (kmlMissing.has(siteID) && !force) return;
-        if (kmlFeatures[siteID] && !force) return;
+        KML_TYPES.forEach(type => fetchOneKML(siteID, type, force));
+    }
+
+    function fetchOneKML(siteID, type, force) {
+        const key = kmlKey(siteID, type);
+        if (kmlFetching.has(key)) return;
+        if (kmlMissing.has(key) && !force) return;
+        if (kmlFeatures[key] && !force) return;
 
         // Try cache first so we render immediately while the network fetch runs.
-        if (!kmlFeatures[siteID]) {
-            const cached = gmGet(KML_CACHE_PREFIX + siteID, null);
+        if (!kmlFeatures[key]) {
+            const cached = gmGet(KML_CACHE_PREFIX + key, null);
             if (cached && Array.isArray(cached.features)) {
-                kmlFeatures[siteID] = cached.features;
-                console.log(`${TAG} KML for site ${siteID} loaded from cache (${cached.features.length} features)`);
+                kmlFeatures[key] = cached.features;
+                console.log(`${TAG} KML ${key} loaded from cache (${cached.features.length} features)`);
             }
         }
 
-        // Try in-memory cache first (set via TOKEN_VALUE broadcast from the
-        // control panel), then fall back to our own GM storage (would only
-        // help if some future script wrote it there for us).
+        // In-memory cache from TOKEN_VALUE broadcast, falling back to our own
+        // GM storage (per-script — only useful if we wrote it ourselves).
         const token = cachedToken || gmGet(TOKEN_KEY, '');
         if (!token) {
             console.warn(`${TAG} no GitHub token cached yet — waiting for TOKEN_VALUE from control panel (or open AIM Controls and re-save your PAT)`);
-            // Ask the control panel to send it now in case it missed our
-            // initial REQUEST_TOKEN (e.g. registration race on first load).
             if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
             return;
         }
@@ -669,9 +690,9 @@
             return;
         }
 
-        kmlFetching.add(siteID);
-        const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${siteID}.kml`;
-        console.log(`${TAG} fetching KML for site ${siteID}`);
+        kmlFetching.add(key);
+        const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${siteID}-${type}.kml`;
+        console.log(`${TAG} fetching ${type} KML for site ${siteID}`);
         try {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -679,39 +700,38 @@
                 headers: { 'Authorization': `Bearer ${token}` },
                 timeout: 15000,
                 onload: (resp) => {
-                    kmlFetching.delete(siteID);
+                    kmlFetching.delete(key);
                     if (resp.status === 200) {
                         try {
                             const features = parseKML(resp.responseText);
-                            kmlFeatures[siteID] = features;
-                            gmSet(KML_CACHE_PREFIX + siteID, { features, at: Date.now() });
-                            console.log(`${TAG} KML for site ${siteID} loaded (${features.length} features)`);
-                            // Trigger a re-render so the new shielding appears now.
+                            kmlFeatures[key] = features;
+                            gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now() });
+                            console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features)`);
                             if (isActive) runUpdate();
                         } catch (e) {
-                            console.error(`${TAG} KML parse failed for site ${siteID}:`, e);
+                            console.error(`${TAG} KML parse failed for ${key}:`, e);
                         }
                     } else if (resp.status === 404) {
-                        kmlMissing.add(siteID);
-                        console.log(`${TAG} no KML for site ${siteID} (404) — site has no shielding configured`);
+                        kmlMissing.add(key);
+                        console.log(`${TAG} no ${type} KML for site ${siteID} (404) — that type has no shielding configured here`);
                     } else if (resp.status === 401) {
-                        console.warn(`${TAG} KML fetch unauthorized (401) — check your PAT in AIM Controls`);
+                        console.warn(`${TAG} ${type} KML fetch unauthorized (401) — check your PAT in AIM Controls`);
                     } else {
-                        console.warn(`${TAG} KML fetch HTTP ${resp.status}`);
+                        console.warn(`${TAG} ${type} KML fetch HTTP ${resp.status}`);
                     }
                 },
                 onerror: () => {
-                    kmlFetching.delete(siteID);
-                    console.warn(`${TAG} KML fetch network error`);
+                    kmlFetching.delete(key);
+                    console.warn(`${TAG} ${type} KML fetch network error`);
                 },
                 ontimeout: () => {
-                    kmlFetching.delete(siteID);
-                    console.warn(`${TAG} KML fetch timed out`);
+                    kmlFetching.delete(key);
+                    console.warn(`${TAG} ${type} KML fetch timed out`);
                 },
             });
         } catch (e) {
-            kmlFetching.delete(siteID);
-            console.error(`${TAG} KML fetch threw:`, e);
+            kmlFetching.delete(key);
+            console.error(`${TAG} ${type} KML fetch threw:`, e);
         }
     }
 
@@ -754,10 +774,10 @@
     // arrays using the Leaflet map's projection. Returns [] if the map
     // isn't available yet (the next runUpdate will retry).
     // Cached per-tick by callers if they need it twice.
-    function shieldingFeaturePointsInSVG() {
+    function shieldingFeaturePointsInSVG(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) return [];
-        const features = kmlFeatures[siteID];
+        const features = kmlFeatures[kmlKey(siteID, type)];
         if (!features || !features.length) return [];
         const map = getLeafletMap();
         if (!map || typeof map.latLngToContainerPoint !== 'function') return [];
@@ -793,32 +813,40 @@
     }
 
     function renderShielding() {
-        if (!toggleState['kml.show'] || !toggleState['kml.outline']) return;
         const siteID = getCurrentSiteID();
         if (!siteID) return;
-        // Lazy-fetch if not yet loaded. The fetch first tries the cache
-        // synchronously — if it hits, kmlFeatures[siteID] is populated by the
-        // time fetchKMLForSite returns and we render this same tick.
-        if (!kmlFeatures[siteID] && !kmlFetching.has(siteID) && !kmlMissing.has(siteID)) {
-            fetchKMLForSite(siteID);
-        }
-        if (!kmlFeatures[siteID]) return;
+        // Lazy-fetch if any type isn't loaded yet.
+        const needsFetch = KML_TYPES.some(t => {
+            const k = kmlKey(siteID, t);
+            return !kmlFeatures[k] && !kmlFetching.has(k) && !kmlMissing.has(k);
+        });
+        if (needsFetch) fetchKMLForSite(siteID);
         const svg = document.querySelector('.leaflet-overlay-pane svg');
         if (!svg) return;
         const g = svg.querySelector('g');
         if (!g) return;
-        const feats = shieldingFeaturePointsInSVG();
+        // Render distro first then trans, so trans paints on top — matches
+        // its higher-priority/more-dangerous status.
+        KML_TYPES.forEach(type => renderShieldingType(type, g));
+    }
+
+    function renderShieldingType(type, g) {
+        if (!toggleState[`${type}.show`] || !toggleState[`${type}.outline`]) return;
+        const feats = shieldingFeaturePointsInSVG(type);
         if (!feats.length) return;
-        const stroke = toggleState['kml.color'] || '#ff8c00';
-        const opacity = Number(toggleState['kml.opacity']);
-        const opStr = String(isNaN(opacity) ? 0.85 : opacity);
-        const thickness = Number(toggleState['kml.thickness']) || 3;
+        const defaults = type === 'trans'
+            ? { color: '#ff3030', opacity: 0.9, thickness: 4 }
+            : { color: '#ffd700', opacity: 0.9, thickness: 3 };
+        const stroke = toggleState[`${type}.color`] || defaults.color;
+        const opacity = Number(toggleState[`${type}.opacity`]);
+        const opStr = String(isNaN(opacity) ? defaults.opacity : opacity);
+        const thickness = Number(toggleState[`${type}.thickness`]) || defaults.thickness;
         feats.forEach(f => {
             const d = pointsToPathD(f.points, f.type === 'polygon');
             if (!d) return;
             const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
-            p.setAttribute('data-buffer-kind', 'kml-shielding');
+            p.setAttribute('data-buffer-kind', `kml-${type}`);
             p.setAttribute('d', d);
             p.setAttribute('fill', 'none');
             p.setAttribute('stroke', stroke);
@@ -827,9 +855,8 @@
             p.setAttribute('stroke-linejoin', 'round');
             p.setAttribute('stroke-linecap', 'round');
             p.setAttribute('pointer-events', 'none');
-            // Insert at the START of the group so the shielding renders
-            // UNDER the FFZ/FP/asset outlines (which were appended later).
-            // Appending puts at end = on top.
+            // Insert at the start of the group so shielding renders UNDER
+            // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
             else g.appendChild(p);
         });
@@ -858,8 +885,7 @@
         if (!toggleState['asset.show']) return;
         const ffzOn = toggleState['ffz.show'] && toggleState['ffz.violations'];
         const fpOn = toggleState['fp.show'] && toggleState['fp.violations'];
-        const kmlOn = toggleState['kml.show'] && toggleState['kml.violations'];
-        if (!ffzOn && !fpOn && !kmlOn) return;
+        if (!ffzOn && !fpOn) return;
         const svg = document.querySelector('.leaflet-overlay-pane svg');
         if (!svg) return;
         const g = svg.querySelector('g');
@@ -894,13 +920,10 @@
                 checkAndMark(src, assetSamples, t, dotR, g);
             });
         }
-        if (kmlOn) {
-            const t = ftToOneSide(Number(toggleState['kml.violation-distance']) || 15);
-            // KML features arrive as pre-sampled point arrays already (no SVG
-            // path to walk), so use a parallel routine that skips samplePath.
-            const feats = shieldingFeaturePointsInSVG();
-            feats.forEach(f => checkAndMarkPoints(f.points, assetSamples, t, dotR, g));
-        }
+        // Note: there used to be a 'kml.violations' check here (assets within
+        // Xft of shielding). That was the wrong semantic — the FAA rule is the
+        // opposite: flight paths must STAY WITHIN 200ft of shielding. That's
+        // now the Coverage Validator feature (separate category, on-demand).
     }
 
     function checkAndMarkPoints(srcPts, assetSamples, threshold, dotR, g) {
@@ -1260,12 +1283,12 @@
                 }
             } else if (msg.type === 'REFETCH_KMLS') {
                 // Control panel just stored a new token (or the user clicked
-                // refresh). Drop missing-cache entries and re-fetch for the
-                // current site.
+                // refresh). Drop missing-cache entries for all types and
+                // re-fetch for the current site.
                 kmlMissing.clear();
                 const sid = getCurrentSiteID();
                 if (sid) {
-                    delete kmlFeatures[sid];
+                    KML_TYPES.forEach(t => { delete kmlFeatures[kmlKey(sid, t)]; });
                     fetchKMLForSite(sid, true);
                 }
             } else if (msg.type === 'TOKEN_VALUE') {
@@ -1276,7 +1299,7 @@
                 cachedToken = msg.token || '';
                 if (cachedToken && cachedToken !== prev) {
                     const sid = getCurrentSiteID();
-                    if (sid && !kmlFeatures[sid]) fetchKMLForSite(sid, true);
+                    if (sid) fetchKMLForSite(sid, true);
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 if (msg.hotkeyId === 'toggle-master') {
