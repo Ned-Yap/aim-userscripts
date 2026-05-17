@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      32.2
+// @version      32.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '32.2';
+    const SCRIPT_VERSION = '32.3';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -909,6 +909,24 @@
         return d;
     }
 
+    // Squared distance from point (px,py) to line segment (ax,ay)→(bx,by).
+    // Squared because we compare against a squared threshold — saves a sqrt
+    // per call, and the inner validator loop runs millions of times on big
+    // missions. Standard "project onto segment, clamp to endpoints" formula.
+    function pointToSegmentDist2(px, py, ax, ay, bx, by) {
+        const abx = bx - ax, aby = by - ay;
+        const abLen2 = abx * abx + aby * aby;
+        if (abLen2 === 0) {
+            const dx = px - ax, dy = py - ay;
+            return dx * dx + dy * dy;
+        }
+        let t = ((px - ax) * abx + (py - ay) * aby) / abLen2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const cx = ax + t * abx, cy = ay + t * aby;
+        const dx = px - cx, dy = py - cy;
+        return dx * dx + dy * dy;
+    }
+
     // ============================================================
     // COVERAGE VALIDATOR — on-demand check that every flight path
     // segment and FFZ perimeter point has shielding (distro OR trans
@@ -941,13 +959,28 @@
             return;
         }
 
-        // Collect every shielding point (both types) as lat/lng.
-        const shielding = [];
+        // Build shielding as LINE SEGMENTS in layer-point space (not just
+        // vertices). v32.2 measured distance vertex-to-vertex which falsely
+        // flagged spots that are right next to a power line but far from
+        // either endpoint of the line — e.g. anywhere along the middle of
+        // a 1000ft segment that's drawn as just two endpoints in the KML.
+        const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
         KML_TYPES.forEach(t => {
             const feats = kmlFeatures[kmlKey(siteID, t)] || [];
-            feats.forEach(f => f.coords.forEach(c => shielding.push(c)));
+            feats.forEach(f => {
+                const lps = [];
+                for (let i = 0; i < f.coords.length; i++) {
+                    try { lps.push(map.latLngToLayerPoint([f.coords[i].lat, f.coords[i].lng])); } catch (e) {}
+                }
+                for (let i = 0; i < lps.length - 1; i++) {
+                    segments.push({ ax: lps[i].x, ay: lps[i].y, bx: lps[i+1].x, by: lps[i+1].y });
+                }
+                // KML LinearRing already repeats its first point as the last,
+                // so the loop above naturally closes the ring. No extra
+                // closing segment needed.
+            });
         });
-        if (!shielding.length) {
+        if (!segments.length) {
             console.warn(`${TAG} validator: no shielding loaded for site ${siteID}`);
             validatorState.lastRun = { error: 'No shielding KMLs loaded for this site', at: Date.now() };
             runUpdate();
@@ -955,7 +988,18 @@
         }
 
         const thresholdFt = Number(toggleState['validator.distance']) || 200;
-        const thresholdM = thresholdFt * 0.3048;
+        // Convert threshold from feet → layer-point units at this map state.
+        // Use a small latitude offset at the map's current center as the
+        // reference: same trick as renderValidatorPins. Web Mercator's scale
+        // varies with latitude, but within a single site the variation is
+        // negligible.
+        const centerLL = map.getCenter();
+        const latPerFt = 1 / 362776; // 1 deg lat ≈ 362,776 ft
+        const lpA = map.latLngToLayerPoint(centerLL);
+        const lpB = map.latLngToLayerPoint({ lat: centerLL.lat + thresholdFt * latPerFt, lng: centerLL.lng });
+        const thresholdPx = Math.hypot(lpB.x - lpA.x, lpB.y - lpA.y);
+        const t2 = thresholdPx * thresholdPx;
+
         const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
         if (!targetEls.length) {
             console.warn(`${TAG} validator: no flight paths or FFZs to check`);
@@ -969,32 +1013,25 @@
         targetEls.forEach(el => {
             const total = el.getTotalLength();
             if (!total) return;
-            // Oversample — ~1 sample per 3 SVG user units, capped. Most
-            // samples will short-circuit on the first nearby shielding point
-            // so cost stays reasonable even for big missions.
             const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
             let currentGap = null;
 
             for (let i = 0; i <= sampleCount; i++) {
                 const t = total * i / sampleCount;
-                let svgPt;
-                try { svgPt = el.getPointAtLength(t); } catch (e) { continue; }
-                // SVG user-space coords ARE Leaflet's layer-point coords.
-                let sampleLatLng;
-                try { sampleLatLng = map.layerPointToLatLng({ x: svgPt.x, y: svgPt.y }); } catch (e) { continue; }
-                if (!sampleLatLng) continue;
-
-                // Find min distance to any shielding point. Early-exit the
-                // moment we find one within threshold (any one within = pass).
+                let sp;
+                try { sp = el.getPointAtLength(t); } catch (e) { continue; }
+                // sp is already in layer-point coords — same space as our
+                // segments. Compute point-to-segment distance directly.
                 let isFailing = true;
-                for (let j = 0; j < shielding.length; j++) {
-                    const d = map.distance(sampleLatLng, [shielding[j].lat, shielding[j].lng]);
-                    if (d <= thresholdM) { isFailing = false; break; }
+                for (let j = 0; j < segments.length; j++) {
+                    const seg = segments[j];
+                    if (pointToSegmentDist2(sp.x, sp.y, seg.ax, seg.ay, seg.bx, seg.by) <= t2) {
+                        isFailing = false; break;
+                    }
                 }
-
                 if (isFailing) {
                     if (!currentGap) currentGap = { samples: [] };
-                    currentGap.samples.push({ lat: sampleLatLng.lat, lng: sampleLatLng.lng });
+                    currentGap.samples.push({ x: sp.x, y: sp.y });
                 } else if (currentGap) {
                     gaps.push(currentGap);
                     currentGap = null;
@@ -1003,10 +1040,11 @@
             if (currentGap) gaps.push(currentGap);
         });
 
-        // One pin per gap at the midpoint sample.
+        // Convert gap midpoints from layer-point back to lat/lng for storage.
         const results = gaps.map((g, i) => {
             const mid = g.samples[Math.floor(g.samples.length / 2)];
-            return { lat: mid.lat, lng: mid.lng, number: i + 1 };
+            const ll = map.layerPointToLatLng({ x: mid.x, y: mid.y });
+            return { lat: ll.lat, lng: ll.lng, number: i + 1 };
         });
 
         validatorState.results = results;
