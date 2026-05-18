@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      33.2
+// @version      34.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '33.2';
+    const SCRIPT_VERSION = '34.0';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -268,6 +268,12 @@
     let observer = null;
     let observerTarget = null; // node the observer is currently attached to
     let heartbeatInterval = null; // periodic runUpdate fallback (see attachObserverWhenReady)
+    // Fingerprint of relevant state at the end of the last successful runUpdate.
+    // Heartbeat compares the current fingerprint against this and skips the
+    // wipe+rebuild entirely if nothing has changed. Massive CPU savings on
+    // dense sites where idle heartbeat would otherwise rebuild hundreds of
+    // SVG elements 20 times/min for no visual change.
+    let lastUpdateHash = null;
 
     // KML / shielding state — keyed by `${siteID}|${type}` where type is
     // 'distro' or 'trans'. Each entry holds an array of parsed features.
@@ -599,6 +605,39 @@
         renderValidatorPins();
         // 9. Round altitude + make values copyable in altitude popups.
         enhanceAltitudePopups();
+
+        // Mark current state as rendered. Heartbeat compares against this
+        // and skips re-running if nothing changed since.
+        lastUpdateHash = computeUpdateHash();
+    }
+
+    // Cheap fingerprint of inputs that affect what runUpdate draws.
+    // Sub-millisecond on typical sites (a few querySelectorAll calls +
+    // small JSON.stringify). Heartbeat uses this to skip the ~50–150ms
+    // wipe+rebuild cycle when nothing has changed. Mutation-triggered
+    // (debounced) updates bypass the check — if the observer fired,
+    // something probably changed even if our hash doesn't capture it.
+    function computeUpdateHash() {
+        if (!isActive) return null;
+        try {
+            const ffzN  = document.querySelectorAll(SOLID_GREEN_SELECTOR).length;
+            const asN   = document.querySelectorAll(WHITE_ASSET_SELECTOR).length;
+            const fpN   = document.querySelectorAll(BLUE_FLIGHT_PATH_SELECTOR).length;
+            const editN = document.querySelectorAll(EDIT_MODE_SELECTOR).length;
+            const sid   = getCurrentSiteID() || '';
+            const distroN = (kmlFeatures[kmlKey(sid, 'distro')] || []).length;
+            const transN  = (kmlFeatures[kmlKey(sid, 'trans')]  || []).length;
+            const valN    = validatorState.results.length;
+            const dismN   = validatorState.results.filter(r => r.dismissed).length;
+            const map = getLeafletMap();
+            const zoom = map && typeof map.getZoom === 'function' ? map.getZoom() : 0;
+            // toggleState is small (~50 keys × ~30 chars) so JSON.stringify
+            // costs ~0.5ms — still vastly cheaper than rebuilding overlays.
+            const tHash = JSON.stringify(toggleState);
+            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${valN}|${dismN}|${zoom}|${tHash}`;
+        } catch (e) {
+            return null; // any error → force run (safe default)
+        }
     }
 
     // ============================================================
@@ -1575,11 +1614,13 @@
         document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(el => { el.style.fillOpacity = ''; });
     }
 
-    // 50ms quiet-after-last-mutation, 150ms hard cap. The hard cap matters
-    // during page load / zoom when mutations are continuous and a plain
-    // debounce would defer forever. 150 (was 500) trades a bit more CPU
-    // for a snappier feel while editing zones.
-    const debouncedUpdate = debounce(runUpdate, UPDATE_DELAY_MS, 150);
+    // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
+    // 500 → 150 (snappier edits, more CPU) → 300 (heavier sites were
+    // spending too much time rebuilding overlays during zoom/pan storms;
+    // 300ms cap halves the rebuild frequency during continuous mutation
+    // with imperceptible UX cost — combined with the hash-based skip
+    // check in runUpdate it materially reduces CPU on dense sites).
+    const debouncedUpdate = debounce(runUpdate, UPDATE_DELAY_MS, 300);
     const observerConfig = { attributes: true, childList: true, subtree: true, attributeFilter: ['d', 'stroke', 'stroke-width', 'class'] };
 
     let mapPaneWaitTimer = null;
@@ -1635,8 +1676,10 @@
         // Heartbeat: re-run periodically so buffers catch up even if the
         // MutationObserver misses a relevant change (the host app's React can
         // re-mount subtrees in patterns that don't reliably bubble childList
-        // events to our observer target). 1.5s is invisible to users but
-        // negligible CPU (runUpdate is a few ms when there's nothing to do).
+        // events to our observer target). 3s is the safety-net cadence —
+        // most "missed" changes self-correct via the next user interaction's
+        // mutation, so a slower heartbeat is fine. Combined with the
+        // hash-based no-op check in runUpdate, idle CPU cost is negligible.
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
             if (!isActive) {
@@ -1644,8 +1687,13 @@
                 heartbeatInterval = null;
                 return;
             }
+            // Hash-based no-op: if relevant inputs (line counts, zoom,
+            // KML feature counts, toggles, validator results) match the
+            // last render, skip the wipe+rebuild. Mutation observer
+            // catches actual changes; heartbeat is just the safety net.
+            if (computeUpdateHash() === lastUpdateHash) return;
             runUpdate();
-        }, 1500);
+        }, 3000);
     }
 
     function toggleStyler() {
