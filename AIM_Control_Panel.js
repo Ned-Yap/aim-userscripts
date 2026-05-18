@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.15
+// @version      1.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,12 +55,13 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.15';
+    const VERSION = '1.16';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PREFS_KEY = 'aim-control-prefs';
     const HOTKEYS_KEY = 'aim-control-hotkeys';
+    const REBIND_ERROR_TIMEOUT_MS = 6000;
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
     const KMLS_BRANCH = 'main';
@@ -93,8 +94,13 @@
         // Reset each time the panel is opened so it always starts tidy.
         sectionsOpen: {},
         // Transient error message shown when a hotkey rebind collides with
-        // an existing binding. Cleared on next user action.
+        // an existing binding. Cleared on next user action OR auto-clears
+        // after REBIND_ERROR_TIMEOUT_MS.
         rebindError: null,
+        rebindErrorTimer: null,
+        // PAT (GitHub Connection) section state — separately collapsible
+        // from script sections, default closed so the panel stays compact.
+        tokenSectionOpen: false,
     };
 
     console.log(`${TAG} v${VERSION} loading`);
@@ -330,6 +336,23 @@
     // `combo`, excluding (skipScriptId, skipHotkeyId) which is the one being
     // rebound. null if no conflict. Used to prevent two scripts from racing
     // for the same key combo.
+    // Sets a transient rebind error message that auto-clears after the
+    // timeout. Cancels any previously-pending clear.
+    function setRebindError(msg) {
+        state.rebindError = msg;
+        if (state.rebindErrorTimer) {
+            clearTimeout(state.rebindErrorTimer);
+            state.rebindErrorTimer = null;
+        }
+        if (msg) {
+            state.rebindErrorTimer = setTimeout(() => {
+                state.rebindError = null;
+                state.rebindErrorTimer = null;
+                if (state.panelOpen) renderPanel();
+            }, REBIND_ERROR_TIMEOUT_MS);
+        }
+    }
+
     function findHotkeyConflict(combo, skipScriptId, skipHotkeyId) {
         if (!combo) return null;
         const target = combo.toUpperCase();
@@ -364,6 +387,7 @@
                 e.preventDefault(); e.stopPropagation();
                 if (e.key === 'Escape') {
                     state.rebindingFor = null;
+                    setRebindError(null); // also clear any pending collision msg
                     renderPanel();
                     return;
                 }
@@ -382,14 +406,14 @@
                     const conflict = findHotkeyConflict(combo, scriptId, hotkeyId);
                     if (conflict) {
                         const scriptName = (state.registry.get(conflict.scriptId) || {}).name || conflict.scriptId;
-                        state.rebindError = `${combo} is already bound to "${conflict.label}" (${scriptName}). Rebind that one first.`;
+                        setRebindError(`${combo} is already bound to "${conflict.label}" (${scriptName}). Rebind that one first.`);
                         // Stay in rebind mode so user can press another key
                         // or Esc to cancel — better than dropping them out.
                         renderPanel();
                     } else {
                         setHotkey(scriptId, hotkeyId, combo);
                         state.rebindingFor = null;
-                        state.rebindError = null;
+                        setRebindError(null);
                         renderPanel();
                     }
                 }
@@ -541,11 +565,23 @@
                 if (!isNaN(v)) broadcastToggle(t.dataset.script, t.dataset.toggle, v);
             }
         }, false);
-        panel.addEventListener('click', (e) => {
+        // Shared click handler — extracted so we can attach it to BOTH
+        // click and pointerdown for defensive routing (in case Leaflet's
+        // intermittent click swallow causes the first click to miss).
+        // Debounced so one physical click that arrives via both events
+        // only acts once.
+        let lastHandled = 0;
+        const handlePanelInteract = (e) => {
             const t = e.target;
             if (!t) return;
+            // For pointerdown, only process LEFT button (button 0). Avoids
+            // accidental dismissals on right-click context-menu attempts.
+            if (e.type === 'pointerdown' && e.button !== 0) return;
             // Action buttons (validator run/clear etc.)
             if (t.dataset && t.dataset.control === 'button') {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 if (state.channel) {
                     state.channel.postMessage({
@@ -556,17 +592,33 @@
                 }
                 return;
             }
-            // Walk up to find any clickable ancestor (closest works on text/spans inside).
+            // Walk up to find any clickable ancestor.
+            const dismiss = t.closest && t.closest('[data-dismiss-error]');
+            if (dismiss) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                setRebindError(null);
+                renderPanel();
+                return;
+            }
             const rebindBtn = t.closest && t.closest('[data-rebind]');
             if (rebindBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 state.rebindingFor = { scriptId: rebindBtn.dataset.script, hotkeyId: rebindBtn.dataset.hotkey };
-                state.rebindError = null;
+                setRebindError(null);
                 renderPanel();
                 return;
             }
             const resetBtn = t.closest && t.closest('[data-reset]');
             if (resetBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 setHotkey(resetBtn.dataset.script, resetBtn.dataset.hotkey, null);
                 renderPanel();
@@ -574,6 +626,9 @@
             }
             const advToggle = t.closest && t.closest('[data-advtoggle]');
             if (advToggle) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 const key = advToggle.dataset.advtoggle;
                 state.expanded[key] = !state.expanded[key];
@@ -583,6 +638,9 @@
             const catToggle = t.closest && t.closest('[data-cattoggle]');
             if (catToggle) {
                 if (t.tagName === 'INPUT') return; // checkbox owns its click
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 const key = catToggle.dataset.cattoggle;
                 state.expanded[key] = !state.expanded[key];
@@ -592,6 +650,9 @@
             const sectionToggle = t.closest && t.closest('[data-sectiontoggle]');
             if (sectionToggle) {
                 if (t.tagName === 'INPUT') return;
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
                 e.stopPropagation();
                 const key = sectionToggle.dataset.sectiontoggle;
                 if (!state.sectionsOpen) state.sectionsOpen = {};
@@ -599,7 +660,22 @@
                 renderPanel();
                 return;
             }
-        }, false);
+            const tokenToggle = t.closest && t.closest('[data-tokensectiontoggle]');
+            if (tokenToggle) {
+                if (t.tagName === 'INPUT' || t.tagName === 'BUTTON') return;
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                state.tokenSectionOpen = !state.tokenSectionOpen;
+                renderPanel();
+                return;
+            }
+        };
+        panel.addEventListener('click', handlePanelInteract, false);
+        // Pointerdown backup — catches clicks that 'click' loses to Leaflet's
+        // intermittent capture (same fix as the validator pins).
+        panel.addEventListener('pointerdown', handlePanelInteract, false);
         // Keep digit keys from triggering script hotkeys while typing in a
         // number input inside the panel.
         panel.addEventListener('keydown', (e) => {
@@ -618,13 +694,28 @@
             // Reset section open state so the panel always starts tidy.
             // Per-session behavior; not persisted across page loads.
             state.sectionsOpen = {};
-            state.rebindError = null;
+            state.tokenSectionOpen = false;
+            setRebindError(null);
+            // Auto-test the GitHub token (if one is saved) so the dot
+            // reflects current connectivity, not the last cached result.
+            const tok = getToken();
+            if (tok) {
+                state.tokenStatus = 'testing';
+                testToken(tok, (status, msg) => {
+                    state.tokenStatus = status;
+                    state.tokenStatusMsg = msg || '';
+                    if (state.panelOpen) renderPanel();
+                });
+            } else {
+                state.tokenStatus = 'missing';
+                state.tokenStatusMsg = '';
+            }
             requestRegistrations();
             renderPanel();
         } else {
             // Cancel any in-progress rebind
             state.rebindingFor = null;
-            state.rebindError = null;
+            setRebindError(null);
         }
     }
 
@@ -636,19 +727,34 @@
     function escapeAttr(s) { return escapeHtml(s); }
 
     // Renders one control row based on the toggle's type. Supported types:
-    // Renders the GitHub PAT section that sits between the panel header and
-    // the per-script controls. The actual token is never rendered to the DOM
-    // — once saved, we show only a masked indicator (••••) and the status.
+    // Renders the GitHub Connection section as a compact collapsible row.
+    // Collapsed (default): just the dot + name + chevron. Expanded: the
+    // Edit / Test / Clear controls. Lives at the BOTTOM of the panel since
+    // it's a "configuration" item, not part of the active controls.
     function renderTokenSection() {
         const hasToken = !!getToken();
         const status = state.tokenStatus;
-        let pillColor = '#888', pillText = 'Not configured';
-        if (status === 'valid') { pillColor = '#5fff5f'; pillText = '✓ Valid'; }
-        else if (status === 'invalid') { pillColor = '#ff6060'; pillText = '✗ Invalid'; }
-        else if (status === 'testing') { pillColor = '#ffd591'; pillText = 'Testing…'; }
-        else if (status === 'error') { pillColor = '#ff8c00'; pillText = '⚠ Error'; }
-        else if (status === 'missing') { pillColor = '#888'; pillText = 'Not configured'; }
-        else if (hasToken) { pillText = 'Saved (untested)'; pillColor = '#bbb'; }
+        // Status dot color — only green when explicitly verified valid.
+        let dotColor = '#666'; // gray: no token / unknown
+        let dotTitle = 'Not configured';
+        if (status === 'valid') { dotColor = '#5fff5f'; dotTitle = 'Connected'; }
+        else if (status === 'invalid') { dotColor = '#ff6060'; dotTitle = 'Token rejected'; }
+        else if (status === 'testing') { dotColor = '#ffd591'; dotTitle = 'Testing…'; }
+        else if (status === 'error') { dotColor = '#ff8c00'; dotTitle = 'Connection error'; }
+        else if (hasToken) { dotColor = '#bbb'; dotTitle = 'Saved (untested)'; }
+
+        const open = !!state.tokenSectionOpen;
+        const headerHtml = `
+            <div data-tokensectiontoggle="1"
+                 style="display:flex;align-items:center;padding:5px 10px;cursor:pointer;background:rgb(36,36,36);user-select:none">
+                <span title="${escapeAttr(dotTitle)}"
+                      style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${dotColor};margin-right:8px;box-shadow:0 0 4px ${dotColor}66"></span>
+                <strong style="flex:1;color:rgb(20,210,220);font-size:12px">GitHub Connection <span style="color:#888;font-weight:400">(KMLs)</span></strong>
+                <span style="color:#888;font-size:10px;margin-right:8px">${escapeHtml(dotTitle)}</span>
+                <span style="color:#bbb;width:14px;text-align:right">${open ? '▾' : '▸'}</span>
+            </div>
+        `;
+        if (!open) return `<div style="border-top:1px solid rgba(255,255,255,0.12)">${headerHtml}</div>`;
 
         const statusMsgHtml = state.tokenStatusMsg
             ? `<div style="padding:0 10px 4px;color:#888;font-size:11px;font-style:italic">${escapeHtml(state.tokenStatusMsg)}</div>`
@@ -678,11 +784,8 @@
         `;
 
         return `
-            <div style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgba(255,255,255,0.02)">
-                <div style="padding:6px 10px 2px;display:flex;align-items:center;justify-content:space-between">
-                    <span style="color:#e6e6e6;font-weight:600;font-size:12px">GitHub PAT <span style="color:#888;font-weight:400">(shielding KMLs)</span></span>
-                    <span style="font-size:10px;color:${pillColor};font-weight:600">${escapeHtml(pillText)}</span>
-                </div>
+            <div style="border-top:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.02)">
+                ${headerHtml}
                 ${inputHtml}
                 ${statusMsgHtml}
             </div>
@@ -900,17 +1003,21 @@
         ` : '';
 
         // Renders the inner content (toggles + hotkeys) for one script.
-        // Used both inside multi-script groups (with the script's own name
-        // sub-header above) and inside standalone single-script sections
-        // (where the section header IS the script name, so no sub-header).
+        // Three layout variants based on shape:
+        //   1. Single master toggle + single hotkey → ONE combined row
+        //      (checkbox + hotkey label + chip + reset). Used for the
+        //      simple hotkey scripts (Altitude, Ruler, Clear All, etc.)
+        //      where the toggle + hotkey are conceptually the same thing.
+        //   2. Single master toggle + multiple hotkeys → checkbox-in-header
+        //      row + indented hotkey rows. (e.g. New Entity Macro)
+        //   3. Multiple toggles or complex layout → original toggles+hotkey
+        //      list with optional sub-header. (e.g. Outlines)
         const renderScriptInner = (script, withSubHeader) => {
             const toggles = Array.isArray(script.toggles) ? script.toggles : [];
             const hotkeys = Array.isArray(script.hotkeys) ? script.hotkeys : [];
+            const isSimple = toggles.length === 1 && toggles[0].master === true;
 
-            const togglesHtml = toggles.map(t => renderControl(script.scriptId, t)).join('')
-                || (hotkeys.length ? '' : `<div style="padding:3px 10px;color:#888;font-style:italic">no toggles exposed</div>`);
-
-            const hotkeysHtml = hotkeys.map(hk => {
+            const renderHotkeyChip = (hk, indentPx) => {
                 const bound = getHotkey(script.scriptId, hk.id, hk.default);
                 const isBindingThis = state.rebindingFor && state.rebindingFor.scriptId === script.scriptId && state.rebindingFor.hotkeyId === hk.id;
                 const chipStyle = isBindingThis
@@ -919,21 +1026,71 @@
                 const chipText = isBindingThis ? 'press a key… (Esc to cancel)' : (bound || '— unbound —');
                 const isCustom = bound && bound !== hk.default;
                 return `
-                    <div style="display:flex;align-items:center;gap:8px;padding:3px 10px">
+                    <div style="display:flex;align-items:center;gap:8px;padding:3px 10px 3px ${indentPx}px">
                         <span style="flex:1;color:#bbb">${escapeHtml(hk.label || hk.id)}</span>
                         <button data-rebind data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}"
                                 style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;${chipStyle}">${escapeHtml(chipText)}</button>
                         ${isCustom ? `<button data-reset data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}" style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px" title="Reset to default (${escapeAttr(hk.default || '')})">↺</button>` : ''}
                     </div>
                 `;
-            }).join('');
+            };
 
+            // CASE 1: simple single-master + single-hotkey → one row.
+            if (isSimple && hotkeys.length === 1) {
+                const t = toggles[0];
+                const hk = hotkeys[0];
+                const checked = getToggle(script.scriptId, t.id, t.default);
+                const bound = getHotkey(script.scriptId, hk.id, hk.default);
+                const isBindingThis = state.rebindingFor && state.rebindingFor.scriptId === script.scriptId && state.rebindingFor.hotkeyId === hk.id;
+                const chipStyle = isBindingThis
+                    ? 'background:rgba(173,104,0,0.20);border:1px solid #ffd591;color:#ffd591'
+                    : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6';
+                const chipText = isBindingThis ? 'press a key… (Esc to cancel)' : (bound || '— unbound —');
+                const isCustom = bound && bound !== hk.default;
+                return `
+                    <label style="display:flex;align-items:center;gap:8px;padding:4px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.04)">
+                        <input type="checkbox" ${checked ? 'checked' : ''}
+                               data-control="boolean"
+                               data-script="${escapeAttr(script.scriptId)}"
+                               data-toggle="${escapeAttr(t.id)}"
+                               style="cursor:pointer;accent-color:rgb(20,210,220);margin:0" />
+                        <span style="flex:1;color:#e6e6e6">${escapeHtml(hk.label || hk.id)}</span>
+                        <button data-rebind data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}"
+                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;${chipStyle}">${escapeHtml(chipText)}</button>
+                        ${isCustom ? `<button data-reset data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}" style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px" title="Reset to default (${escapeAttr(hk.default || '')})">↺</button>` : ''}
+                    </label>
+                `;
+            }
+
+            // CASE 2: simple single-master + multiple hotkeys → checkbox+name
+            // header followed by indented hotkey rows.
+            if (isSimple && hotkeys.length > 1) {
+                const t = toggles[0];
+                const checked = getToggle(script.scriptId, t.id, t.default);
+                const headerHtml = withSubHeader ? `
+                    <label style="display:flex;align-items:center;gap:8px;padding:4px 10px;cursor:pointer;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.06)">
+                        <input type="checkbox" ${checked ? 'checked' : ''}
+                               data-control="boolean"
+                               data-script="${escapeAttr(script.scriptId)}"
+                               data-toggle="${escapeAttr(t.id)}"
+                               style="cursor:pointer;accent-color:rgb(20,210,220);margin:0" />
+                        <strong style="flex:1;color:#e6e6e6;font-size:12px">${escapeHtml(script.name || script.scriptId)}</strong>
+                    </label>
+                ` : '';
+                const hotkeysHtml = hotkeys.map(hk => renderHotkeyChip(hk, 24)).join('');
+                return `<div>${headerHtml}${hotkeysHtml}</div>`;
+            }
+
+            // CASE 3: complex layout (multiple toggles, etc.) — original
+            // rendering with toggles list + optional sub-header.
+            const togglesHtml = toggles.map(t => renderControl(script.scriptId, t)).join('')
+                || (hotkeys.length ? '' : `<div style="padding:3px 10px;color:#888;font-style:italic">no toggles exposed</div>`);
+            const hotkeysHtml = hotkeys.map(hk => renderHotkeyChip(hk, 10)).join('');
             const subHeader = withSubHeader ? `
                 <div style="padding:3px 10px 3px;display:flex;align-items:center;gap:6px">
                     <strong style="color:#e6e6e6">${escapeHtml(script.name || script.scriptId)}</strong>
                     <span style="color:#888;font-size:11px">v${escapeHtml(script.version || '?')}</span>
                 </div>` : '';
-
             return `
                 <div style="padding:4px 0;${withSubHeader ? 'border-bottom:1px solid rgba(255,255,255,0.08)' : ''}">
                     ${subHeader}
@@ -997,15 +1154,20 @@
             );
         });
 
-        // Transient error banner shown after a rebind collision. Clears on
-        // next user action (next rebind attempt, panel re-open, etc.).
+        // Transient error banner shown after a rebind collision. Auto-clears
+        // after ~6s OR when the user clicks the × close button.
         const errorHtml = state.rebindError ? `
-            <div style="padding:6px 10px;background:rgba(255,96,96,0.18);border-bottom:1px solid rgba(255,96,96,0.45);color:#ff9a9a;font-size:11px;font-weight:600">
-                ⚠ ${escapeHtml(state.rebindError)}
+            <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(255,96,96,0.18);border-bottom:1px solid rgba(255,96,96,0.45);color:#ff9a9a;font-size:11px;font-weight:600">
+                <span style="flex:1">⚠ ${escapeHtml(state.rebindError)}</span>
+                <button data-dismiss-error title="Dismiss"
+                        style="background:transparent;border:none;color:#ff9a9a;cursor:pointer;font-size:14px;line-height:1;padding:0 4px">×</button>
             </div>
         ` : '';
 
-        state.panelEl.innerHTML = headerHtml + tokenHtml + errorHtml + emptyHtml + sectionsHtml;
+        // Layout order: header, error, sections, then PAT at the bottom.
+        // PAT is a config item that the user only touches occasionally —
+        // putting it at the bottom keeps active controls front-and-center.
+        state.panelEl.innerHTML = headerHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
         wireTokenSection();
         // NOTE: per-element click/change listeners moved to delegated
         // handlers in createPanel() — see panel.addEventListener calls
