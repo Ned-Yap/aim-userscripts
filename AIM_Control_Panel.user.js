@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.17';
+    const VERSION = '1.18';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -814,7 +814,18 @@
                 setToken(val);
                 state.tokenInputVisible = false;
                 setStatus('testing', 'Verifying…');
-                testToken(val, (status, msg) => setStatus(status, msg));
+                testToken(val, (status, msg) => {
+                    // On initial connection, append a reload hint. Map Styler
+                    // needs to (re-)receive the token and re-fetch KMLs; in
+                    // some cases — especially right after a multi-update
+                    // install — a hard-reload is needed for the SVG overlays
+                    // to actually render. Telling the user up-front beats
+                    // them wondering why nothing appears.
+                    if (status === 'valid') {
+                        msg = `${msg}. KMLs should appear within ~10s. If they don't, hard-reload: Ctrl+Shift+R (⌘+Shift+R on Mac).`;
+                    }
+                    setStatus(status, msg);
+                });
             };
             saveBtn.addEventListener('click', (e) => { e.stopPropagation(); save(); });
             input.addEventListener('keydown', (e) => {

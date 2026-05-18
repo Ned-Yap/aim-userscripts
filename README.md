@@ -142,6 +142,8 @@ After accepting, you can view the repo at [github.com/Ned-Yap/aim-userscripts-da
 
 That's it. The token stays in Tampermonkey's storage on your machine — it never leaves your browser.
 
+> **If KMLs don't appear within ~10 seconds after a successful Save & Test:** do a hard reload — **Ctrl+Shift+R** (⌘+Shift+R on Mac). This forces the browser to clear cached script state from the install burst. Once it works the first time, it stays working — no future hard reloads needed.
+
 ---
 
 ## Verification
