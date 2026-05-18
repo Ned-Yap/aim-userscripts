@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -85,7 +85,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.3';
+    const SCRIPT_VERSION = '1.4';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -109,7 +109,7 @@
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Absolute Altitude',
             version: SCRIPT_VERSION, group: 'Hotkeys',
-            toggles: [{ id: 'master', label: 'Enable Shift+A', type: 'boolean', default: true, master: true }],
+            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
             hotkeys: [{ id: 'invoke', label: 'Open Absolute Altitude tool', default: 'Shift+A' }],
         });
     }

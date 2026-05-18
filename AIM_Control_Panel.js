@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.14';
+    const VERSION = '1.15';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -89,6 +89,12 @@
         tokenStatus: 'unknown',
         tokenStatusMsg: '',
         tokenInputVisible: false, // only true after Edit click — keeps PAT off-screen by default
+        // Group/section open state. Default = closed (undefined = collapsed).
+        // Reset each time the panel is opened so it always starts tidy.
+        sectionsOpen: {},
+        // Transient error message shown when a hotkey rebind collides with
+        // an existing binding. Cleared on next user action.
+        rebindError: null,
     };
 
     console.log(`${TAG} v${VERSION} loading`);
@@ -320,6 +326,26 @@
         return comboFromEvent(e).toUpperCase() === combo.toUpperCase();
     }
 
+    // Returns { scriptId, hotkeyId, label } of the hotkey currently bound to
+    // `combo`, excluding (skipScriptId, skipHotkeyId) which is the one being
+    // rebound. null if no conflict. Used to prevent two scripts from racing
+    // for the same key combo.
+    function findHotkeyConflict(combo, skipScriptId, skipHotkeyId) {
+        if (!combo) return null;
+        const target = combo.toUpperCase();
+        for (const [scriptId, script] of state.registry) {
+            if (!Array.isArray(script.hotkeys)) continue;
+            for (const hk of script.hotkeys) {
+                if (scriptId === skipScriptId && hk.id === skipHotkeyId) continue;
+                const bound = getHotkey(scriptId, hk.id, hk.default);
+                if (bound && bound.toUpperCase() === target) {
+                    return { scriptId, hotkeyId: hk.id, label: hk.label || hk.id };
+                }
+            }
+        }
+        return null;
+    }
+
     function inputGuard(e) {
         const el = e.target;
         if (!el) return false;
@@ -352,9 +378,20 @@
                 // letter binding would fire whenever the user types anywhere.
                 if (combo && !(/^[A-Z]$/.test(combo))) {
                     const { scriptId, hotkeyId } = state.rebindingFor;
-                    setHotkey(scriptId, hotkeyId, combo);
-                    state.rebindingFor = null;
-                    renderPanel();
+                    // Collision check: same combo already bound elsewhere?
+                    const conflict = findHotkeyConflict(combo, scriptId, hotkeyId);
+                    if (conflict) {
+                        const scriptName = (state.registry.get(conflict.scriptId) || {}).name || conflict.scriptId;
+                        state.rebindError = `${combo} is already bound to "${conflict.label}" (${scriptName}). Rebind that one first.`;
+                        // Stay in rebind mode so user can press another key
+                        // or Esc to cancel — better than dropping them out.
+                        renderPanel();
+                    } else {
+                        setHotkey(scriptId, hotkeyId, combo);
+                        state.rebindingFor = null;
+                        state.rebindError = null;
+                        renderPanel();
+                    }
                 }
                 return;
             }
@@ -480,6 +517,97 @@
                 setPanelOpen(false);
             }
         }, true);
+
+        // Event delegation for ALL panel controls. Attached ONCE on the
+        // stable panel element, so re-renders don't lose listeners and
+        // clicks landing on freshly-recreated checkboxes/buttons still
+        // route correctly. Replaces the previous per-element listener
+        // attachment in renderPanel (which had a race: clicks landing
+        // mid-render could miss their listener).
+        panel.addEventListener('change', (e) => {
+            const t = e.target;
+            if (!t || !t.dataset) return;
+            const ctrl = t.dataset.control;
+            if (ctrl === 'boolean') {
+                broadcastToggle(t.dataset.script, t.dataset.toggle, t.checked);
+            } else if (ctrl === 'select') {
+                let v = t.value;
+                if (!isNaN(parseFloat(v)) && isFinite(v)) v = parseFloat(v);
+                broadcastToggle(t.dataset.script, t.dataset.toggle, v);
+            } else if (ctrl === 'color') {
+                broadcastToggle(t.dataset.script, t.dataset.toggle, t.value);
+            } else if (ctrl === 'number') {
+                const v = parseFloat(t.value);
+                if (!isNaN(v)) broadcastToggle(t.dataset.script, t.dataset.toggle, v);
+            }
+        }, false);
+        panel.addEventListener('click', (e) => {
+            const t = e.target;
+            if (!t) return;
+            // Action buttons (validator run/clear etc.)
+            if (t.dataset && t.dataset.control === 'button') {
+                e.stopPropagation();
+                if (state.channel) {
+                    state.channel.postMessage({
+                        type: 'TRIGGER_ACTION',
+                        scriptId: t.dataset.script,
+                        actionId: t.dataset.action,
+                    });
+                }
+                return;
+            }
+            // Walk up to find any clickable ancestor (closest works on text/spans inside).
+            const rebindBtn = t.closest && t.closest('[data-rebind]');
+            if (rebindBtn) {
+                e.stopPropagation();
+                state.rebindingFor = { scriptId: rebindBtn.dataset.script, hotkeyId: rebindBtn.dataset.hotkey };
+                state.rebindError = null;
+                renderPanel();
+                return;
+            }
+            const resetBtn = t.closest && t.closest('[data-reset]');
+            if (resetBtn) {
+                e.stopPropagation();
+                setHotkey(resetBtn.dataset.script, resetBtn.dataset.hotkey, null);
+                renderPanel();
+                return;
+            }
+            const advToggle = t.closest && t.closest('[data-advtoggle]');
+            if (advToggle) {
+                e.stopPropagation();
+                const key = advToggle.dataset.advtoggle;
+                state.expanded[key] = !state.expanded[key];
+                renderPanel();
+                return;
+            }
+            const catToggle = t.closest && t.closest('[data-cattoggle]');
+            if (catToggle) {
+                if (t.tagName === 'INPUT') return; // checkbox owns its click
+                e.stopPropagation();
+                const key = catToggle.dataset.cattoggle;
+                state.expanded[key] = !state.expanded[key];
+                renderPanel();
+                return;
+            }
+            const sectionToggle = t.closest && t.closest('[data-sectiontoggle]');
+            if (sectionToggle) {
+                if (t.tagName === 'INPUT') return;
+                e.stopPropagation();
+                const key = sectionToggle.dataset.sectiontoggle;
+                if (!state.sectionsOpen) state.sectionsOpen = {};
+                state.sectionsOpen[key] = !state.sectionsOpen[key];
+                renderPanel();
+                return;
+            }
+        }, false);
+        // Keep digit keys from triggering script hotkeys while typing in a
+        // number input inside the panel.
+        panel.addEventListener('keydown', (e) => {
+            const t = e.target;
+            if (t && t.dataset && (t.dataset.control === 'number' || t.dataset['tokenInput'] !== undefined || t.matches('[data-token-input]'))) {
+                e.stopPropagation();
+            }
+        }, false);
     }
 
     function setPanelOpen(open) {
@@ -487,11 +615,16 @@
         state.panelOpen = open;
         state.panelEl.style.display = open ? 'block' : 'none';
         if (open) {
+            // Reset section open state so the panel always starts tidy.
+            // Per-session behavior; not persisted across page loads.
+            state.sectionsOpen = {};
+            state.rebindError = null;
             requestRegistrations();
             renderPanel();
         } else {
             // Cancel any in-progress rebind
             state.rebindingFor = null;
+            state.rebindError = null;
         }
     }
 
@@ -766,7 +899,11 @@
             </div>
         ` : '';
 
-        const renderScriptBody = (script) => {
+        // Renders the inner content (toggles + hotkeys) for one script.
+        // Used both inside multi-script groups (with the script's own name
+        // sub-header above) and inside standalone single-script sections
+        // (where the section header IS the script name, so no sub-header).
+        const renderScriptInner = (script, withSubHeader) => {
             const toggles = Array.isArray(script.toggles) ? script.toggles : [];
             const hotkeys = Array.isArray(script.hotkeys) ? script.hotkeys : [];
 
@@ -791,23 +928,42 @@
                 `;
             }).join('');
 
+            const subHeader = withSubHeader ? `
+                <div style="padding:3px 10px 3px;display:flex;align-items:center;gap:6px">
+                    <strong style="color:#e6e6e6">${escapeHtml(script.name || script.scriptId)}</strong>
+                    <span style="color:#888;font-size:11px">v${escapeHtml(script.version || '?')}</span>
+                </div>` : '';
+
             return `
-                <div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.08)">
-                    <div style="padding:0 10px 3px;display:flex;align-items:center;gap:6px">
-                        <strong style="color:#e6e6e6">${escapeHtml(script.name || script.scriptId)}</strong>
-                        <span style="color:#888;font-size:11px">v${escapeHtml(script.version || '?')}</span>
-                    </div>
+                <div style="padding:4px 0;${withSubHeader ? 'border-bottom:1px solid rgba(255,255,255,0.08)' : ''}">
+                    ${subHeader}
                     ${togglesHtml}
                     ${hotkeysHtml ? `<div style="margin-top:3px;padding:3px 0 0;border-top:1px dashed rgba(255,255,255,0.10)">${hotkeysHtml}</div>` : ''}
                 </div>
             `;
         };
 
-        // Group registered scripts by their declared `group` (if any).
-        // Scripts without a group render standalone. Scripts that share a
-        // group name appear inside a single collapsible header (e.g. all
-        // the hotkey scripts under one "Hotkeys" section). Groups are open
-        // by default; user can collapse via the chevron.
+        // Reusable section wrapper — cyan collapsible header used for both
+        // groups and standalone scripts. Default state = COLLAPSED. Per
+        // user request: the panel always starts tidy each time it opens.
+        const renderSection = (key, title, meta, bodyHtml) => {
+            const open = !!(state.sectionsOpen && state.sectionsOpen[key]);
+            return `
+                <div style="border-bottom:1px solid rgba(255,255,255,0.12)">
+                    <div data-sectiontoggle="${escapeAttr(key)}"
+                         style="display:flex;align-items:center;padding:5px 10px;cursor:pointer;background:rgb(36,36,36);user-select:none">
+                        <strong style="flex:1;color:rgb(20,210,220);font-size:12px">${escapeHtml(title)}</strong>
+                        ${meta ? `<span style="color:#888;font-size:10px;margin-right:8px">${escapeHtml(meta)}</span>` : ''}
+                        <span style="color:#bbb;width:14px;text-align:right">${open ? '▾' : '▸'}</span>
+                    </div>
+                    ${open ? `<div>${bodyHtml}</div>` : ''}
+                </div>
+            `;
+        };
+
+        // Group registered scripts by their declared `group`. Scripts
+        // without a group get a section with the script's own name as the
+        // header (visually consistent with grouped sections).
         const standalone = [];
         const groups = new Map(); // groupName -> [scripts]
         scripts.forEach(s => {
@@ -819,127 +975,42 @@
             }
         });
 
-        const renderGroup = (groupName, members) => {
-            const expandKey = `group:${groupName}`;
-            // Groups default to OPEN. Use a separate state map from categories
-            // (state.groupsCollapsed) so the existing default-closed semantics
-            // for categories isn't disrupted. Undefined = open, true = closed.
-            const collapsed = !!(state.groupsCollapsed && state.groupsCollapsed[expandKey]);
-            const bodyHtml = members.map(renderScriptBody).join('');
-            return `
-                <div style="border-bottom:1px solid rgba(255,255,255,0.12)">
-                    <div data-grouptoggle="${escapeAttr(expandKey)}"
-                         style="display:flex;align-items:center;padding:5px 10px;cursor:pointer;background:rgb(36,36,36);user-select:none">
-                        <strong style="flex:1;color:rgb(20,210,220);font-size:12px">${escapeHtml(groupName)}</strong>
-                        <span style="color:#888;font-size:10px;margin-right:8px">${members.length} script${members.length === 1 ? '' : 's'}</span>
-                        <span style="color:#bbb;width:14px;text-align:right">${collapsed ? '▸' : '▾'}</span>
-                    </div>
-                    ${collapsed ? '' : `<div>${bodyHtml}</div>`}
-                </div>
-            `;
-        };
-
-        // Render standalone scripts first (alphabetical), then groups
-        // (alphabetical by group name).
-        let sectionsHtml = standalone.map(renderScriptBody).join('');
+        // Render standalone scripts first (alphabetical), each in its own
+        // single-script section. Then groups (alphabetical by group name).
+        let sectionsHtml = '';
+        standalone.forEach(s => {
+            sectionsHtml += renderSection(
+                `script:${s.scriptId}`,
+                s.name || s.scriptId,
+                `v${s.version || '?'}`,
+                renderScriptInner(s, false), // header is the section header
+            );
+        });
         Array.from(groups.keys()).sort().forEach(name => {
-            sectionsHtml += renderGroup(name, groups.get(name));
+            const members = groups.get(name);
+            const bodyHtml = members.map(s => renderScriptInner(s, true)).join('');
+            sectionsHtml += renderSection(
+                `group:${name}`,
+                name,
+                `${members.length} script${members.length === 1 ? '' : 's'}`,
+                bodyHtml,
+            );
         });
 
-        state.panelEl.innerHTML = headerHtml + tokenHtml + emptyHtml + sectionsHtml;
+        // Transient error banner shown after a rebind collision. Clears on
+        // next user action (next rebind attempt, panel re-open, etc.).
+        const errorHtml = state.rebindError ? `
+            <div style="padding:6px 10px;background:rgba(255,96,96,0.18);border-bottom:1px solid rgba(255,96,96,0.45);color:#ff9a9a;font-size:11px;font-weight:600">
+                ⚠ ${escapeHtml(state.rebindError)}
+            </div>
+        ` : '';
+
+        state.panelEl.innerHTML = headerHtml + tokenHtml + errorHtml + emptyHtml + sectionsHtml;
         wireTokenSection();
-
-        // Wire checkboxes (boolean controls)
-        state.panelEl.querySelectorAll('input[data-control="boolean"]').forEach(cb => {
-            cb.addEventListener('change', (e) => {
-                broadcastToggle(e.target.dataset.script, e.target.dataset.toggle, e.target.checked);
-            });
-        });
-        // Wire select controls
-        state.panelEl.querySelectorAll('select[data-control="select"]').forEach(sel => {
-            sel.addEventListener('change', (e) => {
-                let v = e.target.value;
-                // Coerce numeric-looking values back to numbers so consumers
-                // get the type they expect.
-                if (!isNaN(parseFloat(v)) && isFinite(v)) v = parseFloat(v);
-                broadcastToggle(e.target.dataset.script, e.target.dataset.toggle, v);
-            });
-        });
-        // Wire action buttons
-        state.panelEl.querySelectorAll('button[data-control="button"]').forEach(b => {
-            b.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (state.channel) {
-                    state.channel.postMessage({
-                        type: 'TRIGGER_ACTION',
-                        scriptId: b.dataset.script,
-                        actionId: b.dataset.action,
-                    });
-                }
-            });
-        });
-        // Wire color inputs
-        state.panelEl.querySelectorAll('input[data-control="color"]').forEach(inp => {
-            inp.addEventListener('change', (e) => {
-                broadcastToggle(e.target.dataset.script, e.target.dataset.toggle, e.target.value);
-            });
-        });
-        // Wire number inputs (commit on change/blur, not on every keystroke)
-        state.panelEl.querySelectorAll('input[data-control="number"]').forEach(inp => {
-            inp.addEventListener('change', (e) => {
-                const v = parseFloat(e.target.value);
-                if (!isNaN(v)) broadcastToggle(e.target.dataset.script, e.target.dataset.toggle, v);
-            });
-            // Stop hotkey router from intercepting digit keys while typing.
-            inp.addEventListener('keydown', (e) => e.stopPropagation());
-        });
-        // Wire Advanced collapsibles
-        state.panelEl.querySelectorAll('button[data-advtoggle]').forEach(b => {
-            b.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const key = b.dataset.advtoggle;
-                state.expanded[key] = !state.expanded[key];
-                renderPanel();
-            });
-        });
-        // Wire category headers — expand/collapse on click, but pass through
-        // clicks that landed on the master checkbox.
-        state.panelEl.querySelectorAll('[data-cattoggle]').forEach(el => {
-            el.addEventListener('click', (e) => {
-                if (e.target.tagName === 'INPUT') return; // checkbox handles itself
-                e.stopPropagation();
-                const key = el.dataset.cattoggle;
-                state.expanded[key] = !state.expanded[key];
-                renderPanel();
-            });
-        });
-        // Wire group headers (default OPEN, separate state map from categories)
-        state.panelEl.querySelectorAll('[data-grouptoggle]').forEach(el => {
-            el.addEventListener('click', (e) => {
-                if (e.target.tagName === 'INPUT') return;
-                e.stopPropagation();
-                const key = el.dataset.grouptoggle;
-                if (!state.groupsCollapsed) state.groupsCollapsed = {};
-                state.groupsCollapsed[key] = !state.groupsCollapsed[key];
-                renderPanel();
-            });
-        });
-        // Wire rebind buttons
-        state.panelEl.querySelectorAll('button[data-rebind]').forEach(b => {
-            b.addEventListener('click', (e) => {
-                e.stopPropagation();
-                state.rebindingFor = { scriptId: b.dataset.script, hotkeyId: b.dataset.hotkey };
-                renderPanel();
-            });
-        });
-        // Wire reset-to-default buttons
-        state.panelEl.querySelectorAll('button[data-reset]').forEach(b => {
-            b.addEventListener('click', (e) => {
-                e.stopPropagation();
-                setHotkey(b.dataset.script, b.dataset.hotkey, null);
-                renderPanel();
-            });
-        });
+        // NOTE: per-element click/change listeners moved to delegated
+        // handlers in createPanel() — see panel.addEventListener calls
+        // there. Per-render attachment had a race where clicks landing on
+        // freshly-recreated controls could miss their listener.
     }
 
     // ============================================================

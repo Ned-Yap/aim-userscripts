@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
 // @description  Hotkeys 1-6 create entities; Shift+S Save, Shift+D Delete, Shift+Z Cancel, Shift+X Finish. Registers with the AIM Control Panel for master toggle + per-hotkey rebinding.
@@ -190,7 +190,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.4';
+    const SCRIPT_VERSION = '1.5';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -230,7 +230,7 @@
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'New Entity Macro',
             version: SCRIPT_VERSION, group: 'Hotkeys',
-            toggles: [{ id: 'master', label: 'Enable Entity Macro hotkeys', type: 'boolean', default: true, master: true }],
+            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
             hotkeys: [
                 { id: 'create-ffz',    label: 'New Free Fly Zone',  default: '1' },
                 { id: 'create-nfz',    label: 'New No Fly Zone',    default: '2' },
