@@ -90,7 +90,7 @@ The Map Styler can overlay power lines (yellow distro / red trans) and run a Cov
 
 1. Go to [github.com/signup](https://github.com/signup)
 2. Use your work email or personal email — either works. The email isn't shown publicly.
-3. Pick a username (lowercase letters / digits / dashes; it's permanent so pick something you're OK with). Examples: `firstname-lastname`, `flast`, `fnamelnamework`.
+3. Pick a username (lowercase letters / digits / dashes; it's permanent so pick something you're OK with). **Suggested:** `aim-<firstname><lastInitial>` or `<initials>-aim` (e.g. `aim-johnd` or `jd-aim`) — project-scoped, doesn't expose your employer in your public profile. Avoid putting your company name in the username if you want a clean separation. Personal accounts work fine too.
 4. Verify the email when GitHub sends the verification link.
 
 That's it — no payment, no further setup. **Skip this step if you already have an account.**
@@ -186,6 +186,16 @@ To check manually: Tampermonkey dashboard → "Check for userscript updates" (to
 
 ---
 
-## Reporting bugs
+## Reporting bugs & requesting features
 
-Open the browser console (F12), reproduce the issue, copy any `[AIM …]` log lines plus any red errors, and send them to Payden along with: site ID, what you were trying to do, what happened instead.
+We use a **private** GitHub repo for issue tracking so screenshots, videos, and descriptions can include real site data without ending up indexable on the public internet.
+
+1. Go to **[github.com/Ned-Yap/aim-userscripts-issues/issues/new/choose](https://github.com/Ned-Yap/aim-userscripts-issues/issues/new/choose)**
+2. Pick **Bug report** or **Feature request** — both have templates that prompt you for what to include
+3. Fill in everything you can. Console logs are the single most useful thing for bugs — open DevTools (F12) → Console → reproduce the bug → copy any `[AIM …]` lines plus any red errors
+
+You'll need access to that repo first — same flow as the KMLs repo: send Payden your GitHub username, accept the email invite. (If you've already done that for KMLs, you're set for issues too — just ask to be added.)
+
+## What's changed?
+
+See [**CHANGELOG.md**](https://github.com/Ned-Yap/aim-userscripts/blob/main/CHANGELOG.md) for the running list of what shipped in each update.

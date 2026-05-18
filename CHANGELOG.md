@@ -1,0 +1,24 @@
+# Changelog
+
+Human-readable summary of what shipped in each update. Tampermonkey auto-update prompts coworkers to install new versions; this file is what they read to know *what changed*.
+
+Newest entries on top. Each entry calls out the script + version + a one-line summary. Issue references look like `[#7](https://github.com/Ned-Yap/aim-userscripts-issues/issues/7)` and link to the private tracker (only visible to collaborators).
+
+---
+
+## 2026-05-18
+
+- **AIM Control Panel v1.18** — After Save & Test of a GitHub PAT, the status message now tells you to hard-reload (Ctrl+Shift+R) if shielding KMLs don't appear within ~10 seconds. Works around an intermittent first-time-setup race we haven't fully diagnosed.
+
+## 2026-05-17 (initial public release)
+
+Everything before this point was iterated rapidly during initial development; see git history for per-commit detail. High-level summary of what's in the first public release:
+
+- **AIM Control Panel v1.17** — schema-driven settings hub with cyan collapsible sections, group support (Hotkeys), per-hotkey enable + colored labels (New Entity Macro), hotkey collision detection, GitHub PAT compact section with auto-test status dot, event-delegation click handling.
+- **AIM Map Styler v33.x** — buffers/outlines/violations for FFZ/asset/FP, dual-type shielding KML loader (distro yellow, trans red), Coverage Validator (on-demand FAA 200ft check with persistent dismissible pins + red highlight of failing outline segments).
+- **AIM New Entity Macro v1.6** — per-entity enable toggles, color-coded entity labels, Shift+D double-press delete for safety.
+- **AIM Inspector v1.7** — cross-frame Leaflet diagnostic panel (Shift+I).
+- **Hotkey scripts** (Altitude, Ruler, Clear All, Copy Asset Name) — all integrated with Control Panel under a "Hotkeys" group.
+- **Bulk scripts** (Mission Adder, Altitude Updater, Validator) — original UI preserved; panel integration pending.
+- **Sidebar Resizer** — auto-runs, restores map visibility.
+- **Distribution** — all scripts at `*.user.js` so install links auto-prompt Tampermonkey, with `@updateURL` headers for automatic daily update checks.
