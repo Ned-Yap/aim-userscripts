@@ -55,9 +55,31 @@ Once the old ones are gone, move on to [Install the userscripts](#2-install-the-
 
 ## 2. Install the userscripts
 
-Click each link below. Tampermonkey will pop up an install prompt for each — click **Install**. After install, the script auto-updates on its own going forward.
+Each link below opens the script's raw source in a new tab — it does NOT auto-install. You need to install each one manually via Tampermonkey. Two methods, **try Method A first**:
 
-Order doesn't matter, but **install the Control Panel first** so the others show up inside it when they load.
+### Method A — Install from URL (fastest, if your Tampermonkey supports it)
+
+1. Open the Tampermonkey **Dashboard**
+2. Top toolbar → **Utilities**
+3. Scroll to the **Import from URL** or **Install from URL** section
+4. Paste the script's raw GitHub URL (from the table below — right-click the link → Copy Link Address)
+5. Click **Install** → confirm the prompt
+6. Repeat for each script
+
+### Method B — Copy and paste (always works)
+
+1. Click the script link below — the raw source code opens in your browser
+2. Select all (**Ctrl+A**) and copy (**Ctrl+C**)
+3. Open the Tampermonkey **Dashboard**
+4. Click the **+** tab at the top to create a new userscript
+5. **Delete the default template** that appears in the editor
+6. Paste your copied code (**Ctrl+V**)
+7. Save: **Ctrl+S** (or **File → Save**)
+8. Repeat for each script
+
+Once installed, scripts auto-update on their own going forward (Tampermonkey checks daily; you can also trigger manually via Dashboard → "Check for userscript updates").
+
+**Install the Control Panel first** so the others show up inside it when they load. Other than that, order doesn't matter.
 
 | # | Script | Install link |
 |---|---|---|
