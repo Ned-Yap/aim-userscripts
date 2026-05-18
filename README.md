@@ -82,13 +82,40 @@ Click each link below. Because the filenames end in `.user.js`, Tampermonkey wil
 
 ## 3. Set up the GitHub token (for shielding KMLs)
 
-The Map Styler can overlay power lines (yellow distro / red trans) and run a Coverage Validator. These features pull per-site KML data from a private GitHub repo. To unlock them you need:
+The Map Styler can overlay power lines (yellow distro / red trans) and run a Coverage Validator. These features pull per-site KML data from a private GitHub repo. To unlock them you need a GitHub account with access to that repo + a personal access token.
 
-### 3a. Ask Payden to add you as a collaborator
+> **Why GitHub?** GitHub is a free, widely-used code/file hosting platform owned by Microsoft. Our dev team already uses it. For this setup, your account is only used as an identity for repository permissions — no data is shared with your employer, no commits or code from you are required, and the account is yours to keep / delete whenever. The only thing you'll have access to is one private repo of shielding KML files.
 
-You'll get a GitHub email invite. Accept it.
+### 3a. Create a GitHub account (if you don't have one)
 
-### 3b. Generate a fine-grained personal access token
+1. Go to [github.com/signup](https://github.com/signup)
+2. Use your work email or personal email — either works. The email isn't shown publicly.
+3. Pick a username (lowercase letters / digits / dashes; it's permanent so pick something you're OK with). Examples: `firstname-lastname`, `flast`, `fnamelnamework`.
+4. Verify the email when GitHub sends the verification link.
+
+That's it — no payment, no further setup. **Skip this step if you already have an account.**
+
+### 3b. Get added to the private repo
+
+GitHub doesn't have a "request access" link for personal-account private repos, so the access has to be granted by Payden directly. Two steps:
+
+1. **DM / email Payden your GitHub username** (just the username, e.g. `flast` — usernames are public, no risk).
+2. Watch your email for a message from GitHub titled something like *"@Ned-Yap invited you to Ned-Yap/aim-userscripts-data"*. Click **View invitation** → **Accept invitation**.
+
+After accepting, you can view the repo at [github.com/Ned-Yap/aim-userscripts-data](https://github.com/Ned-Yap/aim-userscripts-data) (it'll 404 until then — that's expected, it's private).
+
+<details>
+<summary>For Payden: how to add a coworker</summary>
+
+1. Go to https://github.com/Ned-Yap/aim-userscripts-data/settings/access
+2. Click **Add people**
+3. Type their GitHub username, click their profile when it appears
+4. Choose **Read** access (Contents read-only is all that's needed — they don't need to push)
+5. Click **Add NAME to this repository** → GitHub sends them the invite email
+
+</details>
+
+### 3c. Generate a fine-grained personal access token
 
 1. Go to [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)
 2. Click **Generate new token** → **Fine-grained personal access token**
