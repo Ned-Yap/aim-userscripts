@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      33.1
+// @version      33.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '33.1';
+    const SCRIPT_VERSION = '33.2';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1098,22 +1098,38 @@
     function installValidatorClickDelegate() {
         if (validatorDelegateInstalled) return;
         validatorDelegateInstalled = true;
-        document.addEventListener('click', (e) => {
+        // Use both `click` and `pointerdown` so we don't lose dismissals
+        // when Leaflet's own click/drag detection eats one but not the
+        // other. Pointerdown fires earlier in the lifecycle and isn't
+        // affected by Leaflet's "did the mouse move between down and up?"
+        // drag-detection logic. Debounce so one physical click that
+        // arrives via both paths only acts once.
+        let lastDismissAt = 0;
+        const handle = (e) => {
             const t = e.target;
             if (!t || !t.getAttribute) return;
             const attr = t.getAttribute('data-validator-number');
             if (attr == null) return;
             const num = parseInt(attr, 10);
             if (isNaN(num)) return;
+            const now = Date.now();
+            if (now - lastDismissAt < 300) return;
+            lastDismissAt = now;
             e.stopPropagation();
             e.preventDefault();
+            console.log(`${TAG} validator: pin ${num} hit via ${e.type}`);
             dismissValidatorPin(num);
-        }, true); // capture phase — beat Leaflet's click handling
+        };
+        document.addEventListener('click', handle, true);
+        document.addEventListener('pointerdown', handle, true);
     }
 
     function dismissValidatorPin(number) {
         const r = validatorState.results.find(x => x.number === number);
-        if (!r) return;
+        if (!r) {
+            console.warn(`${TAG} validator: pin ${number} not in results (have: ${validatorState.results.map(x => x.number).join(',') || 'none'})`);
+            return;
+        }
         r.dismissed = !r.dismissed;
         saveValidatorResults();
         const total = validatorState.results.length;
@@ -1238,13 +1254,13 @@
                 pin.setAttribute('stroke-opacity', '1');
             }
             pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
+            // Set pointer-events both as SVG attribute AND as inline CSS so
+            // nothing — neither Leaflet's class-based pointer-events styling
+            // nor a stylesheet — can override the hit area. Click/dismiss
+            // is handled by document-level delegate (installValidatorClickDelegate).
             pin.setAttribute('pointer-events', 'all');
+            pin.style.pointerEvents = 'all';
             pin.style.cursor = 'pointer';
-            // No per-element click handler — we use event delegation on the
-            // document instead (see installValidatorClickDelegate). Per-pin
-            // listeners were unreliable: every runUpdate wipe&rebuild
-            // recreates the SVG node, and any click landing in that brief
-            // window — or that Leaflet had partially captured — was lost.
             g.appendChild(pin);
 
             // 4. Number text (pointer-events none so clicks go to the pin)
