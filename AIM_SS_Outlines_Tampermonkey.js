@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      33.0
+// @version      33.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '33.0';
+    const SCRIPT_VERSION = '33.1';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1088,6 +1088,29 @@
         runUpdate();
     }
 
+    // Single document-level click delegate that handles ALL validator pin
+    // clicks regardless of how often the SVG gets wiped & rebuilt. The pin
+    // element re-creation cycle was making per-element listeners unreliable
+    // (a click landing on a brand-new pin between rebuilds sometimes didn't
+    // fire, suspected Leaflet's own capture handling). Delegating to a
+    // stable parent (document, capture phase) is bullet-proof.
+    let validatorDelegateInstalled = false;
+    function installValidatorClickDelegate() {
+        if (validatorDelegateInstalled) return;
+        validatorDelegateInstalled = true;
+        document.addEventListener('click', (e) => {
+            const t = e.target;
+            if (!t || !t.getAttribute) return;
+            const attr = t.getAttribute('data-validator-number');
+            if (attr == null) return;
+            const num = parseInt(attr, 10);
+            if (isNaN(num)) return;
+            e.stopPropagation();
+            e.preventDefault();
+            dismissValidatorPin(num);
+        }, true); // capture phase — beat Leaflet's click handling
+    }
+
     function dismissValidatorPin(number) {
         const r = validatorState.results.find(x => x.number === number);
         if (!r) return;
@@ -1217,17 +1240,11 @@
             pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
             pin.setAttribute('pointer-events', 'all');
             pin.style.cursor = 'pointer';
-            const num = r.number;
-            pin.addEventListener('click', (e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                dismissValidatorPin(num);
-            });
-            // Also swallow mousedown/dblclick so the map below doesn't
-            // start panning or zooming when the user dismisses.
-            ['mousedown', 'dblclick'].forEach(evt => {
-                pin.addEventListener(evt, (e) => { e.stopPropagation(); }, true);
-            });
+            // No per-element click handler — we use event delegation on the
+            // document instead (see installValidatorClickDelegate). Per-pin
+            // listeners were unreliable: every runUpdate wipe&rebuild
+            // recreates the SVG node, and any click landing in that brief
+            // window — or that Leaflet had partially captured — was lost.
             g.appendChild(pin);
 
             // 4. Number text (pointer-events none so clicks go to the pin)
@@ -1741,6 +1758,8 @@
     // Restore any previously-saved validator pins for the current site so
     // they appear immediately when the styler activates.
     loadValidatorResults();
+    // Wire up the click-to-dismiss handler once, against document.
+    installValidatorClickDelegate();
 
     if (isActive) setActiveState(true);
 
