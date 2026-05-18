@@ -115,18 +115,20 @@ After accepting, you can view the repo at [github.com/Ned-Yap/aim-userscripts-da
 
 </details>
 
-### 3c. Generate a fine-grained personal access token
+### 3c. Generate a personal access token
 
-1. Go to [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)
-2. Click **Generate new token** → **Fine-grained personal access token**
+⚠ **Important:** Use a **classic** personal access token (not fine-grained). Fine-grained PATs can't access private repos owned by another personal account — that's a GitHub limitation for collaborators, not something we can work around with the current setup. Classic PATs work fine here.
+
+1. Go to [github.com/settings/tokens](https://github.com/settings/tokens) (Settings → Developer settings → Personal access tokens → **Tokens (classic)**)
+2. Click **Generate new token** → **Generate new token (classic)**
 3. Fill in:
-   - **Token name:** `AIM KML reader` (or whatever helps you find it later)
-   - **Expiration:** 1 year (or as desired)
-   - **Resource owner:** `Ned-Yap`
-   - **Repository access:** "Only select repositories" → tick `aim-userscripts-data`
-   - **Permissions** → expand **Repository permissions** → find **Contents** → set to **Read-only**
-4. Click **Generate token**
-5. **Copy the token** (starts with `github_pat_…`) — you only see it once
+   - **Note:** `AIM KML reader` (or whatever helps you find it later)
+   - **Expiration:** 1 year (or whatever you prefer)
+   - **Scopes:** check the **`repo`** box (this is the only scope you need — gives read access to private repos you have access to)
+4. Click **Generate token** at the bottom
+5. **Copy the token** (starts with `ghp_…`) — you only see it once. If you lose it, just generate a new one.
+
+> **Why classic and not fine-grained?** GitHub's newer fine-grained tokens can only access repos owned by *your* account or organizations you're a member of. Since the KML repo is owned by Payden's personal account, fine-grained tokens won't list it as an option. Classic tokens use scopes that apply across all repos you have access to.
 
 ---
 
