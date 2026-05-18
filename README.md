@@ -1,0 +1,132 @@
+# AIM Userscripts
+
+A set of browser userscripts that streamline the AIM drone-mission workflow on `percepto.app`. Distributed via Tampermonkey + GitHub — install once, get auto-updates.
+
+---
+
+## Quick start (5 minutes)
+
+1. [Install Tampermonkey](#1-install-tampermonkey)
+2. [Install the userscripts](#2-install-the-userscripts) — click each link below
+3. [Get repo access + a GitHub token](#3-set-up-the-github-token-for-shielding-kmls) (only needed for the Map Styler's KML overlays)
+4. [Configure in Percepto](#4-paste-the-token-into-aim-controls)
+
+Auto-updates take over after that — new versions install themselves.
+
+---
+
+## 1. Install Tampermonkey
+
+Tampermonkey is the browser extension that runs userscripts.
+
+- **Chrome / Edge / Brave:** [Tampermonkey on the Chrome Web Store](https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+- **Firefox:** [Tampermonkey on AMO](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/)
+- **Safari:** [Tampermonkey on the App Store](https://apps.apple.com/app/tampermonkey/id1482490089)
+
+Click "Add to browser" and confirm.
+
+---
+
+## 2. Install the userscripts
+
+Click each link below. Tampermonkey will pop up an install prompt for each — click **Install**. After install, the script auto-updates on its own going forward.
+
+Order doesn't matter, but **install the Control Panel first** so the others show up inside it when they load.
+
+| # | Script | Install link |
+|---|---|---|
+| 1 | **AIM Control Panel** (the gear icon + settings hub) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js) |
+| 2 | **AIM Map Styler** (outlines, buffers, KML shielding, Coverage Validator — Shift+O) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js) |
+| 3 | **AIM Inspector** (Leaflet diagnostic panel — Shift+I) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.js) |
+| 4 | **AIM Absolute Altitude** (Shift+A) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js) |
+| 5 | **AIM Measure / Ruler** (Shift+R) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js) |
+| 6 | **AIM Clear All** (Shift+C) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js) |
+| 7 | **AIM Copy Asset Name** (Shift+Ctrl+Q on a hovered asset) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js) |
+| 8 | **AIM New Entity Macro** (1–6 to create, Shift+S/D D/Z/X) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js) |
+| 9 | **AIM Bulk Mission Adder** (Shift+B) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.js) |
+| 10 | **AIM Bulk Altitude Updater** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.js) |
+| 11 | **AIM Bulk Validator** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.js) |
+| 12 | **AIM Sidebar Resizer** (map visibility fix) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js) |
+
+**Verify:** open `percepto.app` and a site. You should see a gear icon (⚙) added to the map toolbar. Click it — that's the AIM Controls panel.
+
+---
+
+## 3. Set up the GitHub token (for shielding KMLs)
+
+The Map Styler can overlay power lines (yellow distro / red trans) and run a Coverage Validator. These features pull per-site KML data from a private GitHub repo. To unlock them you need:
+
+### 3a. Ask Payden to add you as a collaborator
+
+You'll get a GitHub email invite. Accept it.
+
+### 3b. Generate a fine-grained personal access token
+
+1. Go to [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens)
+2. Click **Generate new token** → **Fine-grained personal access token**
+3. Fill in:
+   - **Token name:** `AIM KML reader` (or whatever helps you find it later)
+   - **Expiration:** 1 year (or as desired)
+   - **Resource owner:** `Ned-Yap`
+   - **Repository access:** "Only select repositories" → tick `aim-userscripts-data`
+   - **Permissions** → expand **Repository permissions** → find **Contents** → set to **Read-only**
+4. Click **Generate token**
+5. **Copy the token** (starts with `github_pat_…`) — you only see it once
+
+---
+
+## 4. Paste the token into AIM Controls
+
+1. Reload Percepto on any site
+2. Click the gear icon (⚙) in the map toolbar
+3. Scroll to the bottom — find **GitHub Connection (KMLs)**
+4. Click to expand → paste your token → **Save & Test**
+5. Status dot should turn **green** with "Connected"
+
+That's it. The token stays in Tampermonkey's storage on your machine — it never leaves your browser.
+
+---
+
+## Verification
+
+A working install on a site that has shielding KMLs configured will show:
+
+- ⚙ Gear icon in the map toolbar
+- Press **Shift+O** → map outlines/buffers appear (Map Styler activated)
+- Open the panel, expand **Outlines** → toggle **Distribution Lines** on → orange/yellow power lines render under the map
+- Coverage Validator → **Run coverage check** → numbered red pins on any spots >200ft from shielding
+
+If KMLs don't appear:
+- Check the GitHub Connection dot is **green**, not red/gray
+- Check the browser console for `[AIM STYLER …] no GitHub token cached` warnings
+- Some sites have no KMLs configured yet — that's normal, you'll see `no … KML for site XXXX (404)`
+
+---
+
+## Auto-updates
+
+Tampermonkey checks for new versions roughly daily. You'll see an update prompt when a script changes. Most updates take 10 seconds to accept.
+
+To check manually: Tampermonkey dashboard → "Check for userscript updates" (top toolbar).
+
+⚠ Some updates request new browser permissions (e.g. for the Map Styler's GitHub fetch). When you see the diff highlighted in yellow, that's expected — accept it.
+
+---
+
+## Troubleshooting
+
+**"Gear icon doesn't appear in the map toolbar"** — Make sure AIM Control Panel is installed and enabled in Tampermonkey. Reload the Percepto page.
+
+**"Hotkeys do nothing"** — Tampermonkey might be paused. Open the dashboard, make sure each AIM script is enabled (toggle in the top row).
+
+**"My panel settings are out of date / scripts look weird after lots of updates"** — Hard refresh: empty cache + reload (Ctrl+Shift+Delete → cached images, or DevTools → Network tab → "Disable cache" while devtools open + reload).
+
+**"GitHub Connection stays gray / red"** — Token isn't reaching the script. Re-paste it; make sure you copied the full `github_pat_…` string with no whitespace. Check that the token has Contents: Read on `aim-userscripts-data` specifically.
+
+**"Power lines render in the wrong place / not at all"** — The site might not have KMLs uploaded yet. Ask Payden.
+
+---
+
+## Reporting bugs
+
+Open the browser console (F12), reproduce the issue, copy any `[AIM …]` log lines plus any red errors, and send them to Payden along with: site ID, what you were trying to do, what happened instead.
