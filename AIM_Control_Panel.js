@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.16';
+    const VERSION = '1.17';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1003,48 +1003,93 @@
         ` : '';
 
         // Renders the inner content (toggles + hotkeys) for one script.
-        // Three layout variants based on shape:
-        //   1. Single master toggle + single hotkey → ONE combined row
-        //      (checkbox + hotkey label + chip + reset). Used for the
-        //      simple hotkey scripts (Altitude, Ruler, Clear All, etc.)
-        //      where the toggle + hotkey are conceptually the same thing.
-        //   2. Single master toggle + multiple hotkeys → checkbox-in-header
-        //      row + indented hotkey rows. (e.g. New Entity Macro)
-        //   3. Multiple toggles or complex layout → original toggles+hotkey
-        //      list with optional sub-header. (e.g. Outlines)
+        // Four layout variants based on shape:
+        //   1. Single master + single hotkey → ONE combined row.
+        //   2. Hotkeys all have pairToggleId, no other toggles → each row
+        //      gets its own inline enable checkbox. No master. Optional
+        //      script-name header. (e.g. New Entity Macro v1.6+)
+        //   3. Single master + multiple hotkeys → checkbox+name header + rows.
+        //   4. Default → toggles list + hotkey rows + optional sub-header.
+        //
+        // Hotkey schema fields supported beyond {id, label, default}:
+        //   - labelHtml: trusted raw HTML to use as label (for colored names)
+        //   - chipColor: hex color applied to the key-chip text
+        //   - pairToggleId: id of a paired enable toggle that renders inline
         const renderScriptInner = (script, withSubHeader) => {
             const toggles = Array.isArray(script.toggles) ? script.toggles : [];
             const hotkeys = Array.isArray(script.hotkeys) ? script.hotkeys : [];
-            const isSimple = toggles.length === 1 && toggles[0].master === true;
+
+            // Which toggles are paired with a hotkey row? Those are rendered
+            // inline (inside the hotkey row) instead of as standalone toggles.
+            const pairedToggleIds = new Set();
+            hotkeys.forEach(hk => { if (hk.pairToggleId) pairedToggleIds.add(hk.pairToggleId); });
+            const unpairedToggles = toggles.filter(t => !pairedToggleIds.has(t.id));
+            const isSimple = unpairedToggles.length === 1 && unpairedToggles[0].master === true;
+
+            // Resolve a label — trusted HTML if labelHtml is present, otherwise
+            // the plain label gets escaped. Used for both toggles and hotkeys.
+            const labelText = (item) => item.labelHtml || escapeHtml(item.label || item.id);
 
             const renderHotkeyChip = (hk, indentPx) => {
                 const bound = getHotkey(script.scriptId, hk.id, hk.default);
                 const isBindingThis = state.rebindingFor && state.rebindingFor.scriptId === script.scriptId && state.rebindingFor.hotkeyId === hk.id;
+                const chipColorOverride = !isBindingThis && hk.chipColor ? `color:${hk.chipColor};` : '';
                 const chipStyle = isBindingThis
                     ? 'background:rgba(173,104,0,0.20);border:1px solid #ffd591;color:#ffd591'
-                    : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6';
+                    : `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6;${chipColorOverride}`;
                 const chipText = isBindingThis ? 'press a key… (Esc to cancel)' : (bound || '— unbound —');
                 const isCustom = bound && bound !== hk.default;
                 return `
                     <div style="display:flex;align-items:center;gap:8px;padding:3px 10px 3px ${indentPx}px">
-                        <span style="flex:1;color:#bbb">${escapeHtml(hk.label || hk.id)}</span>
+                        <span style="flex:1;color:#bbb">${labelText(hk)}</span>
                         <button data-rebind data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}"
-                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;${chipStyle}">${escapeHtml(chipText)}</button>
+                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;font-weight:600;${chipStyle}">${escapeHtml(chipText)}</button>
                         ${isCustom ? `<button data-reset data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}" style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px" title="Reset to default (${escapeAttr(hk.default || '')})">↺</button>` : ''}
                     </div>
                 `;
             };
 
+            // Hotkey row with INLINE enable checkbox (paired toggle). Used by
+            // CASE 2. The checkbox swallows clicks so the row label/chip stays
+            // independent.
+            const renderHotkeyRowWithCheckbox = (hk, indentPx) => {
+                const t = toggles.find(x => x.id === hk.pairToggleId);
+                if (!t) return renderHotkeyChip(hk, indentPx);
+                const checked = getToggle(script.scriptId, t.id, t.default);
+                const bound = getHotkey(script.scriptId, hk.id, hk.default);
+                const isBindingThis = state.rebindingFor && state.rebindingFor.scriptId === script.scriptId && state.rebindingFor.hotkeyId === hk.id;
+                const chipColorOverride = !isBindingThis && hk.chipColor ? `color:${hk.chipColor};` : '';
+                const chipStyle = isBindingThis
+                    ? 'background:rgba(173,104,0,0.20);border:1px solid #ffd591;color:#ffd591'
+                    : `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6;${chipColorOverride}`;
+                const chipText = isBindingThis ? 'press a key… (Esc to cancel)' : (bound || '— unbound —');
+                const isCustom = bound && bound !== hk.default;
+                return `
+                    <label style="display:flex;align-items:center;gap:8px;padding:3px 10px 3px ${indentPx}px;cursor:pointer">
+                        <input type="checkbox" ${checked ? 'checked' : ''}
+                               data-control="boolean"
+                               data-script="${escapeAttr(script.scriptId)}"
+                               data-toggle="${escapeAttr(t.id)}"
+                               style="cursor:pointer;accent-color:rgb(20,210,220);margin:0" />
+                        <span style="flex:1;color:#e6e6e6">${labelText(hk)}</span>
+                        <button data-rebind data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}"
+                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;font-weight:600;${chipStyle}">${escapeHtml(chipText)}</button>
+                        ${isCustom ? `<button data-reset data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}" style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px" title="Reset to default (${escapeAttr(hk.default || '')})">↺</button>` : ''}
+                    </label>
+                `;
+            };
+
             // CASE 1: simple single-master + single-hotkey → one row.
-            if (isSimple && hotkeys.length === 1) {
-                const t = toggles[0];
+            if (isSimple && hotkeys.length === 1 && !hotkeys[0].pairToggleId) {
+                const t = unpairedToggles[0];
                 const hk = hotkeys[0];
                 const checked = getToggle(script.scriptId, t.id, t.default);
                 const bound = getHotkey(script.scriptId, hk.id, hk.default);
                 const isBindingThis = state.rebindingFor && state.rebindingFor.scriptId === script.scriptId && state.rebindingFor.hotkeyId === hk.id;
+                const chipColorOverride = !isBindingThis && hk.chipColor ? `color:${hk.chipColor};` : '';
                 const chipStyle = isBindingThis
                     ? 'background:rgba(173,104,0,0.20);border:1px solid #ffd591;color:#ffd591'
-                    : 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6';
+                    : `background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.18);color:#e6e6e6;${chipColorOverride}`;
                 const chipText = isBindingThis ? 'press a key… (Esc to cancel)' : (bound || '— unbound —');
                 const isCustom = bound && bound !== hk.default;
                 return `
@@ -1054,18 +1099,33 @@
                                data-script="${escapeAttr(script.scriptId)}"
                                data-toggle="${escapeAttr(t.id)}"
                                style="cursor:pointer;accent-color:rgb(20,210,220);margin:0" />
-                        <span style="flex:1;color:#e6e6e6">${escapeHtml(hk.label || hk.id)}</span>
+                        <span style="flex:1;color:#e6e6e6">${labelText(hk)}</span>
                         <button data-rebind data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}"
-                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;${chipStyle}">${escapeHtml(chipText)}</button>
+                                style="font-family:ui-monospace,monospace;font-size:11px;padding:2px 8px;border-radius:3px;cursor:pointer;font-weight:600;${chipStyle}">${escapeHtml(chipText)}</button>
                         ${isCustom ? `<button data-reset data-script="${escapeAttr(script.scriptId)}" data-hotkey="${escapeAttr(hk.id)}" style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px" title="Reset to default (${escapeAttr(hk.default || '')})">↺</button>` : ''}
                     </label>
                 `;
             }
 
-            // CASE 2: simple single-master + multiple hotkeys → checkbox+name
-            // header followed by indented hotkey rows.
+            // CASE 2: every hotkey has a paired enable toggle (no master) →
+            // each row gets its own inline checkbox. Optional script-name
+            // header for context (no checkbox in it).
+            const allHotkeysPaired = hotkeys.length > 0 && hotkeys.every(hk => hk.pairToggleId);
+            if (allHotkeysPaired && unpairedToggles.length === 0) {
+                const headerHtml = withSubHeader ? `
+                    <div style="padding:4px 10px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.06)">
+                        <strong style="color:#e6e6e6;font-size:12px">${escapeHtml(script.name || script.scriptId)}</strong>
+                    </div>
+                ` : '';
+                const rowsHtml = hotkeys.map(hk => renderHotkeyRowWithCheckbox(hk, 10)).join('');
+                return `<div>${headerHtml}${rowsHtml}</div>`;
+            }
+
+            // CASE 3: simple single-master + multiple hotkeys → checkbox+name
+            // header followed by indented hotkey rows. Some hotkeys may have
+            // their own pairToggleId — rendered inline if so.
             if (isSimple && hotkeys.length > 1) {
-                const t = toggles[0];
+                const t = unpairedToggles[0];
                 const checked = getToggle(script.scriptId, t.id, t.default);
                 const headerHtml = withSubHeader ? `
                     <label style="display:flex;align-items:center;gap:8px;padding:4px 10px;cursor:pointer;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.06)">
@@ -1077,15 +1137,19 @@
                         <strong style="flex:1;color:#e6e6e6;font-size:12px">${escapeHtml(script.name || script.scriptId)}</strong>
                     </label>
                 ` : '';
-                const hotkeysHtml = hotkeys.map(hk => renderHotkeyChip(hk, 24)).join('');
+                const hotkeysHtml = hotkeys.map(hk => hk.pairToggleId
+                    ? renderHotkeyRowWithCheckbox(hk, 24)
+                    : renderHotkeyChip(hk, 24)).join('');
                 return `<div>${headerHtml}${hotkeysHtml}</div>`;
             }
 
-            // CASE 3: complex layout (multiple toggles, etc.) — original
-            // rendering with toggles list + optional sub-header.
-            const togglesHtml = toggles.map(t => renderControl(script.scriptId, t)).join('')
+            // CASE 4 (default): complex layout — toggles list (excluding any
+            // that are paired with hotkey rows) + hotkey rows.
+            const togglesHtml = unpairedToggles.map(t => renderControl(script.scriptId, t)).join('')
                 || (hotkeys.length ? '' : `<div style="padding:3px 10px;color:#888;font-style:italic">no toggles exposed</div>`);
-            const hotkeysHtml = hotkeys.map(hk => renderHotkeyChip(hk, 10)).join('');
+            const hotkeysHtml = hotkeys.map(hk => hk.pairToggleId
+                ? renderHotkeyRowWithCheckbox(hk, 10)
+                : renderHotkeyChip(hk, 10)).join('');
             const subHeader = withSubHeader ? `
                 <div style="padding:3px 10px 3px;display:flex;align-items:center;gap:6px">
                     <strong style="color:#e6e6e6">${escapeHtml(script.name || script.scriptId)}</strong>

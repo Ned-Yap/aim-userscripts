@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
-// @description  Hotkeys 1-6 create entities; Shift+S Save, Shift+D Delete, Shift+Z Cancel, Shift+X Finish. Registers with the AIM Control Panel for master toggle + per-hotkey rebinding.
+// @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -186,16 +186,38 @@
     }
 
     // --- AIM Control Panel integration ---
-    // 10 hotkeys total. Each individually rebindable via the panel.
+    // 10 hotkeys, each individually rebindable AND individually enable/disable
+    // via paired enable toggles (no shared master — user wanted per-entity
+    // control). Color-coded entity labels + chips for visual scanning.
+    // Delete requires DOUBLE-PRESS within DELETE_WINDOW_MS for safety.
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-new-entity-macro';
-    const SCRIPT_VERSION = '1.5';
+    const SCRIPT_VERSION = '1.6';
+    const DELETE_WINDOW_MS = 500; // second press must arrive within this
     let controlChannel = null;
     let controlPanelDetected = false;
-    let masterEnabled = true;
+    // Per-hotkey enable state. Mirrors the paired toggles' state. Defaults
+    // to true so a fresh install works without panel interaction.
+    const enables = {
+        'create-ffz': true, 'create-nfz': true, 'create-fp': true,
+        'create-safe': true, 'create-asset': true, 'create-marker': true,
+        'save': true, 'delete': true, 'cancel': true, 'finish': true,
+    };
+    let lastDeletePressAt = 0;
 
-    // hotkeyId -> action handler
+    // Color palette (kept here so the colors apply to both the panel chip
+    // and the entity name label — see hotkey schema below).
+    const ENTITY_COLORS = {
+        ffz: '#5fff5f',     // green
+        nfz: '#ff5060',     // red
+        fp:  '#1ca0de',     // cyan
+        safe:'#ff8c00',     // orange
+        asset:'#ffffff',    // white
+        marker:'#c39bd3',   // light purple
+    };
+
+    // hotkeyId -> action handler. Delete is special-cased for double-press.
     const HOTKEY_ACTIONS = {
         'create-ffz':    () => performGlobalAction('Digit1'),
         'create-nfz':    () => performGlobalAction('Digit2'),
@@ -204,7 +226,20 @@
         'create-asset':  () => performGlobalAction('Digit5'),
         'create-marker': () => performGlobalAction('Digit6'),
         'save':          () => performGlobalSave(),
-        'delete':        () => performGlobalDelete(),
+        'delete':        () => {
+            // Double-press safety: first press records timestamp; the second
+            // within DELETE_WINDOW_MS triggers the actual delete. Otherwise
+            // the press is a no-op and resets the window.
+            const now = Date.now();
+            if (now - lastDeletePressAt <= DELETE_WINDOW_MS) {
+                lastDeletePressAt = 0;
+                console.log("[AIM MACRO] 🗑️ Delete confirmed (double-press) — executing");
+                performGlobalDelete();
+            } else {
+                lastDeletePressAt = now;
+                console.log(`[AIM MACRO] ⚠️ Delete primed — press again within ${DELETE_WINDOW_MS}ms to confirm`);
+            }
+        },
         'cancel':        () => performGlobalCancel(),
         'finish':        () => performGlobalFinish(),
     };
@@ -217,57 +252,102 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
-                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                // Toggle ids follow the pattern 'enable-<hotkey-id>'.
+                const m = (msg.toggleId || '').match(/^enable-(.+)$/);
+                if (m && enables.hasOwnProperty(m[1])) {
+                    enables[m[1]] = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
-                if (!masterEnabled) return;
+                if (!enables[msg.hotkeyId]) return; // per-hotkey enable check
                 const fn = HOTKEY_ACTIONS[msg.hotkeyId];
                 if (fn) fn();
             }
         };
     }
+
+    // Builds the per-hotkey enable toggles. The panel renders them inline
+    // with the matching hotkey row via the pairToggleId schema field.
+    function buildToggles() {
+        return Object.keys(enables).map(id => ({
+            id: `enable-${id}`,
+            // Label not user-visible (paired toggle is inlined in the hotkey row)
+            // but kept descriptive in case the panel ever surfaces it.
+            label: `Enable ${id}`,
+            type: 'boolean',
+            default: true,
+        }));
+    }
+
+    // Builds the hotkey schema with colored labels (labelHtml — bold colored
+    // span on the entity name with plain "New" prefix per user spec) and
+    // matching chipColor. Each paired with its enable toggle.
+    function buildHotkeys() {
+        const C = ENTITY_COLORS;
+        const colored = (prefix, name, color) => `${prefix}<strong style="color:${color}">${name}</strong>`;
+        return [
+            { id: 'create-ffz',    labelHtml: colored('New ', 'Free Fly Zone',  C.ffz),    chipColor: C.ffz,    default: '1',       pairToggleId: 'enable-create-ffz' },
+            { id: 'create-nfz',    labelHtml: colored('New ', 'No Fly Zone',    C.nfz),    chipColor: C.nfz,    default: '2',       pairToggleId: 'enable-create-nfz' },
+            { id: 'create-fp',     labelHtml: colored('New ', 'Flight Path',    C.fp),     chipColor: C.fp,     default: '3',       pairToggleId: 'enable-create-fp' },
+            { id: 'create-safe',   labelHtml: colored('New ', 'Safe Zone',      C.safe),   chipColor: C.safe,   default: '4',       pairToggleId: 'enable-create-safe' },
+            { id: 'create-asset',  labelHtml: colored('New ', 'Asset',          C.asset),  chipColor: C.asset,  default: '5',       pairToggleId: 'enable-create-asset' },
+            { id: 'create-marker', labelHtml: colored('New ', 'General Marker', C.marker), chipColor: C.marker, default: '6',       pairToggleId: 'enable-create-marker' },
+            { id: 'save',          label: 'Save (triple-confirm sequencing)',                                   default: 'Shift+S', pairToggleId: 'enable-save' },
+            { id: 'delete',        label: 'Delete entity (double-press to confirm)',                            default: 'Shift+D', pairToggleId: 'enable-delete' },
+            { id: 'cancel',        label: 'Cancel current edit',                                                default: 'Shift+Z', pairToggleId: 'enable-cancel' },
+            { id: 'finish',        label: 'Finish editing',                                                     default: 'Shift+X', pairToggleId: 'enable-finish' },
+        ];
+    }
+
     function registerWithControlPanel() {
         if (!controlChannel) return;
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'New Entity Macro',
             version: SCRIPT_VERSION, group: 'Hotkeys',
-            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
-            hotkeys: [
-                { id: 'create-ffz',    label: 'New Free Fly Zone',  default: '1' },
-                { id: 'create-nfz',    label: 'New No Fly Zone',    default: '2' },
-                { id: 'create-fp',     label: 'New Flight Path',    default: '3' },
-                { id: 'create-safe',   label: 'New Safe Zone',      default: '4' },
-                { id: 'create-asset',  label: 'New Asset',          default: '5' },
-                { id: 'create-marker', label: 'New General Marker', default: '6' },
-                { id: 'save',          label: 'Save (with triple-confirm sequencing)', default: 'Shift+S' },
-                { id: 'delete',        label: 'Delete entity',      default: 'Shift+D' },
-                { id: 'cancel',        label: 'Cancel current edit', default: 'Shift+Z' },
-                { id: 'finish',        label: 'Finish editing',     default: 'Shift+X' },
-            ],
+            toggles: buildToggles(),
+            hotkeys: buildHotkeys(),
         });
     }
     setupControlPanel();
     registerWithControlPanel();
 
     // --- Listener ---
+    // Fallback keydown handler for when the Control Panel isn't loaded
+    // (standalone use). Defers to the panel's HOTKEY_FIRED routing when
+    // the panel IS detected. Routes through HOTKEY_ACTIONS so the same
+    // per-entity enable + double-press-delete logic applies in both modes.
     var install = function() {
         var handler = function(e) {
-            if (controlPanelDetected) return; // panel routes via HOTKEY_FIRED
-            if (!masterEnabled) return;
+            if (controlPanelDetected) return;
             var el = e.target;
             if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
                 el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') ||
                 el.getAttribute('role') === 'textbox') return;
 
+            const fireAction = (hotkeyId) => {
+                if (!enables[hotkeyId]) return false;
+                const fn = HOTKEY_ACTIONS[hotkeyId];
+                if (!fn) return false;
+                fn();
+                return true;
+            };
+
             if (e.shiftKey) {
-                if (e.code === 'KeyZ') performGlobalCancel();
-                else if (e.code === 'KeyS') performGlobalSave();
-                else if (e.code === 'KeyD') performGlobalDelete();
-                else if (e.code === 'KeyX') performGlobalFinish();
+                let id = null;
+                if (e.code === 'KeyZ') id = 'cancel';
+                else if (e.code === 'KeyS') id = 'save';
+                else if (e.code === 'KeyD') id = 'delete';
+                else if (e.code === 'KeyX') id = 'finish';
                 else return;
-                e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-            } else if (['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6'].includes(e.code)) {
-                e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-                performGlobalAction(e.code);
+                if (fireAction(id)) {
+                    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+                }
+            } else {
+                const map = { Digit1:'create-ffz', Digit2:'create-nfz', Digit3:'create-fp',
+                              Digit4:'create-safe', Digit5:'create-asset', Digit6:'create-marker' };
+                const id = map[e.code];
+                if (id && fireAction(id)) {
+                    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+                }
             }
         };
 
