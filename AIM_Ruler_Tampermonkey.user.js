@@ -2,8 +2,8 @@
 // @name         AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
 // @version      2.6
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
 // @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*

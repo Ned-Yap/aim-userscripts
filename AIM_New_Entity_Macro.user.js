@@ -2,8 +2,8 @@
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
 // @version      1.6
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js
 // @description  Hotkeys 1-6 create color-coded entities; Shift+S Save, Shift+D D (double-press) Delete, Shift+Z Cancel, Shift+X Finish. Each hotkey individually enable/rebindable via the AIM Control Panel.
 // @author       Payden
 // @match        *://percepto.app/*

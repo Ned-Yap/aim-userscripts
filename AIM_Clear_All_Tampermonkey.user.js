@@ -2,8 +2,8 @@
 // @name         AIM Clear All
 // @namespace    http://tampermonkey.net/
 // @version      1.3
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js
 // @description  Adds Shift+C hotkey for the Clear All button. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*

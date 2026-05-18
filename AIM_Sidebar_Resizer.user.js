@@ -2,8 +2,8 @@
 // @name         AIM Sidebar Resizer
 // @namespace    http://tampermonkey.net/
 // @version      3.2
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
 // @description  Restores map visibility by forcing sibling height and flex-growth.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*

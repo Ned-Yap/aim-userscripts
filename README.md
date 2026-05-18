@@ -55,46 +55,26 @@ Once the old ones are gone, move on to [Install the userscripts](#2-install-the-
 
 ## 2. Install the userscripts
 
-Each link below opens the script's raw source in a new tab — it does NOT auto-install. You need to install each one manually via Tampermonkey. Two methods, **try Method A first**:
-
-### Method A — Install from URL (fastest, if your Tampermonkey supports it)
-
-1. Open the Tampermonkey **Dashboard**
-2. Top toolbar → **Utilities**
-3. Scroll to the **Import from URL** or **Install from URL** section
-4. Paste the script's raw GitHub URL (from the table below — right-click the link → Copy Link Address)
-5. Click **Install** → confirm the prompt
-6. Repeat for each script
-
-### Method B — Copy and paste (always works)
-
-1. Click the script link below — the raw source code opens in your browser
-2. Select all (**Ctrl+A**) and copy (**Ctrl+C**)
-3. Open the Tampermonkey **Dashboard**
-4. Click the **+** tab at the top to create a new userscript
-5. **Delete the default template** that appears in the editor
-6. Paste your copied code (**Ctrl+V**)
-7. Save: **Ctrl+S** (or **File → Save**)
-8. Repeat for each script
-
-Once installed, scripts auto-update on their own going forward (Tampermonkey checks daily; you can also trigger manually via Dashboard → "Check for userscript updates").
+Click each link below. Because the filenames end in `.user.js`, Tampermonkey will automatically pop up an install prompt for each — click **Install**. After install, the script auto-updates on its own going forward (Tampermonkey checks daily; you can also trigger manually via Dashboard → "Check for userscript updates").
 
 **Install the Control Panel first** so the others show up inside it when they load. Other than that, order doesn't matter.
 
 | # | Script | Install link |
 |---|---|---|
-| 1 | **AIM Control Panel** (the gear icon + settings hub) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js) |
-| 2 | **AIM Map Styler** (outlines, buffers, KML shielding, Coverage Validator — Shift+O) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js) |
-| 3 | **AIM Inspector** (Leaflet diagnostic panel — Shift+I) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.js) |
-| 4 | **AIM Absolute Altitude** (Shift+A) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js) |
-| 5 | **AIM Measure / Ruler** (Shift+R) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js) |
-| 6 | **AIM Clear All** (Shift+C) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js) |
-| 7 | **AIM Copy Asset Name** (Shift+Ctrl+Q on a hovered asset) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js) |
-| 8 | **AIM New Entity Macro** (1–6 to create, Shift+S/D D/Z/X) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js) |
-| 9 | **AIM Bulk Mission Adder** (Shift+B) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.js) |
-| 10 | **AIM Bulk Altitude Updater** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.js) |
-| 11 | **AIM Bulk Validator** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.js) |
-| 12 | **AIM Sidebar Resizer** (map visibility fix) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.js) |
+| 1 | **AIM Control Panel** (the gear icon + settings hub) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js) |
+| 2 | **AIM Map Styler** (outlines, buffers, KML shielding, Coverage Validator — Shift+O) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js) |
+| 3 | **AIM Inspector** (Leaflet diagnostic panel — Shift+I) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js) |
+| 4 | **AIM Absolute Altitude** (Shift+A) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js) |
+| 5 | **AIM Measure / Ruler** (Shift+R) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js) |
+| 6 | **AIM Clear All** (Shift+C) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js) |
+| 7 | **AIM Copy Asset Name** (Shift+Ctrl+Q on a hovered asset) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js) |
+| 8 | **AIM New Entity Macro** (1–6 to create, Shift+S/D D/Z/X) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js) |
+| 9 | **AIM Bulk Mission Adder** (Shift+B) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js) |
+| 10 | **AIM Bulk Altitude Updater** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js) |
+| 11 | **AIM Bulk Validator** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js) |
+| 12 | **AIM Sidebar Resizer** (map visibility fix) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js) |
+
+**If a link doesn't auto-prompt** (rare — usually means your Tampermonkey is configured to skip auto-detection): paste the URL into Tampermonkey Dashboard → Utilities → "Import from URL" section, or copy the page source and paste into a new userscript (Dashboard → **+** tab → delete template → paste → Save).
 
 **Verify:** open `percepto.app` and a site. You should see a gear icon (⚙) added to the map toolbar. Click it — that's the AIM Controls panel.
 

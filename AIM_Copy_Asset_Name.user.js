@@ -2,8 +2,8 @@
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
 // @version      1.5
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Copies the name of an asset on hover using Shift+Ctrl+Q. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*

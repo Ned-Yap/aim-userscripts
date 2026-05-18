@@ -2,8 +2,8 @@
 // @name         AIM Inspector
 // @namespace    http://tampermonkey.net/
 // @version      1.7
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js
 // @description  Cross-frame Leaflet / AIM investigation & control panel. Toggle with Shift+I. Snapshot with Shift+Alt+I.
 // @author       Payden
 // @match        *://percepto.app/*
