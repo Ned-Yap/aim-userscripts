@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.js
-// @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup.
+// @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -77,6 +77,45 @@
         }
     };
 
+    // --- AIM Control Panel integration ---
+    // Master toggle + rebindable hotkey via the panel. When the panel is
+    // detected, our own keydown listener defers and the panel routes via
+    // HOTKEY_FIRED so rebinds work. Only TOP handles the action to avoid
+    // double-execution from BroadcastChannel delivery to all contexts.
+    const IS_TOP = window === window.top;
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-altitude';
+    const SCRIPT_VERSION = '1.3';
+    let controlChannel = null;
+    let controlPanelDetected = false;
+    let masterEnabled = true;
+
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { return; }
+        controlChannel.onmessage = (ev) => {
+            controlPanelDetected = true;
+            const msg = ev.data || {};
+            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
+            }
+        };
+    }
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Absolute Altitude',
+            version: SCRIPT_VERSION, group: 'Hotkeys',
+            toggles: [{ id: 'master', label: 'Enable Shift+A', type: 'boolean', default: true, master: true }],
+            hotkeys: [{ id: 'invoke', label: 'Open Absolute Altitude tool', default: 'Shift+A' }],
+        });
+    }
+    setupControlPanel();
+    registerWithControlPanel();
+
     var install = function() {
         var clickHandler = function(e) {
             if (window.aimPendingPin && e.button === 0) {
@@ -138,9 +177,13 @@
         };
 
         var keyHandler = function(e) {
+            // Defer to the control panel's hotkey router once detected, and
+            // skip entirely if the user disabled this script via master toggle.
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             var el = e.target;
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || 
-                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') || 
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') ||
                 el.getAttribute('role') === 'textbox') return;
 
             if (e.shiftKey && (e.key === 'A' || e.code === 'KeyA')) {

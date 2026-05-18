@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.13';
+    const VERSION = '1.14';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -766,12 +766,12 @@
             </div>
         ` : '';
 
-        const sectionsHtml = scripts.map(script => {
+        const renderScriptBody = (script) => {
             const toggles = Array.isArray(script.toggles) ? script.toggles : [];
             const hotkeys = Array.isArray(script.hotkeys) ? script.hotkeys : [];
 
             const togglesHtml = toggles.map(t => renderControl(script.scriptId, t)).join('')
-                || `<div style="padding:3px 10px;color:#888;font-style:italic">no toggles exposed</div>`;
+                || (hotkeys.length ? '' : `<div style="padding:3px 10px;color:#888;font-style:italic">no toggles exposed</div>`);
 
             const hotkeysHtml = hotkeys.map(hk => {
                 const bound = getHotkey(script.scriptId, hk.id, hk.default);
@@ -801,7 +801,50 @@
                     ${hotkeysHtml ? `<div style="margin-top:3px;padding:3px 0 0;border-top:1px dashed rgba(255,255,255,0.10)">${hotkeysHtml}</div>` : ''}
                 </div>
             `;
-        }).join('');
+        };
+
+        // Group registered scripts by their declared `group` (if any).
+        // Scripts without a group render standalone. Scripts that share a
+        // group name appear inside a single collapsible header (e.g. all
+        // the hotkey scripts under one "Hotkeys" section). Groups are open
+        // by default; user can collapse via the chevron.
+        const standalone = [];
+        const groups = new Map(); // groupName -> [scripts]
+        scripts.forEach(s => {
+            if (s.group) {
+                if (!groups.has(s.group)) groups.set(s.group, []);
+                groups.get(s.group).push(s);
+            } else {
+                standalone.push(s);
+            }
+        });
+
+        const renderGroup = (groupName, members) => {
+            const expandKey = `group:${groupName}`;
+            // Groups default to OPEN. Use a separate state map from categories
+            // (state.groupsCollapsed) so the existing default-closed semantics
+            // for categories isn't disrupted. Undefined = open, true = closed.
+            const collapsed = !!(state.groupsCollapsed && state.groupsCollapsed[expandKey]);
+            const bodyHtml = members.map(renderScriptBody).join('');
+            return `
+                <div style="border-bottom:1px solid rgba(255,255,255,0.12)">
+                    <div data-grouptoggle="${escapeAttr(expandKey)}"
+                         style="display:flex;align-items:center;padding:5px 10px;cursor:pointer;background:rgb(36,36,36);user-select:none">
+                        <strong style="flex:1;color:rgb(20,210,220);font-size:12px">${escapeHtml(groupName)}</strong>
+                        <span style="color:#888;font-size:10px;margin-right:8px">${members.length} script${members.length === 1 ? '' : 's'}</span>
+                        <span style="color:#bbb;width:14px;text-align:right">${collapsed ? '▸' : '▾'}</span>
+                    </div>
+                    ${collapsed ? '' : `<div>${bodyHtml}</div>`}
+                </div>
+            `;
+        };
+
+        // Render standalone scripts first (alphabetical), then groups
+        // (alphabetical by group name).
+        let sectionsHtml = standalone.map(renderScriptBody).join('');
+        Array.from(groups.keys()).sort().forEach(name => {
+            sectionsHtml += renderGroup(name, groups.get(name));
+        });
 
         state.panelEl.innerHTML = headerHtml + tokenHtml + emptyHtml + sectionsHtml;
         wireTokenSection();
@@ -867,6 +910,17 @@
                 e.stopPropagation();
                 const key = el.dataset.cattoggle;
                 state.expanded[key] = !state.expanded[key];
+                renderPanel();
+            });
+        });
+        // Wire group headers (default OPEN, separate state map from categories)
+        state.panelEl.querySelectorAll('[data-grouptoggle]').forEach(el => {
+            el.addEventListener('click', (e) => {
+                if (e.target.tagName === 'INPUT') return;
+                e.stopPropagation();
+                const key = el.dataset.grouptoggle;
+                if (!state.groupsCollapsed) state.groupsCollapsed = {};
+                state.groupsCollapsed[key] = !state.groupsCollapsed[key];
                 renderPanel();
             });
         });

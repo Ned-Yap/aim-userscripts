@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.js
-// @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup.
+// @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -79,6 +79,41 @@
         }
     };
 
+    // --- AIM Control Panel integration (see comment block in Altitude script) ---
+    const IS_TOP = window === window.top;
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-ruler';
+    const SCRIPT_VERSION = '2.5';
+    let controlChannel = null;
+    let controlPanelDetected = false;
+    let masterEnabled = true;
+
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { return; }
+        controlChannel.onmessage = (ev) => {
+            controlPanelDetected = true;
+            const msg = ev.data || {};
+            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
+            }
+        };
+    }
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Measure / Ruler',
+            version: SCRIPT_VERSION, group: 'Hotkeys',
+            toggles: [{ id: 'master', label: 'Enable Shift+R', type: 'boolean', default: true, master: true }],
+            hotkeys: [{ id: 'invoke', label: 'Open Measure tool', default: 'Shift+R' }],
+        });
+    }
+    setupControlPanel();
+    registerWithControlPanel();
+
     var install = function() {
         // --- CLICK CLEANER (Same logic as Altitude) ---
         var clickHandler = function(e) {
@@ -103,9 +138,11 @@
         };
 
         var keyHandler = function(e) {
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             var el = e.target;
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || 
-                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') || 
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') ||
                 el.getAttribute('role') === 'textbox') return;
 
             // Shift + R

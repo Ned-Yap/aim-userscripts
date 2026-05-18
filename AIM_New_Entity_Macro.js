@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM New Entity Macro
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.js
-// @description  Hotkeys 1-6 create entities; Shift+S Save, Shift+D Delete, Shift+Z Cancel, Shift+X Finish.
+// @description  Hotkeys 1-6 create entities; Shift+S Save, Shift+D Delete, Shift+Z Cancel, Shift+X Finish. Registers with the AIM Control Panel for master toggle + per-hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -185,12 +185,77 @@
         }
     }
 
+    // --- AIM Control Panel integration ---
+    // 10 hotkeys total. Each individually rebindable via the panel.
+    const IS_TOP = window === window.top;
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-new-entity-macro';
+    const SCRIPT_VERSION = '1.4';
+    let controlChannel = null;
+    let controlPanelDetected = false;
+    let masterEnabled = true;
+
+    // hotkeyId -> action handler
+    const HOTKEY_ACTIONS = {
+        'create-ffz':    () => performGlobalAction('Digit1'),
+        'create-nfz':    () => performGlobalAction('Digit2'),
+        'create-fp':     () => performGlobalAction('Digit3'),
+        'create-safe':   () => performGlobalAction('Digit4'),
+        'create-asset':  () => performGlobalAction('Digit5'),
+        'create-marker': () => performGlobalAction('Digit6'),
+        'save':          () => performGlobalSave(),
+        'delete':        () => performGlobalDelete(),
+        'cancel':        () => performGlobalCancel(),
+        'finish':        () => performGlobalFinish(),
+    };
+
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { return; }
+        controlChannel.onmessage = (ev) => {
+            controlPanelDetected = true;
+            const msg = ev.data || {};
+            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                if (!masterEnabled) return;
+                const fn = HOTKEY_ACTIONS[msg.hotkeyId];
+                if (fn) fn();
+            }
+        };
+    }
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'New Entity Macro',
+            version: SCRIPT_VERSION, group: 'Hotkeys',
+            toggles: [{ id: 'master', label: 'Enable Entity Macro hotkeys', type: 'boolean', default: true, master: true }],
+            hotkeys: [
+                { id: 'create-ffz',    label: 'New Free Fly Zone',  default: '1' },
+                { id: 'create-nfz',    label: 'New No Fly Zone',    default: '2' },
+                { id: 'create-fp',     label: 'New Flight Path',    default: '3' },
+                { id: 'create-safe',   label: 'New Safe Zone',      default: '4' },
+                { id: 'create-asset',  label: 'New Asset',          default: '5' },
+                { id: 'create-marker', label: 'New General Marker', default: '6' },
+                { id: 'save',          label: 'Save (with triple-confirm sequencing)', default: 'Shift+S' },
+                { id: 'delete',        label: 'Delete entity',      default: 'Shift+D' },
+                { id: 'cancel',        label: 'Cancel current edit', default: 'Shift+Z' },
+                { id: 'finish',        label: 'Finish editing',     default: 'Shift+X' },
+            ],
+        });
+    }
+    setupControlPanel();
+    registerWithControlPanel();
+
     // --- Listener ---
     var install = function() {
         var handler = function(e) {
+            if (controlPanelDetected) return; // panel routes via HOTKEY_FIRED
+            if (!masterEnabled) return;
             var el = e.target;
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || 
-                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') || 
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') ||
                 el.getAttribute('role') === 'textbox') return;
 
             if (e.shiftKey) {

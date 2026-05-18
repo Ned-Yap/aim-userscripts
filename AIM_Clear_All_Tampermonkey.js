@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Clear All
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.js
-// @description  Adds Shift+C hotkey for the Clear All button.
+// @description  Adds Shift+C hotkey for the Clear All button. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden
 // @match        *://percepto.app/*
 // @grant        none
@@ -78,12 +78,49 @@
         }
     };
 
+    // --- AIM Control Panel integration ---
+    const IS_TOP = window === window.top;
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-clear-all';
+    const SCRIPT_VERSION = '1.2';
+    let controlChannel = null;
+    let controlPanelDetected = false;
+    let masterEnabled = true;
+
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { return; }
+        controlChannel.onmessage = (ev) => {
+            controlPanelDetected = true;
+            const msg = ev.data || {};
+            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
+            }
+        };
+    }
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Clear All',
+            version: SCRIPT_VERSION, group: 'Hotkeys',
+            toggles: [{ id: 'master', label: 'Enable Shift+C', type: 'boolean', default: true, master: true }],
+            hotkeys: [{ id: 'invoke', label: 'Clear All measurements', default: 'Shift+C' }],
+        });
+    }
+    setupControlPanel();
+    registerWithControlPanel();
+
     var install = function() {
         var handler = function(e) {
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             // --- UNIVERSAL INPUT GUARD ---
             var el = e.target;
-            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || 
-                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') || 
+            if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' ||
+                el.isContentEditable || el.closest('.ant-input') || el.closest('.ant-select') ||
                 el.getAttribute('role') === 'textbox') {
                 return;
             }

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.js
-// @description  Copies the name of an asset on hover using Shift+Ctrl+Q. Broad search version.
+// @description  Copies the name of an asset on hover using Shift+Ctrl+Q. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -72,11 +72,67 @@
         return true;
     }
 
+    // --- AIM Control Panel integration ---
+    const IS_TOP = CONTEXT === "TOP";
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-copy-asset';
+    const SCRIPT_VERSION = '1.4';
+    let controlChannel = null;
+    let controlPanelDetected = false;
+    let masterEnabled = true;
+    let doPerformCopy = null; // assigned below before the channel may need it
+
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { return; }
+        controlChannel.onmessage = (ev) => {
+            controlPanelDetected = true;
+            const msg = ev.data || {};
+            if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                if (msg.hotkeyId === 'invoke' && masterEnabled && doPerformCopy) doPerformCopy();
+            }
+        };
+    }
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Copy Asset Name',
+            version: SCRIPT_VERSION, group: 'Hotkeys',
+            toggles: [{ id: 'master', label: 'Enable Shift+Ctrl+Q', type: 'boolean', default: true, master: true }],
+            hotkeys: [{ id: 'invoke', label: 'Copy hovered asset name', default: 'Shift+Ctrl+Q' }],
+        });
+    }
+    setupControlPanel();
+    registerWithControlPanel();
+
+    // Wrapped so the panel's HOTKEY_FIRED handler can call the same logic.
+    doPerformCopy = function performHotkeyAction() {
+        const potentialTooltips = document.querySelectorAll('.leaflet-tooltip, .ant-tooltip-inner, [role="tooltip"], .tooltip-inner');
+        let foundText = null;
+        for (let t of potentialTooltips) {
+            const style = window.getComputedStyle(t);
+            const opacity = parseFloat(style.opacity);
+            const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && opacity > 0.1;
+            if (isVisible) {
+                const span = t.querySelector('span');
+                const text = (span ? span.innerText : t.innerText).trim();
+                if (text) { foundText = text; break; }
+            }
+        }
+        if (foundText) performCopy(foundText);
+        else if (CONTEXT === "TOP") triggerToast('⚠️ No active tooltip found!', '#ff9800');
+    };
+
     window.addEventListener('keydown', (e) => {
+        if (controlPanelDetected) return; // panel routes via HOTKEY_FIRED
+        if (!masterEnabled) return;
         const isQ = (e.key === 'Q' || e.key === 'q' || e.code === 'KeyQ');
         if (isQ && e.shiftKey && (e.ctrlKey || e.metaKey)) {
             console.log(`[AIM COPY] 🔑 Hotkey detected in ${CONTEXT}. Searching...`);
-            
+
             // Check if we are in an input field
             const el = e.target;
             if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable || el.closest('.ant-input')) {
