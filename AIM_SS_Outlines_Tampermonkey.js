@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      32.3
+// @version      33.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '32.3';
+    const SCRIPT_VERSION = '33.0';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -170,6 +170,7 @@
                   min: 2, max: 50, step: 1, default: 10, unit: 'ft' },
                 { id: 'validator-run', label: 'Run coverage check', type: 'button', action: 'run-validator' },
                 { id: 'validator-clear', label: 'Clear pins', type: 'button', action: 'clear-validator' },
+                { id: 'validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
             ],
         },
         {
@@ -280,12 +281,17 @@
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
 
-    // Coverage Validator state — results stored as lat/lng so they survive
-    // zoom/pan (we re-project to SVG user space every render tick).
+    // Coverage Validator state — persisted to GM storage per-site so pins
+    // survive reloads and site navigation. Each result holds the FULL list
+    // of failing samples (segments) so we can draw the red highlight along
+    // the unshielded portion of the FFZ/FP outline, plus a midpoint for
+    // the numbered pin and dismissed flag for click-to-dismiss workflow.
     const validatorState = {
-        results: [], // [{ lat, lng, number }]
-        lastRun: null, // { count, at, durationMs, error? }
+        // [{ number, midLat, midLng, segments: [{lat,lng}], dismissed }]
+        results: [],
+        lastRun: null,
     };
+    const VALIDATOR_CACHE_PREFIX = 'aim-validator-';
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
     // GM storage is per-script in Tampermonkey, so the token saved by the
@@ -1040,11 +1046,22 @@
             if (currentGap) gaps.push(currentGap);
         });
 
-        // Convert gap midpoints from layer-point back to lat/lng for storage.
+        // For each gap: store ALL failing samples as lat/lng (used for the
+        // red highlight that traces the failing portion of the outline) plus
+        // a midpoint for the numbered pin.
         const results = gaps.map((g, i) => {
-            const mid = g.samples[Math.floor(g.samples.length / 2)];
-            const ll = map.layerPointToLatLng({ x: mid.x, y: mid.y });
-            return { lat: ll.lat, lng: ll.lng, number: i + 1 };
+            const segsLL = g.samples.map(s => {
+                const ll = map.layerPointToLatLng({ x: s.x, y: s.y });
+                return { lat: ll.lat, lng: ll.lng };
+            });
+            const mid = segsLL[Math.floor(segsLL.length / 2)];
+            return {
+                number: i + 1,
+                midLat: mid.lat,
+                midLng: mid.lng,
+                segments: segsLL,
+                dismissed: false,
+            };
         });
 
         validatorState.results = results;
@@ -1053,10 +1070,11 @@
             at: Date.now(),
             durationMs: Date.now() - startTime,
         };
+        saveValidatorResults();
         if (results.length === 0) {
             console.log(`${TAG} validator: ✓ no coverage gaps found (${validatorState.lastRun.durationMs}ms)`);
         } else {
-            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) in ${validatorState.lastRun.durationMs}ms — see numbered pins`);
+            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) in ${validatorState.lastRun.durationMs}ms — click a pin to dismiss after visual confirmation`);
         }
         runUpdate();
     }
@@ -1065,8 +1083,37 @@
         const had = validatorState.results.length;
         validatorState.results = [];
         validatorState.lastRun = null;
+        saveValidatorResults();
         console.log(`${TAG} validator: cleared ${had} pin(s)`);
         runUpdate();
+    }
+
+    function dismissValidatorPin(number) {
+        const r = validatorState.results.find(x => x.number === number);
+        if (!r) return;
+        r.dismissed = !r.dismissed;
+        saveValidatorResults();
+        const total = validatorState.results.length;
+        const remaining = validatorState.results.filter(x => !x.dismissed).length;
+        console.log(`${TAG} validator: pin ${number} ${r.dismissed ? 'dismissed' : 'restored'} (${remaining}/${total} remaining)`);
+        runUpdate();
+    }
+
+    // Persistence: store per-site so each Percepto site keeps its own
+    // results. Reloads and site navigation both restore on demand.
+    function saveValidatorResults() {
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        gmSet(VALIDATOR_CACHE_PREFIX + sid, validatorState.results);
+    }
+    function loadValidatorResults() {
+        const sid = getCurrentSiteID();
+        if (!sid) { validatorState.results = []; return; }
+        const saved = gmGet(VALIDATOR_CACHE_PREFIX + sid, null);
+        validatorState.results = Array.isArray(saved) ? saved : [];
+        if (validatorState.results.length) {
+            console.log(`${TAG} validator: restored ${validatorState.results.length} pin(s) for site ${sid} from cache`);
+        }
     }
 
     function renderValidatorPins() {
@@ -1094,49 +1141,96 @@
             return sp.matrixTransform(inv);
         };
 
-        // Coverage circle radius — convert 200ft to SVG units AT THIS PIN
-        // location, by offsetting latitude by 200ft and measuring the delta.
-        // (200ft latitude offset ≈ 200/362776 degrees — 1 deg lat is ~362,776 ft.)
         const thresholdFt = Number(toggleState['validator.distance']) || 200;
         const latOffsetDeg = thresholdFt / 362776;
+        const showDismissed = !!toggleState['validator.show-dismissed'];
 
         validatorState.results.forEach(r => {
-            const c = latLngToSVG(r.lat, r.lng);
-            const c2 = latLngToSVG(r.lat + latOffsetDeg, r.lng);
-            const dx = c2.x - c.x, dy = c2.y - c.y;
-            const radiusUnits = Math.sqrt(dx * dx + dy * dy);
+            if (r.dismissed && !showDismissed) return;
 
-            // Coverage circle (translucent red — shows the 200ft scope)
-            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
-            circle.setAttribute('data-buffer-kind', 'validator-coverage');
-            circle.setAttribute('cx', String(c.x));
-            circle.setAttribute('cy', String(c.y));
-            circle.setAttribute('r', String(radiusUnits));
-            circle.setAttribute('fill', '#ff0033');
-            circle.setAttribute('fill-opacity', '0.10');
-            circle.setAttribute('stroke', '#ff0033');
-            circle.setAttribute('stroke-opacity', '0.55');
-            circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.018)));
-            circle.setAttribute('stroke-dasharray', String(radiusUnits * 0.04) + ' ' + String(radiusUnits * 0.04));
-            circle.setAttribute('pointer-events', 'none');
-            g.appendChild(circle);
-
-            // Pin marker — solid red circle with number, sized relative to
-            // the coverage radius so it stays legible at any zoom.
+            const c = latLngToSVG(r.midLat, r.midLng);
+            const c2 = latLngToSVG(r.midLat + latOffsetDeg, r.midLng);
+            const radiusUnits = Math.hypot(c2.x - c.x, c2.y - c.y);
             const pinR = Math.max(8, radiusUnits * 0.07);
+
+            // Active pins get the full visual (red highlight + coverage
+            // circle). Dismissed pins (only shown when showDismissed=true)
+            // get just a small gray marker so the user can see what they've
+            // already cleared and click to un-dismiss.
+            if (!r.dismissed) {
+                // 1. Red polyline tracing the actual unshielded portion of
+                //    the FFZ/FP outline — built from the failing samples.
+                if (r.segments && r.segments.length >= 2) {
+                    const pts = r.segments.map(s => latLngToSVG(s.lat, s.lng));
+                    const d = pointsToPathD(pts, false);
+                    const hl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                    hl.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+                    hl.setAttribute('data-buffer-kind', 'validator-highlight');
+                    hl.setAttribute('d', d);
+                    hl.setAttribute('fill', 'none');
+                    hl.setAttribute('stroke', '#ff0033');
+                    hl.setAttribute('stroke-opacity', '0.85');
+                    hl.setAttribute('stroke-width', String(Math.max(4, pinR * 0.7)));
+                    hl.setAttribute('stroke-linecap', 'round');
+                    hl.setAttribute('stroke-linejoin', 'round');
+                    hl.setAttribute('pointer-events', 'none');
+                    g.appendChild(hl);
+                }
+
+                // 2. 200ft coverage circle (translucent red, dashed border)
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+                circle.setAttribute('data-buffer-kind', 'validator-coverage');
+                circle.setAttribute('cx', String(c.x));
+                circle.setAttribute('cy', String(c.y));
+                circle.setAttribute('r', String(radiusUnits));
+                circle.setAttribute('fill', '#ff0033');
+                circle.setAttribute('fill-opacity', '0.08');
+                circle.setAttribute('stroke', '#ff0033');
+                circle.setAttribute('stroke-opacity', '0.45');
+                circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.015)));
+                circle.setAttribute('stroke-dasharray', `${radiusUnits * 0.04} ${radiusUnits * 0.04}`);
+                circle.setAttribute('pointer-events', 'none');
+                g.appendChild(circle);
+            }
+
+            // 3. Pin marker (always rendered when shown). Clickable to
+            //    dismiss / un-dismiss. Coverage circle is pass-through so
+            //    map interactions in that area still work.
             const pin = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             pin.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
             pin.setAttribute('data-buffer-kind', 'validator-pin');
+            pin.setAttribute('data-validator-number', String(r.number));
             pin.setAttribute('cx', String(c.x));
             pin.setAttribute('cy', String(c.y));
             pin.setAttribute('r', String(pinR));
-            pin.setAttribute('fill', '#cc0029');
-            pin.setAttribute('stroke', '#ffffff');
+            if (r.dismissed) {
+                pin.setAttribute('fill', '#666');
+                pin.setAttribute('fill-opacity', '0.55');
+                pin.setAttribute('stroke', '#aaa');
+                pin.setAttribute('stroke-opacity', '0.8');
+            } else {
+                pin.setAttribute('fill', '#cc0029');
+                pin.setAttribute('stroke', '#ffffff');
+                pin.setAttribute('stroke-opacity', '1');
+            }
             pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
-            pin.setAttribute('pointer-events', 'none');
+            pin.setAttribute('pointer-events', 'all');
+            pin.style.cursor = 'pointer';
+            const num = r.number;
+            pin.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                dismissValidatorPin(num);
+            });
+            // Also swallow mousedown/dblclick so the map below doesn't
+            // start panning or zooming when the user dismisses.
+            ['mousedown', 'dblclick'].forEach(evt => {
+                pin.addEventListener(evt, (e) => { e.stopPropagation(); }, true);
+            });
             g.appendChild(pin);
 
+            // 4. Number text (pointer-events none so clicks go to the pin)
             const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             text.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
             text.setAttribute('data-buffer-kind', 'validator-num');
@@ -1144,7 +1238,8 @@
             text.setAttribute('y', String(c.y));
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('dominant-baseline', 'central');
-            text.setAttribute('fill', '#ffffff');
+            text.setAttribute('fill', r.dismissed ? '#ddd' : '#ffffff');
+            text.setAttribute('fill-opacity', r.dismissed ? '0.7' : '1');
             text.setAttribute('font-size', String(pinR * 1.25));
             text.setAttribute('font-weight', 'bold');
             text.setAttribute('font-family', 'sans-serif');
@@ -1629,17 +1724,23 @@
 
     // Detect site navigation (the host app is a hash-routed SPA — the styler
     // stays loaded across site changes, so we have to spot the hash change
-    // ourselves and re-fetch the appropriate KML).
+    // ourselves and re-fetch the appropriate KML and reload validator pins).
     let lastSiteID = getCurrentSiteID();
     window.addEventListener('hashchange', () => {
         const sid = getCurrentSiteID();
         if (sid === lastSiteID) return;
         lastSiteID = sid;
+        loadValidatorResults();
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
             fetchKMLForSite(sid);
+            runUpdate();
         }
     });
+
+    // Restore any previously-saved validator pins for the current site so
+    // they appear immediately when the styler activates.
+    loadValidatorResults();
 
     if (isActive) setActiveState(true);
 
