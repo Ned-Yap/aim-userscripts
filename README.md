@@ -7,9 +7,10 @@ A set of browser userscripts that streamline the AIM drone-mission workflow on `
 ## Quick start (5 minutes)
 
 1. [Install Tampermonkey](#1-install-tampermonkey)
-2. [Install the userscripts](#2-install-the-userscripts) — click each link below
-3. [Get repo access + a GitHub token](#3-set-up-the-github-token-for-shielding-kmls) (only needed for the Map Styler's KML overlays)
-4. [Configure in Percepto](#4-paste-the-token-into-aim-controls)
+2. [Already have older AIM scripts? Back up + remove them](#1a-already-have-older-aim-scripts-back-up--remove-them)
+3. [Install the new userscripts](#2-install-the-userscripts) — click each link below
+4. [Get repo access + a GitHub token](#3-set-up-the-github-token-for-shielding-kmls) (only needed for the Map Styler's KML overlays)
+5. [Configure in Percepto](#4-paste-the-token-into-aim-controls)
 
 Auto-updates take over after that — new versions install themselves.
 
@@ -24,6 +25,31 @@ Tampermonkey is the browser extension that runs userscripts.
 - **Safari:** [Tampermonkey on the App Store](https://apps.apple.com/app/tampermonkey/id1482490089)
 
 Click "Add to browser" and confirm.
+
+---
+
+## 1a. Already have older AIM scripts? Back up + remove them
+
+**Skip this section if you're installing Tampermonkey for the first time.**
+
+If Payden has previously sent you AIM scripts manually (copy-paste into Tampermonkey), those are the *old* style and don't talk to the new Control Panel. Leaving them installed will cause duplicate behavior (e.g. Shift+A firing twice) or stale UI. Replace them with the new versions below.
+
+### Back up first (in case you want to roll back)
+
+1. Open the Tampermonkey **Dashboard** (click the Tampermonkey icon in your browser → Dashboard)
+2. Top toolbar → **Utilities**
+3. Under the **Export** section, click **Export** — choose either "Export to file" or "Export to zip"
+4. Save the file somewhere safe. It contains every script you currently have installed; if anything goes sideways you can re-import.
+
+### Then delete every AIM-named script
+
+Back in the Tampermonkey Dashboard main list:
+
+1. Find each script with a name starting with `AIM ` or `Percepto ` (older ones were named `Percepto Altitude Fix`, `PerceptoRulerFix`, etc.)
+2. Click the **trash icon** next to each one to delete it
+3. When you're done, the script list should NOT contain any AIM or Percepto scripts — you'll reinstall them all from the next section.
+
+Once the old ones are gone, move on to [Install the userscripts](#2-install-the-userscripts) below.
 
 ---
 
