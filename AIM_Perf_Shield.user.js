@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -92,6 +92,29 @@
     let hideSatellite = false;
     try { hideSatellite = GM_getValue(STORAGE_KEY_HIDE_SAT, false) === true; } catch (e) {}
 
+    // Chat-bubble CSS-hide config. Declared up here (NOT inside the function
+    // section below) because the init block calls applyChatBlockCss() before
+    // those function-section declarations are evaluated — function
+    // declarations hoist but `const` doesn't, so referencing them from a
+    // hoisted function at init time throws TDZ. Targets stable Zendesk /
+    // Intercom attributes; generated styled-components classes change on
+    // every host-app build so we avoid those.
+    const CHAT_BLOCK_STYLE_ID = 'aim-perf-chat-block-css';
+    const CHAT_BLOCK_CSS = `
+        /* Zendesk Web Widget */
+        iframe#launcher,
+        iframe[title*="messaging window" i],
+        iframe[title*="Messaging Window" i],
+        button[aria-label="Open messaging window" i],
+        /* Intercom */
+        iframe[name^="intercom-"],
+        div.intercom-lightweight-app,
+        div.intercom-launcher-frame,
+        div#intercom-container {
+            display: none !important;
+        }
+    `;
+
     function shouldBlock(url) {
         if (!url) return false;
         const s = typeof url === 'string' ? url : (url.url || String(url));
@@ -108,7 +131,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.5';
+    const SCRIPT_VERSION = '1.6';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -254,25 +277,6 @@
         };
     }
 
-    // CSS hide for chat bubbles. Targets stable Zendesk/Intercom attributes
-    // (iframe#launcher, aria-label, title) — generated styled-components
-    // classes change on every build so we avoid those. Idempotent: if the
-    // style tag already exists, do nothing. Removal restores visibility.
-    const CHAT_BLOCK_STYLE_ID = 'aim-perf-chat-block-css';
-    const CHAT_BLOCK_CSS = `
-        /* Zendesk Web Widget */
-        iframe#launcher,
-        iframe[title*="messaging window" i],
-        iframe[title*="Messaging Window" i],
-        button[aria-label="Open messaging window" i],
-        /* Intercom */
-        iframe[name^="intercom-"],
-        div.intercom-lightweight-app,
-        div.intercom-launcher-frame,
-        div#intercom-container {
-            display: none !important;
-        }
-    `;
     function applyChatBlockCss(on) {
         if (on) {
             if (document.getElementById(CHAT_BLOCK_STYLE_ID)) return;

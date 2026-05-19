@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Performance Shield v1.6** — TDZ fix. v1.5's chat-CSS-hide block referenced `const`s that hadn't been evaluated yet when the init code ran (function declarations hoist but `const` doesn't), so the chat CSS never applied on initial page load and the console showed `ReferenceError: Cannot access 'CHAT_BLOCK_STYLE_ID' before initialization`. Toggle-driven re-apply still worked, and the network block already removed the bubble, so visible impact was zero — but the error was noise. Consts now live at the top of the IIFE alongside other state.
 - **AIM Performance Shield v1.5** — fixes the "I turned on Block chat widget but the bubble is still there" case:
   - Added Zendesk Web Widget patterns (`zdassets.com`, `zopim.com`, `zendesk.com`) to the chat block — Percepto's actual chat vendor turned out to be Zendesk, not Intercom. Toggle relabeled to "Block chat widget (Zendesk + Intercom)" since it now covers both.
   - Added CSS hide for any already-rendered chat bubble (`iframe#launcher`, `iframe[title*="messaging window"]`, `button[aria-label="Open messaging window"]`, plus standard Intercom selectors). Script-blocking alone can't undo a bubble that loaded before the block was on; the CSS applies instantly and is reversible via toggle.
