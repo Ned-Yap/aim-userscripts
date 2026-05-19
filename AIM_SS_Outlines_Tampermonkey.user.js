@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.9
+// @version      34.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.9' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.10' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.9';
+    const SCRIPT_VERSION = '34.10';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -61,6 +61,9 @@
                 { id: 'ffz.color', label: 'Buffer color', type: 'color', default: '#5fff5f' },
                 { id: 'ffz.opacity', label: 'Buffer opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
+                { id: 'ffz.line-color', label: 'Line color (override)', type: 'color', default: '#5fff5f' },
+                { id: 'ffz.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
                 { id: 'ffz.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'ffz.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
                 { id: 'ffz.shielding', label: 'Show shielding (200ft)', type: 'boolean', default: false },
@@ -83,7 +86,13 @@
                 { id: 'asset.color', label: 'Buffer color', type: 'color', default: '#ffffff' },
                 { id: 'asset.opacity', label: 'Buffer opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
+                { id: 'asset.line-color', label: 'Line color (override)', type: 'color', default: '#ffffff' },
+                { id: 'asset.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
                 { id: 'asset.fill', label: 'Show asset fill', type: 'boolean', default: true },
+                { id: 'asset.fill-color', label: 'Fill color', type: 'color', default: '#ffffff' },
+                { id: 'asset.fill-opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
                 { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
                 { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
@@ -99,12 +108,22 @@
                 { id: 'fp.buffer', label: 'Show buffer', type: 'boolean', default: true },
                 { id: 'fp.distance', label: 'Buffer distance', type: 'number',
                   min: 5, max: 500, step: 1, default: 40, unit: 'ft' },
-                { id: 'fp.color', label: 'Buffer color', type: 'color', default: '#1ca0de' },
-                { id: 'fp.opacity', label: 'Buffer opacity', type: 'number',
+                { id: 'fp.color', label: '40ft buffer color', type: 'color', default: '#1ca0de' },
+                { id: 'fp.opacity', label: '40ft buffer opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.5, unit: 'fill' },
+                { id: 'fp.line-color', label: 'Line color (override)', type: 'color', default: '#1ca0de' },
+                { id: 'fp.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
                 { id: 'fp.65ft-band', label: 'Show 65ft outer band', type: 'boolean', default: true },
                 { id: 'fp.65ft-distance', label: '65ft band distance', type: 'number',
                   min: 5, max: 500, step: 1, default: 65, unit: 'ft' },
+                { id: 'fp.65ft-color', label: '65ft band color', type: 'color', default: '#1ca0de' },
+                { id: 'fp.65ft-opacity', label: '65ft band opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.225, unit: 'fill' },
+                { id: 'fp.show-vertices', label: 'Show flight-path vertex dots', type: 'boolean', default: true },
+                { id: 'fp.vertex-color', label: 'Vertex dot color', type: 'color', default: '#1ca0de' },
+                { id: 'fp.vertex-size', label: 'Vertex dot size', type: 'number',
+                  min: 2, max: 20, step: 1, default: 10, unit: 'px' },
                 { id: 'fp.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'fp.shielding', label: 'Show shielding (200ft)', type: 'boolean', default: false },
                 { id: 'fp.violations', label: 'Flag violations (assets within Xft of main line)', type: 'boolean', default: true },
@@ -469,6 +488,43 @@
             // Asset fill applies regardless of buffer toggle — user might want
             // outlines without fill even when halos are off.
             const wantAssetFillOverride = isWhiteAsset;
+
+            // --- Line color / opacity override (runs every iteration,
+            // before the early-return below, so it applies / clears even
+            // when no other category sub-toggle is active).
+            // Inline-style overrides the visible stroke without touching the
+            // stroke ATTRIBUTE (so our other selectors that match on stroke
+            // value still work). Cleared when the category master is off so
+            // the host's native color returns.
+            if (isSolidGreen) {
+                if (toggleState['ffz.show']) {
+                    line.style.stroke = toggleState['ffz.line-color'] || '';
+                    const op = Number(toggleState['ffz.line-opacity']);
+                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                } else {
+                    line.style.stroke = '';
+                    line.style.strokeOpacity = '';
+                }
+            } else if (isWhiteAsset) {
+                if (toggleState['asset.show']) {
+                    line.style.stroke = toggleState['asset.line-color'] || '';
+                    const op = Number(toggleState['asset.line-opacity']);
+                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                } else {
+                    line.style.stroke = '';
+                    line.style.strokeOpacity = '';
+                }
+            } else if (isBlueFlight) {
+                if (toggleState['fp.show']) {
+                    line.style.stroke = toggleState['fp.line-color'] || '';
+                    const op = Number(toggleState['fp.line-opacity']);
+                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                } else {
+                    line.style.stroke = '';
+                    line.style.strokeOpacity = '';
+                }
+            }
+
             if (!want40 && !want65 && !wantShield && !wantForce && !wantAssetFillOverride) return;
 
             let currentAttrWidth = line.getAttribute('stroke-width');
@@ -493,11 +549,20 @@
             // --- Asset fill override ---
             // Only acts when asset.show is on. If the category master is off,
             // we leave the host app's default fill alone (restore empty style).
+            // When asset.fill is on, applies user-chosen fill color + opacity.
             if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
-                    line.style.fillOpacity = toggleState['asset.fill'] === false ? '0' : '';
+                    if (toggleState['asset.fill'] === false) {
+                        line.style.fillOpacity = '0';
+                        line.style.fill = '';
+                    } else {
+                        line.style.fill = toggleState['asset.fill-color'] || '';
+                        const fo = Number(toggleState['asset.fill-opacity']);
+                        line.style.fillOpacity = isNaN(fo) ? '' : String(fo);
+                    }
                 } else {
                     line.style.fillOpacity = '';
+                    line.style.fill = '';
                 }
             }
 
@@ -571,12 +636,21 @@
                 band65.removeAttribute('stroke-dasharray');
                 band65.removeAttribute('data-original-width');
                 band65.removeAttribute('aria-describedby');
-                band65.setAttribute('stroke', toggleState['fp.color'] || '#1ca0de');
-                // Outer band ~45% the inner band's opacity, so it reads as a
-                // softer extension rather than competing with the 40ft fill.
-                const fpOp = Number(toggleState['fp.opacity']);
-                const baseOp = isNaN(fpOp) ? 0.5 : fpOp;
-                band65.setAttribute('stroke-opacity', String(baseOp * 0.45));
+                // 65ft band has its own color + opacity controls; fall back to
+                // fp.color / fp.opacity*0.45 (the old shared behavior) if the
+                // user hasn't customized the 65ft-specific values.
+                const band65Color = toggleState['fp.65ft-color'] || toggleState['fp.color'] || '#1ca0de';
+                band65.setAttribute('stroke', band65Color);
+                const band65OpRaw = Number(toggleState['fp.65ft-opacity']);
+                let band65Op;
+                if (!isNaN(band65OpRaw)) {
+                    band65Op = band65OpRaw;
+                } else {
+                    const fpOp = Number(toggleState['fp.opacity']);
+                    const baseOp = isNaN(fpOp) ? 0.5 : fpOp;
+                    band65Op = baseOp * 0.45;
+                }
+                band65.setAttribute('stroke-opacity', String(band65Op));
                 band65.setAttribute('stroke-width', String(ftToUnits(Number(toggleState['fp.65ft-distance']) || 65)));
                 if (line.parentNode) line.parentNode.insertBefore(band65, line.parentNode.firstChild);
             }
@@ -629,6 +703,8 @@
         applyMapBackgroundVisibility();
         // 11. Orthomosaic brightness + low-res cap (perf optimization).
         applyOrthoSettings();
+        // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
+        applyVertexStyle();
 
         // Mark current state as rendered. Heartbeat compares against this
         // and skips re-running if nothing changed since.
@@ -820,6 +896,43 @@
                 }
             });
         } catch (e) {}
+    }
+
+    // Flight-path vertex dot styling. Percepto renders FP vertices as
+    // `<div class="map-marker__flight-path-vertex …">` icons in
+    // .leaflet-marker-pane with inline width/height/margin styles. Our
+    // injected stylesheet wins via !important and persists across
+    // Percepto's re-renders (CSS rules don't need re-application like
+    // inline styles do). One style tag per page; content updated as the
+    // user changes the FP vertex toggles.
+    const FP_VERTEX_STYLE_ID = 'aim-fp-vertex-style';
+    function applyVertexStyle() {
+        let el = document.getElementById(FP_VERTEX_STYLE_ID);
+        if (!el) {
+            el = document.createElement('style');
+            el.id = FP_VERTEX_STYLE_ID;
+            (document.head || document.documentElement).appendChild(el);
+        }
+        const masterOn = toggleState['fp.show'] !== false;
+        if (!masterOn) { el.textContent = ''; return; }
+        const show = toggleState['fp.show-vertices'] !== false;
+        if (!show) {
+            el.textContent = `.map-marker__flight-path-vertex { display: none !important; }`;
+            return;
+        }
+        const color = toggleState['fp.vertex-color'] || '#1ca0de';
+        const sizeRaw = Number(toggleState['fp.vertex-size']);
+        const size = isNaN(sizeRaw) ? 10 : sizeRaw;
+        const margin = size / 2;
+        el.textContent = `
+            .map-marker__flight-path-vertex {
+                width: ${size}px !important;
+                height: ${size}px !important;
+                margin-left: -${margin}px !important;
+                margin-top: -${margin}px !important;
+                background-color: ${color} !important;
+            }
+        `;
     }
 
     // Cheap fingerprint of inputs that affect what runUpdate draws.
@@ -1837,8 +1950,19 @@
             const orig = parseFloat(el.getAttribute('data-original-width'));
             if (!isNaN(orig)) el.setAttribute('stroke-width', String(orig));
         });
-        // Restore asset fill-opacity we may have zeroed.
-        document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(el => { el.style.fillOpacity = ''; });
+        // Restore asset fill-opacity + fill color we may have set.
+        document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(el => {
+            el.style.fillOpacity = '';
+            el.style.fill = '';
+        });
+        // Restore line stroke colors / opacities we overrode via inline style.
+        document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}, ${WHITE_ASSET_SELECTOR}`).forEach(el => {
+            el.style.stroke = '';
+            el.style.strokeOpacity = '';
+        });
+        // Remove the FP vertex CSS override so Percepto's native styling returns.
+        const vStyle = document.getElementById(FP_VERTEX_STYLE_ID);
+        if (vStyle) vStyle.remove();
         // Restore the satellite base tile layer if we hid it.
         restoreMapBackground();
         // Restore ortho brightness + native zoom if we changed them.
