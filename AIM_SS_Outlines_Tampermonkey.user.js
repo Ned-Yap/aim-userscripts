@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.5
+// @version      34.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.6' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.5';
+    const SCRIPT_VERSION = '34.6';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -733,10 +733,17 @@
             const dismN   = validatorState.results.filter(r => r.dismissed).length;
             const map = getLeafletMap();
             const zoom = map && typeof map.getZoom === 'function' ? map.getZoom() : 0;
+            // Count OUR rendered overlays. If Percepto's React wiped them
+            // between heartbeats but native element counts didn't change,
+            // the hash would otherwise match and we'd skip the rebuild,
+            // leaving KML/buffers/shielding invisible until something else
+            // moved. Including our own count forces a rebuild on every wipe.
+            // (Cheap: one querySelectorAll on an indexed attribute.)
+            const ourN = document.querySelectorAll(`[${CUSTOM_BUFFER_ATTR}="true"]`).length;
             // toggleState is small (~50 keys × ~30 chars) so JSON.stringify
             // costs ~0.5ms — still vastly cheaper than rebuilding overlays.
             const tHash = JSON.stringify(toggleState);
-            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${valN}|${dismN}|${zoom}|${tHash}`;
+            return `${ffzN}|${asN}|${fpN}|${editN}|${distroN}|${transN}|${valN}|${dismN}|${ourN}|${zoom}|${tHash}`;
         } catch (e) {
             return null; // any error → force run (safe default)
         }
@@ -1800,10 +1807,19 @@
                 heartbeatInterval = null;
                 return;
             }
+            // Defense-in-depth: if Percepto's React detached the node our
+            // observer was attached to, we wouldn't have received any
+            // mutation events for the new subtree. Force a runUpdate so its
+            // built-in self-heal re-attaches the observer (and re-renders).
+            // This bypasses the hash check below.
+            if (observerTarget && !document.body.contains(observerTarget)) {
+                runUpdate();
+                return;
+            }
             // Hash-based no-op: if relevant inputs (line counts, zoom,
-            // KML feature counts, toggles, validator results) match the
-            // last render, skip the wipe+rebuild. Mutation observer
-            // catches actual changes; heartbeat is just the safety net.
+            // KML feature counts, toggles, validator results, OUR overlay
+            // count) match the last render, skip the wipe+rebuild. Mutation
+            // observer catches actual changes; heartbeat is just the safety net.
             if (computeUpdateHash() === lastUpdateHash) return;
             runUpdate();
         }, 3000);

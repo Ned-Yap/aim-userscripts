@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Map Styler v34.6** — fixes "satellite reappears, KMLs/buffers/shielding randomly stop showing" on both Site Setup and Data View. Root cause: Percepto's React was wiping our SVG overlays (and re-creating tile layers) without changing any of the counts in our heartbeat hash — so the hash-skip optimization in v34.0 was preventing the next heartbeat tick from rebuilding. Validator pins survived because they sit in a more stable container, which masked the issue. Two fixes:
+  1. Include our own overlay count (elements with `data-custom-buffer-v24="true"`) in the heartbeat hash. If Percepto wipes them, count drops, hash changes, next heartbeat rebuilds them within 3s. Same mechanism re-applies the satellite-hide on freshly added HERE tile layers.
+  2. If the observer's target node was detached between ticks (Percepto re-mounted the overlay-pane), force a `runUpdate` from the heartbeat to trigger the existing self-heal path — bypasses the hash check so we recover even if counts happen to coincide.
+  Also: log version at init (`Initializing v34.6...`) so version mismatches are obvious in the console.
 - **AIM Performance Shield v1.6** — TDZ fix. v1.5's chat-CSS-hide block referenced `const`s that hadn't been evaluated yet when the init code ran (function declarations hoist but `const` doesn't), so the chat CSS never applied on initial page load and the console showed `ReferenceError: Cannot access 'CHAT_BLOCK_STYLE_ID' before initialization`. Toggle-driven re-apply still worked, and the network block already removed the bubble, so visible impact was zero — but the error was noise. Consts now live at the top of the IIFE alongside other state.
 - **AIM Performance Shield v1.5** — fixes the "I turned on Block chat widget but the bubble is still there" case:
   - Added Zendesk Web Widget patterns (`zdassets.com`, `zopim.com`, `zendesk.com`) to the chat block — Percepto's actual chat vendor turned out to be Zendesk, not Intercom. Toggle relabeled to "Block chat widget (Zendesk + Intercom)" since it now covers both.
