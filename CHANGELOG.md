@@ -8,7 +8,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
-- **AIM Map Styler v34.11** — two fixes on top of v34.10:
+- **AIM Map Styler v34.12** — vertex dot visibility redesigned around the actual workflow:
+  - Toggle renamed to **"Always show vertex dots (off: only while editing)"**, default OFF.
+  - When OFF (default): vertex dots are hidden EXCEPT (a) red disconnected/error variants — always shown, (b) when any line is in edit mode (auto-detected via the black-dashed edit-mode line) — at which point all vertex dots become visible so the user can grab them.
+  - When ON: vertex dots always visible (the v34.10/11 behavior, opt-in now).
+  - This means in normal building you see ~zero dots (good for perf + visual clarity on dense sites); click an FP to edit and all the dots appear automatically.
+  - Specificity bump on the hide rule (`.cls.cls`) to beat Percepto's CSS — the single-class selector was being overridden in some cases, leaving dots painted at full opacity hidden in plain sight under the buffer color. — two fixes on top of v34.10:
   - **Buffers were inheriting the line's inline stroke** (so FP buffers looked the same color/opacity as the FP line, making the line appear "too big"). Cause: `line.cloneNode(true)` copied the inline `style.stroke` we set for line-color overrides; inline style wins over the buffer's `setAttribute('stroke', …)`. Fix: clear the clone's inline `style.stroke` and `style.strokeOpacity` immediately after `cloneNode`, before applying the buffer's own attributes. Applies to all three clone sites (40ft buffer, 65ft band, shielding band).
   - **"Show flight-path vertex dots" toggle now keeps the disconnected/error variants visible** when toggled OFF. The bare hide rule was hiding ALL vertex dots including the red ones that signal a disconnected segment — those are important for the builder to see. Now uses attribute-substring selectors (`[class*="disconnect" i]`, `[class*="error" i]`, etc.) to keep them visible. If your build uses a different class name for the disconnected variant, share the HTML and I'll widen the pattern.
 - **AIM Map Styler v34.10** — Phase B (granular color/opacity) + Phase D (FP vertex dots) bundled:
