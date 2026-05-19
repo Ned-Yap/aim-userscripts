@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-18
 
+- **AIM Map Styler v34.1** — stop spamming "no GitHub token cached yet" warning. The Control Panel echoes one SET_TOGGLE per toggle whenever the panel opens (or scripts re-register); each one triggered a render → fetch attempt → warning → token request. Resulted in ~14 spam lines + 14 cascading REQUEST_TOKEN messages per panel open. Now warns + requests once per token-lost period.
 - **AIM Performance Shield v1.2** — stop spamming "ENABLED — reload page" log on every panel open. The Control Panel echoes a SET_TOGGLE message back to the script on every REGISTER (which happens whenever the panel opens, plus on every REQUEST_REGISTRATIONS), so the shield was treating each echo as a "user just changed the toggle" event and logging the reload reminder. Now only logs on actual state transitions.
 - **AIM Performance Shield v1.1** — two bug fixes in v1.0 that materially blunted its effect:
   - TDZ (temporal dead zone) reference error during init prevented Control Panel registration (and possibly some blocker installation).

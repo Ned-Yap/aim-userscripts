@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.0
+// @version      34.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.0';
+    const SCRIPT_VERSION = '34.1';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -286,6 +286,11 @@
     const kmlMissing = new Set();
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
+    // Tracks whether we've already warned about no-token in the current
+    // session, so we don't spam (each panel-driven SET_TOGGLE echo
+    // triggered a render → fetch attempt → warn). Cleared whenever a
+    // token actually arrives.
+    let warnedNoToken = false;
 
     // Coverage Validator state — persisted to GM storage per-site so pins
     // survive reloads and site navigation. Each result holds the FULL list
@@ -765,10 +770,19 @@
         // GM storage (per-script — only useful if we wrote it ourselves).
         const token = cachedToken || gmGet(TOKEN_KEY, '');
         if (!token) {
-            console.warn(`${TAG} no GitHub token cached yet — waiting for TOKEN_VALUE from control panel (or open AIM Controls and re-save your PAT)`);
-            if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
+            // Warn + request token only ONCE per token-lost period. The panel
+            // echoes SET_TOGGLE messages for every toggle on REGISTER, each
+            // of which triggers a render → fetch attempt → would-be-warning,
+            // so this used to spam ~14 lines + 14 REQUEST_TOKEN messages
+            // every panel registration.
+            if (!warnedNoToken) {
+                warnedNoToken = true;
+                console.warn(`${TAG} no GitHub token cached yet — waiting for TOKEN_VALUE from control panel (will auto-retry when it arrives)`);
+                if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
+            }
             return;
         }
+        warnedNoToken = false; // reset for next token-lost period
         if (typeof GM_xmlhttpRequest !== 'function') {
             console.warn(`${TAG} GM_xmlhttpRequest unavailable — script grants may need re-approval after update`);
             return;
