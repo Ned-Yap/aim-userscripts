@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.4
+// @version      34.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.4';
+    const SCRIPT_VERSION = '34.5';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -641,6 +641,11 @@
         /google.*satellite/i, /bing/i,
         /\/satellite\//i, /\/aerial\//i, /\/imagery\//i,
         /maptiler.*satellite/i,
+        // HERE Maps — Percepto's actual base map. Template URLs contain
+        // `{type}` literally, so /satellite/i above doesn't match. Targeting
+        // the API host catches both the imagery layer and the labels overlay
+        // (Percepto loads both as separate tile layers).
+        /maps\.hereapi\.com/i,
     ];
     // Tracks URLs we've already logged so the per-runUpdate sweep doesn't
     // spam the console with the same diagnostic line every tick.

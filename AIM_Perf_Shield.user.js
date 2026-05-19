@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -67,6 +67,12 @@
                 /intercomcdn\.com/i,
                 /intercomassets\.com/i,
                 /widget\.intercom/i,
+                // Zendesk Web Widget — Percepto's actual chat vendor
+                // (confirmed by the iframe#launcher + data-garden-id="..."
+                // attributes on the bubble element).
+                /zdassets\.com/i,
+                /zopim\.com/i,
+                /zendesk\.com/i,
             ],
         },
     };
@@ -102,7 +108,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.4';
+    const SCRIPT_VERSION = '1.5';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -119,6 +125,10 @@
     try { installFetchBlocker(); } catch (e) { console.warn(`${TAG} fetch blocker failed:`, e); }
     try { installXHRBlocker(); } catch (e) { console.warn(`${TAG} XHR blocker failed:`, e); }
     try { installSendBeaconBlocker(); } catch (e) { console.warn(`${TAG} beacon blocker failed:`, e); }
+    // CSS-hide for chat bubbles. Network blocks alone can't remove an
+    // already-rendered bubble — apply now so any pre-loaded launcher
+    // disappears immediately.
+    try { applyChatBlockCss(blockEnabled['block-intercom']); } catch (e) { console.warn(`${TAG} chat CSS apply failed:`, e); }
     try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
     try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
 
@@ -244,6 +254,39 @@
         };
     }
 
+    // CSS hide for chat bubbles. Targets stable Zendesk/Intercom attributes
+    // (iframe#launcher, aria-label, title) — generated styled-components
+    // classes change on every build so we avoid those. Idempotent: if the
+    // style tag already exists, do nothing. Removal restores visibility.
+    const CHAT_BLOCK_STYLE_ID = 'aim-perf-chat-block-css';
+    const CHAT_BLOCK_CSS = `
+        /* Zendesk Web Widget */
+        iframe#launcher,
+        iframe[title*="messaging window" i],
+        iframe[title*="Messaging Window" i],
+        button[aria-label="Open messaging window" i],
+        /* Intercom */
+        iframe[name^="intercom-"],
+        div.intercom-lightweight-app,
+        div.intercom-launcher-frame,
+        div#intercom-container {
+            display: none !important;
+        }
+    `;
+    function applyChatBlockCss(on) {
+        if (on) {
+            if (document.getElementById(CHAT_BLOCK_STYLE_ID)) return;
+            const style = document.createElement('style');
+            style.id = CHAT_BLOCK_STYLE_ID;
+            style.textContent = CHAT_BLOCK_CSS;
+            // documentElement is available at document-start; head may not be yet.
+            (document.head || document.documentElement).appendChild(style);
+        } else {
+            const el = document.getElementById(CHAT_BLOCK_STYLE_ID);
+            if (el) el.remove();
+        }
+    }
+
     // Push current Perf Shield toggle state out to anyone listening (currently
     // just Map Styler, which mirrors `hide-satellite`). Called on init, on
     // toggle change, and in response to REQUEST_PERF_SETTINGS.
@@ -285,6 +328,11 @@
                 if (!group) return;
                 blockEnabled[groupId] = newVal;
                 try { GM_setValue(group.storageKey, newVal); } catch (e) {}
+                // Chat block also needs the CSS hide applied/removed instantly
+                // — script-blocking alone can't undo an already-rendered bubble.
+                if (groupId === 'block-intercom') {
+                    try { applyChatBlockCss(newVal); } catch (e) {}
+                }
                 if (newVal !== lastNotified[groupId]) {
                     lastNotified[groupId] = newVal;
                     const reloadHint = groupId === 'session-replay'
@@ -326,7 +374,7 @@
                 },
                 {
                     id: 'block-intercom',
-                    label: 'Block Intercom chat widget',
+                    label: 'Block chat widget (Zendesk + Intercom)',
                     type: 'boolean',
                     default: BLOCK_GROUPS['block-intercom'].defaultEnabled,
                 },
