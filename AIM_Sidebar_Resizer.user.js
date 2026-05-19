@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Sidebar Resizer
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js
-// @description  Restores map visibility by forcing sibling height and flex-growth.
+// @description  TEMPORARILY DISABLED (v3.3) — was breaking AIM load. Script no-ops at init until fixed. Safe to keep installed.
 // @author       Payden / Gemini
 // @match        *://percepto.app/*
 // @grant        none
@@ -13,6 +13,23 @@
 
 (function() {
     'use strict';
+
+    // ============================================================
+    // KILL SWITCH (v3.3, 2026-05-19)
+    // ------------------------------------------------------------
+    // The resizer's DOM mutations were preventing AIM from loading
+    // correctly. Disabled at init pending investigation. Existing
+    // installs will pull this version on Tampermonkey's next update
+    // check and stop affecting the page. Safe to keep installed.
+    //
+    // To re-enable for local testing: flip DISABLED to false below.
+    // ============================================================
+    const DISABLED = true;
+    if (DISABLED) {
+        console.log('[AIM SIDEBAR RESIZER] v3.3 DISABLED — script no-ops until further notice (was breaking AIM load).');
+        return;
+    }
+
 
     const WIDTH_KEY = "AIM_SIDEBAR_WIDTH_V32";
 

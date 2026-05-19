@@ -74,8 +74,9 @@ Click each link below. Because the filenames end in `.user.js`, Tampermonkey wil
 | 9 | **AIM Bulk Mission Adder** (Shift+B) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js) |
 | 10 | **AIM Bulk Altitude Updater** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js) |
 | 11 | **AIM Bulk Validator** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js) |
-| 12 | **AIM Sidebar Resizer** (map visibility fix) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Sidebar_Resizer.user.js) |
-| 13 | **AIM Performance Shield** (blocks session-replay recorder that was leaking ~200MB/30s) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js) |
+| 12 | **AIM Performance Shield** (blocks session-replay recorder that was leaking ~200MB/30s) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js) |
+
+> ⚠ **AIM Sidebar Resizer** is temporarily unavailable (was breaking AIM load). Existing installs will auto-update to a no-op version on Tampermonkey's next check — safe to leave installed. Will be re-added once fixed.
 
 **If a link doesn't auto-prompt** (rare — usually means your Tampermonkey is configured to skip auto-detection): paste the URL into Tampermonkey Dashboard → Utilities → "Import from URL" section, or copy the page source and paste into a new userscript (Dashboard → **+** tab → delete template → paste → Save).
 

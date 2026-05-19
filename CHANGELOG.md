@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Sidebar Resizer v3.3 — TEMPORARILY DISABLED** — was breaking AIM from loading correctly. v3.3 is a kill-switch release: the entire script body is gated on a `DISABLED = true` constant and returns at init with a clear console log (`[AIM SIDEBAR RESIZER] v3.3 DISABLED — script no-ops until further notice`). Safe to leave installed; existing installs will auto-update to the no-op on Tampermonkey's next check. Removed from the install list on both the README and the Pages install guide so new users don't pick it up. Will be re-enabled once we identify what was breaking — the script itself wasn't changed, just gated.
 - **AIM Map Styler v34.9 + AIM Absolute Altitude v1.5** — Phase A site-builder QoL bundle:
   - **Asset lockdown** (Map Styler, in Asset category, default OFF): toggle locks all white-asset paths against clicks. Capture-phase mousedown/click interceptor swallows events on locked assets *unless* you hold Shift — Shift+click is the per-asset bypass. Useful when building so you don't accidentally drag/select assets while panning.
   - **Orthomosaic brightness slider** (Map Styler, new Orthomosaic category): 0.2× to 1.0× CSS `filter: brightness()` on the ortho tile-layer container. Default 1.0× (no change). GPU-accelerated, near-zero cost.
