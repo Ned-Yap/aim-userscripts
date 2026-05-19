@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Map Styler v34.7** — fixes "won't even load" symptom that started after a browser-cache clear. Root cause: master toggle defaulted to `false` in the schema, so a fresh install (or one whose Control Panel storage got wiped) stayed dormant — KMLs loaded into memory but `runUpdate` never ran, so nothing rendered and the satellite-hide never applied. Two fixes:
+  1. Master toggle now defaults to `true`. New installs and post-cache-clear users get a working styler out of the box.
+  2. Safety net: if no `SET_TOGGLE master=...` message arrives from the Control Panel within 1.5s of register, auto-activate (and log "auto-activating (schema default)"). Catches the case where the panel's storage was wiped or it never echoes the toggle for some reason. Skipped if a SET_TOGGLE *did* arrive with `master=false` (user explicitly off).
+  Also logs `SET_TOGGLE master=true|false` when received so future "did the toggle arrive?" debugging is one-line obvious in the console.
 - **AIM Map Styler v34.6** — fixes "satellite reappears, KMLs/buffers/shielding randomly stop showing" on both Site Setup and Data View. Root cause: Percepto's React was wiping our SVG overlays (and re-creating tile layers) without changing any of the counts in our heartbeat hash — so the hash-skip optimization in v34.0 was preventing the next heartbeat tick from rebuilding. Validator pins survived because they sit in a more stable container, which masked the issue. Two fixes:
   1. Include our own overlay count (elements with `data-custom-buffer-v24="true"`) in the heartbeat hash. If Percepto wipes them, count drops, hash changes, next heartbeat rebuilds them within 3s. Same mechanism re-applies the satellite-hide on freshly added HERE tile layers.
   2. If the observer's target node was detached between ticks (Percepto re-mounted the overlay-pane), force a `runUpdate` from the heartbeat to trigger the existing self-heal path — bypasses the hash check so we recover even if counts happen to coincide.
