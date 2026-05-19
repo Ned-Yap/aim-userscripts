@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -85,10 +85,15 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.4';
+    const SCRIPT_VERSION = '1.5';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
+    // When true, the popup that appears after dropping a pin stays closed.
+    // The user re-opens it manually by clicking the pin. The 50ms re-click
+    // in clickHandler (which exists to recover from the stray-vertex
+    // cleanup closing the popup) is suppressed.
+    let popupDefaultClosed = true;
 
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
@@ -98,7 +103,9 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
-                if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                const newVal = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                if (msg.toggleId === 'master') masterEnabled = newVal;
+                else if (msg.toggleId === 'popup-closed') popupDefaultClosed = newVal;
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
                 if (msg.hotkeyId === 'invoke' && masterEnabled) performAction();
             }
@@ -109,7 +116,10 @@
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Absolute Altitude',
             version: SCRIPT_VERSION, group: 'Hotkeys',
-            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+            toggles: [
+                { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
+                { id: 'popup-closed', label: 'Pin popup closed by default (click pin to open)', type: 'boolean', default: true },
+            ],
             hotkeys: [{ id: 'invoke', label: 'Open Absolute Altitude tool', default: 'Shift+A' }],
         });
     }
@@ -154,21 +164,26 @@
                         topEl.style.pointerEvents = originalPE;
 
                         // 6. RE-CLICK PIN TO OPEN POPUP (Fix for popup closing)
-                        setTimeout(() => {
-                             console.log("[AIM ALT] 🔄 Re-clicking pin to restore popup...");
-                             topEl.click();
-                             // React often needs a deeper simulated click if the standard .click() is swallowed
-                             try {
-                                 var k = Object.keys(topEl).find(key => key.startsWith('__reactFiber') || key.startsWith('__reactProps'));
-                                 if (k && topEl[k].memoizedProps && topEl[k].memoizedProps.onClick) {
-                                     topEl[k].memoizedProps.onClick({ 
-                                         stopPropagation:()=>{}, 
-                                         preventDefault:()=>{}, 
-                                         nativeEvent: new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView }) 
-                                     });
-                                 }
-                             } catch(e) {}
-                        }, 50);
+                        // Skipped when the user has popupDefaultClosed turned ON
+                        // — they want the popup closed by default and will
+                        // click the pin themselves when they want it open.
+                        if (!popupDefaultClosed) {
+                            setTimeout(() => {
+                                 console.log("[AIM ALT] 🔄 Re-clicking pin to restore popup...");
+                                 topEl.click();
+                                 // React often needs a deeper simulated click if the standard .click() is swallowed
+                                 try {
+                                     var k = Object.keys(topEl).find(key => key.startsWith('__reactFiber') || key.startsWith('__reactProps'));
+                                     if (k && topEl[k].memoizedProps && topEl[k].memoizedProps.onClick) {
+                                         topEl[k].memoizedProps.onClick({
+                                             stopPropagation:()=>{},
+                                             preventDefault:()=>{},
+                                             nativeEvent: new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView })
+                                         });
+                                     }
+                                 } catch(e) {}
+                            }, 50);
+                        }
                     }
                 }, 200); 
                 

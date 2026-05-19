@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.8
+// @version      34.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.8' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.9' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.8';
+    const SCRIPT_VERSION = '34.9';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -86,6 +86,7 @@
                 { id: 'asset.fill', label: 'Show asset fill', type: 'boolean', default: true },
                 { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
+                { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
             ],
         },
         {
@@ -171,6 +172,20 @@
                 { id: 'validator-run', label: 'Run coverage check', type: 'button', action: 'run-validator' },
                 { id: 'validator-clear', label: 'Clear pins', type: 'button', action: 'clear-validator' },
                 { id: 'validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
+            ],
+        },
+        {
+            type: 'category',
+            id: 'ortho-cat',
+            label: 'Orthomosaic',
+            meta: '(brightness + perf)',
+            master: { id: 'ortho.show', default: true },
+            children: [
+                { id: 'ortho.brightness', label: 'Brightness', type: 'number',
+                  min: 0.2, max: 1.0, step: 0.05, default: 1.0, unit: '×' },
+                { id: 'ortho.low-res', label: 'Low-res mode (perf)', type: 'boolean', default: false },
+                { id: 'ortho.max-zoom', label: 'Low-res cap zoom', type: 'number',
+                  min: 10, max: 20, step: 1, default: 15 },
             ],
         },
         {
@@ -612,6 +627,8 @@
         enhanceAltitudePopups();
         // 10. Toggle satellite base tiles on/off per user preference.
         applyMapBackgroundVisibility();
+        // 11. Orthomosaic brightness + low-res cap (perf optimization).
+        applyOrthoSettings();
 
         // Mark current state as rendered. Heartbeat compares against this
         // and skips re-running if nothing changed since.
@@ -711,6 +728,95 @@
                 if (layer && layer._aimHidden && layer._container) {
                     layer._container.style.display = layer._aimOrigDisplay || '';
                     layer._aimHidden = false;
+                }
+            });
+        } catch (e) {}
+    }
+
+    // Orthomosaic customizations: brightness filter + low-res tile cap.
+    // Identifies ortho TileLayers by URL pattern (Percepto's COG-backed
+    // tiles use `user_tile_<siteID>_…` identifiers + cloudfront `/cog/tiles/`
+    // paths). Apply runs from runUpdate so toggle changes settle within one
+    // heartbeat cycle.
+    //
+    // Brightness: CSS `filter: brightness(X)` on the layer's `_container`.
+    // GPU-accelerated, near-zero runtime cost.
+    //
+    // Low-res cap: set `layer.options.maxNativeZoom = N`. Leaflet then caps
+    // tile fetches at zoom N and auto-upsamples (blurrier but ~10× fewer
+    // tile requests at deep zoom). `layer.redraw()` flushes existing tiles.
+    // Original `maxNativeZoom` is cached on the layer as `_aimOrigMaxNativeZoom`
+    // so we can restore.
+    const _ORTHO_URL_PATTERNS = [
+        /user_tile_\d+/i,           // Percepto site-ortho identifier
+        /cog\/tiles\/.*\.tif/i,     // generic COG tile-server URL with .tif source
+    ];
+    const _seenOrthoUrls = new Set();
+    function applyOrthoSettings() {
+        const masterOn = toggleState['ortho.show'] !== false;
+        if (!masterOn) { restoreOrthoSettings(); return; }
+        const brightness = Number(toggleState['ortho.brightness']);
+        const lowRes = toggleState['ortho.low-res'] === true;
+        const maxZoom = Number(toggleState['ortho.max-zoom']) || 15;
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            map.eachLayer(layer => {
+                if (!layer || !layer._url || typeof layer._url !== 'string') return;
+                const url = layer._url;
+                if (!_ORTHO_URL_PATTERNS.some(p => p.test(url))) return;
+                if (!_seenOrthoUrls.has(url)) {
+                    _seenOrthoUrls.add(url);
+                    console.log(`${TAG} ortho layer detected: ${url.substring(0, 120)}…`);
+                }
+                // Brightness
+                const container = layer._container;
+                if (container) {
+                    const desiredFilter = (!isNaN(brightness) && brightness !== 1.0) ? `brightness(${brightness})` : '';
+                    if (container.style.filter !== desiredFilter) {
+                        container.style.filter = desiredFilter;
+                    }
+                }
+                // Low-res cap
+                if (layer.options && layer.options) {
+                    if (layer._aimOrigMaxNativeZoom === undefined) {
+                        layer._aimOrigMaxNativeZoom = layer.options.maxNativeZoom !== undefined
+                            ? layer.options.maxNativeZoom
+                            : null;
+                    }
+                    const desiredMaxZoom = lowRes ? maxZoom : layer._aimOrigMaxNativeZoom;
+                    const current = layer.options.maxNativeZoom !== undefined ? layer.options.maxNativeZoom : null;
+                    if (desiredMaxZoom !== current) {
+                        if (desiredMaxZoom === null) {
+                            delete layer.options.maxNativeZoom;
+                        } else {
+                            layer.options.maxNativeZoom = desiredMaxZoom;
+                        }
+                        try { if (typeof layer.redraw === 'function') layer.redraw(); } catch (e) {}
+                        console.log(`${TAG} ortho maxNativeZoom: ${desiredMaxZoom === null ? 'native' : desiredMaxZoom}`);
+                    }
+                }
+            });
+        } catch (e) {
+            console.warn(`${TAG} applyOrthoSettings failed:`, e);
+        }
+    }
+
+    function restoreOrthoSettings() {
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            map.eachLayer(layer => {
+                if (!layer || !layer._url || !_ORTHO_URL_PATTERNS.some(p => p.test(layer._url))) return;
+                if (layer._container) layer._container.style.filter = '';
+                if (layer._aimOrigMaxNativeZoom !== undefined) {
+                    if (layer._aimOrigMaxNativeZoom === null) {
+                        delete layer.options.maxNativeZoom;
+                    } else {
+                        layer.options.maxNativeZoom = layer._aimOrigMaxNativeZoom;
+                    }
+                    try { if (typeof layer.redraw === 'function') layer.redraw(); } catch (e) {}
+                    delete layer._aimOrigMaxNativeZoom;
                 }
             });
         } catch (e) {}
@@ -1735,6 +1841,8 @@
         document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(el => { el.style.fillOpacity = ''; });
         // Restore the satellite base tile layer if we hid it.
         restoreMapBackground();
+        // Restore ortho brightness + native zoom if we changed them.
+        restoreOrthoSettings();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -1852,6 +1960,32 @@
         }, true);
     }
 
+    // Asset lockdown click/mousedown interceptor. Installed unconditionally
+    // (one set of listeners per page) but only swallows events when the
+    // `asset.locked` toggle is on AND the user isn't holding Shift (the
+    // per-asset bypass). Capture phase so we run before Leaflet's bubble
+    // handlers — once we stopPropagation it's as if the click never happened
+    // as far as Leaflet / the host app is concerned.
+    function installAssetLockHandler() {
+        if (window.aimAssetLockInstalled) return;
+        window.aimAssetLockInstalled = true;
+        const handler = (e) => {
+            if (toggleState['asset.locked'] !== true) return;
+            if (e.shiftKey) return; // bypass
+            const t = e.target;
+            if (!t || !t.closest) return;
+            if (t.closest('path.leaflet-interactive[stroke="#ffffff"]')) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }
+        };
+        // mousedown is what Leaflet actually uses for selection; click is
+        // included as belt-and-suspenders.
+        document.addEventListener('mousedown', handler, true);
+        document.addEventListener('click', handler, true);
+    }
+
     function setupControlPanel() {
         try {
             controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME);
@@ -1955,6 +2089,7 @@
     setupControlPanel();
     registerWithControlPanel();
     installListener();
+    installAssetLockHandler();
 
     // Safety net: if no SET_TOGGLE for `master` arrives shortly after
     // registration, auto-activate. Symptom this prevents: when the Control
