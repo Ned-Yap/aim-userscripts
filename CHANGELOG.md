@@ -8,6 +8,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Map Styler v34.11** — two fixes on top of v34.10:
+  - **Buffers were inheriting the line's inline stroke** (so FP buffers looked the same color/opacity as the FP line, making the line appear "too big"). Cause: `line.cloneNode(true)` copied the inline `style.stroke` we set for line-color overrides; inline style wins over the buffer's `setAttribute('stroke', …)`. Fix: clear the clone's inline `style.stroke` and `style.strokeOpacity` immediately after `cloneNode`, before applying the buffer's own attributes. Applies to all three clone sites (40ft buffer, 65ft band, shielding band).
+  - **"Show flight-path vertex dots" toggle now keeps the disconnected/error variants visible** when toggled OFF. The bare hide rule was hiding ALL vertex dots including the red ones that signal a disconnected segment — those are important for the builder to see. Now uses attribute-substring selectors (`[class*="disconnect" i]`, `[class*="error" i]`, etc.) to keep them visible. If your build uses a different class name for the disconnected variant, share the HTML and I'll widen the pattern.
 - **AIM Map Styler v34.10** — Phase B (granular color/opacity) + Phase D (FP vertex dots) bundled:
   - **FP 65ft outer band now has its own color + opacity** controls (`65ft band color`, `65ft band opacity` in the Flight Path category). Defaults preserve the prior shared-with-40ft behavior (`#1ca0de`, `0.225` ≈ the old 0.5 × 0.45 multiplier).
   - **Line color + opacity overrides** added to FFZ, Asset, and FP categories. Applied as inline `style.stroke` / `style.strokeOpacity` so the host's stroke attribute is untouched (our other selectors still match). Cleared when the category master is off. Defaults match Percepto's native colors so no visible change unless you tweak them.

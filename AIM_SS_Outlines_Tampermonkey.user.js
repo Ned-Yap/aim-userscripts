@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.10
+// @version      34.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.10' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.11' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.10';
+    const SCRIPT_VERSION = '34.11';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -617,6 +617,11 @@
                 buffer.removeAttribute('stroke-dasharray');
                 buffer.removeAttribute('data-original-width');
                 buffer.removeAttribute('aria-describedby');
+                // Clear inline stroke/opacity inherited from the line — we set
+                // those via inline style for our line-color overrides, and
+                // inline style would otherwise win over our setAttribute calls.
+                buffer.style.stroke = '';
+                buffer.style.strokeOpacity = '';
                 if (bufferStroke) buffer.setAttribute('stroke', bufferStroke);
                 buffer.setAttribute('stroke-opacity', bufferOpacity);
                 buffer.setAttribute('stroke-width', String(finalBufferWidth));
@@ -636,6 +641,9 @@
                 band65.removeAttribute('stroke-dasharray');
                 band65.removeAttribute('data-original-width');
                 band65.removeAttribute('aria-describedby');
+                // Clear inherited inline stroke styles (see 40ft block).
+                band65.style.stroke = '';
+                band65.style.strokeOpacity = '';
                 // 65ft band has its own color + opacity controls; fall back to
                 // fp.color / fp.opacity*0.45 (the old shared behavior) if the
                 // user hasn't customized the 65ft-specific values.
@@ -667,6 +675,9 @@
                 shielding.setAttribute('fill', 'none');
                 shielding.removeAttribute('stroke-dasharray');
                 shielding.removeAttribute('data-original-width');
+                // Clear inherited inline stroke styles (see 40ft block).
+                shielding.style.stroke = '';
+                shielding.style.strokeOpacity = '';
                 shielding.removeAttribute('aria-describedby');
                 shielding.setAttribute('stroke', toggleState['shielding.color'] || '#ff8c00');
                 const shOp = Number(toggleState['shielding.opacity']);
@@ -917,7 +928,22 @@
         if (!masterOn) { el.textContent = ''; return; }
         const show = toggleState['fp.show-vertices'] !== false;
         if (!show) {
-            el.textContent = `.map-marker__flight-path-vertex { display: none !important; }`;
+            // Hide all vertex dots EXCEPT ones that look like disconnected /
+            // error variants (Percepto typically signals these with extra
+            // modifier classes containing "disconnect", "error", "invalid",
+            // or "warning"). Keeping them visible is important — disconnected
+            // segments are something the builder needs to see.
+            el.textContent = `
+                .map-marker__flight-path-vertex {
+                    display: none !important;
+                }
+                .map-marker__flight-path-vertex[class*="disconnect" i],
+                .map-marker__flight-path-vertex[class*="error" i],
+                .map-marker__flight-path-vertex[class*="invalid" i],
+                .map-marker__flight-path-vertex[class*="warning" i] {
+                    display: block !important;
+                }
+            `;
             return;
         }
         const color = toggleState['fp.vertex-color'] || '#1ca0de';
