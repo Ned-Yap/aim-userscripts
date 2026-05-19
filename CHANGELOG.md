@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-18
 
+- **AIM Performance Shield v1.2** — stop spamming "ENABLED — reload page" log on every panel open. The Control Panel echoes a SET_TOGGLE message back to the script on every REGISTER (which happens whenever the panel opens, plus on every REQUEST_REGISTRATIONS), so the shield was treating each echo as a "user just changed the toggle" event and logging the reload reminder. Now only logs on actual state transitions.
 - **AIM Performance Shield v1.1** — two bug fixes in v1.0 that materially blunted its effect:
   - TDZ (temporal dead zone) reference error during init prevented Control Panel registration (and possibly some blocker installation).
   - `new Response('', { status: 204 })` throws because HTTP 204 must have a null body. Every blocked fetch was throwing instead of returning a fake response, so the host's network layer saw failures and retried. Fixed to use `null` body.

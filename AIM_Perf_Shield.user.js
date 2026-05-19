@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  Blocks the host app's session-replay recorder. On dense sites this was leaking ~600K DOM nodes + ~200MB heap per 30s + ~30% of total CPU. Surgical: only the replay plugin is blocked, regular product analytics still flow. Toggle via AIM Controls; default ON.
@@ -63,7 +63,12 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.1';
+    const SCRIPT_VERSION = '1.2';
+    // Tracks the last-applied enabled state so we only log on real changes.
+    // The Control Panel echoes SET_TOGGLE messages back on every REGISTER
+    // (including auto-registration when the panel opens), so without this
+    // we'd spam the console every time the user opens the panel.
+    let lastNotifiedEnabled = enabled;
     let controlChannel = null;
 
     // Each install* call is try/wrapped so one failure doesn't take the
@@ -210,7 +215,12 @@
                 if (msg.toggleId === 'master') {
                     const newVal = !!(msg.value !== undefined ? msg.value : msg.enabled);
                     try { GM_setValue(STORAGE_KEY, newVal); } catch (e) {}
-                    console.log(`${TAG} ${newVal ? 'ENABLED' : 'DISABLED'} — reload the page for the change to take effect (in-flight recorder code keeps running until reload).`);
+                    // Only log on actual user-driven changes — the panel echoes
+                    // SET_TOGGLE on every REGISTER which would otherwise spam.
+                    if (newVal !== lastNotifiedEnabled) {
+                        lastNotifiedEnabled = newVal;
+                        console.log(`${TAG} ${newVal ? 'ENABLED' : 'DISABLED'} — reload the page for the change to take effect (in-flight recorder code keeps running until reload).`);
+                    }
                 }
             }
         };
