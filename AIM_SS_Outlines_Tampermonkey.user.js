@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.3
+// @version      34.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.3';
+    const SCRIPT_VERSION = '34.4';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -642,16 +642,29 @@
         /\/satellite\//i, /\/aerial\//i, /\/imagery\//i,
         /maptiler.*satellite/i,
     ];
+    // Tracks URLs we've already logged so the per-runUpdate sweep doesn't
+    // spam the console with the same diagnostic line every tick.
+    const _seenTileLayerUrls = new Set();
     function applyMapBackgroundVisibility() {
         const hide = perfHideSatellite === true;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
+            let matchedAny = false;
             map.eachLayer(layer => {
                 if (!layer || !layer._url || typeof layer._url !== 'string') return;
                 const url = layer._url;
+                // Diagnostic: print every unique tile layer URL once. Helps
+                // identify Percepto's actual satellite provider when our
+                // built-in patterns don't match. Always logs (not just when
+                // hide is on) so user can see candidates in the console.
+                if (!_seenTileLayerUrls.has(url)) {
+                    _seenTileLayerUrls.add(url);
+                    console.log(`${TAG} tile layer present: ${url}`);
+                }
                 const isSatellite = _SAT_URL_PATTERNS.some(p => p.test(url));
                 if (!isSatellite) return;
+                matchedAny = true;
                 const container = layer._container;
                 if (!container) return;
                 if (hide) {
@@ -666,6 +679,14 @@
                     layer._aimHidden = false;
                 }
             });
+            // Diagnostic: warn ONCE per session if hide is on but no URL
+            // matched our satellite patterns — flags the case where the user
+            // toggled Hide-Satellite but nothing got hidden because the
+            // provider URL isn't in _SAT_URL_PATTERNS.
+            if (hide && !matchedAny && !applyMapBackgroundVisibility._warnedNoMatch) {
+                applyMapBackgroundVisibility._warnedNoMatch = true;
+                console.warn(`${TAG} hide-satellite is ON but no tile layer matched satellite URL patterns. See "tile layer present:" lines above and share the satellite URL so we can add the pattern.`);
+            }
         } catch (e) {
             console.warn(`${TAG} applyMapBackgroundVisibility failed:`, e);
         }
