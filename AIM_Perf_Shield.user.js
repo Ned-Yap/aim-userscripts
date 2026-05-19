@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
-// @description  Blocks the host app's session-replay recorder. On dense sites this was leaking ~600K DOM nodes + ~200MB heap per 30s + ~30% of total CPU. Surgical: only the replay plugin is blocked, regular product analytics still flow. Toggle via AIM Controls; default ON.
+// @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -32,30 +32,69 @@
     'use strict';
 
     const TAG = '[AIM PERF SHIELD]';
-    const STORAGE_KEY = 'aim-perf-shield-enabled';
 
-    // Read setting from GM storage; default ON. If the user has explicitly
-    // toggled it OFF via the panel, GM_setValue stored `false`, otherwise
-    // we get `true` (the default).
-    let enabled = true;
-    try { enabled = GM_getValue(STORAGE_KEY, true) !== false; } catch (e) {}
+    // Each block category is a peer toggle. The install* hooks (fetch/XHR/script-tag
+    // overrides) are installed unconditionally below — they're cheap when no
+    // category matches the URL — so toggling any single category on or off
+    // takes effect immediately for FUTURE network calls. Existing in-flight
+    // code (especially the session-replay recorder) keeps running until reload.
+    //
+    // Adding a new block category: append to BLOCK_GROUPS, add a corresponding
+    // toggle in registerWithControlPanel(), handle the toggleId in setupControlPanel().
+    const BLOCK_GROUPS = {
+        'session-replay': {
+            storageKey: 'aim-perf-shield-enabled',
+            defaultEnabled: true,
+            patterns: [
+                /plugin-session-replay-browser/i,
+                /session.?replay/i,
+                /rrweb/i,
+                /sr\.amplitude\.com/i,
+            ],
+        },
+        'block-weather': {
+            storageKey: 'aim-perf-block-weather',
+            defaultEnabled: false,
+            patterns: [
+                /\/weather_for_indication\//i,
+            ],
+        },
+        'block-intercom': {
+            storageKey: 'aim-perf-block-intercom',
+            defaultEnabled: false,
+            patterns: [
+                /intercom\.io/i,
+                /intercomcdn\.com/i,
+                /intercomassets\.com/i,
+                /widget\.intercom/i,
+            ],
+        },
+    };
 
-    // Patterns we block. Surgical: only the session-replay plugin and the
-    // rrweb library that underpins it. Main Amplitude analytics tracking
-    // (`analytics-browser-*.js`) is NOT blocked — that's small + Percepto
-    // needs it for product metrics.
-    const BLOCK_PATTERNS = [
-        /plugin-session-replay-browser/i,
-        /session.?replay/i, // catches session-replay, session_replay, session replay
-        /rrweb/i,
-        /sr\.amplitude\.com/i, // session-replay-specific upload endpoint
-    ];
+    // Live enabled-state per group, read from GM storage with defaults.
+    const blockEnabled = {};
+    Object.keys(BLOCK_GROUPS).forEach(id => {
+        const g = BLOCK_GROUPS[id];
+        try { blockEnabled[id] = GM_getValue(g.storageKey, g.defaultEnabled) === true; }
+        catch (e) { blockEnabled[id] = g.defaultEnabled; }
+    });
+
+    // Hide-satellite isn't a network block — it's a Map Styler instruction —
+    // but lives here so all perf toggles are in one panel section. Broadcast
+    // via PERF_TOGGLE; Map Styler mirrors and acts on it.
+    const STORAGE_KEY_HIDE_SAT = 'aim-perf-shield-hide-satellite';
+    let hideSatellite = false;
+    try { hideSatellite = GM_getValue(STORAGE_KEY_HIDE_SAT, false) === true; } catch (e) {}
 
     function shouldBlock(url) {
-        if (!enabled) return false;
         if (!url) return false;
         const s = typeof url === 'string' ? url : (url.url || String(url));
-        return BLOCK_PATTERNS.some(p => p.test(s));
+        for (const id of Object.keys(BLOCK_GROUPS)) {
+            if (!blockEnabled[id]) continue;
+            const g = BLOCK_GROUPS[id];
+            if (g.patterns.some(p => p.test(s))) return true;
+        }
+        return false;
     }
 
     // Control Panel state declared early so the registration functions
@@ -63,28 +102,29 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.2';
-    // Tracks the last-applied enabled state so we only log on real changes.
-    // The Control Panel echoes SET_TOGGLE messages back on every REGISTER
-    // (including auto-registration when the panel opens), so without this
-    // we'd spam the console every time the user opens the panel.
-    let lastNotifiedEnabled = enabled;
+    const SCRIPT_VERSION = '1.4';
+    // Tracks the last-applied per-group state so we only log on real changes.
+    // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
+    // without this dedup would log a reload-reminder line per toggle per
+    // panel open.
+    const lastNotified = Object.assign({}, blockEnabled);
     let controlChannel = null;
 
-    // Each install* call is try/wrapped so one failure doesn't take the
-    // rest down (and ESPECIALLY doesn't prevent control panel registration).
-    if (enabled) {
-        try { installScriptSrcSetterOverride(); } catch (e) { console.warn(`${TAG} src setter override failed:`, e); }
-        try { installScriptTagBlocker(); } catch (e) { console.warn(`${TAG} tag blocker failed:`, e); }
-        try { installFetchBlocker(); } catch (e) { console.warn(`${TAG} fetch blocker failed:`, e); }
-        try { installXHRBlocker(); } catch (e) { console.warn(`${TAG} XHR blocker failed:`, e); }
-        try { installSendBeaconBlocker(); } catch (e) { console.warn(`${TAG} beacon blocker failed:`, e); }
-    }
+    // Install all network/script overrides UNCONDITIONALLY so any block
+    // category can take effect without needing the session-replay master ON.
+    // Each call is try/wrapped so one failure doesn't take down the rest
+    // (and especially doesn't prevent control panel registration).
+    try { installScriptSrcSetterOverride(); } catch (e) { console.warn(`${TAG} src setter override failed:`, e); }
+    try { installScriptTagBlocker(); } catch (e) { console.warn(`${TAG} tag blocker failed:`, e); }
+    try { installFetchBlocker(); } catch (e) { console.warn(`${TAG} fetch blocker failed:`, e); }
+    try { installXHRBlocker(); } catch (e) { console.warn(`${TAG} XHR blocker failed:`, e); }
+    try { installSendBeaconBlocker(); } catch (e) { console.warn(`${TAG} beacon blocker failed:`, e); }
     try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
     try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
 
-    if (enabled) console.log(`${TAG} v${SCRIPT_VERSION} active — blocking session-replay traffic`);
-    else console.log(`${TAG} v${SCRIPT_VERSION} disabled by user — all traffic passing through`);
+    const activeBlocks = Object.keys(blockEnabled).filter(k => blockEnabled[k]);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready — active blocks: ${activeBlocks.length ? activeBlocks.join(', ') : 'none'}`);
+    if (hideSatellite) console.log(`${TAG} hide-satellite ON — broadcasting to Map Styler`);
 
     // 0. Override HTMLScriptElement.prototype.src setter — fires BEFORE
     //    the browser starts loading when JS sets `script.src = 'url'`.
@@ -204,6 +244,21 @@
         };
     }
 
+    // Push current Perf Shield toggle state out to anyone listening (currently
+    // just Map Styler, which mirrors `hide-satellite`). Called on init, on
+    // toggle change, and in response to REQUEST_PERF_SETTINGS.
+    function broadcastPerfSettings() {
+        if (!controlChannel) return;
+        controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'hide-satellite', value: hideSatellite });
+    }
+
+    // The panel uses toggleId='master' to signal the script's primary
+    // on/off. We map 'master' → 'session-replay' here so the rest of the
+    // file stays consistent with the BLOCK_GROUPS keys.
+    function toggleIdToGroup(toggleId) {
+        return toggleId === 'master' ? 'session-replay' : toggleId;
+    }
+
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
         catch (e) { return; }
@@ -211,34 +266,71 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') {
                 registerWithControlPanel();
+                broadcastPerfSettings();
+            } else if (msg.type === 'REQUEST_PERF_SETTINGS') {
+                broadcastPerfSettings();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
-                if (msg.toggleId === 'master') {
-                    const newVal = !!(msg.value !== undefined ? msg.value : msg.enabled);
-                    try { GM_setValue(STORAGE_KEY, newVal); } catch (e) {}
-                    // Only log on actual user-driven changes — the panel echoes
-                    // SET_TOGGLE on every REGISTER which would otherwise spam.
-                    if (newVal !== lastNotifiedEnabled) {
-                        lastNotifiedEnabled = newVal;
-                        console.log(`${TAG} ${newVal ? 'ENABLED' : 'DISABLED'} — reload the page for the change to take effect (in-flight recorder code keeps running until reload).`);
+                const newVal = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                if (msg.toggleId === 'hide-satellite') {
+                    if (newVal !== hideSatellite) {
+                        hideSatellite = newVal;
+                        try { GM_setValue(STORAGE_KEY_HIDE_SAT, newVal); } catch (e) {}
+                        console.log(`${TAG} hide-satellite ${newVal ? 'ON' : 'OFF'}`);
                     }
+                    broadcastPerfSettings();
+                    return;
+                }
+                const groupId = toggleIdToGroup(msg.toggleId);
+                const group = BLOCK_GROUPS[groupId];
+                if (!group) return;
+                blockEnabled[groupId] = newVal;
+                try { GM_setValue(group.storageKey, newVal); } catch (e) {}
+                if (newVal !== lastNotified[groupId]) {
+                    lastNotified[groupId] = newVal;
+                    const reloadHint = groupId === 'session-replay'
+                        ? ' — reload the page for the change to take effect (in-flight recorder code keeps running until reload).'
+                        : ' — takes effect on the next matching network call.';
+                    console.log(`${TAG} ${groupId} ${newVal ? 'ENABLED' : 'DISABLED'}${reloadHint}`);
                 }
             }
         };
+        // Replay state to any scripts already listening (e.g. Map Styler).
+        broadcastPerfSettings();
     }
 
     function registerWithControlPanel() {
         if (!controlChannel) return;
         controlChannel.postMessage({
-            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Performance Shield',
-            description: 'Blocks the host app\'s session-replay recorder (CPU + memory leak source)',
+            type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Performance',
+            description: 'Network-level blocks for stuff site builders don\'t need (weather, replay, chat) + map perf toggles',
             version: SCRIPT_VERSION,
-            toggles: [{
-                id: 'master',
-                label: 'Block session-replay (reload page after toggle)',
-                type: 'boolean',
-                default: true,
-                master: true,
-            }],
+            toggles: [
+                {
+                    id: 'master',
+                    label: 'Block session-replay recorder (reload page after toggle)',
+                    type: 'boolean',
+                    default: BLOCK_GROUPS['session-replay'].defaultEnabled,
+                    master: true,
+                },
+                {
+                    id: 'hide-satellite',
+                    label: 'Hide satellite base tiles (use when ortho covers site)',
+                    type: 'boolean',
+                    default: false,
+                },
+                {
+                    id: 'block-weather',
+                    label: 'Block weather API (Percepto /weather_for_indication/)',
+                    type: 'boolean',
+                    default: BLOCK_GROUPS['block-weather'].defaultEnabled,
+                },
+                {
+                    id: 'block-intercom',
+                    label: 'Block Intercom chat widget',
+                    type: 'boolean',
+                    default: BLOCK_GROUPS['block-intercom'].defaultEnabled,
+                },
+            ],
             hotkeys: [],
         });
     }

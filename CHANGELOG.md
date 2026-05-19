@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-19
+
+- **AIM Performance Shield v1.4** — section renamed to **Performance** in the panel and restructured around peer toggles (each block category is independent — turning off session-replay no longer disables the other blockers). Three new toggles, all default OFF:
+  - **Hide satellite base tiles** — useful when an orthomosaic already covers the site; suppresses the redundant satellite tile layer so paint/decoding cost goes away on every zoom/pan. Detection is heuristic (ESRI/ArcGIS, Mapbox satellite, Bing, Google, generic `/satellite|aerial|imagery`); if your provider isn't recognized, send the tile URL and I'll add the pattern. Implementation lives in the Map Styler (which already has the Leaflet map reference); the toggle in Perf Shield drives it via a `PERF_TOGGLE` broadcast.
+  - **Block weather API** — drops every request to Percepto's `/weather_for_indication/<siteID>/`. WeatherStore goes idle once data stops arriving, so the whole `recalcWeather` cascade stops too. Useful only to pilots; safe to leave off for site building.
+  - **Block Intercom chat widget** — drops requests to `intercom.io` / `intercomcdn.com` / `intercomassets.com` / `widget.intercom`. Cuts the chat-support bundle entirely.
+- **AIM Map Styler v34.3** — implementation hook for the Perf Shield satellite-hide toggle (listens for `PERF_TOGGLE` on the control channel). No new panel UI here — the toggle lives in Perf Shield's Performance section.
+
 ## 2026-05-18
 
 - **AIM Map Styler v34.1** — stop spamming "no GitHub token cached yet" warning. The Control Panel echoes one SET_TOGGLE per toggle whenever the panel opens (or scripts re-register); each one triggered a render → fetch attempt → warning → token request. Resulted in ~14 spam lines + 14 cascading REQUEST_TOKEN messages per panel open. Now warns + requests once per token-lost period.

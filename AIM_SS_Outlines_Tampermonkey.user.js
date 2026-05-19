@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.1
+// @version      34.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.1';
+    const SCRIPT_VERSION = '34.3';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -610,10 +610,81 @@
         renderValidatorPins();
         // 9. Round altitude + make values copyable in altitude popups.
         enhanceAltitudePopups();
+        // 10. Toggle satellite base tiles on/off per user preference.
+        applyMapBackgroundVisibility();
 
         // Mark current state as rendered. Heartbeat compares against this
         // and skips re-running if nothing changed since.
         lastUpdateHash = computeUpdateHash();
+    }
+
+    // Hides/restores the Leaflet satellite base tile layer. Driven by the
+    // AIM Performance Shield's "Hide satellite base tiles" toggle, which
+    // broadcasts PERF_TOGGLE messages on the AIM_CONTROL_CHANNEL. The
+    // implementation lives here (not in Perf Shield) because we already
+    // have a robust Leaflet map reference via getLeafletMap().
+    //
+    // Heuristic for "is this a satellite layer": tile URLs commonly contain
+    // identifiable strings (esri, arcgis, world_imagery, mapbox.satellite,
+    // bing, virtualearth, google satellite, generic /satellite|aerial|imagery).
+    // Orthomosaics are typically served from the host app's own CDN with
+    // site/user identifiers in the URL — they should NOT match these patterns.
+    //
+    // We use `_container.style.display = 'none'` (not setOpacity(0)) so the
+    // browser skips the tile-image paint entirely. Cache _aimHidden on the
+    // layer so we know to restore. Errors are swallowed — if Leaflet internals
+    // change, we fail open (no hide, visible satellite).
+    let perfHideSatellite = false; // mirrors AIM Perf Shield toggle state
+    const _SAT_URL_PATTERNS = [
+        /esri/i, /arcgis/i, /world_?imagery/i,
+        /mapbox.*satellite/i, /tiles?\.virtualearth/i,
+        /google.*satellite/i, /bing/i,
+        /\/satellite\//i, /\/aerial\//i, /\/imagery\//i,
+        /maptiler.*satellite/i,
+    ];
+    function applyMapBackgroundVisibility() {
+        const hide = perfHideSatellite === true;
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            map.eachLayer(layer => {
+                if (!layer || !layer._url || typeof layer._url !== 'string') return;
+                const url = layer._url;
+                const isSatellite = _SAT_URL_PATTERNS.some(p => p.test(url));
+                if (!isSatellite) return;
+                const container = layer._container;
+                if (!container) return;
+                if (hide) {
+                    if (!layer._aimHidden) {
+                        layer._aimHidden = true;
+                        layer._aimOrigDisplay = container.style.display;
+                        container.style.display = 'none';
+                        console.log(`${TAG} hiding satellite base: ${url}`);
+                    }
+                } else if (layer._aimHidden) {
+                    container.style.display = layer._aimOrigDisplay || '';
+                    layer._aimHidden = false;
+                }
+            });
+        } catch (e) {
+            console.warn(`${TAG} applyMapBackgroundVisibility failed:`, e);
+        }
+    }
+
+    // Restore satellite visibility on any layer we hid. Called from cleanup()
+    // when the styler deactivates so the user doesn't see a blank map after
+    // turning the master off.
+    function restoreMapBackground() {
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            map.eachLayer(layer => {
+                if (layer && layer._aimHidden && layer._container) {
+                    layer._container.style.display = layer._aimOrigDisplay || '';
+                    layer._aimHidden = false;
+                }
+            });
+        } catch (e) {}
     }
 
     // Cheap fingerprint of inputs that affect what runUpdate draws.
@@ -1626,6 +1697,8 @@
         });
         // Restore asset fill-opacity we may have zeroed.
         document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(el => { el.style.fillOpacity = ''; });
+        // Restore the satellite base tile layer if we hid it.
+        restoreMapBackground();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -1779,6 +1852,15 @@
                 // Button-type controls in the panel broadcast this when clicked.
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
+            } else if (msg.type === 'PERF_TOGGLE' && msg.key === 'hide-satellite') {
+                // Driven by AIM Performance Shield. Mirror its state, then
+                // re-run so the satellite layer hides/shows immediately.
+                const next = !!msg.value;
+                if (next !== perfHideSatellite) {
+                    perfHideSatellite = next;
+                    if (isActive) runUpdate();
+                    else if (!next) restoreMapBackground();
+                }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 if (msg.hotkeyId === 'toggle-master') {
                     const next = !isActive;
@@ -1811,6 +1893,9 @@
         // if it has one. (The panel also auto-sends on REGISTER, but asking
         // explicitly covers the case where this script loaded first.)
         controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
+        // Ask Perf Shield to replay its current state — covers the case where
+        // this script loaded after Perf Shield broadcast initial values.
+        controlChannel.postMessage({ type: 'REQUEST_PERF_SETTINGS' });
     }
 
     setupControlPanel();
