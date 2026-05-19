@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  Blocks the host app's session-replay recorder. On dense sites this was leaking ~600K DOM nodes + ~200MB heap per 30s + ~30% of total CPU. Surgical: only the replay plugin is blocked, regular product analytics still flow. Toggle via AIM Controls; default ON.
@@ -46,8 +46,8 @@
     // needs it for product metrics.
     const BLOCK_PATTERNS = [
         /plugin-session-replay-browser/i,
+        /session.?replay/i, // catches session-replay, session_replay, session replay
         /rrweb/i,
-        /\/session-replay\//i,
         /sr\.amplitude\.com/i, // session-replay-specific upload endpoint
     ];
 
@@ -58,24 +58,66 @@
         return BLOCK_PATTERNS.some(p => p.test(s));
     }
 
-    if (enabled) installBlockers();
-    setupControlPanel(); // register either way so the toggle is visible
-    registerWithControlPanel();
+    // Control Panel state declared early so the registration functions
+    // can read it without hitting TDZ (was a v1.0 bug — `controlChannel`
+    // declared at the bottom but referenced from the top crashed init).
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-perf-shield';
+    const SCRIPT_VERSION = '1.1';
+    let controlChannel = null;
 
-    if (enabled) console.log(`${TAG} active — blocking session-replay traffic`);
-    else console.log(`${TAG} disabled by user — all traffic passing through`);
+    // Each install* call is try/wrapped so one failure doesn't take the
+    // rest down (and ESPECIALLY doesn't prevent control panel registration).
+    if (enabled) {
+        try { installScriptSrcSetterOverride(); } catch (e) { console.warn(`${TAG} src setter override failed:`, e); }
+        try { installScriptTagBlocker(); } catch (e) { console.warn(`${TAG} tag blocker failed:`, e); }
+        try { installFetchBlocker(); } catch (e) { console.warn(`${TAG} fetch blocker failed:`, e); }
+        try { installXHRBlocker(); } catch (e) { console.warn(`${TAG} XHR blocker failed:`, e); }
+        try { installSendBeaconBlocker(); } catch (e) { console.warn(`${TAG} beacon blocker failed:`, e); }
+    }
+    try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
+    try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
 
-    // --- BLOCKERS (only installed when enabled) ---
-    function installBlockers() {
-        installScriptTagBlocker();
-        installFetchBlocker();
-        installXHRBlocker();
-        installSendBeaconBlocker();
+    if (enabled) console.log(`${TAG} v${SCRIPT_VERSION} active — blocking session-replay traffic`);
+    else console.log(`${TAG} v${SCRIPT_VERSION} disabled by user — all traffic passing through`);
+
+    // 0. Override HTMLScriptElement.prototype.src setter — fires BEFORE
+    //    the browser starts loading when JS sets `script.src = 'url'`.
+    //    More reliable than MutationObserver, which fires AFTER append
+    //    (the browser may have already started loading by then).
+    function installScriptSrcSetterOverride() {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const proto = win.HTMLScriptElement && win.HTMLScriptElement.prototype;
+        if (!proto) return;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'src');
+        if (!desc || !desc.set || !desc.get) return;
+        const origGet = desc.get, origSet = desc.set;
+        Object.defineProperty(proto, 'src', {
+            configurable: true,
+            enumerable: true,
+            get() { return origGet.call(this); },
+            set(value) {
+                if (shouldBlock(value)) {
+                    console.log(`${TAG} blocked script.src=: ${value}`);
+                    return origSet.call(this, 'data:text/plain,');
+                }
+                return origSet.call(this, value);
+            },
+        });
+        // Also intercept setAttribute('src', ...)
+        const origSetAttr = proto.setAttribute;
+        proto.setAttribute = function(name, value) {
+            if (name && name.toLowerCase() === 'src' && shouldBlock(value)) {
+                console.log(`${TAG} blocked script.setAttribute(src): ${value}`);
+                return origSetAttr.call(this, name, 'data:text/plain,');
+            }
+            return origSetAttr.call(this, name, value);
+        };
     }
 
     // 1. Catch <script> tags being inserted into the DOM and remove them
-    //    BEFORE the browser executes them. This is the most effective
-    //    block — if the plugin script never runs, it can't record anything.
+    //    BEFORE the browser executes them. Defense-in-depth alongside the
+    //    src setter override above.
     let removed = 0;
     function installScriptTagBlocker() {
         const setupObserver = () => {
@@ -104,66 +146,58 @@
     // 2. Override fetch — catches network calls if the recorder script
     //    somehow loaded before we did (defense in depth).
     function installFetchBlocker() {
-        try {
-            const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-            const origFetch = win.fetch;
-            if (typeof origFetch !== 'function') return;
-            win.fetch = function(...args) {
-                if (shouldBlock(args[0])) {
-                    return Promise.resolve(new Response('', { status: 204, statusText: 'Blocked by AIM Shield' }));
-                }
-                return origFetch.apply(this, args);
-            };
-        } catch (e) { console.warn(`${TAG} fetch override failed:`, e); }
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const origFetch = win.fetch;
+        if (typeof origFetch !== 'function') return;
+        win.fetch = function(...args) {
+            if (shouldBlock(args[0])) {
+                // Per Fetch spec: 204/205/304 are "null body status" codes
+                // and the Response constructor THROWS if body is a non-null
+                // value with those statuses. Use null. (v1.0 used '' here
+                // which threw on every blocked call.)
+                return Promise.resolve(new Response(null, { status: 204, statusText: 'Blocked by AIM' }));
+            }
+            return origFetch.apply(this, args);
+        };
     }
 
     // 3. Override XMLHttpRequest — same rationale as fetch.
     function installXHRBlocker() {
-        try {
-            const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-            const OXHR = win.XMLHttpRequest;
-            if (typeof OXHR !== 'function') return;
-            const Patched = function() {
-                const xhr = new OXHR();
-                const origOpen = xhr.open;
-                const origSend = xhr.send;
-                let isBlocked = false;
-                xhr.open = function(method, url, ...rest) {
-                    if (shouldBlock(url)) {
-                        isBlocked = true;
-                        return origOpen.call(xhr, method, 'data:text/plain,', ...rest);
-                    }
-                    return origOpen.call(xhr, method, url, ...rest);
-                };
-                xhr.send = function(body) {
-                    if (isBlocked) return; // no-op (browser already opened a data: URL)
-                    return origSend.call(xhr, body);
-                };
-                return xhr;
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const OXHR = win.XMLHttpRequest;
+        if (typeof OXHR !== 'function') return;
+        const Patched = function() {
+            const xhr = new OXHR();
+            const origOpen = xhr.open;
+            const origSend = xhr.send;
+            let isBlocked = false;
+            xhr.open = function(method, url, ...rest) {
+                if (shouldBlock(url)) {
+                    isBlocked = true;
+                    return origOpen.call(xhr, method, 'data:text/plain,', ...rest);
+                }
+                return origOpen.call(xhr, method, url, ...rest);
             };
-            Patched.prototype = OXHR.prototype;
-            win.XMLHttpRequest = Patched;
-        } catch (e) { console.warn(`${TAG} XHR override failed:`, e); }
+            xhr.send = function(body) {
+                if (isBlocked) return; // no-op (browser already opened a data: URL)
+                return origSend.call(xhr, body);
+            };
+            return xhr;
+        };
+        Patched.prototype = OXHR.prototype;
+        win.XMLHttpRequest = Patched;
     }
 
     // 4. Override sendBeacon — analytics commonly use this for the final
     //    upload on page unload.
     function installSendBeaconBlocker() {
-        try {
-            const origBeacon = navigator.sendBeacon;
-            if (typeof origBeacon !== 'function') return;
-            navigator.sendBeacon = function(url, data) {
-                if (shouldBlock(url)) return true; // pretend success
-                return origBeacon.call(navigator, url, data);
-            };
-        } catch (e) { console.warn(`${TAG} sendBeacon override failed:`, e); }
+        const origBeacon = navigator.sendBeacon;
+        if (typeof origBeacon !== 'function') return;
+        navigator.sendBeacon = function(url, data) {
+            if (shouldBlock(url)) return true; // pretend success
+            return origBeacon.call(navigator, url, data);
+        };
     }
-
-    // --- AIM Control Panel registration ---
-    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
-    const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.0';
-    let controlChannel = null;
 
     function setupControlPanel() {
         try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }

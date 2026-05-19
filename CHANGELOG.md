@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-18
 
+- **AIM Performance Shield v1.1** — two bug fixes in v1.0 that materially blunted its effect:
+  - TDZ (temporal dead zone) reference error during init prevented Control Panel registration (and possibly some blocker installation).
+  - `new Response('', { status: 204 })` throws because HTTP 204 must have a null body. Every blocked fetch was throwing instead of returning a fake response, so the host's network layer saw failures and retried. Fixed to use `null` body.
+  - Also added: HTMLScriptElement.prototype.src setter override + setAttribute interception (catches `<script>` tag loads BEFORE the browser starts them — more reliable than the MutationObserver fallback alone). Every install* call now individually try-wrapped so one failure can't take the rest down.
 - **AIM Performance Shield v1.0 (NEW SCRIPT)** — blocks the host app's session-replay recorder. Per the perf trace, that recorder was leaking ~200MB heap + ~600K DOM nodes per 30 seconds on dense sites, AND consuming ~30% of total CPU. Surgical block — only `plugin-session-replay-browser` and `rrweb` URLs are dropped; main product analytics (`analytics-browser.js`) still flows. Toggle via AIM Controls; default ON. New script — install once via the README link.
 - **AIM Map Styler v34.0** — performance tuning for dense sites (lots of KML lines, FFZs, FPs, validator pins). Heartbeat now skips the full wipe+rebuild when nothing has changed (line counts, zoom, KML features, toggles, validator results all hashed). Heartbeat cadence reduced 1.5s → 3s. Mutation-storm debounce hard cap 150ms → 300ms. Combined effect: idle CPU near zero, interactive CPU halved during zoom/pan. No visual change when nothing is happening.
 - **AIM Control Panel v1.18** — After Save & Test of a GitHub PAT, the status message now tells you to hard-reload (Ctrl+Shift+R) if shielding KMLs don't appear within ~10 seconds. Works around an intermittent first-time-setup race we haven't fully diagnosed.
