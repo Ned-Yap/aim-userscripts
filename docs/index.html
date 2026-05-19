@@ -161,14 +161,21 @@
     margin: 32px 0;
   }
   .step {
+    display: block;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 20px;
     text-align: center;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, transform 0.1s;
+    color: var(--text);
   }
-  .step:hover { border-color: var(--cyan-dim); }
+  .step:hover {
+    border-color: var(--cyan);
+    text-decoration: none;
+    transform: translateY(-2px);
+    color: var(--text);
+  }
   .step-num {
     display: inline-block;
     width: 32px;
@@ -339,31 +346,31 @@
     <h2>Quick start</h2>
     <p class="lede">Five steps, about five minutes. Auto-updates take over after that.</p>
     <div class="steps">
-      <div class="step">
+      <a class="step" href="#tampermonkey">
         <div class="step-num">1</div>
         <div class="step-title">Tampermonkey</div>
         <div class="step-desc">Browser extension that runs userscripts</div>
-      </div>
-      <div class="step">
+      </a>
+      <a class="step" href="#cleanup">
         <div class="step-num">2</div>
         <div class="step-title">Clean up</div>
         <div class="step-desc">Remove any old AIM scripts (skip if new install)</div>
-      </div>
-      <div class="step">
+      </a>
+      <a class="step" href="#install">
         <div class="step-num">3</div>
         <div class="step-title">Install scripts</div>
         <div class="step-desc">One click each — Tampermonkey prompts you</div>
-      </div>
-      <div class="step">
+      </a>
+      <a class="step" href="#github-token">
         <div class="step-num">4</div>
         <div class="step-title">GitHub token</div>
         <div class="step-desc">Unlocks the shielding KML overlays</div>
-      </div>
-      <div class="step">
+      </a>
+      <a class="step" href="#paste-token">
         <div class="step-num">5</div>
         <div class="step-title">Paste &amp; test</div>
         <div class="step-desc">Drop the token into AIM Controls — done</div>
-      </div>
+      </a>
     </div>
   </div>
 </section>
@@ -377,6 +384,19 @@
       <a class="btn btn-browser" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Chrome / Edge / Brave</a>
       <a class="btn btn-browser" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>
       <a class="btn btn-browser" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>
+    </div>
+
+    <h3>Set auto-update to "Every Day"</h3>
+    <p>Tampermonkey sometimes defaults this to <strong>Never</strong>, which means you never see new versions until you go check manually. Set it once and forget it:</p>
+    <ol>
+      <li>Click the Tampermonkey icon in your browser toolbar → <strong>Dashboard</strong></li>
+      <li>Top right → <strong>Settings</strong> tab</li>
+      <li>Scroll to <strong>Userscript Update</strong></li>
+      <li>Set <strong>Check Interval</strong> to <strong>Every Day</strong> (recommended) or <strong>Every Hour</strong> if you want updates faster</li>
+      <li>Tick <strong>Update disabled scripts</strong> too if you want disabled scripts kept up to date (optional)</li>
+    </ol>
+    <div class="callout note">
+      <strong>Why this matters:</strong> the install links here use <code>@updateURL</code> + <code>@downloadURL</code> headers so Tampermonkey can pull new versions automatically — but only if the interval isn't set to Never. With "Every Day" you'll get prompted for updates within ~24h of any push, no action needed on your end.
     </div>
   </div>
 </section>
