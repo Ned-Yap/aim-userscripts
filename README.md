@@ -2,6 +2,8 @@
 
 A set of browser userscripts that streamline the AIM drone-mission workflow on `percepto.app`. Distributed via Tampermonkey + GitHub — install once, get auto-updates.
 
+> 📖 **For coworkers installing:** the friendly install guide lives at **[ned-yap.github.io/aim-userscripts](https://ned-yap.github.io/aim-userscripts/)** — styled, click-through, 5 minutes end to end. The README below is the same content in raw form (good if you're already poking around the repo).
+
 ---
 
 ## Quick start (5 minutes)
@@ -181,7 +183,7 @@ To check manually: Tampermonkey dashboard → "Check for userscript updates" (to
 
 **"My panel settings are out of date / scripts look weird after lots of updates"** — Hard refresh: empty cache + reload (Ctrl+Shift+Delete → cached images, or DevTools → Network tab → "Disable cache" while devtools open + reload).
 
-**"GitHub Connection stays gray / red"** — Token isn't reaching the script. Re-paste it; make sure you copied the full `github_pat_…` string with no whitespace. Check that the token has Contents: Read on `aim-userscripts-data` specifically.
+**"GitHub Connection stays gray / red"** — Token isn't reaching the script. Re-paste it; make sure you copied the full `ghp_…` string with no whitespace. Check that the token has `repo` scope enabled.
 
 **"Power lines render in the wrong place / not at all"** — The site might not have KMLs uploaded yet. Ask Payden.
 
