@@ -8,6 +8,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
+- **AIM Map Styler v34.8** — cosmetic-only cleanup of the v34.7 noise:
+  - `SET_TOGGLE master=...` now only logs when the value actually transitions. The Control Panel echoes a SET_TOGGLE storm whenever any script re-registers (and with several scripts × TOP+IFRAME contexts there are dozens per page load) — v34.7's logging was firing on every redundant arrival. `setActiveState` is already idempotent so the repeated calls weren't doing any harm, just spamming the console.
+  - "hide-satellite is ON but no tile layer matched" warning no longer fires when *no* tile layers have been seen yet — that just means the first runUpdate happened before Leaflet finished adding the host's tile layers, not that the URL pattern is wrong. Only warns once we've seen ≥1 tile layer and still found no match.
 - **AIM Map Styler v34.7** — fixes "won't even load" symptom that started after a browser-cache clear. Root cause: master toggle defaulted to `false` in the schema, so a fresh install (or one whose Control Panel storage got wiped) stayed dormant — KMLs loaded into memory but `runUpdate` never ran, so nothing rendered and the satellite-hide never applied. Two fixes:
   1. Master toggle now defaults to `true`. New installs and post-cache-clear users get a working styler out of the box.
   2. Safety net: if no `SET_TOGGLE master=...` message arrives from the Control Panel within 1.5s of register, auto-activate (and log "auto-activating (schema default)"). Catches the case where the panel's storage was wiped or it never echoes the toggle for some reason. Skipped if a SET_TOGGLE *did* arrive with `master=false` (user explicitly off).

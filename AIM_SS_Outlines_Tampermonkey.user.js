@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.7
+// @version      34.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.7' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.8' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.7';
+    const SCRIPT_VERSION = '34.8';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -684,11 +684,14 @@
                     layer._aimHidden = false;
                 }
             });
-            // Diagnostic: warn ONCE per session if hide is on but no URL
-            // matched our satellite patterns — flags the case where the user
-            // toggled Hide-Satellite but nothing got hidden because the
-            // provider URL isn't in _SAT_URL_PATTERNS.
-            if (hide && !matchedAny && !applyMapBackgroundVisibility._warnedNoMatch) {
+            // Diagnostic: warn ONCE per session if hide is on, we've seen
+            // at least one tile layer, but none matched our satellite
+            // patterns. Flags the case where the provider URL isn't in
+            // _SAT_URL_PATTERNS. The seenTileLayers guard avoids a false
+            // alarm when applyMapBackgroundVisibility runs BEFORE Leaflet
+            // has added the host's tile layers (we're just too early — not
+            // a pattern miss).
+            if (hide && !matchedAny && _seenTileLayerUrls.size > 0 && !applyMapBackgroundVisibility._warnedNoMatch) {
                 applyMapBackgroundVisibility._warnedNoMatch = true;
                 console.warn(`${TAG} hide-satellite is ON but no tile layer matched satellite URL patterns. See "tile layer present:" lines above and share the satellite URL so we can add the pattern.`);
             }
@@ -1866,7 +1869,15 @@
                 const prev = toggleState[msg.toggleId];
                 toggleState[msg.toggleId] = newVal;
                 if (msg.toggleId === 'master') {
-                    console.log(`${TAG} SET_TOGGLE master=${!!newVal}`);
+                    // Only log when the value actually transitions. The Control
+                    // Panel re-broadcasts SET_TOGGLE on every REGISTER from any
+                    // script — with several scripts × TOP+IFRAME contexts, that's
+                    // dozens of redundant arrivals per page load. setActiveState
+                    // is idempotent so calling it repeatedly is fine; we just
+                    // don't want to log every one.
+                    if (!!newVal !== !!prev) {
+                        console.log(`${TAG} SET_TOGGLE master=${!!newVal}`);
+                    }
                     setActiveState(!!newVal);
                 } else if (isActive && prev !== newVal) {
                     runUpdate();
