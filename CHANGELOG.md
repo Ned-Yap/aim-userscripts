@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-20
+
+- **AIM Map Styler v34.15** — bulletproof vertex hide. v34.12-v34.14 relied on a class-selector CSS rule with `!important` (`.cls.cls { display: none !important }`) to hide flight-path vertex dots when not in edit mode. Inspector-confirmed: the rule was present in our injected style tag but the dot's computed `display` was still `flex` — Percepto's rules were winning the specificity/order battle. Switched to per-element inline `style.setProperty('display', 'none', 'important')`. Inline `!important` beats any class selector regardless of specificity or source order. Red/disconnect/error variants still preserved via className substring check. Cleanup on master-off clears the inline display so Percepto's natives return.
+
 ## 2026-05-19
 
 - **AIM Map Styler v34.14** — cap the TOP-frame `.leaflet-map-pane` retry at 5 attempts (1s) instead of 150 (30s). Same logic as the Control Panel v1.19 fix: Percepto's Leaflet map is always in the IFRAME, so the TOP-frame styler's 30s retry-then-warn loop was producing dozens of stack traces per page load for no benefit. IFRAME keeps the full 30s budget (its first load can take ~7s on some pages). TOP now logs once that it's expected to have no map-pane, then quiets down.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.14
+// @version      34.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.14' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.15' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.14';
+    const SCRIPT_VERSION = '34.15';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -926,7 +926,13 @@
             (document.head || document.documentElement).appendChild(el);
         }
         const masterOn = toggleState['fp.show'] !== false;
-        if (!masterOn) { el.textContent = ''; return; }
+        const verts = document.querySelectorAll('.map-marker__flight-path-vertex');
+        if (!masterOn) {
+            el.textContent = '';
+            // Restore any inline display we forced
+            verts.forEach(d => d.style.removeProperty('display'));
+            return;
+        }
 
         // Auto-detect edit mode: Percepto signals it via black-dashed lines
         // on the canvas (FFZ or FP). If ANY edit-mode line exists, vertices
@@ -943,7 +949,10 @@
         const margin = size / 2;
 
         if (show) {
-            // Render all vertex dots at the user's color + size.
+            // Render all vertex dots at the user's color + size. Class-selector
+            // CSS is enough here because we're not trying to override anything
+            // critical — Percepto's defaults give visible dots, we just tweak
+            // size/color on top.
             el.textContent = `
                 .map-marker__flight-path-vertex {
                     width: ${size}px !important;
@@ -953,23 +962,26 @@
                     background-color: ${color} !important;
                 }
             `;
+            verts.forEach(d => d.style.removeProperty('display'));
         } else {
-            // Hide all vertex dots EXCEPT disconnected/error variants
-            // (Percepto signals those with modifier classes containing
-            // "disconnect", "error", "invalid", or "warning"). Specificity
-            // bumped to .class.class to beat Percepto's CSS — single-class
-            // selectors were getting overridden by their own rules.
-            el.textContent = `
-                .map-marker__flight-path-vertex.map-marker__flight-path-vertex {
-                    display: none !important;
+            // HIDE PATH — bulletproof. Class-selector CSS was losing the
+            // specificity/source-order battle against Percepto's own rules
+            // (computed `display: flex` was sticking despite our class CSS
+            // having !important). Switch to per-element inline `display: none`
+            // with !important priority. Inline style beats any class selector,
+            // period. Keeps red/disconnect/error variants visible via the
+            // attribute-substring check on className.
+            el.textContent = ''; // class-selector CSS no longer needed for hide
+            verts.forEach(d => {
+                const cls = (typeof d.className === 'string') ? d.className
+                    : (d.className && d.className.baseVal) || '';
+                if (/disconnect|error|invalid|warning/i.test(cls)) {
+                    // Always-visible variant — make sure no forced hide lingers.
+                    d.style.removeProperty('display');
+                } else {
+                    d.style.setProperty('display', 'none', 'important');
                 }
-                .map-marker__flight-path-vertex[class*="disconnect" i],
-                .map-marker__flight-path-vertex[class*="error" i],
-                .map-marker__flight-path-vertex[class*="invalid" i],
-                .map-marker__flight-path-vertex[class*="warning" i] {
-                    display: block !important;
-                }
-            `;
+            });
         }
     }
 
@@ -2001,6 +2013,11 @@
         // Remove the FP vertex CSS override so Percepto's native styling returns.
         const vStyle = document.getElementById(FP_VERTEX_STYLE_ID);
         if (vStyle) vStyle.remove();
+        // Clear any inline `display: none` we forced on vertex dots so
+        // Percepto's natives become visible again when the styler deactivates.
+        document.querySelectorAll('.map-marker__flight-path-vertex').forEach(d => {
+            d.style.removeProperty('display');
+        });
         // Restore the satellite base tile layer if we hid it.
         restoreMapBackground();
         // Restore ortho brightness + native zoom if we changed them.
