@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.15
+// @version      34.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.15' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.16' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.15';
+    const SCRIPT_VERSION = '34.16';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -120,7 +120,7 @@
                 { id: 'fp.65ft-color', label: '65ft band color', type: 'color', default: '#1ca0de' },
                 { id: 'fp.65ft-opacity', label: '65ft band opacity', type: 'number',
                   min: 0.05, max: 1, step: 0.05, default: 0.225, unit: 'fill' },
-                { id: 'fp.show-vertices', label: 'Always show vertex dots (off: only while editing)', type: 'boolean', default: false },
+                { id: 'fp.show-vertices', label: 'Show flight-path vertex dots', type: 'boolean', default: false },
                 { id: 'fp.vertex-color', label: 'Vertex dot color', type: 'color', default: '#1ca0de' },
                 { id: 'fp.vertex-size', label: 'Vertex dot size', type: 'number',
                   min: 2, max: 20, step: 1, default: 10, unit: 'px' },
@@ -934,14 +934,14 @@
             return;
         }
 
-        // Auto-detect edit mode: Percepto signals it via black-dashed lines
-        // on the canvas (FFZ or FP). If ANY edit-mode line exists, vertices
-        // become visible automatically so the user can grab them. computeUpdateHash
-        // already includes editN, so toggling in/out of edit mode triggers a
-        // runUpdate → applyVertexStyle re-evaluation within ~50ms.
-        const inEditMode = document.querySelector(EDIT_MODE_SELECTOR) !== null;
-        const alwaysShow = toggleState['fp.show-vertices'] === true;
-        const show = alwaysShow || inEditMode;
+        // Note: previous versions auto-showed vertices when EDIT_MODE_SELECTOR
+        // matched anything. That selector is too broad — it picks up the
+        // always-present native FFZ + FP dashed outlines (every site has
+        // dozens), so `inEditMode` evaluated true permanently and dots were
+        // never hidden. Until we identify a tighter "is the user editing
+        // RIGHT NOW" signal, the toggle is the sole control: ON = always
+        // show, OFF = always hide (except red/error variants).
+        const show = toggleState['fp.show-vertices'] === true;
 
         const color = toggleState['fp.vertex-color'] || '#1ca0de';
         const sizeRaw = Number(toggleState['fp.vertex-size']);
