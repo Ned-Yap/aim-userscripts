@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.28
+// @version      34.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -15,6 +15,7 @@
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
 
@@ -41,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.28';
+    const SCRIPT_VERSION = '34.29';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -297,11 +298,12 @@
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
     const KMLS_BRANCH = 'main';
-    // v2 (Map Styler 34.21+): features now carry pmIdx + visible. Old
-    // cached features lack those, so right-click would fail until the
-    // network refetch completed. Bumping the key skips the old cache
-    // entirely (tiny cost — 2 KMLs × ~50KB redownload on first load).
-    const KML_CACHE_PREFIX = 'aim-kml-cache-v2-';
+    // v3 (Map Styler 34.29+): cache entries now carry the resolved
+    // filename (e.g. "1596-distro.kml" vs "1596-Distro.kml" vs ".kmz")
+    // so subsequent commits/splits hit the same file the fetch resolved.
+    // v2 (34.21): features carry pmIdx + visible.
+    // Bumping skips old cache entries; small refetch cost on first load.
+    const KML_CACHE_PREFIX = 'aim-kml-cache-v3-';
     const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}`
     const GITHUB_API_BASE = 'https://api.github.com';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
@@ -338,6 +340,11 @@
     const kmlFeatures = {};
     const kmlFetching = new Set();
     const kmlMissing = new Set();
+    // kmlResolvedPath: { [`${siteID}|${type}`]: 'siteID-Type.kml' } — the
+    // actual filename the multi-candidate fetcher resolved to. Used by
+    // commit/split so writes target the same file that was read. Filled
+    // from cache on load and from a successful 200 on fetch.
+    const kmlResolvedPath = {};
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
     // Tracks whether we've already warned about no-token in the current
@@ -1195,7 +1202,8 @@
             const cached = gmGet(KML_CACHE_PREFIX + key, null);
             if (cached && Array.isArray(cached.features)) {
                 kmlFeatures[key] = cached.features;
-                console.log(`${TAG} KML ${key} loaded from cache (${cached.features.length} features)`);
+                if (cached.path) kmlResolvedPath[key] = cached.path;
+                console.log(`${TAG} KML ${key} loaded from cache (${cached.features.length} features, path: ${cached.path || '?'})`);
             }
         }
 
@@ -1203,11 +1211,6 @@
         // GM storage (per-script — only useful if we wrote it ourselves).
         const token = cachedToken || gmGet(TOKEN_KEY, '');
         if (!token) {
-            // Warn + request token only ONCE per token-lost period. The panel
-            // echoes SET_TOGGLE messages for every toggle on REGISTER, each
-            // of which triggers a render → fetch attempt → would-be-warning,
-            // so this used to spam ~14 lines + 14 REQUEST_TOKEN messages
-            // every panel registration.
             if (!warnedNoToken) {
                 warnedNoToken = true;
                 console.warn(`${TAG} no GitHub token cached yet — waiting for TOKEN_VALUE from control panel (will auto-retry when it arrives)`);
@@ -1215,55 +1218,126 @@
             }
             return;
         }
-        warnedNoToken = false; // reset for next token-lost period
+        warnedNoToken = false;
         if (typeof GM_xmlhttpRequest !== 'function') {
             console.warn(`${TAG} GM_xmlhttpRequest unavailable — script grants may need re-approval after update`);
             return;
         }
 
         kmlFetching.add(key);
-        const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${siteID}-${type}.kml`;
-        console.log(`${TAG} fetching ${type} KML for site ${siteID}`);
-        try {
-            GM_xmlhttpRequest({
+
+        // Multi-candidate filename fallback. GitHub raw URLs are case-
+        // sensitive and we accept either .kml or .kmz. Try lowercase first
+        // (matches the 1595/1597 convention) and capitalize-first as a
+        // forgiveness layer; .kml before .kmz since plain XML is cheaper
+        // than unzipping. First successful 200 wins; resolved filename is
+        // tracked in kmlResolvedPath[key] so commits/splits hit the same
+        // file the fetch resolved.
+        const cap = type.charAt(0).toUpperCase() + type.slice(1);
+        const candidates = [
+            { name: `${siteID}-${type}.kml`, ext: 'kml' },
+            { name: `${siteID}-${cap}.kml`, ext: 'kml' },
+            { name: `${siteID}-${type}.kmz`, ext: 'kmz' },
+            { name: `${siteID}-${cap}.kmz`, ext: 'kmz' },
+        ];
+
+        const tryFetch = (i) => {
+            if (i >= candidates.length) {
+                kmlFetching.delete(key);
+                kmlMissing.add(key);
+                console.log(`${TAG} no ${type} KML for site ${siteID} — none of: ${candidates.map(c => c.name).join(', ')}`);
+                return;
+            }
+            const c = candidates[i];
+            const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${c.name}`;
+            const opts = {
                 method: 'GET',
                 url,
                 headers: { 'Authorization': `Bearer ${token}` },
                 timeout: 15000,
                 onload: (resp) => {
-                    kmlFetching.delete(key);
                     if (resp.status === 200) {
-                        try {
-                            const features = parseKML(resp.responseText);
-                            kmlFeatures[key] = features;
-                            gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now() });
-                            console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features)`);
-                            if (isActive) runUpdate();
-                        } catch (e) {
-                            console.error(`${TAG} KML parse failed for ${key}:`, e);
+                        kmlResolvedPath[key] = c.name;
+                        if (c.ext === 'kmz') {
+                            parseKMZAndStore(resp.response, key, siteID, type, c.name);
+                        } else {
+                            kmlFetching.delete(key);
+                            try {
+                                const features = parseKML(resp.responseText);
+                                kmlFeatures[key] = features;
+                                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
+                                console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
+                                if (isActive) runUpdate();
+                            } catch (e) {
+                                console.error(`${TAG} KML parse failed for ${key}:`, e);
+                            }
                         }
                     } else if (resp.status === 404) {
-                        kmlMissing.add(key);
-                        console.log(`${TAG} no ${type} KML for site ${siteID} (404) — that type has no shielding configured here`);
+                        // Quiet on intermediate 404s; only log the final one.
+                        tryFetch(i + 1);
                     } else if (resp.status === 401) {
+                        kmlFetching.delete(key);
                         console.warn(`${TAG} ${type} KML fetch unauthorized (401) — check your PAT in AIM Controls`);
                     } else {
-                        console.warn(`${TAG} ${type} KML fetch HTTP ${resp.status}`);
+                        kmlFetching.delete(key);
+                        console.warn(`${TAG} ${type} KML fetch HTTP ${resp.status} (candidate ${c.name})`);
                     }
                 },
                 onerror: () => {
                     kmlFetching.delete(key);
-                    console.warn(`${TAG} ${type} KML fetch network error`);
+                    console.warn(`${TAG} ${type} KML fetch network error (candidate ${c.name})`);
                 },
                 ontimeout: () => {
                     kmlFetching.delete(key);
-                    console.warn(`${TAG} ${type} KML fetch timed out`);
+                    console.warn(`${TAG} ${type} KML fetch timed out (candidate ${c.name})`);
                 },
-            });
-        } catch (e) {
+            };
+            // KMZ is a ZIP archive — pull as binary so JSZip can unzip it.
+            if (c.ext === 'kmz') opts.responseType = 'arraybuffer';
+            console.log(`${TAG} fetching ${type} KML for site ${siteID} — trying ${c.name}`);
+            try {
+                GM_xmlhttpRequest(opts);
+            } catch (e) {
+                kmlFetching.delete(key);
+                console.error(`${TAG} ${type} KML fetch threw on ${c.name}:`, e);
+            }
+        };
+
+        tryFetch(0);
+    }
+
+    // Parses an in-memory KMZ ArrayBuffer (ZIP containing .kml + optional
+    // resource files) using JSZip. Picks doc.kml when present, else the
+    // first .kml entry. Result flows through parseKML() like a plain
+    // .kml fetch.
+    function parseKMZAndStore(arrayBuffer, key, siteID, type, sourceName) {
+        const Z = (typeof JSZip !== 'undefined') ? JSZip
+            : (typeof unsafeWindow !== 'undefined' && unsafeWindow.JSZip) ? unsafeWindow.JSZip
+            : (typeof window !== 'undefined' && window.JSZip) ? window.JSZip
+            : null;
+        if (!Z) {
             kmlFetching.delete(key);
-            console.error(`${TAG} ${type} KML fetch threw:`, e);
+            console.error(`${TAG} JSZip not loaded — cannot parse KMZ ${sourceName}. Reload the page; if the issue persists, check Tampermonkey grants on this script.`);
+            return;
         }
+        Z.loadAsync(arrayBuffer).then(zip => {
+            const kmlEntries = Object.values(zip.files).filter(f => /\.kml$/i.test(f.name) && !f.dir);
+            if (!kmlEntries.length) {
+                throw new Error('KMZ contains no .kml file');
+            }
+            const doc = kmlEntries.find(f => /(^|\/)doc\.kml$/i.test(f.name)) || kmlEntries[0];
+            return doc.async('string').then(text => {
+                const features = parseKML(text);
+                kmlFeatures[key] = features;
+                gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: sourceName });
+                console.log(`${TAG} ${type} KMZ for site ${siteID} loaded (${features.length} features, source: ${sourceName}, entry: ${doc.name})`);
+                kmlFetching.delete(key);
+                if (isActive) runUpdate();
+            });
+        }).catch(e => {
+            kmlFetching.delete(key);
+            console.error(`${TAG} KMZ unzip/parse failed for ${sourceName}:`, e);
+        });
     }
 
     // KML parser. Walks every <Placemark> and extracts either a LineString
@@ -1574,7 +1648,7 @@
             return;
         }
         showKMLToast(`Committing ${count} ${type} change${count === 1 ? '' : 's'}…`, 8000);
-        const path = `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -1659,7 +1733,7 @@
     }
 
     function putKMLToGitHub(siteID, type, xmlText, sha, count, pendingSnapshot, token) {
-        const path = `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         // btoa needs binary string; encode UTF-8 first so non-ASCII names
         // (rare in current KMLs but legal in the spec) round-trip cleanly.
@@ -1749,11 +1823,19 @@
             showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
             return;
         }
-        if (!confirm(`Split all multi-segment ${type} lines in site ${siteID} into single-segment placemarks?\n\nThis is a one-time, repo-wide change to ${siteID}-${type}.kml. File size will grow ~3-4× but every right-click after this will act on a single segment instead of a whole multi-vertex line.\n\nProceed?`)) {
+        // Resolved path comes from the multi-candidate fetcher — guarantees
+        // we hit the same file the user is currently viewing. Fall back to
+        // lowercase .kml (the convention) if nothing's been resolved yet
+        // (rare: user clicked Split before KML loaded).
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        if (/\.kmz$/i.test(path)) {
+            showKMLToast(`Split doesn't support .kmz yet (current file is ${path}). Convert to .kml first via Google Earth, push the .kml, then retry.`, 9000);
+            return;
+        }
+        if (!confirm(`Split all multi-segment ${type} lines in site ${siteID} into single-segment placemarks?\n\nThis is a one-time, repo-wide change to ${path}. File size will grow ~3-4× but every right-click after this will act on a single segment instead of a whole multi-vertex line.\n\nProceed?`)) {
             return;
         }
         showKMLToast(`Reading ${type} KML…`, 8000);
-        const path = `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -1879,7 +1961,7 @@
     }
 
     function putSplitToGitHub(siteID, type, xmlText, sha, message, token, result) {
-        const path = `${siteID}-${type}.kml`;
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
         let contentB64;
         try {

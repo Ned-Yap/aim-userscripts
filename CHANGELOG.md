@@ -8,6 +8,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **AIM Map Styler v34.29** — **multi-candidate KML fetch + .kmz support.** Two ergonomic upgrades for the data repo workflow.
+  - **Case-tolerant filename fetch.** GitHub raw URLs are case-sensitive, so `1596-Distro.kml` returned 404 when the script asked for `1596-distro.kml`. Now tries up to four candidates in order: `siteID-type.kml` (preferred), `siteID-Type.kml`, `siteID-type.kmz`, `siteID-Type.kmz`. First 200 wins; only one entry in the console.
+  - **.kmz support.** KMZ is a ZIP wrapping a `.kml` plus optional resources. Added JSZip via `@require` (cdnjs). On a .kmz hit we pull as `arraybuffer`, unzip in-browser, pick `doc.kml` or the first .kml entry, and parse like a normal KML. Coworkers can upload Google Earth's default `.kmz` save format without converting first.
+  - **Resolved-path tracking.** The fetcher records which filename actually returned 200 in `kmlResolvedPath[siteID|type]`. Subsequent operations (Split, future Commit) target that same file so writes don't drift into a different case/extension. Cached to GM along with features so the resolution survives reloads.
+  - **Split now rejects .kmz** (until we add ZIP repacking). Toast hints to convert to .kml first.
+  - **KML cache key bumped to `aim-kml-cache-v3-`** so the new cache schema (with `path`) isn't merged with v2 entries; one-time refetch on first load.
+- **AIM Map Styler v34.28** — gate TRIGGER_ACTION + HOTKEY_FIRED to focused tab. Multi-tab safety: clicking Split on site 1597 in Tab A no longer fires confirm() in Tab B's site 1599. Uses `document.hasFocus()` — only the OS-focused tab handles the action; others silently ignore.
+- **AIM Map Styler v34.27** — gate TRIGGER_ACTION to IFRAME context only. Was firing in both TOP + IFRAME (BroadcastChannel delivers to all), causing Split's confirm dialog to appear twice + risking double GitHub PUT.
 - **AIM Map Styler v34.26** — **E1 model pivot: hide/show is now per-user view only, never commits to GitHub.** Treating the KML as the canonical ~100%-of-real-world-infrastructure source of truth and pulling hide/show out of the commit path entirely.
   - **Removed** the per-category "Commit pending changes to GitHub" button. Hide/Unhide writes only to local GM storage now; nothing syncs to the repo.
   - **Added "Clear all my hides for this site"** button per category — wipes local pending in one click + re-renders.
