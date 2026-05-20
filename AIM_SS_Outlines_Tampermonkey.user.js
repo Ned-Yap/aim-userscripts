@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.13
+// @version      34.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.13' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.14' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.13';
+    const SCRIPT_VERSION = '34.14';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -2052,8 +2052,17 @@
         const container = document.querySelector('.leaflet-map-pane')
             || document.querySelector('.leaflet-overlay-pane');
         if (!container) {
-            if (attempt > 150) {
-                console.warn(`${TAG} gave up waiting for .leaflet-map-pane after 30s`);
+            // TOP frame caps at 5 attempts (1s) because Percepto's Leaflet
+            // map is always in the IFRAME — TOP retrying for 30s is just
+            // noise. IFRAME keeps the full 30s budget because its first-load
+            // can take ~7s on some pages.
+            const cap = (CONTEXT === 'TOP') ? 5 : 150;
+            if (attempt > cap) {
+                if (CONTEXT === 'TOP') {
+                    console.log(`${TAG} no map-pane in TOP frame after ${cap} tries — that's expected; map lives in iframe.`);
+                } else {
+                    console.warn(`${TAG} gave up waiting for .leaflet-map-pane after 30s`);
+                }
                 return;
             }
             mapPaneWaitTimer = setTimeout(() => attachObserverWhenReady(attempt + 1), 200);
