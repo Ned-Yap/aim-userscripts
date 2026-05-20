@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.25
+// @version      34.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.25';
+    const SCRIPT_VERSION = '34.26';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -161,10 +161,12 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'distro.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 3, unit: 'px' },
-                { type: 'header', label: 'Editing (E1 — hide/show)' },
-                { id: 'distro.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
-                { id: 'distro.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
-                { id: 'distro-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-distro' },
+                { type: 'header', label: 'Local hides (per-user view)' },
+                { id: 'distro.edit-mode', label: 'Hide mode (right-click a line)', type: 'boolean', default: false },
+                { id: 'distro.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
+                { id: 'distro.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
+                { id: 'distro-clear-hides', label: 'Clear all my hides for this site', type: 'button', action: 'clear-hides-distro' },
+                { type: 'header', label: 'KML data (commits to GitHub)' },
                 { id: 'distro-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-distro' },
             ],
         },
@@ -181,10 +183,12 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'trans.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 4, unit: 'px' },
-                { type: 'header', label: 'Editing (E1 — hide/show)' },
-                { id: 'trans.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
-                { id: 'trans.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
-                { id: 'trans-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-trans' },
+                { type: 'header', label: 'Local hides (per-user view)' },
+                { id: 'trans.edit-mode', label: 'Hide mode (right-click a line)', type: 'boolean', default: false },
+                { id: 'trans.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
+                { id: 'trans.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
+                { id: 'trans-clear-hides', label: 'Clear all my hides for this site', type: 'button', action: 'clear-hides-trans' },
+                { type: 'header', label: 'KML data (commits to GitHub)' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
             ],
         },
@@ -1378,6 +1382,22 @@
         setPending(siteID, type, p);
     }
 
+    // "Clear all my hides for this site" button handler. Resets local
+    // pending state for one category to empty + re-renders so any
+    // hidden lines come back. Local-only — no GitHub roundtrip.
+    function clearLocalHides(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const before = pendingCount(siteID, type);
+        if (before === 0) {
+            showKMLToast(`No local ${type} hides to clear.`, 2500);
+            return;
+        }
+        setPending(siteID, type, {});
+        showKMLToast(`Cleared ${before} local ${type} hide${before === 1 ? '' : 's'}.`, 3500);
+        if (isActive) runUpdate();
+    }
+
     // --- KML edit UI: right-click context menu + toast ---
     const KML_CTX_MENU_ID = 'aim-kml-ctx-menu';
     const KML_TOAST_ID = 'aim-kml-toast';
@@ -1527,6 +1547,14 @@
     }
 
     // --- Commit pending changes to GitHub via Contents API ---
+    //
+    // RESERVED FOR FUTURE PHASES (E2 delete, E3 vertex edit, E4 add line).
+    // E1 (current) intentionally does NOT commit hide/show to GitHub —
+    // local hides are a per-user view filter, the KML stays canonical
+    // ~100% of real-world infrastructure. The pipeline below
+    // (commitKMLChanges → applyPendingToKML → putKMLToGitHub) is the
+    // exact write-back plumbing E2/E3/E4 will use for actual KML data
+    // changes, so it stays in place. No UI path reaches it in v34.26+.
     function commitKMLChanges(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
@@ -2012,12 +2040,12 @@
             p.setAttribute('d', d);
             p.setAttribute('fill', 'none');
             if (!isVis) {
-                // Ghost-render: dashed gray over its true placement. Width
-                // matches the category's normal thickness so the hit-target
-                // for right-click → Unhide is the same size as a visible
-                // line — v34.24 used width=2 which made ghost lines very
-                // hard to right-click on dense maps.
-                p.setAttribute('stroke', '#888');
+                // Ghost-render: dashed in the user's hidden-color over the
+                // line's true placement. Width matches normal thickness so
+                // the right-click hit-target is identical to a visible
+                // line. Default color is gray; user can tweak per-category.
+                const hiddenColor = toggleState[`${type}.hidden-color`] || '#888888';
+                p.setAttribute('stroke', hiddenColor);
                 p.setAttribute('stroke-opacity', '0.7');
                 p.setAttribute('stroke-width', String(thickness));
                 p.setAttribute('stroke-dasharray', '6 6');
@@ -2976,8 +3004,8 @@
                 // Button-type controls in the panel broadcast this when clicked.
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
-                else if (msg.actionId === 'commit-distro') commitKMLChanges('distro');
-                else if (msg.actionId === 'commit-trans') commitKMLChanges('trans');
+                else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
+                else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
                 else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
                 else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
             } else if (msg.type === 'PERF_TOGGLE') {

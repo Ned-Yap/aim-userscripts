@@ -8,6 +8,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **AIM Map Styler v34.26** — **E1 model pivot: hide/show is now per-user view only, never commits to GitHub.** Treating the KML as the canonical ~100%-of-real-world-infrastructure source of truth and pulling hide/show out of the commit path entirely.
+  - **Removed** the per-category "Commit pending changes to GitHub" button. Hide/Unhide writes only to local GM storage now; nothing syncs to the repo.
+  - **Added "Clear all my hides for this site"** button per category — wipes local pending in one click + re-renders.
+  - **Added "Hidden color" color picker** per category (default `#888888` gray) — ghost-render dashed stroke uses this color so you can pick whatever stands out for your eye.
+  - **Renamed "Edit mode" → "Hide mode"** to make the local-only nature obvious.
+  - **Renamed "Show hidden lines (dashed gray)" → "Show my hidden lines (dashed)"** for the same reason.
+  - **Reorganized the Editing sub-section** of each category into two sub-headers: **"Local hides (per-user view)"** and **"KML data (commits to GitHub)"**. The Split button stays in the GitHub section since splitting is a real data improvement that benefits all coworkers.
+  - **Commit infrastructure preserved** — `commitKMLChanges` / `applyPendingToKML` / `putKMLToGitHub` are kept in place but no UI path reaches them. They're the exact pipeline E2 (delete bogus lines), E3 (vertex edit), and E4 (add new line) will need when those phases ship.
 - **AIM Map Styler v34.25** — **per-category "Split multi-segment lines (one-time)" button** + ghost-render hit-area fix.
   - **Split button** (one per Distribution / Transmission Editing sub-section). Walks the current site's KML, finds every Placemark whose single `<LineString>` has 3+ coordinates, replaces it with N-1 single-segment placemarks (each gets the original's `<name>` suffixed with ` (seg i/N)`, plus the original's `<styleUrl>` + `<visibility>`). Single commit per category. Confirmation dialog first; refuses to run if there are pending E1 hide/show changes (those reference the OLD `pmIdx` values and would silently apply to different placemarks after the split). File size grows ~3-4× but parser + render time stay sub-10ms.
   - **Purpose:** the original KMLs have huge multi-vertex polylines as single placemarks, so E1's right-click-to-hide was hiding half-mile chunks instead of single spans. After splitting, every right-click acts on exactly one segment. Once-per-file operation; future E4 (add line) will auto-split new lines on commit so the file never grows multi-segment again.
