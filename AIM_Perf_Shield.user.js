@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -92,6 +92,16 @@
     let hideSatellite = false;
     try { hideSatellite = GM_getValue(STORAGE_KEY_HIDE_SAT, false) === true; } catch (e) {}
 
+    // Ortho low-res mode (v1.7) — moved from Map Styler so users see the
+    // option alongside other performance toggles. Map Styler still owns the
+    // actual tile-cap logic; we just persist the preference and broadcast it.
+    const STORAGE_KEY_ORTHO_LOWRES = 'aim-perf-shield-ortho-lowres';
+    const STORAGE_KEY_ORTHO_LOWRES_ZOOM = 'aim-perf-shield-ortho-lowres-zoom';
+    let orthoLowRes = false;
+    let orthoLowResZoom = 15;
+    try { orthoLowRes = GM_getValue(STORAGE_KEY_ORTHO_LOWRES, false) === true; } catch (e) {}
+    try { orthoLowResZoom = Number(GM_getValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, 15)) || 15; } catch (e) {}
+
     // Chat-bubble CSS-hide config. Declared up here (NOT inside the function
     // section below) because the init block calls applyChatBlockCss() before
     // those function-section declarations are evaluated — function
@@ -131,7 +141,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.6';
+    const SCRIPT_VERSION = '1.7';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -158,6 +168,7 @@
     const activeBlocks = Object.keys(blockEnabled).filter(k => blockEnabled[k]);
     console.log(`${TAG} v${SCRIPT_VERSION} ready — active blocks: ${activeBlocks.length ? activeBlocks.join(', ') : 'none'}`);
     if (hideSatellite) console.log(`${TAG} hide-satellite ON — broadcasting to Map Styler`);
+    if (orthoLowRes) console.log(`${TAG} ortho low-res ON (cap zoom ${orthoLowResZoom}) — broadcasting to Map Styler`);
 
     // 0. Override HTMLScriptElement.prototype.src setter — fires BEFORE
     //    the browser starts loading when JS sets `script.src = 'url'`.
@@ -297,6 +308,8 @@
     function broadcastPerfSettings() {
         if (!controlChannel) return;
         controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'hide-satellite', value: hideSatellite });
+        controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'ortho-lowres', value: orthoLowRes });
+        controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'ortho-lowres-zoom', value: orthoLowResZoom });
     }
 
     // The panel uses toggleId='master' to signal the script's primary
@@ -317,12 +330,32 @@
             } else if (msg.type === 'REQUEST_PERF_SETTINGS') {
                 broadcastPerfSettings();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
-                const newVal = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                const rawVal = msg.value !== undefined ? msg.value : msg.enabled;
+                const newVal = !!rawVal;
                 if (msg.toggleId === 'hide-satellite') {
                     if (newVal !== hideSatellite) {
                         hideSatellite = newVal;
                         try { GM_setValue(STORAGE_KEY_HIDE_SAT, newVal); } catch (e) {}
                         console.log(`${TAG} hide-satellite ${newVal ? 'ON' : 'OFF'}`);
+                    }
+                    broadcastPerfSettings();
+                    return;
+                }
+                if (msg.toggleId === 'ortho-lowres') {
+                    if (newVal !== orthoLowRes) {
+                        orthoLowRes = newVal;
+                        try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES, newVal); } catch (e) {}
+                        console.log(`${TAG} ortho-lowres ${newVal ? 'ON' : 'OFF'}`);
+                    }
+                    broadcastPerfSettings();
+                    return;
+                }
+                if (msg.toggleId === 'ortho-lowres-zoom') {
+                    const n = Number(rawVal);
+                    if (!isNaN(n) && n !== orthoLowResZoom) {
+                        orthoLowResZoom = n;
+                        try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, n); } catch (e) {}
+                        console.log(`${TAG} ortho-lowres cap zoom = ${n}`);
                     }
                     broadcastPerfSettings();
                     return;
@@ -356,31 +389,50 @@
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Performance',
             description: 'Network-level blocks for stuff site builders don\'t need (weather, replay, chat) + map perf toggles',
             version: SCRIPT_VERSION,
+            // Two visual sub-groups via type:'header' dividers. Headers carry
+            // no state — they just label everything below them until the next
+            // header. The session-replay toggle keeps `master:true` so the
+            // script-level master rendering still works; the header above it
+            // visually anchors it in the Network blocks group.
             toggles: [
+                { type: 'header', label: 'Map performance' },
+                {
+                    id: 'hide-satellite',
+                    label: 'Hide satellite base tiles',
+                    type: 'boolean',
+                    default: false,
+                },
+                {
+                    id: 'ortho-lowres',
+                    label: 'Low-res orthomosaic (caps tile zoom)',
+                    type: 'boolean',
+                    default: false,
+                },
+                {
+                    id: 'ortho-lowres-zoom',
+                    label: 'Cap zoom at',
+                    type: 'number',
+                    min: 10, max: 20, step: 1, default: 15,
+                },
+                { type: 'header', label: 'Network blocks' },
                 {
                     id: 'master',
-                    label: 'Block session-replay recorder (reload page after toggle)',
+                    label: 'Block session-replay recorder (reload after toggle)',
                     type: 'boolean',
                     default: BLOCK_GROUPS['session-replay'].defaultEnabled,
                     master: true,
                 },
                 {
-                    id: 'hide-satellite',
-                    label: 'Hide satellite base tiles (use when ortho covers site)',
+                    id: 'block-intercom',
+                    label: 'Block chat widget (Zendesk · Intercom)',
                     type: 'boolean',
-                    default: false,
+                    default: BLOCK_GROUPS['block-intercom'].defaultEnabled,
                 },
                 {
                     id: 'block-weather',
-                    label: 'Block weather API (Percepto /weather_for_indication/)',
+                    label: 'Block weather indicator (pilots only)',
                     type: 'boolean',
                     default: BLOCK_GROUPS['block-weather'].defaultEnabled,
-                },
-                {
-                    id: 'block-intercom',
-                    label: 'Block chat widget (Zendesk + Intercom)',
-                    type: 'boolean',
-                    default: BLOCK_GROUPS['block-intercom'].defaultEnabled,
                 },
             ],
             hotkeys: [],

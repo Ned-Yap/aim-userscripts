@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js
 // @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -83,7 +83,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-ruler';
-    const SCRIPT_VERSION = '2.6';
+    const SCRIPT_VERSION = '2.7';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -106,7 +106,7 @@
         if (!controlChannel) return;
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Measure / Ruler',
-            version: SCRIPT_VERSION, group: 'Hotkeys',
+            version: SCRIPT_VERSION, group: 'Hotkeys', priority: 20,
             toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
             hotkeys: [{ id: 'invoke', label: 'Open Measure tool', default: 'Shift+R' }],
         });

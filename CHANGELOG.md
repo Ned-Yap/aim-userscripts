@@ -8,6 +8,29 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **Panel layout overhaul** — second-pass cleanup of ordering and wording across the whole panel; no functional behavior changed.
+  - **AIM Control Panel v1.21**:
+    - New `type: 'header'` for visual sub-section dividers in flat toggle lists. Used by Perf Shield to split its toggles into "Map performance" and "Network blocks" without forcing a master checkbox per sub-section.
+    - **Per-script `priority` field** for ordering scripts inside a group. The Hotkeys group now sorts simple per-click hotkeys first (Absolute Altitude / Ruler / Clear All / Copy Asset Name), then macros (New Entity Macro), then bulk multi-step tools (Bulk Mission Adder / Altitude Updater / Validator). Scripts without `priority` default to 100 and fall back to alphabetical ordering.
+  - **AIM Map Styler v34.20** — category reorder + label cleanup:
+    - Reordered Outlines categories to match drone-mission flow: **Flight Path → Free Fly Zone → Assets → Altitude markers → Distribution lines → Transmission lines → Orthomosaic → Coverage Validator → Advanced**.
+    - Dropped noisy suffixes: "Free Fly Zone (FFZ) - Overlays" → **"Free Fly Zone"**, "Asset - Overlays" → **"Assets"**, "Flight Path (FP) - Overlays" → **"Flight Path"**, "Altitude marker shield" → **"Altitude markers"**, "Distribution Lines (User KML)" → **"Distribution lines"** (KML noted in meta), etc.
+    - Master rename: "Show Overlays (Master)" → **"Show all overlays"**.
+    - **Ortho low-res controls moved out** of the Orthomosaic category into Perf Shield (see below). Orthomosaic category now has just Brightness.
+    - Toggle IDs are unchanged → all existing per-user prefs (colors / opacities / category masters) carry over with no migration needed.
+  - **AIM Performance Shield v1.7** — split into two sub-groups via the new header type:
+    - **Map performance**: Hide satellite base tiles · **Low-res orthomosaic (caps tile zoom)** + **Cap zoom at** *[both moved from Map Styler]* — driven via PERF_TOGGLE broadcast (same pattern as hide-satellite). Map Styler still owns the actual tile-cap implementation; Perf Shield just persists the preference + broadcasts it.
+    - **Network blocks**: Block session-replay recorder · Block chat widget (Zendesk · Intercom) · Block weather indicator (pilots only).
+    - Wording polish: "Block weather API (Percepto /weather_for_indication/)" → "Block weather indicator (pilots only)"; "Hide satellite base tiles (use when ortho covers site)" → "Hide satellite base tiles" (descriptions belong elsewhere, not in toggle labels).
+  - **Hotkeys group `priority` field** — added to all 8 hotkey scripts so they sort in intuitive order instead of alphabetical:
+    - **AIM Absolute Altitude v1.8** (priority 10)
+    - **AIM Measure / Ruler v2.7** (priority 20)
+    - **AIM Clear All v1.4** (priority 30)
+    - **AIM Copy Asset Name v1.6** (priority 40)
+    - **AIM New Entity Macro v1.7** (priority 50)
+    - **AIM Bulk Mission Adder v1.12** (priority 70)
+    - **AIM Bulk Altitude Updater v4.11** (priority 80)
+    - **AIM Bulk Validator v1.3** (priority 90)
 - **AIM Control Panel v1.20** — panel cleanup pass:
   - **Reset-to-default arrow on every customized control** (boolean / number / color / select). Same `↺` icon already used for hotkey rebinds; only appears when the value differs from the schema default. Click → deletes the user's override from prefs, broadcasts `SET_TOGGLE` with the default, owning script updates immediately. Type-aware comparison so e.g. `"0.5"` vs `0.5` doesn't show a stale arrow.
   - **Section order made intuitive** instead of pure alphabetical. New `SECTION_PRIORITY` map: Outlines (primary feature) → Performance → Hotkeys (now includes the bulk scripts) → anything else (alphabetical) → GitHub Connection (always last, lives outside the priority map). Easy to edit if you want a different order.

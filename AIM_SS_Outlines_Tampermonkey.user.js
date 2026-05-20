@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.19
+// @version      34.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,68 +40,18 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.19';
+    const SCRIPT_VERSION = '34.20';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
     // (color/opacity/distance) lives in Advanced as a shared knob since
     // toggles in different categories share the same shielding appearance.
     const TOGGLES = [
-        { id: 'master', label: 'Show Overlays (Master)', type: 'boolean', default: true, master: true },
-        {
-            type: 'category',
-            id: 'ffz-cat',
-            label: 'Free Fly Zone (FFZ) - Overlays',
-            meta: '(green)',
-            master: { id: 'ffz.show', default: true },
-            children: [
-                { id: 'ffz.buffer', label: 'Show buffer', type: 'boolean', default: true },
-                { id: 'ffz.distance', label: 'Buffer distance', type: 'number',
-                  min: 5, max: 500, step: 1, default: 15, unit: 'ft' },
-                { id: 'ffz.color', label: 'Buffer color', type: 'color', default: '#5fff5f' },
-                { id: 'ffz.opacity', label: 'Buffer opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
-                { id: 'ffz.line-color', label: 'Line color (override)', type: 'color', default: '#5fff5f' },
-                { id: 'ffz.line-opacity', label: 'Line opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
-                { id: 'ffz.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
-                { id: 'ffz.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
-                { id: 'ffz.shielding', label: 'Show shielding (200ft)', type: 'boolean', default: false },
-                { id: 'ffz.violations', label: 'Flag violations (assets within Xft)', type: 'boolean', default: true },
-                { id: 'ffz.violation-distance', label: 'Violation distance', type: 'number',
-                  min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
-                { id: 'ffz.hide-native', label: 'Hide native (green / dashed FFZ)', type: 'boolean', default: true },
-            ],
-        },
-        {
-            type: 'category',
-            id: 'asset-cat',
-            label: 'Asset - Overlays',
-            meta: '(white)',
-            master: { id: 'asset.show', default: true },
-            children: [
-                { id: 'asset.buffer', label: 'Show buffer', type: 'boolean', default: true },
-                { id: 'asset.distance', label: 'Buffer distance', type: 'number',
-                  min: 5, max: 500, step: 1, default: 15, unit: 'ft' },
-                { id: 'asset.color', label: 'Buffer color', type: 'color', default: '#ffffff' },
-                { id: 'asset.opacity', label: 'Buffer opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
-                { id: 'asset.line-color', label: 'Line color (override)', type: 'color', default: '#ffffff' },
-                { id: 'asset.line-opacity', label: 'Line opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
-                { id: 'asset.fill', label: 'Show asset fill', type: 'boolean', default: true },
-                { id: 'asset.fill-color', label: 'Fill color', type: 'color', default: '#ffffff' },
-                { id: 'asset.fill-opacity', label: 'Fill opacity', type: 'number',
-                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
-                { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
-                { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
-                { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
-            ],
-        },
+        { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
         {
             type: 'category',
             id: 'fp-cat',
-            label: 'Flight Path (FP) - Overlays',
+            label: 'Flight Path',
             meta: '(blue)',
             master: { id: 'fp.show', default: true },
             children: [
@@ -134,8 +84,58 @@
         },
         {
             type: 'category',
+            id: 'ffz-cat',
+            label: 'Free Fly Zone',
+            meta: '(green)',
+            master: { id: 'ffz.show', default: true },
+            children: [
+                { id: 'ffz.buffer', label: 'Show buffer', type: 'boolean', default: true },
+                { id: 'ffz.distance', label: 'Buffer distance', type: 'number',
+                  min: 5, max: 500, step: 1, default: 15, unit: 'ft' },
+                { id: 'ffz.color', label: 'Buffer color', type: 'color', default: '#5fff5f' },
+                { id: 'ffz.opacity', label: 'Buffer opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
+                { id: 'ffz.line-color', label: 'Line color (override)', type: 'color', default: '#5fff5f' },
+                { id: 'ffz.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
+                { id: 'ffz.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
+                { id: 'ffz.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
+                { id: 'ffz.shielding', label: 'Show shielding (200ft)', type: 'boolean', default: false },
+                { id: 'ffz.violations', label: 'Flag violations (assets within Xft)', type: 'boolean', default: true },
+                { id: 'ffz.violation-distance', label: 'Violation distance', type: 'number',
+                  min: 1, max: 100, step: 1, default: 15, unit: 'ft' },
+                { id: 'ffz.hide-native', label: 'Hide native (green / dashed FFZ)', type: 'boolean', default: true },
+            ],
+        },
+        {
+            type: 'category',
+            id: 'asset-cat',
+            label: 'Assets',
+            meta: '(white)',
+            master: { id: 'asset.show', default: true },
+            children: [
+                { id: 'asset.buffer', label: 'Show buffer', type: 'boolean', default: true },
+                { id: 'asset.distance', label: 'Buffer distance', type: 'number',
+                  min: 5, max: 500, step: 1, default: 15, unit: 'ft' },
+                { id: 'asset.color', label: 'Buffer color', type: 'color', default: '#ffffff' },
+                { id: 'asset.opacity', label: 'Buffer opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 0.4, unit: 'fill' },
+                { id: 'asset.line-color', label: 'Line color (override)', type: 'color', default: '#ffffff' },
+                { id: 'asset.line-opacity', label: 'Line opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
+                { id: 'asset.fill', label: 'Show asset fill', type: 'boolean', default: true },
+                { id: 'asset.fill-color', label: 'Fill color', type: 'color', default: '#ffffff' },
+                { id: 'asset.fill-opacity', label: 'Fill opacity', type: 'number',
+                  min: 0.05, max: 1, step: 0.05, default: 1, unit: 'fill' },
+                { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
+                { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
+                { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            type: 'category',
             id: 'altitude-cat',
-            label: 'Altitude marker shield',
+            label: 'Altitude markers',
             meta: '(purple)',
             master: { id: 'altitude.show', default: true },
             children: [
@@ -150,8 +150,8 @@
         {
             type: 'category',
             id: 'distro-cat',
-            label: 'Distribution Lines (User KML)',
-            meta: '(yellow)',
+            label: 'Distribution lines',
+            meta: '(yellow — KML)',
             master: { id: 'distro.show', default: true },
             children: [
                 { id: 'distro.outline', label: 'Show outlines', type: 'boolean', default: true },
@@ -165,8 +165,8 @@
         {
             type: 'category',
             id: 'trans-cat',
-            label: 'Transmission Lines (User KML)',
-            meta: '(red — taller / more hazardous)',
+            label: 'Transmission lines',
+            meta: '(red — KML · taller / more hazardous)',
             master: { id: 'trans.show', default: true },
             children: [
                 { id: 'trans.outline', label: 'Show outlines', type: 'boolean', default: true },
@@ -179,9 +179,20 @@
         },
         {
             type: 'category',
+            id: 'ortho-cat',
+            label: 'Orthomosaic',
+            meta: '(brightness)',
+            master: { id: 'ortho.show', default: true },
+            children: [
+                { id: 'ortho.brightness', label: 'Brightness', type: 'number',
+                  min: 0.2, max: 1.0, step: 0.05, default: 1.0, unit: '×' },
+            ],
+        },
+        {
+            type: 'category',
             id: 'validator-cat',
             label: 'Coverage Validator',
-            meta: '(200ft FAA rule — on-demand)',
+            meta: '(on-demand · 200ft FAA rule)',
             master: { id: 'validator.show', default: true },
             children: [
                 { id: 'validator.distance', label: 'Required coverage', type: 'number',
@@ -191,20 +202,6 @@
                 { id: 'validator-run', label: 'Run coverage check', type: 'button', action: 'run-validator' },
                 { id: 'validator-clear', label: 'Clear pins', type: 'button', action: 'clear-validator' },
                 { id: 'validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
-            ],
-        },
-        {
-            type: 'category',
-            id: 'ortho-cat',
-            label: 'Orthomosaic',
-            meta: '(brightness + perf)',
-            master: { id: 'ortho.show', default: true },
-            children: [
-                { id: 'ortho.brightness', label: 'Brightness', type: 'number',
-                  min: 0.2, max: 1.0, step: 0.05, default: 1.0, unit: '×' },
-                { id: 'ortho.low-res', label: 'Low-res mode (perf)', type: 'boolean', default: false },
-                { id: 'ortho.max-zoom', label: 'Low-res cap zoom', type: 'number',
-                  min: 10, max: 20, step: 1, default: 15 },
             ],
         },
         {
@@ -740,7 +737,14 @@
     // browser skips the tile-image paint entirely. Cache _aimHidden on the
     // layer so we know to restore. Errors are swallowed — if Leaflet internals
     // change, we fail open (no hide, visible satellite).
-    let perfHideSatellite = false; // mirrors AIM Perf Shield toggle state
+    let perfHideSatellite = false;     // mirrors AIM Perf Shield toggle state
+    // Ortho low-res lives in Perf Shield (v1.7+) — moved there for
+    // discoverability since it's a performance lever, not a style choice.
+    // Map Styler still implements the actual cap (it owns the ortho tile
+    // layer) but reads the user preference from these locals, which Perf
+    // Shield drives via PERF_TOGGLE messages on AIM_CONTROL_CHANNEL.
+    let perfOrthoLowRes = false;
+    let perfOrthoLowResZoom = 15;
     const _SAT_URL_PATTERNS = [
         /esri/i, /arcgis/i, /world_?imagery/i,
         /mapbox.*satellite/i, /tiles?\.virtualearth/i,
@@ -845,8 +849,9 @@
         const masterOn = toggleState['ortho.show'] !== false;
         if (!masterOn) { restoreOrthoSettings(); return; }
         const brightness = Number(toggleState['ortho.brightness']);
-        const lowRes = toggleState['ortho.low-res'] === true;
-        const maxZoom = Number(toggleState['ortho.max-zoom']) || 15;
+        // Low-res cap is driven by Perf Shield (see perfOrthoLowRes decl).
+        const lowRes = perfOrthoLowRes === true;
+        const maxZoom = Number(perfOrthoLowResZoom) || 15;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -2276,14 +2281,29 @@
                 // Button-type controls in the panel broadcast this when clicked.
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
-            } else if (msg.type === 'PERF_TOGGLE' && msg.key === 'hide-satellite') {
+            } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
-                // re-run so the satellite layer hides/shows immediately.
-                const next = !!msg.value;
-                if (next !== perfHideSatellite) {
-                    perfHideSatellite = next;
-                    if (isActive) runUpdate();
-                    else if (!next) restoreMapBackground();
+                // re-run so the change takes effect immediately.
+                if (msg.key === 'hide-satellite') {
+                    const next = !!msg.value;
+                    if (next !== perfHideSatellite) {
+                        perfHideSatellite = next;
+                        if (isActive) runUpdate();
+                        else if (!next) restoreMapBackground();
+                    }
+                } else if (msg.key === 'ortho-lowres') {
+                    const next = !!msg.value;
+                    if (next !== perfOrthoLowRes) {
+                        perfOrthoLowRes = next;
+                        if (isActive) runUpdate();
+                        else if (!next) restoreOrthoSettings();
+                    }
+                } else if (msg.key === 'ortho-lowres-zoom') {
+                    const n = Number(msg.value);
+                    if (!isNaN(n) && n !== perfOrthoLowResZoom) {
+                        perfOrthoLowResZoom = n;
+                        if (isActive && perfOrthoLowRes) runUpdate();
+                    }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 if (msg.hotkeyId === 'toggle-master') {

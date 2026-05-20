@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Copies the name of an asset on hover using Shift+Ctrl+Q. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -76,7 +76,7 @@
     const IS_TOP = CONTEXT === "TOP";
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-copy-asset';
-    const SCRIPT_VERSION = '1.5';
+    const SCRIPT_VERSION = '1.6';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -100,7 +100,7 @@
         if (!controlChannel) return;
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Copy Asset Name',
-            version: SCRIPT_VERSION, group: 'Hotkeys',
+            version: SCRIPT_VERSION, group: 'Hotkeys', priority: 40,
             toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
             hotkeys: [{ id: 'invoke', label: 'Copy hovered asset name', default: 'Shift+Ctrl+Q' }],
         });

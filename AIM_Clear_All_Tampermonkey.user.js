@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Clear All
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js
 // @description  Adds Shift+C hotkey for the Clear All button. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -82,7 +82,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-clear-all';
-    const SCRIPT_VERSION = '1.3';
+    const SCRIPT_VERSION = '1.4';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -105,7 +105,7 @@
         if (!controlChannel) return;
         controlChannel.postMessage({
             type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Clear All',
-            version: SCRIPT_VERSION, group: 'Hotkeys',
+            version: SCRIPT_VERSION, group: 'Hotkeys', priority: 30,
             toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
             hotkeys: [{ id: 'invoke', label: 'Clear All measurements', default: 'Shift+C' }],
         });

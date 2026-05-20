@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
@@ -31,7 +31,7 @@
         const IS_TOP = window === window.top;
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-mission-adder';
-        const SCRIPT_VERSION = '1.11';
+        const SCRIPT_VERSION = '1.12';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;
@@ -55,7 +55,7 @@
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Mission Adder',
                 description: 'Bulk add missions from a list. Only active on the merge_available_apps/step2 page.',
                 version: SCRIPT_VERSION,
-                group: 'Hotkeys',
+                group: 'Hotkeys', priority: 70,
                 toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
                 hotkeys: [{ id: 'invoke', label: 'Open Bulk Mission Adder', default: 'Shift+B' }],
             });

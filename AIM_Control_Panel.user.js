@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.20
+// @version      1.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -286,6 +286,7 @@
         const out = [];
         (toggles || []).forEach(t => {
             if (!t) return;
+            if (t.type === 'header') return; // purely visual divider, no stored state
             if ((t.type === 'advanced' || t.type === 'category') && Array.isArray(t.children)) {
                 if (t.type === 'category' && t.master && t.master.id) {
                     out.push({ id: t.master.id, default: t.master.default });
@@ -929,6 +930,20 @@
         const type = t.type || 'boolean';
         const value = getToggle(scriptId, t.id, t.default);
 
+        if (type === 'header') {
+            // Purely visual sub-section divider — no state, no checkbox, no
+            // collapse. Used to group flat lists of toggles into named
+            // segments (e.g. Perf Shield's "Map performance" / "Network
+            // blocks"). Children are NOT nested — they're peer siblings in
+            // the toggles list; the header just labels everything that
+            // follows it until the next header.
+            return `
+                <div style="padding:6px 10px 3px 10px;color:#7adfe6;font-size:10px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;background:rgba(20,210,220,0.04)">
+                    ${escapeHtml(t.label || '')}
+                </div>
+            `;
+        }
+
         if (type === 'category') {
             // Header row: optional master checkbox + label + meta + expand arrow.
             // Clicking the checkbox toggles its boolean; clicking anywhere else
@@ -1293,6 +1308,17 @@
         });
         groups.forEach((members, name) => {
             const key = `group:${name}`;
+            // Sort members WITHIN the group by REGISTER's optional `priority`
+            // field (lower first, default 100), tiebreak by display name.
+            // Lets us order Hotkeys as "simple → macros → bulk tools" instead
+            // of pure alphabetical. Scripts that don't set priority just
+            // fall back to alphabetical ordering with everything else at 100.
+            const sortedMembers = [...members].sort((a, b) => {
+                const pa = (typeof a.priority === 'number') ? a.priority : 100;
+                const pb = (typeof b.priority === 'number') ? b.priority : 100;
+                if (pa !== pb) return pa - pb;
+                return (a.name || a.scriptId).localeCompare(b.name || b.scriptId);
+            });
             sectionEntries.push({
                 key,
                 priority: SECTION_PRIORITY[key] !== undefined ? SECTION_PRIORITY[key] : 999,
@@ -1300,8 +1326,8 @@
                 renderFn: () => renderSection(
                     key,
                     name,
-                    `${members.length} script${members.length === 1 ? '' : 's'}`,
-                    members.map(s => renderScriptInner(s, true)).join(''),
+                    `${sortedMembers.length} script${sortedMembers.length === 1 ? '' : 's'}`,
+                    sortedMembers.map(s => renderScriptInner(s, true)).join(''),
                 ),
             });
         });
