@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -85,7 +85,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.5';
+    const SCRIPT_VERSION = '1.6';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -163,11 +163,22 @@
                         // 5. Restore Pin Interactivity
                         topEl.style.pointerEvents = originalPE;
 
-                        // 6. RE-CLICK PIN TO OPEN POPUP (Fix for popup closing)
-                        // Skipped when the user has popupDefaultClosed turned ON
-                        // — they want the popup closed by default and will
-                        // click the pin themselves when they want it open.
-                        if (!popupDefaultClosed) {
+                        // 6. POPUP STATE: Percepto opens the popup natively when
+                        // the pin drops. v1.5 incorrectly assumed the M2 cleanup
+                        // ABOVE was closing the popup and that re-clicking would
+                        // restore it — actually the popup stays open through the
+                        // cleanup. So when popupDefaultClosed is true, we have to
+                        // ACTIVELY close it (click the close button). When false,
+                        // we still do the safety re-click in case it got dismissed.
+                        if (popupDefaultClosed) {
+                            setTimeout(() => {
+                                const closeBtn = doc.querySelector('.leaflet-popup-close-button');
+                                if (closeBtn) {
+                                    closeBtn.click();
+                                    console.log("[AIM ALT] 🚪 Closed popup (default-closed mode)");
+                                }
+                            }, 50);
+                        } else {
                             setTimeout(() => {
                                  console.log("[AIM ALT] 🔄 Re-clicking pin to restore popup...");
                                  topEl.click();
@@ -207,9 +218,69 @@
             }
         };
 
+        // Right-click an altitude pin to delete it. Identifies pins by their
+        // src attribute (altitude-shadow / altitude-marker SVGs Percepto uses)
+        // — the hashed filename suffix changes per build so we match on the
+        // stable "altitude-" prefix. Find the Leaflet marker instance that
+        // owns this DOM element and call map.removeLayer() so Leaflet/Percepto
+        // forget about it entirely (just .remove()-ing the DOM would let
+        // React re-render it back). Falls back to DOM removal if we can't
+        // locate the Leaflet map (Map Styler patches L.Map to expose it).
+        var contextHandler = function(e) {
+            if (!masterEnabled) return;
+            var pin = e.target;
+            if (!pin || pin.tagName !== 'IMG') return;
+            if (!pin.classList || !pin.classList.contains('leaflet-marker-icon')) return;
+            var src = pin.getAttribute('src') || '';
+            if (!/altitude-(shadow|marker)/i.test(src)) return;
+
+            e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+
+            // Locate the Leaflet map. Map Styler's L.Map.initialize patch puts
+            // the map instance on the container as __aim_map__. We check a few
+            // fallbacks because Altitude script can't guarantee Map Styler ran
+            // its patch in time.
+            var doc = pin.ownerDocument || document;
+            var container = pin.closest('.leaflet-container') || doc.querySelector('.leaflet-container');
+            var map = container && (container.__aim_map__ || container._leaflet_map);
+            if (!map && container) {
+                for (var k in container) {
+                    try {
+                        var v = container[k];
+                        if (v && typeof v === 'object' && typeof v.eachLayer === 'function' && typeof v.removeLayer === 'function') {
+                            map = v; break;
+                        }
+                    } catch (e2) {}
+                }
+            }
+
+            if (!map || typeof map.eachLayer !== 'function') {
+                console.warn('[AIM ALT] right-click delete: no Leaflet map found, removing DOM only (Percepto may re-render)');
+                pin.remove();
+                return;
+            }
+
+            var removed = false;
+            map.eachLayer(function(layer) {
+                if (removed) return;
+                var layerEl = (typeof layer.getElement === 'function' && layer.getElement()) || layer._icon;
+                if (layerEl === pin) {
+                    try { map.removeLayer(layer); removed = true; } catch (e2) {}
+                }
+            });
+
+            if (removed) {
+                console.log('[AIM ALT] 🗑️ Deleted altitude pin via right-click');
+            } else {
+                console.warn('[AIM ALT] right-click delete: marker not found in eachLayer; falling back to DOM remove');
+                pin.remove();
+            }
+        };
+
         if (!window.aimAltInstalled) {
             window.addEventListener('keydown', keyHandler, true);
             window.addEventListener('mousedown', clickHandler, true);
+            window.addEventListener('contextmenu', contextHandler, true);
             window.aimAltInstalled = true;
         }
 
@@ -220,6 +291,7 @@
                 if (win && !win.aimAltInstalled) {
                     win.addEventListener('keydown', keyHandler, true);
                     win.addEventListener('mousedown', clickHandler, true);
+                    win.addEventListener('contextmenu', contextHandler, true);
                     win.aimAltInstalled = true;
                 }
             } catch(e) {}
