@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.24
+// @version      34.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.24';
+    const SCRIPT_VERSION = '34.25';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -165,6 +165,7 @@
                 { id: 'distro.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
                 { id: 'distro.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
                 { id: 'distro-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-distro' },
+                { id: 'distro-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-distro' },
             ],
         },
         {
@@ -184,6 +185,7 @@
                 { id: 'trans.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
                 { id: 'trans.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
                 { id: 'trans-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-trans' },
+                { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
             ],
         },
         {
@@ -1693,6 +1695,216 @@
         }
     }
 
+    // One-time per file: walks every placemark and splits any LineString
+    // with 3+ vertices (= 2+ segments) into N-1 single-segment placemarks,
+    // each preserving the parent's name + styleUrl. Single-segment lines
+    // pass through unchanged. After this, every right-click acts on a
+    // single segment instead of a half-mile of placemark.
+    //
+    // Refuses to run if pending hide/unhide changes exist for this type —
+    // those reference the OLD pmIdx values and would silently apply to
+    // different placemarks after the split. User must commit or clear
+    // pending first.
+    //
+    // Single commit message: "[AIM site <id>] <type>: split N placemarks into M segments".
+    function splitMultiSegmentPlacemarks(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        const pCount = pendingCount(siteID, type);
+        if (pCount > 0) {
+            showKMLToast(`Refusing to split: ${pCount} pending ${type} change${pCount === 1 ? '' : 's'}. Commit or clear them first (the split would shift placemark indices).`, 9000);
+            return;
+        }
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) { showKMLToast('No GitHub token — set one in AIM Controls first.', 4500); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        if (!confirm(`Split all multi-segment ${type} lines in site ${siteID} into single-segment placemarks?\n\nThis is a one-time, repo-wide change to ${siteID}-${type}.kml. File size will grow ~3-4× but every right-click after this will act on a single segment instead of a whole multi-vertex line.\n\nProceed?`)) {
+            return;
+        }
+        showKMLToast(`Reading ${type} KML…`, 8000);
+        const path = `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+                onload: (resp) => {
+                    if (resp.status !== 200) {
+                        showKMLToast(`Split GET failed: HTTP ${resp.status}.`, 5000);
+                        console.warn(`${TAG} split GET HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 400));
+                        return;
+                    }
+                    let json;
+                    try { json = JSON.parse(resp.responseText); }
+                    catch (e) { showKMLToast('Split failed: bad GitHub response.', 5000); return; }
+                    const sha = json && json.sha;
+                    const b64 = (json && json.content) ? String(json.content).replace(/\s/g, '') : '';
+                    if (!sha || !b64) { showKMLToast('Split failed: missing sha/content.', 5000); return; }
+                    let xmlText;
+                    try { xmlText = atob(b64); } catch (e) { showKMLToast('Split failed: decode error.', 5000); return; }
+                    let result;
+                    try { result = doSplitKML(xmlText); }
+                    catch (e) {
+                        showKMLToast(`Split failed: ${e.message}.`, 6000);
+                        console.error(`${TAG} doSplitKML failed:`, e);
+                        return;
+                    }
+                    if (result.splitCount === 0) {
+                        showKMLToast(`No multi-segment ${type} lines to split — file is already segment-level.`, 5000);
+                        return;
+                    }
+                    showKMLToast(`Splitting ${result.splitCount} placemark${result.splitCount === 1 ? '' : 's'} → ${result.newCount} segments…`, 8000);
+                    const message = `[AIM site ${siteID}] ${type}: split ${result.splitCount} placemark${result.splitCount === 1 ? '' : 's'} into ${result.newCount} segments`;
+                    putSplitToGitHub(siteID, type, result.xml, sha, message, token, result);
+                },
+                onerror: () => showKMLToast('Split failed: network error during GET.', 5000),
+                ontimeout: () => showKMLToast('Split failed: GET timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Split GET threw: ${e.message}.`, 5000);
+            console.error(`${TAG} split GET threw:`, e);
+        }
+    }
+
+    // Walks the KML, finds every Placemark with a LineString of N ≥ 3
+    // coordinates, replaces it with N-1 sibling Placemarks (each a 2-vertex
+    // LineString). Preserves the original's <name>, <styleUrl>, and
+    // <visibility>. Returns { xml, splitCount, newCount } where splitCount
+    // is the number of original placemarks split and newCount is the total
+    // number of new placemarks created (sum of N-1 across all splits).
+    //
+    // Single-segment LineStrings, Polygons, and anything else pass through
+    // unchanged.
+    function doSplitKML(xmlText) {
+        const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+        const NS = 'http://www.opengis.net/kml/2.2';
+        const placemarks = Array.from(doc.querySelectorAll('Placemark'));
+        let splitCount = 0;
+        let newCount = 0;
+        placemarks.forEach(pm => {
+            // Only act on placemarks whose geometry is a single LineString
+            // with 3+ coords. MultiGeometry, Polygons, single-segment lines
+            // are left alone.
+            const lineStrings = pm.querySelectorAll(':scope > LineString');
+            if (lineStrings.length !== 1) return;
+            // Also bail if MultiGeometry is present (mixed structures get
+            // skipped — user can convert manually if needed).
+            if (pm.querySelector(':scope > MultiGeometry')) return;
+            const coordEl = lineStrings[0].querySelector(':scope > coordinates');
+            if (!coordEl) return;
+            const triplets = (coordEl.textContent || '').trim().split(/\s+/).filter(Boolean);
+            if (triplets.length < 3) return; // already a single segment
+            // Source attributes we want to clone onto each new placemark.
+            const nameEl = pm.querySelector(':scope > name');
+            const styleUrlEl = pm.querySelector(':scope > styleUrl');
+            const visEl = pm.querySelector(':scope > visibility');
+            const nameText = nameEl ? nameEl.textContent : 'Untitled Path';
+            const styleUrlText = styleUrlEl ? styleUrlEl.textContent : '';
+            const visText = visEl ? visEl.textContent : '';
+            const parent = pm.parentNode;
+            const nextSibling = pm.nextSibling;
+            // Build N-1 new placemarks just BEFORE removing the original,
+            // so insertion order matches the original's position in <Document>.
+            const created = [];
+            for (let i = 0; i < triplets.length - 1; i++) {
+                const np = doc.createElementNS(NS, 'Placemark');
+                // <name> "Original name (seg 1/4)" so the split is traceable.
+                const nm = doc.createElementNS(NS, 'name');
+                nm.textContent = `${nameText} (seg ${i + 1}/${triplets.length - 1})`;
+                np.appendChild(nm);
+                if (styleUrlText) {
+                    const su = doc.createElementNS(NS, 'styleUrl');
+                    su.textContent = styleUrlText;
+                    np.appendChild(su);
+                }
+                if (visText) {
+                    const v = doc.createElementNS(NS, 'visibility');
+                    v.textContent = visText;
+                    np.appendChild(v);
+                }
+                const ls = doc.createElementNS(NS, 'LineString');
+                const tess = doc.createElementNS(NS, 'tessellate');
+                tess.textContent = '1';
+                ls.appendChild(tess);
+                const cd = doc.createElementNS(NS, 'coordinates');
+                cd.textContent = `${triplets[i]} ${triplets[i + 1]}`;
+                ls.appendChild(cd);
+                np.appendChild(ls);
+                created.push(np);
+            }
+            // Insert all new placemarks where the original was.
+            created.forEach(np => parent.insertBefore(np, nextSibling));
+            parent.removeChild(pm);
+            splitCount++;
+            newCount += created.length;
+        });
+        return { xml: new XMLSerializer().serializeToString(doc), splitCount, newCount };
+    }
+
+    function putSplitToGitHub(siteID, type, xmlText, sha, message, token, result) {
+        const path = `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
+        let contentB64;
+        try {
+            const utf8 = new TextEncoder().encode(xmlText);
+            let bin = '';
+            for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+            contentB64 = btoa(bin);
+        } catch (e) {
+            showKMLToast('Split failed: cannot encode XML.', 5000);
+            return;
+        }
+        try {
+            GM_xmlhttpRequest({
+                method: 'PUT',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                    'Content-Type': 'application/json',
+                },
+                data: JSON.stringify({ message, content: contentB64, sha, branch: KMLS_BRANCH }),
+                timeout: 30000,
+                onload: (resp) => {
+                    if (resp.status === 200 || resp.status === 201) {
+                        showKMLToast(`✓ Split ${result.splitCount} ${type} placemark${result.splitCount === 1 ? '' : 's'} into ${result.newCount} segments.`, 6000);
+                        // Force refetch so render reflects committed file (with
+                        // the new placemark indices) — also clears any stale
+                        // pending state for safety.
+                        setPending(siteID, type, {});
+                        const k = kmlKey(siteID, type);
+                        delete kmlFeatures[k];
+                        gmSet(KML_CACHE_PREFIX + k, null);
+                        kmlMissing.delete(k);
+                        fetchKMLForSite(siteID, true);
+                        if (isActive) runUpdate();
+                    } else if (resp.status === 409) {
+                        showKMLToast('Split conflict: file changed on GitHub since GET. Refresh and try again.', 9000);
+                    } else if (resp.status === 401 || resp.status === 403) {
+                        showKMLToast('GitHub denied write — your PAT needs contents:write scope.', 9000);
+                    } else {
+                        showKMLToast(`Split failed: HTTP ${resp.status}.`, 5000);
+                        console.warn(`${TAG} split PUT HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 600));
+                    }
+                },
+                onerror: () => showKMLToast('Split failed: network error during PUT.', 5000),
+                ontimeout: () => showKMLToast('Split failed: PUT timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Split PUT threw: ${e.message}.`, 5000);
+            console.error(`${TAG} split PUT threw:`, e);
+        }
+    }
+
     // Converts the current site's KML features into SVG-user-space point
     // arrays using the Leaflet map's projection. Returns [] if the map
     // isn't available yet (the next runUpdate will retry).
@@ -1800,12 +2012,14 @@
             p.setAttribute('d', d);
             p.setAttribute('fill', 'none');
             if (!isVis) {
-                // Ghost-render: thin dashed gray over its true placement.
-                // Always reads as "hidden" regardless of category color, so
-                // the user can spot what they've hidden at a glance.
+                // Ghost-render: dashed gray over its true placement. Width
+                // matches the category's normal thickness so the hit-target
+                // for right-click → Unhide is the same size as a visible
+                // line — v34.24 used width=2 which made ghost lines very
+                // hard to right-click on dense maps.
                 p.setAttribute('stroke', '#888');
                 p.setAttribute('stroke-opacity', '0.7');
-                p.setAttribute('stroke-width', '2');
+                p.setAttribute('stroke-width', String(thickness));
                 p.setAttribute('stroke-dasharray', '6 6');
             } else {
                 p.setAttribute('stroke', stroke);
@@ -2764,6 +2978,8 @@
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
                 else if (msg.actionId === 'commit-distro') commitKMLChanges('distro');
                 else if (msg.actionId === 'commit-trans') commitKMLChanges('trans');
+                else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
+                else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.
