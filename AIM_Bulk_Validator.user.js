@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Validator
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js
 // @description  Bulk validate/unvalidate entities from a list. FFZs prioritized.
@@ -33,7 +33,7 @@
         const IS_TOP = window === window.top;
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-validator';
-        const SCRIPT_VERSION = '1.1';
+        const SCRIPT_VERSION = '1.2';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;
@@ -57,6 +57,7 @@
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Validator',
                 description: 'Bulk validate/unvalidate entities from a list. FFZs prioritized.',
                 version: SCRIPT_VERSION,
+                group: 'Hotkeys',
                 toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
                 hotkeys: [{ id: 'invoke', label: 'Open Bulk Validator', default: 'Shift+V' }],
             });

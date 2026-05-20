@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.19';
+    const VERSION = '1.20';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -125,6 +125,33 @@
         if (!state.prefs[scriptId]) state.prefs[scriptId] = {};
         state.prefs[scriptId][toggleId] = enabled;
         savePrefs();
+    }
+    // Reset a toggle back to the schema default. We DELETE from prefs so
+    // future getToggle() falls back to the schema default cleanly. The
+    // SET_TOGGLE broadcast with the default value notifies the owning
+    // script — its internal toggleState updates and it can re-render.
+    function resetToggleToDefault(scriptId, toggleId, def) {
+        if (state.prefs[scriptId] && Object.prototype.hasOwnProperty.call(state.prefs[scriptId], toggleId)) {
+            delete state.prefs[scriptId][toggleId];
+            savePrefs();
+        }
+        if (state.channel) {
+            state.channel.postMessage({
+                type: 'SET_TOGGLE', scriptId, toggleId,
+                value: def, enabled: !!def,
+            });
+        }
+    }
+    // True when the live value differs from the schema default — controls
+    // the per-row reset icon's visibility. Type-aware comparison so
+    // "0.5" vs 0.5 doesn't show a stale reset arrow.
+    function isCustomized(t, value) {
+        if (value === undefined) return false;
+        if (t.type === 'number') return Number(value) !== Number(t.default);
+        if (t.type === 'color') return String(value).toLowerCase() !== String(t.default || '').toLowerCase();
+        if (t.type === 'select') return String(value) !== String(t.default);
+        // boolean (default)
+        return !!value !== !!t.default;
     }
     function getHotkey(scriptId, hotkeyId, def) {
         const s = state.hotkeys[scriptId];
@@ -620,7 +647,21 @@
                 if (now - lastHandled < 250) return;
                 lastHandled = now;
                 e.stopPropagation();
-                setHotkey(resetBtn.dataset.script, resetBtn.dataset.hotkey, null);
+                const sid = resetBtn.dataset.script;
+                if (resetBtn.dataset.hotkey) {
+                    // Hotkey reset (existing behavior): clear from saved
+                    // hotkeys so the schema default takes over.
+                    setHotkey(sid, resetBtn.dataset.hotkey, null);
+                } else if (resetBtn.dataset.toggle) {
+                    // Toggle reset (v1.20): find the toggle schema, look up
+                    // its default, broadcast SET_TOGGLE with that value, and
+                    // drop the per-user override from prefs.
+                    const script = state.registry.get(sid);
+                    if (script) {
+                        const t = flattenToggles(script.toggles).find(x => x.id === resetBtn.dataset.toggle);
+                        if (t) resetToggleToDefault(sid, t.id, t.default);
+                    }
+                }
                 renderPanel();
                 return;
             }
@@ -872,6 +913,17 @@
     //   select             — dropdown of {value,label} options
     //   number             — numeric input with optional unit suffix
     //   advanced           — collapsible group of nested children
+    // v1.20 — small reset-icon snippet shared across all control types.
+    // Returns empty string when the value matches the schema default
+    // (so the icon only appears when there's something to reset).
+    function resetIconHtml(scriptId, t, value) {
+        if (!isCustomized(t, value)) return '';
+        const defStr = t.default === undefined ? '' : String(t.default);
+        return `<button data-reset data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
+                       style="background:transparent;border:none;color:rgb(20,210,220);cursor:pointer;font-size:11px;padding:0 2px"
+                       title="Reset to default${defStr ? ` (${escapeAttr(defStr)})` : ''}">↺</button>`;
+    }
+
     function renderControl(scriptId, t) {
         if (!t) return '';
         const type = t.type || 'boolean';
@@ -932,6 +984,7 @@
                     <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
                     <select data-control="select" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                             style="background:#1f2228;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;cursor:pointer;font:inherit">${opts}</select>
+                    ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
         }
@@ -944,6 +997,7 @@
                     <input type="color" value="${escapeAttr(String(v))}"
                            data-control="color" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                            style="width:42px;height:24px;cursor:pointer;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:0;background:transparent"/>
+                    ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
         }
@@ -975,6 +1029,7 @@
                            data-control="number" data-script="${escapeAttr(scriptId)}" data-toggle="${escapeAttr(t.id)}"
                            style="width:70px;background:#1f2228;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:3px;padding:2px 6px;font:inherit"/>
                     ${t.unit ? `<span style="color:#888;font-size:11px">${escapeHtml(t.unit)}</span>` : ''}
+                    ${resetIconHtml(scriptId, t, value)}
                 </div>
             `;
         }
@@ -988,7 +1043,8 @@
                        data-script="${escapeAttr(scriptId)}"
                        data-toggle="${escapeAttr(t.id)}"
                        style="cursor:pointer;accent-color:rgb(20,210,220)" />
-                <span>${escapeHtml(t.label || t.id)}</span>
+                <span style="flex:1">${escapeHtml(t.label || t.id)}</span>
+                ${resetIconHtml(scriptId, t, value)}
             </label>
         `;
     }
@@ -1207,27 +1263,53 @@
             }
         });
 
-        // Render standalone scripts first (alphabetical), each in its own
-        // single-script section. Then groups (alphabetical by group name).
-        let sectionsHtml = '';
+        // v1.20 — Build a single section list with explicit ordering by
+        // SECTION_PRIORITY. Lower priority numbers render first. Items not
+        // in the map get priority 999 (and tie-break alphabetically). This
+        // is what makes "Outlines / Performance / Hotkeys / others"
+        // intuitive instead of pure alphabetical (which would put Bulk*
+        // first, scattering the layout). Keys match the existing
+        // section keys: `script:<scriptId>` for standalone, `group:<name>`
+        // for groups. Edit this map to change the order.
+        const SECTION_PRIORITY = {
+            'script:aim-styler': 10,            // Outlines (primary feature)
+            'script:aim-perf-shield': 20,       // Performance
+            'group:Hotkeys': 30,                // Hotkeys group (incl. bulk scripts)
+        };
+        const sectionEntries = [];
         standalone.forEach(s => {
-            sectionsHtml += renderSection(
-                `script:${s.scriptId}`,
-                s.name || s.scriptId,
-                `v${s.version || '?'}`,
-                renderScriptInner(s, false), // header is the section header
-            );
+            const key = `script:${s.scriptId}`;
+            sectionEntries.push({
+                key,
+                priority: SECTION_PRIORITY[key] !== undefined ? SECTION_PRIORITY[key] : 999,
+                sortName: s.name || s.scriptId,
+                renderFn: () => renderSection(
+                    key,
+                    s.name || s.scriptId,
+                    `v${s.version || '?'}`,
+                    renderScriptInner(s, false),
+                ),
+            });
         });
-        Array.from(groups.keys()).sort().forEach(name => {
-            const members = groups.get(name);
-            const bodyHtml = members.map(s => renderScriptInner(s, true)).join('');
-            sectionsHtml += renderSection(
-                `group:${name}`,
-                name,
-                `${members.length} script${members.length === 1 ? '' : 's'}`,
-                bodyHtml,
-            );
+        groups.forEach((members, name) => {
+            const key = `group:${name}`;
+            sectionEntries.push({
+                key,
+                priority: SECTION_PRIORITY[key] !== undefined ? SECTION_PRIORITY[key] : 999,
+                sortName: name,
+                renderFn: () => renderSection(
+                    key,
+                    name,
+                    `${members.length} script${members.length === 1 ? '' : 's'}`,
+                    members.map(s => renderScriptInner(s, true)).join(''),
+                ),
+            });
         });
+        sectionEntries.sort((a, b) => {
+            if (a.priority !== b.priority) return a.priority - b.priority;
+            return a.sortName.localeCompare(b.sortName);
+        });
+        let sectionsHtml = sectionEntries.map(e => e.renderFn()).join('');
 
         // Transient error banner shown after a rebind collision. Auto-clears
         // after ~6s OR when the user clicks the × close button.
