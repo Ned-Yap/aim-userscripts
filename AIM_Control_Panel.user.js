@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.18';
+    const VERSION = '1.19';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1262,7 +1262,17 @@
         setupChannel();
         installHotkeyRouter();
         const start = () => {
-            ensureButton();
+            // .map-tools only ever exists in the iframe context where
+            // Percepto mounts its Leaflet map. The TOP-frame instance of
+            // the Control Panel stays alive for BroadcastChannel routing,
+            // hotkey handling, and shared GM storage — but should NOT try
+            // to inject the gear button there (was spamming the console
+            // with 60 retry stack traces over 30s, all guaranteed to fail).
+            if (IS_TOP) {
+                console.log(`${TAG} skipping button injection in TOP frame (map is in iframe)`);
+            } else {
+                ensureButton();
+            }
             requestRegistrations();
         };
         if (document.body) start();

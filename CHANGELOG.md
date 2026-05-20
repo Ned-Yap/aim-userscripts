@@ -8,7 +8,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-19
 
-- **AIM Map Styler v34.12** — vertex dot visibility redesigned around the actual workflow:
+- **AIM Map Styler v34.13 + AIM Control Panel v1.19** — two recovery/cleanup fixes after a laptop-sleep-then-soft-refresh produced a stuck no-overlay state:
+  - **Map Styler v34.13 — first-render watchdog**: after the styler activates, the heartbeat now bypasses the hash-skip optimization for the first 10 ticks (~30s). Without this, the very first `runUpdate` after activation could fire before Leaflet's overlay-pane SVG was mounted, producing zero overlays (`ourN=0`), and every subsequent heartbeat would see the same hash and skip — leaving overlays absent indefinitely. Now we always run for 30s post-activation, then settle into hash-skip mode once things have stabilized. Recovers from the suspend/wake symptom without needing a hard refresh.
+  - **AIM Control Panel v1.19 — skip button injection in TOP frame**: `.map-tools` only ever exists in the iframe where Percepto mounts its Leaflet map; the TOP-frame Control Panel was running its 60-attempt-over-30s `ensureButton` retry loop in the wrong frame and producing dozens of `[AIM CONTROL TOP] gave up injecting after 60 tries` stack traces per page load. Now logs once at startup that injection is skipped in TOP, then stays quiet. TOP instance keeps doing its real job (BroadcastChannel routing, GM storage) without the noise. — vertex dot visibility redesigned around the actual workflow:
   - Toggle renamed to **"Always show vertex dots (off: only while editing)"**, default OFF.
   - When OFF (default): vertex dots are hidden EXCEPT (a) red disconnected/error variants — always shown, (b) when any line is in edit mode (auto-detected via the black-dashed edit-mode line) — at which point all vertex dots become visible so the user can grab them.
   - When ON: vertex dots always visible (the v34.10/11 behavior, opt-in now).

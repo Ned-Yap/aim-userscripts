@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.12
+// @version      34.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.12' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.13' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.12';
+    const SCRIPT_VERSION = '34.13';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -302,6 +302,7 @@
     let observer = null;
     let observerTarget = null; // node the observer is currently attached to
     let heartbeatInterval = null; // periodic runUpdate fallback (see attachObserverWhenReady)
+    let warmupRunsRemaining = 0; // first-render watchdog counter (see attachObserverWhenReady)
     // Fingerprint of relevant state at the end of the last successful runUpdate.
     // Heartbeat compares the current fingerprint against this and skips the
     // wipe+rebuild entirely if nothing has changed. Massive CPU savings on
@@ -2064,6 +2065,15 @@
         observerTarget = container;
         observer = new MutationObserver(debouncedUpdate);
         observer.observe(container, observerConfig);
+        // First-render watchdog: after attach, run runUpdate up to N times
+        // unconditionally (bypass hash check) so we recover from the case
+        // where the very first runUpdate fires before Leaflet's overlay-pane
+        // SVG is mounted. Without this, the first run produces ourN=0,
+        // lastUpdateHash captures that state, and every subsequent heartbeat
+        // matches the hash and skips — leaving overlays absent indefinitely.
+        // Symptom that motivated this: laptop sleep + regular page refresh
+        // produced exactly this stuck state. 10 ticks × 3s = 30s warmup.
+        warmupRunsRemaining = 10;
         runUpdate();
         // Heartbeat: re-run periodically so buffers catch up even if the
         // MutationObserver misses a relevant change (the host app's React can
@@ -2085,6 +2095,14 @@
             // built-in self-heal re-attaches the observer (and re-renders).
             // This bypasses the hash check below.
             if (observerTarget && !document.body.contains(observerTarget)) {
+                runUpdate();
+                return;
+            }
+            // Warmup: bypass hash check until we've run at least N times
+            // post-activation, so a too-early first render that produced
+            // ourN=0 doesn't lock us into a stuck state.
+            if (warmupRunsRemaining > 0) {
+                warmupRunsRemaining--;
                 runUpdate();
                 return;
             }
