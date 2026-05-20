@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.23
+// @version      34.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.23';
+    const SCRIPT_VERSION = '34.24';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1379,10 +1379,19 @@
     // --- KML edit UI: right-click context menu + toast ---
     const KML_CTX_MENU_ID = 'aim-kml-ctx-menu';
     const KML_TOAST_ID = 'aim-kml-toast';
+    // Outside-click listener for the open menu. Tracked module-level so
+    // closeKMLContextMenu always cleans it up (otherwise it'd leak across
+    // open/close cycles). Set by showKMLContextMenu after a setTimeout(0)
+    // to avoid catching the SAME contextmenu's mousedown.
+    let kmlMenuOutsideListener = null;
 
     function closeKMLContextMenu() {
         const m = document.getElementById(KML_CTX_MENU_ID);
         if (m) m.remove();
+        if (kmlMenuOutsideListener) {
+            document.removeEventListener('mousedown', kmlMenuOutsideListener, true);
+            kmlMenuOutsideListener = null;
+        }
     }
 
     function showKMLContextMenu(x, y, type, pmIdx, isCurrentlyVisible, fileVisible) {
@@ -1444,9 +1453,17 @@
         if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
 
         // Close on outside click — registered on next tick so the same right
-        // click that opened the menu doesn't also close it.
+        // click that opened the menu doesn't also close it. Skip the close
+        // when the mousedown lands INSIDE the menu (was the v34.23 bug:
+        // mousedown on the action button fired in capture phase BEFORE the
+        // button's click event, removing the menu and never letting the
+        // click run, so action.onclick never logged).
         setTimeout(() => {
-            document.addEventListener('mousedown', closeKMLContextMenu, { once: true, capture: true });
+            kmlMenuOutsideListener = (e) => {
+                if (menu.contains(e.target)) return;
+                closeKMLContextMenu();
+            };
+            document.addEventListener('mousedown', kmlMenuOutsideListener, true);
         }, 0);
     }
 
