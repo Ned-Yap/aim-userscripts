@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.20
+// @version      34.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -14,6 +14,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
+// @connect      api.github.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -40,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.20';
+    const SCRIPT_VERSION = '34.21';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -160,6 +161,10 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'distro.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 3, unit: 'px' },
+                { type: 'header', label: 'Editing (E1 — hide/show)' },
+                { id: 'distro.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
+                { id: 'distro.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
+                { id: 'distro-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-distro' },
             ],
         },
         {
@@ -175,6 +180,10 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'trans.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 4, unit: 'px' },
+                { type: 'header', label: 'Editing (E1 — hide/show)' },
+                { id: 'trans.edit-mode', label: 'Edit mode (right-click a line)', type: 'boolean', default: false },
+                { id: 'trans.show-hidden', label: 'Show hidden lines (dashed gray)', type: 'boolean', default: false },
+                { id: 'trans-commit', label: 'Commit pending changes to GitHub', type: 'button', action: 'commit-trans' },
             ],
         },
         {
@@ -282,7 +291,13 @@
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
     const KMLS_BRANCH = 'main';
-    const KML_CACHE_PREFIX = 'aim-kml-cache-'; // suffixed with siteID
+    // v2 (Map Styler 34.21+): features now carry pmIdx + visible. Old
+    // cached features lack those, so right-click would fail until the
+    // network refetch completed. Bumping the key skips the old cache
+    // entirely (tiny cost — 2 KMLs × ~50KB redownload on first load).
+    const KML_CACHE_PREFIX = 'aim-kml-cache-v2-';
+    const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}`
+    const GITHUB_API_BASE = 'https://api.github.com';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
 
     // --- Settings ---
@@ -1248,7 +1263,15 @@
     // KML parser. Walks every <Placemark> and extracts either a LineString
     // or a Polygon (outerBoundaryIs/LinearRing). Coordinates are KML-format
     // "lng,lat[,alt] lng,lat[,alt] …" — note lng comes first.
-    // Returns: [{ type: 'line'|'polygon', coords: [{lat, lng}, ...] }, ...]
+    //
+    // Each feature carries `pmIdx` (the placemark's 0-based position in the
+    // file) and `visible` (from <visibility>, KML defaults to 1). These let
+    // E1 hide/show actions reference the right placemark when committing
+    // back to GitHub. A single placemark with MultiGeometry can produce
+    // multiple features that share the same pmIdx — hide acts on ALL of
+    // them, which is the intended behavior.
+    //
+    // Returns: [{ type: 'line'|'polygon', coords: [{lat, lng}, ...], pmIdx, visible }, ...]
     function parseKML(xmlText) {
         const out = [];
         const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
@@ -1267,17 +1290,365 @@
             });
             return pts;
         };
-        // LineStrings (any depth — handles MultiGeometry too)
-        doc.querySelectorAll('LineString > coordinates').forEach(c => {
-            const coords = parseCoords(c.textContent);
-            if (coords.length >= 2) out.push({ type: 'line', coords });
-        });
-        // Polygons — outer boundary only (we don't render holes for shielding)
-        doc.querySelectorAll('Polygon > outerBoundaryIs > LinearRing > coordinates').forEach(c => {
-            const coords = parseCoords(c.textContent);
-            if (coords.length >= 3) out.push({ type: 'polygon', coords });
+        const placemarks = doc.querySelectorAll('Placemark');
+        placemarks.forEach((pm, pmIdx) => {
+            // KML spec: <visibility> default is 1. Only "0" hides.
+            // :scope avoids matching nested <visibility> inside a Style.
+            let visible = true;
+            const visEl = pm.querySelector(':scope > visibility');
+            if (visEl && visEl.textContent.trim() === '0') visible = false;
+            pm.querySelectorAll('LineString > coordinates').forEach(c => {
+                const coords = parseCoords(c.textContent);
+                if (coords.length >= 2) out.push({ type: 'line', coords, pmIdx, visible });
+            });
+            pm.querySelectorAll('Polygon > outerBoundaryIs > LinearRing > coordinates').forEach(c => {
+                const coords = parseCoords(c.textContent);
+                if (coords.length >= 3) out.push({ type: 'polygon', coords, pmIdx, visible });
+            });
         });
         return out;
+    }
+
+    // ============================================================
+    // KML EDITING (E1 — hide/show)
+    //
+    // Pending changes are persisted per-site, per-type in GM storage so a
+    // refresh doesn't lose mid-session edits. Format: object keyed by
+    // placemark index, value is the DESIRED final visibility (boolean).
+    // An entry only exists when desired ≠ file state — if the user toggles
+    // a line back to its file state, the entry is deleted, NOT set to its
+    // current visibility.
+    //
+    //   { "5": false, "12": true }
+    //     ^ placemark 5 should end up hidden in the committed file
+    //                      ^ placemark 12 should end up visible
+    //
+    // Commit flow (per type):
+    //   1. GET /repos/.../contents/<siteID>-<type>.kml via Contents API
+    //      — returns content (base64) + sha
+    //   2. Parse XML, walk placemarks, apply each pending entry
+    //      (insert <visibility>0/1</visibility> as child of Placemark)
+    //   3. PUT with { message, content (base64), sha }
+    //      — GitHub returns 409 if sha is stale (someone else pushed first)
+    //   4. On 200: clear pending for that type + force-refetch
+    //   5. On 409: leave pending intact, warn user
+    // ============================================================
+
+    function pendingKey(siteID, type) {
+        return `${KML_PENDING_PREFIX}${siteID}-${type}`;
+    }
+
+    function getPending(siteID, type) {
+        if (!siteID) return {};
+        const v = gmGet(pendingKey(siteID, type), null);
+        return (v && typeof v === 'object') ? v : {};
+    }
+
+    function setPending(siteID, type, obj) {
+        if (!siteID) return;
+        gmSet(pendingKey(siteID, type), obj || {});
+    }
+
+    function pendingCount(siteID, type) {
+        return Object.keys(getPending(siteID, type)).length;
+    }
+
+    // Combine the file's stored visibility with any pending override. Used
+    // by the renderer to decide visible vs ghost-render vs skip, and by the
+    // right-click menu to know which action label to show ("Hide" vs "Unhide").
+    function effectiveVisible(siteID, type, pmIdx, fileVisible) {
+        const p = getPending(siteID, type);
+        const key = String(pmIdx);
+        return Object.prototype.hasOwnProperty.call(p, key) ? !!p[key] : !!fileVisible;
+    }
+
+    // User chose Hide/Unhide on a placemark. Update pending so the desired
+    // state matches what the user just asked for; clear the pending entry
+    // if that state matches the file's stored visibility (no-op edit).
+    function setDesiredVisibility(siteID, type, pmIdx, fileVisible, desiredVisible) {
+        const p = getPending(siteID, type);
+        const key = String(pmIdx);
+        if (!!desiredVisible === !!fileVisible) {
+            delete p[key];
+        } else {
+            p[key] = !!desiredVisible;
+        }
+        setPending(siteID, type, p);
+    }
+
+    // --- KML edit UI: right-click context menu + toast ---
+    const KML_CTX_MENU_ID = 'aim-kml-ctx-menu';
+    const KML_TOAST_ID = 'aim-kml-toast';
+
+    function closeKMLContextMenu() {
+        const m = document.getElementById(KML_CTX_MENU_ID);
+        if (m) m.remove();
+    }
+
+    function showKMLContextMenu(x, y, type, pmIdx, isCurrentlyVisible, fileVisible) {
+        closeKMLContextMenu();
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        const menu = document.createElement('div');
+        menu.id = KML_CTX_MENU_ID;
+        menu.style.cssText = `
+            position:fixed;left:${x}px;top:${y}px;z-index:99999;
+            background:#1f2228;border:1px solid rgba(20,210,220,0.5);border-radius:6px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+            padding:4px 0;min-width:180px;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;
+        `;
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:4px 12px;color:#7adfe6;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
+        header.textContent = `${type === 'distro' ? 'Distribution' : 'Transmission'} · line #${pmIdx}`;
+        menu.appendChild(header);
+
+        const action = document.createElement('button');
+        action.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#e6e6e6;cursor:pointer;font:inherit';
+        action.onmouseenter = () => { action.style.background = 'rgba(20,210,220,0.15)'; };
+        action.onmouseleave = () => { action.style.background = 'transparent'; };
+        action.textContent = isCurrentlyVisible ? '🚫  Hide line' : '👁  Unhide line';
+        action.onclick = (e) => {
+            e.stopPropagation();
+            const desired = !isCurrentlyVisible;
+            setDesiredVisibility(siteID, type, pmIdx, fileVisible, desired);
+            const count = pendingCount(siteID, type);
+            showKMLToast(
+                `${desired ? 'Unhid' : 'Hid'} ${type} line #${pmIdx}. ${count} pending — click Commit to push.`,
+                3500
+            );
+            closeKMLContextMenu();
+            if (isActive) runUpdate();
+        };
+        menu.appendChild(action);
+
+        document.body.appendChild(menu);
+        // Reposition if off-screen to the right or bottom.
+        const r = menu.getBoundingClientRect();
+        if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
+        if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
+
+        // Close on outside click — registered on next tick so the same right
+        // click that opened the menu doesn't also close it.
+        setTimeout(() => {
+            document.addEventListener('mousedown', closeKMLContextMenu, { once: true, capture: true });
+        }, 0);
+    }
+
+    function showKMLToast(text, durationMs) {
+        const existing = document.getElementById(KML_TOAST_ID);
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.id = KML_TOAST_ID;
+        toast.textContent = text;
+        toast.style.cssText = `
+            position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+            background:rgba(15,18,22,0.95);color:#e6e6e6;
+            padding:10px 18px;border-radius:6px;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            z-index:99999;border:1px solid rgba(20,210,220,0.5);
+            pointer-events:none;max-width:80vw;text-align:center;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+        `;
+        document.body.appendChild(toast);
+        setTimeout(() => { try { toast.remove(); } catch (e) {} }, durationMs || 3000);
+    }
+
+    // Single delegated contextmenu handler on window (capture phase so Leaflet
+    // doesn't swallow it first). Filters for our tagged SVG paths; bails when
+    // the matching type's edit-mode toggle is OFF so right-clicks on KML
+    // lines still go through to Leaflet's normal behavior when not editing.
+    function installKMLEditHandlers() {
+        window.addEventListener('contextmenu', (e) => {
+            const t = e.target;
+            if (!t || typeof t.getAttribute !== 'function') return;
+            const path = (typeof t.closest === 'function') ? t.closest('path[data-kml-type]') : null;
+            if (!path) return;
+            const type = path.getAttribute('data-kml-type');
+            if (!type) return;
+            if (toggleState[`${type}.edit-mode`] !== true) return;
+            const pmIdx = parseInt(path.getAttribute('data-kml-pm-idx'), 10);
+            if (isNaN(pmIdx)) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const siteID = getCurrentSiteID();
+            if (!siteID) return;
+            const features = kmlFeatures[kmlKey(siteID, type)] || [];
+            const f = features.find(ff => ff.pmIdx === pmIdx);
+            if (!f) return;
+            const cur = effectiveVisible(siteID, type, pmIdx, f.visible);
+            showKMLContextMenu(e.clientX, e.clientY, type, pmIdx, cur, f.visible);
+        }, true);
+    }
+
+    // --- Commit pending changes to GitHub via Contents API ---
+    function commitKMLChanges(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        const pending = getPending(siteID, type);
+        const count = Object.keys(pending).length;
+        if (count === 0) {
+            showKMLToast(`No pending ${type} changes.`, 2500);
+            return;
+        }
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) {
+            showKMLToast('No GitHub token — set one in AIM Controls first.', 4500);
+            return;
+        }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        showKMLToast(`Committing ${count} ${type} change${count === 1 ? '' : 's'}…`, 8000);
+        const path = `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+                onload: (resp) => {
+                    if (resp.status !== 200) {
+                        if (resp.status === 401 || resp.status === 403) {
+                            showKMLToast('GitHub denied read access — check your PAT scope.', 6000);
+                        } else if (resp.status === 404) {
+                            showKMLToast(`File ${path} not found on GitHub.`, 5000);
+                        } else {
+                            showKMLToast(`Commit GET failed: HTTP ${resp.status}.`, 5000);
+                        }
+                        console.warn(`${TAG} commit GET HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 400));
+                        return;
+                    }
+                    let json;
+                    try { json = JSON.parse(resp.responseText); }
+                    catch (e) {
+                        showKMLToast('Commit failed: unexpected GitHub response.', 5000);
+                        console.error(`${TAG} commit GET JSON parse failed:`, e);
+                        return;
+                    }
+                    const sha = json && json.sha;
+                    const b64 = (json && json.content) ? String(json.content).replace(/\s/g, '') : '';
+                    if (!sha || !b64) {
+                        showKMLToast('Commit failed: missing sha/content from GitHub.', 5000);
+                        return;
+                    }
+                    let xmlText;
+                    try { xmlText = atob(b64); }
+                    catch (e) {
+                        showKMLToast('Commit failed: cannot decode GitHub content.', 5000);
+                        console.error(`${TAG} atob failed:`, e);
+                        return;
+                    }
+                    let mutated;
+                    try { mutated = applyPendingToKML(xmlText, pending); }
+                    catch (e) {
+                        showKMLToast(`Commit failed: ${e.message || 'XML mutation error'}.`, 6000);
+                        console.error(`${TAG} applyPendingToKML failed:`, e);
+                        return;
+                    }
+                    putKMLToGitHub(siteID, type, mutated, sha, count, pending, token);
+                },
+                onerror: () => showKMLToast('Commit failed: network error.', 5000),
+                ontimeout: () => showKMLToast('Commit failed: timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Commit threw: ${e.message}.`, 5000);
+            console.error(`${TAG} commit GET threw:`, e);
+        }
+    }
+
+    // Mutate the KML XML so each pending placemark gets the desired
+    // <visibility> child. Inserts a new <visibility> if absent; updates
+    // the existing one otherwise. Re-serializes and returns the string.
+    function applyPendingToKML(xmlText, pending) {
+        const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+        const placemarks = doc.querySelectorAll('Placemark');
+        const NS = 'http://www.opengis.net/kml/2.2';
+        Object.keys(pending).forEach(key => {
+            const idx = parseInt(key, 10);
+            if (isNaN(idx) || idx < 0 || idx >= placemarks.length) return;
+            const pm = placemarks[idx];
+            const desired = !!pending[key];
+            let visEl = pm.querySelector(':scope > visibility');
+            if (!visEl) {
+                visEl = doc.createElementNS(NS, 'visibility');
+                pm.insertBefore(visEl, pm.firstChild);
+            }
+            visEl.textContent = desired ? '1' : '0';
+        });
+        return new XMLSerializer().serializeToString(doc);
+    }
+
+    function putKMLToGitHub(siteID, type, xmlText, sha, count, pendingSnapshot, token) {
+        const path = `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
+        // btoa needs binary string; encode UTF-8 first so non-ASCII names
+        // (rare in current KMLs but legal in the spec) round-trip cleanly.
+        let contentB64;
+        try {
+            const utf8 = new TextEncoder().encode(xmlText);
+            let bin = '';
+            for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+            contentB64 = btoa(bin);
+        } catch (e) {
+            showKMLToast('Commit failed: cannot encode XML.', 5000);
+            console.error(`${TAG} btoa failed:`, e);
+            return;
+        }
+        const numHidden = Object.values(pendingSnapshot).filter(v => v === false).length;
+        const numShown = count - numHidden;
+        const parts = [];
+        if (numHidden) parts.push(`hide ${numHidden}`);
+        if (numShown) parts.push(`unhide ${numShown}`);
+        const message = `[AIM site ${siteID}] ${type}: ${parts.join(' · ')}`;
+        try {
+            GM_xmlhttpRequest({
+                method: 'PUT',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                    'Content-Type': 'application/json',
+                },
+                data: JSON.stringify({ message, content: contentB64, sha, branch: KMLS_BRANCH }),
+                timeout: 20000,
+                onload: (resp) => {
+                    if (resp.status === 200 || resp.status === 201) {
+                        setPending(siteID, type, {});
+                        showKMLToast(`✓ Committed ${count} ${type} change${count === 1 ? '' : 's'}.`, 4000);
+                        // Force refetch so render reflects committed file.
+                        const k = kmlKey(siteID, type);
+                        delete kmlFeatures[k];
+                        gmSet(KML_CACHE_PREFIX + k, null);
+                        kmlMissing.delete(k);
+                        fetchKMLForSite(siteID, true);
+                        if (isActive) runUpdate();
+                    } else if (resp.status === 409) {
+                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
+                    } else if (resp.status === 401 || resp.status === 403) {
+                        showKMLToast('GitHub denied write — your PAT needs contents:write scope on aim-userscripts-data.', 9000);
+                    } else if (resp.status === 422) {
+                        showKMLToast('GitHub rejected the write (422 — branch protection?). See console.', 6000);
+                        console.warn(`${TAG} commit PUT 422:`, (resp.responseText || '').substring(0, 600));
+                    } else {
+                        showKMLToast(`Commit failed: HTTP ${resp.status}.`, 5000);
+                        console.warn(`${TAG} commit PUT HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 600));
+                    }
+                },
+                onerror: () => showKMLToast('Commit failed: network error during PUT.', 5000),
+                ontimeout: () => showKMLToast('Commit failed: PUT timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Commit PUT threw: ${e.message}.`, 5000);
+            console.error(`${TAG} commit PUT threw:`, e);
+        }
     }
 
     // Converts the current site's KML features into SVG-user-space point
@@ -1317,7 +1688,10 @@
                 const p = svgPt.matrixTransform(inv);
                 pts.push({ x: p.x, y: p.y });
             }
-            if (pts.length >= 2) out.push({ type: f.type, points: pts });
+            if (pts.length >= 2) out.push({
+                type: f.type, points: pts,
+                pmIdx: f.pmIdx, visible: f.visible,
+            });
         });
         return out;
     }
@@ -1351,20 +1725,43 @@
         const opacity = Number(toggleState[`${type}.opacity`]);
         const opStr = String(isNaN(opacity) ? defaults.opacity : opacity);
         const thickness = Number(toggleState[`${type}.thickness`]) || defaults.thickness;
+        // E1 editing state — only relevant when at least one of edit-mode
+        // or show-hidden is on. pointer-events stays 'none' otherwise so
+        // Leaflet's own interaction (drag-pan over an empty area) isn't
+        // intercepted by our overlay paths.
+        const editMode = toggleState[`${type}.edit-mode`] === true;
+        const showHidden = toggleState[`${type}.show-hidden`] === true;
+        const siteID = getCurrentSiteID();
         feats.forEach(f => {
+            const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
+            if (!isVis && !showHidden) return; // hidden + not asked to show → skip
             const d = pointsToPathD(f.points, f.type === 'polygon');
             if (!d) return;
             const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
             p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
             p.setAttribute('data-buffer-kind', `kml-${type}`);
+            p.setAttribute('data-kml-type', type);
+            p.setAttribute('data-kml-pm-idx', String(f.pmIdx));
             p.setAttribute('d', d);
             p.setAttribute('fill', 'none');
-            p.setAttribute('stroke', stroke);
-            p.setAttribute('stroke-opacity', opStr);
-            p.setAttribute('stroke-width', String(thickness));
+            if (!isVis) {
+                // Ghost-render: thin dashed gray over its true placement.
+                // Always reads as "hidden" regardless of category color, so
+                // the user can spot what they've hidden at a glance.
+                p.setAttribute('stroke', '#888');
+                p.setAttribute('stroke-opacity', '0.7');
+                p.setAttribute('stroke-width', '2');
+                p.setAttribute('stroke-dasharray', '6 6');
+            } else {
+                p.setAttribute('stroke', stroke);
+                p.setAttribute('stroke-opacity', opStr);
+                p.setAttribute('stroke-width', String(thickness));
+            }
             p.setAttribute('stroke-linejoin', 'round');
             p.setAttribute('stroke-linecap', 'round');
-            p.setAttribute('pointer-events', 'none');
+            // 'stroke' hit-testing = right-click on the line itself counts,
+            // but clicks on empty pixels nearby pass through to Leaflet.
+            p.setAttribute('pointer-events', editMode ? 'stroke' : 'none');
             // Insert at the start of the group so shielding renders UNDER
             // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
@@ -2243,6 +2640,25 @@
                 const newVal = msg.value !== undefined ? msg.value : msg.enabled;
                 const prev = toggleState[msg.toggleId];
                 toggleState[msg.toggleId] = newVal;
+                // E1 auto-on coupling: when edit-mode for a KML type flips
+                // ON, auto-flip show-hidden ON too so the user can see what
+                // they've hidden (otherwise they'd flip a line invisible
+                // and have nothing to right-click for "Unhide"). We don't
+                // auto-flip OFF when edit-mode leaves — the user might want
+                // to keep ghosting on while not actively editing.
+                if ((msg.toggleId === 'distro.edit-mode' || msg.toggleId === 'trans.edit-mode')
+                    && newVal === true && prev !== true) {
+                    const type = msg.toggleId.split('.')[0];
+                    const hiddenKey = `${type}.show-hidden`;
+                    if (toggleState[hiddenKey] !== true) {
+                        toggleState[hiddenKey] = true;
+                        // Echo back so the panel checkbox + GM storage update.
+                        controlChannel.postMessage({
+                            type: 'SET_TOGGLE', scriptId: SCRIPT_ID,
+                            toggleId: hiddenKey, value: true, enabled: true,
+                        });
+                    }
+                }
                 if (msg.toggleId === 'master') {
                     // Only log when the value actually transitions. The Control
                     // Panel re-broadcasts SET_TOGGLE on every REGISTER from any
@@ -2281,6 +2697,8 @@
                 // Button-type controls in the panel broadcast this when clicked.
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
+                else if (msg.actionId === 'commit-distro') commitKMLChanges('distro');
+                else if (msg.actionId === 'commit-trans') commitKMLChanges('trans');
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.
@@ -2401,6 +2819,7 @@
     registerWithControlPanel();
     installListener();
     installAssetLockHandler();
+    installKMLEditHandlers();
 
     // Safety net: if no SET_TOGGLE for `master` arrives shortly after
     // registration, auto-activate. Symptom this prevents: when the Control

@@ -8,6 +8,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **AIM Map Styler v34.21** — **KML editing Phase E1: hide / show with 2-way GitHub sync.** First write-back feature for the data repo.
+  - **Right-click any rendered KML line** (yellow distro or red trans) → small menu with **Hide / Unhide** (the option flips based on current state). Only armed when the matching category's **Edit mode** toggle is ON, so right-clicks fall through to Leaflet normally otherwise.
+  - **Separate edit state per category.** Distribution lines and Transmission lines each get their own Edit mode toggle, their own Show hidden lines toggle, their own pending queue, and their own Commit button. Lets you edit + commit one type without touching the other.
+  - **Hidden lines render as thin dashed gray** when "Show hidden" is on (auto-flips on with Edit mode but can be independently controlled). Right-click a ghost-rendered line → Unhide.
+  - **Local persistence:** each edit immediately saves to GM storage (`aim-kml-pending-<siteID>-<type>`) so a page refresh doesn't lose work. A toast shows the pending count after every action ("Hid distro line #5. 3 pending — click Commit to push.").
+  - **Commit flow:** `Commit pending changes to GitHub` button GETs current file SHA via Contents API → mutates the XML to insert/update `<visibility>0/1</visibility>` per pending entry → PUTs with the SHA. Single commit per click. Commit message: `[AIM site <id>] <type>: hide N · unhide M`. On success, clears pending + refetches.
+  - **Conflict handling:** GitHub 409 (file changed since open) → toast tells user their local pending is kept; refresh + retry. 401/403 → toast hints PAT needs `contents:write`. 422 / network / timeout all surface clearly.
+  - **Parser carries placemark identity** (`pmIdx` + file `<visibility>`) so the renderer knows what's hidden and the commit knows which placemark to mutate. KML cache key bumped to `aim-kml-cache-v2-` so old cached features (without `pmIdx`) don't get used; one-time refetch on first load.
+  - **PAT scope reminder:** read-only PATs still fetch but commits will toast a "needs write scope" hint. Update your token to `contents:read+write` on `aim-userscripts-data` to enable commits.
+  - **What's NOT in E1:** Delete (E2), vertex edit (E3), Add new line (E4). Right-click menu shows only Hide / Unhide for now.
 - **Panel layout overhaul** — second-pass cleanup of ordering and wording across the whole panel; no functional behavior changed.
   - **AIM Control Panel v1.21**:
     - New `type: 'header'` for visual sub-section dividers in flat toggle lists. Used by Perf Shield to split its toggles into "Map performance" and "Network blocks" without forcing a master checkbox per sub-section.
