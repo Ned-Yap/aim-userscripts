@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Validator
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js
 // @description  Bulk validate/unvalidate entities from a list. FFZs prioritized.
@@ -25,6 +25,44 @@
 
     function init() {
         console.log("[AIM Bulk Validator] 🚀 Validator Initialized.");
+
+        // --- AIM Control Panel integration ---
+        // Master toggle + rebindable Shift+V hotkey. Existing keydown defers
+        // when panel is detected. IS_TOP gates the action so it only fires
+        // once across all frame contexts.
+        const IS_TOP = window === window.top;
+        const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+        const SCRIPT_ID = 'aim-bulk-validator';
+        const SCRIPT_VERSION = '1.1';
+        let controlChannel = null;
+        let controlPanelDetected = false;
+        let masterEnabled = true;
+        function setupControlPanel() {
+            try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+            catch (e) { return; }
+            controlChannel.onmessage = (ev) => {
+                controlPanelDetected = true;
+                const msg = ev.data || {};
+                if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+                else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                    if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                    if (msg.hotkeyId === 'invoke' && masterEnabled) createUI();
+                }
+            };
+        }
+        function registerWithControlPanel() {
+            if (!controlChannel) return;
+            controlChannel.postMessage({
+                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Validator',
+                description: 'Bulk validate/unvalidate entities from a list. FFZs prioritized.',
+                version: SCRIPT_VERSION,
+                toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+                hotkeys: [{ id: 'invoke', label: 'Open Bulk Validator', default: 'Shift+V' }],
+            });
+        }
+        setupControlPanel();
+        registerWithControlPanel();
 
         // --- UI Trigger Injection ---
         function runInjection() {
@@ -339,6 +377,9 @@
         }
 
         window.addEventListener('keydown', (e) => {
+            // Defer to panel router once detected; respect master toggle.
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             if (e.shiftKey && e.key.toLowerCase() === 'v') {
                 const el = e.target;
                 if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable || el.closest('.ant-input')) return;

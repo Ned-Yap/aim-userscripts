@@ -8,6 +8,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **Bulk scripts — Control Panel integration** (older Phase 2 done). Three scripts now register with AIM Controls under their own panel sections, alongside their existing UI (no buttons removed, no functionality changed):
+  - **AIM Bulk Mission Adder v1.10** — Shift+B (rebindable). Action only fires on `/merge_available_apps/step2/`, matching the existing behavior.
+  - **AIM Bulk Altitude Updater v4.9** — Shift+E (rebindable). Master toggle + invoke hotkey.
+  - **AIM Bulk Validator v1.1** — Shift+V (rebindable). Master toggle + invoke hotkey.
+  - Standard integration pattern: existing keydown handlers defer to the panel's hotkey router once detected (prevents Shift+X double-firing); IS_TOP gate on HOTKEY_FIRED handler prevents double-execution from BroadcastChannel delivery to all frames; each script gets its own panel section (NOT in the Hotkeys group — they're bulkier features). User can now disable individual bulk scripts or rebind their hotkeys via the panel.
 - **AIM Absolute Altitude v1.7** — two fixes for v1.6's popup behavior:
   - **AIM altitude button path now also auto-closes the popup**. v1.6's cleanup only ran when `aimPendingPin` was set, which only `performAction()` (Shift+A) did — so clicking Percepto's native button skipped the cleanup entirely and the popup stayed open. v1.7 hooks the button click directly: any click on `img[title="Absolute altitude"]` sets `aimPendingPin = true`, so the subsequent map click goes through the same cleanup path as Shift+A.
   - **Stacked popups no longer close the wrong one ("offset" symptom)**. v1.6 used `querySelector('.leaflet-popup-close-button')` which returns the first match in DOM order — typically the OLDEST popup, not the newly-opened one. v1.7 snapshots the set of `.leaflet-popup` elements at the start of pin-drop cleanup, then closes only the ones that are NEW since the snapshot. Result: old popups stay open if you intentionally left them, only the just-opened one dismisses.

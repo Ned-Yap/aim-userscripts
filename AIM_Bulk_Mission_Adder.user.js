@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      1.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
@@ -22,6 +22,45 @@
 
     function init() {
         console.log("[AIM BULK] 🚀 Script fully initialized.");
+
+        // --- AIM Control Panel integration ---
+        // Master toggle + rebindable Shift+B hotkey via the panel. When the
+        // panel is detected the existing keydown handler defers to it; the
+        // panel routes hotkeys via HOTKEY_FIRED. IS_TOP gates the action so
+        // it only runs once even though BroadcastChannel delivers to all frames.
+        const IS_TOP = window === window.top;
+        const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+        const SCRIPT_ID = 'aim-bulk-mission-adder';
+        const SCRIPT_VERSION = '1.10';
+        let controlChannel = null;
+        let controlPanelDetected = false;
+        let masterEnabled = true;
+        function setupControlPanel() {
+            try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+            catch (e) { return; }
+            controlChannel.onmessage = (ev) => {
+                controlPanelDetected = true;
+                const msg = ev.data || {};
+                if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+                else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                    if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                    if (msg.hotkeyId === 'invoke' && masterEnabled && isTargetPage()) createUI();
+                }
+            };
+        }
+        function registerWithControlPanel() {
+            if (!controlChannel) return;
+            controlChannel.postMessage({
+                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Mission Adder',
+                description: 'Bulk add missions from a list. Only active on the merge_available_apps/step2 page.',
+                version: SCRIPT_VERSION,
+                toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+                hotkeys: [{ id: 'invoke', label: 'Open Bulk Mission Adder', default: 'Shift+B' }],
+            });
+        }
+        setupControlPanel();
+        registerWithControlPanel();
 
         // Helper to ensure we are on the correct step 2 page
         function isTargetPage() {
@@ -284,6 +323,11 @@
         }
 
         window.addEventListener('keydown', (e) => {
+            // Defer to the control panel's hotkey router once detected (the
+            // panel re-fires the action via HOTKEY_FIRED). Also skip if the
+            // user disabled this script via master toggle.
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             const isB = (e.key && e.key.toLowerCase() === 'b');
             if (e.shiftKey && isB) {
                 if (!isTargetPage()) return;

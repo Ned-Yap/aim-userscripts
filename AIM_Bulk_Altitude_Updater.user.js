@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Altitude Updater
 // @namespace    http://tampermonkey.net/
-// @version      4.8
+// @version      4.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js
 // @description  Pause-enabled bulk altitude updater with double-check logic. Prep Pass -> Pause (Update Data) -> Final Pass.
@@ -27,6 +27,45 @@
 
     function init() {
         console.log("[AIM ALT v4.7] 🚀 Hunter Initialized. Double-Check logic active.");
+
+        // --- AIM Control Panel integration ---
+        // Master toggle + rebindable Shift+E hotkey. Existing keydown defers
+        // when panel is detected. IS_TOP gates the action so it only fires
+        // once across all frame contexts. createUI() is defined later in
+        // init() but available by closure at HOTKEY_FIRED dispatch time.
+        const IS_TOP = window === window.top;
+        const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+        const SCRIPT_ID = 'aim-bulk-altitude-updater';
+        const SCRIPT_VERSION = '4.9';
+        let controlChannel = null;
+        let controlPanelDetected = false;
+        let masterEnabled = true;
+        function setupControlPanel() {
+            try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+            catch (e) { return; }
+            controlChannel.onmessage = (ev) => {
+                controlPanelDetected = true;
+                const msg = ev.data || {};
+                if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+                else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
+                    if (msg.toggleId === 'master') masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID && IS_TOP) {
+                    if (msg.hotkeyId === 'invoke' && masterEnabled) createUI();
+                }
+            };
+        }
+        function registerWithControlPanel() {
+            if (!controlChannel) return;
+            controlChannel.postMessage({
+                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Altitude Updater',
+                description: 'Pause-enabled bulk altitude updater with double-check (prep → pause → final).',
+                version: SCRIPT_VERSION,
+                toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+                hotkeys: [{ id: 'invoke', label: 'Open Bulk Altitude Updater', default: 'Shift+E' }],
+            });
+        }
+        setupControlPanel();
+        registerWithControlPanel();
 
         // --- UI Trigger Injection ---
         function runInjection() {
@@ -472,6 +511,9 @@
         }
 
         window.addEventListener('keydown', (e) => {
+            // Defer to panel router once detected; respect master toggle.
+            if (controlPanelDetected) return;
+            if (!masterEnabled) return;
             if (e.shiftKey && e.key.toLowerCase() === 'e') {
                 const el = e.target;
                 if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable || el.closest('.ant-input')) return;
