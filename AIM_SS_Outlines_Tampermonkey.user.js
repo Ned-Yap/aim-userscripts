@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.21
+// @version      34.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.21';
+    const SCRIPT_VERSION = '34.22';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1462,6 +1462,17 @@
     function installKMLEditHandlers() {
         window.addEventListener('contextmenu', (e) => {
             const t = e.target;
+            // Debug: only log when at least one edit mode is on so we don't
+            // spam the console for every right-click. Tells us "did the
+            // event reach us, and what was the target?" without needing
+            // browser DevTools breakpoints.
+            const anyEdit = toggleState['distro.edit-mode'] === true || toggleState['trans.edit-mode'] === true;
+            if (anyEdit) {
+                const tag = (t && t.tagName) || '?';
+                const cls = (t && t.getAttribute && t.getAttribute('class')) || '';
+                const kt = (t && t.getAttribute && t.getAttribute('data-kml-type')) || '';
+                console.log(`${TAG} contextmenu → tag=${tag} class="${cls}" data-kml-type="${kt}"`);
+            }
             if (!t || typeof t.getAttribute !== 'function') return;
             const path = (typeof t.closest === 'function') ? t.closest('path[data-kml-type]') : null;
             if (!path) return;
@@ -1759,9 +1770,19 @@
             }
             p.setAttribute('stroke-linejoin', 'round');
             p.setAttribute('stroke-linecap', 'round');
-            // 'stroke' hit-testing = right-click on the line itself counts,
-            // but clicks on empty pixels nearby pass through to Leaflet.
-            p.setAttribute('pointer-events', editMode ? 'stroke' : 'none');
+            // Leaflet sets `pointer-events: none` on the overlay-pane SVG by
+            // default. Its own interactive paths use the `leaflet-interactive`
+            // class which has a CSS rule `pointer-events: visibleStroke` —
+            // overriding the parent's none. Without this class our paths
+            // inherit none and right-clicks fall through to Leaflet's own
+            // canvas/path under us. Only add it when in edit mode so we
+            // don't intercept Leaflet's drag-pan otherwise.
+            if (editMode) {
+                p.setAttribute('class', 'leaflet-interactive');
+                p.setAttribute('pointer-events', 'visibleStroke');
+            } else {
+                p.setAttribute('pointer-events', 'none');
+            }
             // Insert at the start of the group so shielding renders UNDER
             // the FFZ/FP/asset outlines.
             if (g.firstChild) g.insertBefore(p, g.firstChild);
