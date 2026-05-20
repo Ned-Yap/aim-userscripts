@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-20
 
+- **AIM Map Styler v34.18** — diagnosed stuck-state root cause + made Kick actually work. Diagnostic in stuck state showed: `__aim_map__: false`, `L.Map.prototype.initialize patched: true`, AND no map-like property anywhere on the container (enumerable, non-enumerable, React fiber, window globals). Conclusion: Percepto's Leaflet map was instantiated BEFORE our `initialize` patch took effect AND the instance is held in a WeakMap or closure that's unreachable from the DOM. v34.17's Kick was clearing state and re-activating but `getLeafletMap()` still returned null → apply functions silently no-op'd. v34.18 fixes:
+  - **`patchLeafletMap()` now hooks 7 prototype methods** (initialize, getPane, addLayer, invalidateSize, setView, panTo, _animateZoom) instead of just initialize. Each one captures `this._container.__aim_map__ = this` on first call. Next time Percepto does ANY map operation, we capture the reference even for maps that pre-existed our patch.
+  - **Kick now dispatches a synthetic `window resize` event** after re-activating. Leaflet's built-in resize handler calls `invalidateSize` on every map → our patched method intercepts → captures `this` → sets `__aim_map__` on container. Deterministic — no waiting for the user to interact.
+  - **`getLeafletMap()` also iterates non-enumerable properties** via `Object.getOwnPropertyNames` as a fallback (catches some Percepto wrapper scenarios).
 - **Bulk scripts — Control Panel integration** (older Phase 2 done). Three scripts now register with AIM Controls under their own panel sections, alongside their existing UI (no buttons removed, no functionality changed):
   - **AIM Bulk Mission Adder v1.10** — Shift+B (rebindable). Action only fires on `/merge_available_apps/step2/`, matching the existing behavior.
   - **AIM Bulk Altitude Updater v4.9** — Shift+E (rebindable). Master toggle + invoke hotkey.

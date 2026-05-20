@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.17
+// @version      34.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.17' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.18' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.17';
+    const SCRIPT_VERSION = '34.18';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1055,14 +1055,30 @@
         try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return false; }
         if (!L || !L.Map || !L.Map.prototype) return false;
         try {
-            const orig = L.Map.prototype.initialize;
-            L.Map.prototype.initialize = function(...args) {
-                const r = orig.apply(this, args);
-                try { if (this._container) this._container.__aim_map__ = this; } catch (e) {}
-                return r;
-            };
+            // Patch MULTIPLE prototype methods so we capture the map reference
+            // for already-created maps too — not just freshly-constructed ones.
+            // Diagnosed 2026-05-20: in stuck-state recovery, Percepto's map was
+            // already initialized before our `initialize` patch took effect, and
+            // the map instance was unreachable from the DOM (likely held in a
+            // WeakMap / closure). Hooking commonly-called methods like
+            // `getPane`, `addLayer`, `invalidateSize` etc. means the next time
+            // Percepto does ANY map operation, we capture `this` and stash it
+            // on the container as `__aim_map__`.
+            const methodsToHook = ['initialize', 'getPane', 'addLayer', 'invalidateSize', 'setView', 'panTo', '_animateZoom'];
+            methodsToHook.forEach(method => {
+                if (typeof L.Map.prototype[method] !== 'function') return;
+                const orig = L.Map.prototype[method];
+                L.Map.prototype[method] = function(...args) {
+                    try {
+                        if (this && this._container && !this._container.__aim_map__) {
+                            this._container.__aim_map__ = this;
+                        }
+                    } catch (e) {}
+                    return orig.apply(this, args);
+                };
+            });
             leafletPatched = true;
-            console.log(`${TAG} patched L.Map.initialize`);
+            console.log(`${TAG} patched L.Map prototype methods (${methodsToHook.length} hooks)`);
             return true;
         } catch (e) {
             console.warn(`${TAG} L.Map patch failed:`, e);
@@ -1099,6 +1115,7 @@
             for (const c of candidates) {
                 if (looksLikeLeafletMap(c)) { leafletMapRef = c; return c; }
             }
+            // Enumerable property iteration (covers most cases)
             for (const k in container) {
                 try {
                     const v = container[k];
@@ -1108,6 +1125,19 @@
                     }
                 } catch (e) {}
             }
+            // Non-enumerable property iteration (fallback — diagnosed
+            // 2026-05-20 stuck state had no enumerable map-like prop)
+            try {
+                for (const k of Object.getOwnPropertyNames(container)) {
+                    try {
+                        const v = container[k];
+                        if (looksLikeLeafletMap(v)) {
+                            console.log(`${TAG} captured Leaflet map via non-enumerable container.${k}`);
+                            leafletMapRef = v; return v;
+                        }
+                    } catch (e) {}
+                }
+            } catch (e) {}
         }
         return null;
     }
@@ -2267,14 +2297,22 @@
                     // Note: control panel will echo this back to us, but our
                     // SET_TOGGLE handler is idempotent.
                 } else if (msg.hotkeyId === 'kick-styler') {
-                    // Recovery hotkey: when the styler is stuck (KMLs/satellite
-                    // not applying after a soft refresh), most users currently
-                    // recover via "Empty Cache and Hard Reload" in DevTools.
-                    // This hotkey does the script-side equivalent: drop our
-                    // cached Leaflet map ref, detach observer, fully re-init
-                    // via setActiveState(false) → setActiveState(true). If the
-                    // bug is in our cached state, this should restore overlays
-                    // without a reload.
+                    // Recovery hotkey for the "stuck after refresh" state.
+                    //
+                    // v34.17 cleared our cached state + re-activated. But
+                    // diagnosed 2026-05-20: in stuck state the Leaflet map
+                    // instance is unreachable from the DOM (held in a WeakMap
+                    // or closure) and our `initialize` patch can't capture
+                    // already-created maps. So Kick was finding nothing and
+                    // apply-functions silently no-op'd.
+                    //
+                    // v34.18 expanded patchLeafletMap to hook MULTIPLE prototype
+                    // methods (getPane, addLayer, invalidateSize, etc.). Now
+                    // any map operation captures `this` and stashes it on the
+                    // container. To trigger one synthetically, Kick dispatches
+                    // a window resize — Leaflet's built-in resize handler calls
+                    // `invalidateSize` on every map, which our patched method
+                    // intercepts to set `__aim_map__`.
                     const wasActive = isActive || toggleState.master !== false;
                     console.log(`${TAG} 🦵 Kick — forcing re-init (wasActive=${wasActive})`);
                     setActiveState(false);
@@ -2283,8 +2321,12 @@
                     warmupRunsRemaining = 10;
                     if (wasActive) {
                         setTimeout(() => {
-                            console.log(`${TAG} 🦵 Kick — re-activating`);
+                            console.log(`${TAG} 🦵 Kick — re-activating + nudging Leaflet to capture map ref`);
                             setActiveState(true);
+                            // Dispatch resize so Leaflet's _onResize fires
+                            // invalidateSize on every existing map → our
+                            // patched method captures the map reference.
+                            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
                         }, 100);
                     }
                 }
