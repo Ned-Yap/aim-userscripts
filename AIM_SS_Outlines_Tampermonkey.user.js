@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.16
+// @version      34.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -24,7 +24,7 @@
     const FRAME_ID = `${CONTEXT}@${location.pathname}${location.search ? '?' + location.search.slice(0, 40) : ''}`;
     const TAG = `[AIM STYLER ${FRAME_ID}]`;
 
-    console.log(`${TAG} 🎨 Initializing v${ '34.16' }...`);
+    console.log(`${TAG} 🎨 Initializing v${ '34.17' }...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
@@ -40,7 +40,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.16';
+    const SCRIPT_VERSION = '34.17';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -236,6 +236,7 @@
     ];
     const HOTKEYS = [
         { id: 'toggle-master', label: 'Toggle overlays', default: 'Shift+O' },
+        { id: 'kick-styler', label: 'Kick styler (re-init when stuck)', default: 'Shift+K' },
     ];
     // Flatten advanced AND category groups so every leaf setting (and each
     // category's master checkbox) gets an entry in toggleState. Without this,
@@ -2265,6 +2266,27 @@
                     });
                     // Note: control panel will echo this back to us, but our
                     // SET_TOGGLE handler is idempotent.
+                } else if (msg.hotkeyId === 'kick-styler') {
+                    // Recovery hotkey: when the styler is stuck (KMLs/satellite
+                    // not applying after a soft refresh), most users currently
+                    // recover via "Empty Cache and Hard Reload" in DevTools.
+                    // This hotkey does the script-side equivalent: drop our
+                    // cached Leaflet map ref, detach observer, fully re-init
+                    // via setActiveState(false) → setActiveState(true). If the
+                    // bug is in our cached state, this should restore overlays
+                    // without a reload.
+                    const wasActive = isActive || toggleState.master !== false;
+                    console.log(`${TAG} 🦵 Kick — forcing re-init (wasActive=${wasActive})`);
+                    setActiveState(false);
+                    leafletMapRef = null;
+                    observerTarget = null;
+                    warmupRunsRemaining = 10;
+                    if (wasActive) {
+                        setTimeout(() => {
+                            console.log(`${TAG} 🦵 Kick — re-activating`);
+                            setActiveState(true);
+                        }, 100);
+                    }
                 }
             }
         };
