@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.27
+// @version      34.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.27';
+    const SCRIPT_VERSION = '34.28';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -3002,11 +3002,20 @@
                 }
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Button-type controls in the panel broadcast this when clicked.
-                // Gated to IFRAME: BroadcastChannel delivers to BOTH contexts
-                // and TOP doesn't render anything — running these in TOP at
-                // best wastes CPU and at worst (split) fires confirm() +
-                // GitHub PUT twice. IFRAME is the only context that owns the
-                // map and the panel UI, so it's the canonical handler.
+                // Two gates here:
+                //   1. CONTEXT === 'IFRAME' — TOP doesn't render anything; running
+                //      actions there at best wastes CPU and at worst (split) fires
+                //      confirm() + GitHub PUT twice.
+                //   2. document.hasFocus() — BroadcastChannel delivers to EVERY
+                //      open AIM tab in the same origin, not just the one the
+                //      user clicked in. Without this gate, clicking Split on
+                //      site 1597 in Tab A would fire confirm()/run on Tab B's
+                //      open site 1599 too. Only the focused tab handles the
+                //      action; all other tabs silently ignore.
+                if (!document.hasFocus()) {
+                    console.log(`${TAG} TRIGGER_ACTION ${msg.actionId} arrived but tab is not focused — ignoring (cross-tab broadcast).`);
+                    return;
+                }
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
@@ -3038,6 +3047,12 @@
                     }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
+                // Same cross-tab gate as TRIGGER_ACTION: hotkeys pressed in
+                // one AIM tab shouldn't toggle styler / kick / etc. in every
+                // other open AIM tab. Only the focused tab handles the key.
+                if (!document.hasFocus()) {
+                    return;
+                }
                 if (msg.hotkeyId === 'toggle-master') {
                     const next = !isActive;
                     toggleState.master = next;
