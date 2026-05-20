@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -85,7 +85,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.6';
+    const SCRIPT_VERSION = '1.7';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -133,6 +133,11 @@
                 var x = e.clientX;
                 var y = e.clientY;
                 var doc = e.target.ownerDocument || document;
+                // Snapshot existing popups so we can close ONLY the new one that
+                // opens from this pin drop. Without this, our close-button click
+                // hits the first popup in DOM order (typically the OLDEST), which
+                // is what produced the "closing older popups one at a time" bug.
+                var popupsBefore = new Set(doc.querySelectorAll('.leaflet-popup'));
                 
                 setTimeout(() => {
                     // 1. Find the Top Element (The Pin we just dropped)
@@ -168,14 +173,25 @@
                         // ABOVE was closing the popup and that re-clicking would
                         // restore it — actually the popup stays open through the
                         // cleanup. So when popupDefaultClosed is true, we have to
-                        // ACTIVELY close it (click the close button). When false,
-                        // we still do the safety re-click in case it got dismissed.
+                        // ACTIVELY close it.
+                        //
+                        // v1.7: close ONLY the popup that's new since the pin
+                        // drop (using popupsBefore snapshot). Previous version
+                        // used querySelector which returned the first popup in
+                        // DOM order — typically the OLDEST — so user reported
+                        // "older popups close one at a time, offset" when
+                        // stacking pins without dismissing prior popups.
                         if (popupDefaultClosed) {
                             setTimeout(() => {
-                                const closeBtn = doc.querySelector('.leaflet-popup-close-button');
-                                if (closeBtn) {
-                                    closeBtn.click();
-                                    console.log("[AIM ALT] 🚪 Closed popup (default-closed mode)");
+                                var newPopups = Array.from(doc.querySelectorAll('.leaflet-popup'))
+                                    .filter(function(p) { return !popupsBefore.has(p); });
+                                var closedCount = 0;
+                                newPopups.forEach(function(p) {
+                                    var btn = p.querySelector('.leaflet-popup-close-button');
+                                    if (btn) { btn.click(); closedCount++; }
+                                });
+                                if (closedCount > 0) {
+                                    console.log("[AIM ALT] 🚪 Closed " + closedCount + " new altitude popup(s)");
                                 }
                             }, 50);
                         } else {
@@ -216,6 +232,21 @@
                 e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
                 performAction();
             }
+        };
+
+        // Detect when the user clicks the NATIVE AIM altitude tool button
+        // (not via Shift+A). Without this hook, the button path didn't set
+        // window.aimPendingPin, so the clickHandler skipped the cleanup +
+        // popup-close logic — popup stayed open. Now both Shift+A and the
+        // button result in the same cleanup behavior. Cross-frame consistent
+        // via the same sync channel performAction uses.
+        var buttonClickHandler = function(e) {
+            var t = e.target;
+            if (!t || t.tagName !== 'IMG') return;
+            if (t.getAttribute('title') !== 'Absolute altitude') return;
+            window.aimPendingPin = true;
+            try { sync.postMessage('START_TRAP'); } catch (e2) {}
+            console.log('[AIM ALT] 🎯 Manual AIM button click — pin trap set');
         };
 
         // Right-click an altitude pin to delete it. Identifies pins by their
@@ -281,6 +312,7 @@
             window.addEventListener('keydown', keyHandler, true);
             window.addEventListener('mousedown', clickHandler, true);
             window.addEventListener('contextmenu', contextHandler, true);
+            window.addEventListener('click', buttonClickHandler, true);
             window.aimAltInstalled = true;
         }
 
@@ -292,6 +324,7 @@
                     win.addEventListener('keydown', keyHandler, true);
                     win.addEventListener('mousedown', clickHandler, true);
                     win.addEventListener('contextmenu', contextHandler, true);
+                    win.addEventListener('click', buttonClickHandler, true);
                     win.aimAltInstalled = true;
                 }
             } catch(e) {}
