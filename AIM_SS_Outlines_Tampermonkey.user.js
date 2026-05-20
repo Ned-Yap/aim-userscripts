@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.26
+// @version      34.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -41,7 +41,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.26';
+    const SCRIPT_VERSION = '34.27';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -3000,8 +3000,13 @@
                     const sid = getCurrentSiteID();
                     if (sid) fetchKMLForSite(sid, true);
                 }
-            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) {
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Button-type controls in the panel broadcast this when clicked.
+                // Gated to IFRAME: BroadcastChannel delivers to BOTH contexts
+                // and TOP doesn't render anything — running these in TOP at
+                // best wastes CPU and at worst (split) fires confirm() +
+                // GitHub PUT twice. IFRAME is the only context that owns the
+                // map and the panel UI, so it's the canonical handler.
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
