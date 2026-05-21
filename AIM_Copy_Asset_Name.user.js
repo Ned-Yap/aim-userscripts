@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '2.0';
+    const SCRIPT_VERSION = '2.1';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -426,9 +426,11 @@
     }
 
     // ============================================================
-    // "Open in editor" — synthesize a Shift+click at the entity's
-    // centroid. Shift bypasses asset.lock (per Map Styler design),
-    // so this works whether assets are locked or not.
+    // "Open in editor" — try Leaflet's layer-fire first (the only
+    // reliable way to trigger Percepto's `.on('click', ...)` handlers,
+    // since synthetic DOM events don't satisfy Leaflet's internal click
+    // dispatcher). Fall back to copying the entity name to clipboard
+    // so the user can paste it into the Map Entities sidebar.
     // ============================================================
     function openInEditor(entity) {
         const map = getLeafletMap();
@@ -437,42 +439,81 @@
             return;
         }
         if (!Array.isArray(entity.coords) || entity.coords.length === 0) {
-            showToast('Cannot open editor: no coords on entity', 'rgba(255,96,96,0.55)');
+            fallbackCopyName(entity);
             return;
         }
-        let lat, lng;
-        if (entity.coords.length >= 3) {
-            let sumLat = 0, sumLng = 0;
-            for (const c of entity.coords) { sumLat += c.lat; sumLng += c.lng; }
-            lat = sumLat / entity.coords.length;
-            lng = sumLng / entity.coords.length;
+        // Entity centroid
+        let cLat = 0, cLng = 0;
+        for (const c of entity.coords) { cLat += c.lat; cLng += c.lng; }
+        cLat /= entity.coords.length;
+        cLng /= entity.coords.length;
+
+        // Walk Leaflet's layer tree, find the layer whose centroid is
+        // closest to the entity's centroid. Match within 30m to avoid
+        // accidentally firing on a neighbor.
+        let bestLayer = null, bestDist = Infinity;
+        try {
+            if (typeof map.eachLayer === 'function') {
+                map.eachLayer(layer => {
+                    if (!layer) return;
+                    let llCenter = null;
+                    try {
+                        if (typeof layer.getBounds === 'function') {
+                            const b = layer.getBounds();
+                            if (b && typeof b.isValid === 'function' && b.isValid() && typeof b.getCenter === 'function') {
+                                llCenter = b.getCenter();
+                            }
+                        } else if (typeof layer.getLatLng === 'function') {
+                            llCenter = layer.getLatLng();
+                        }
+                    } catch (e) { return; }
+                    if (!llCenter || typeof llCenter.lat !== 'number') return;
+                    const d = approxMeters(cLat, cLng, llCenter.lat, llCenter.lng);
+                    if (d < bestDist) { bestDist = d; bestLayer = layer; }
+                });
+            }
+        } catch (e) {
+            console.warn(`${TAG} eachLayer threw:`, e);
+        }
+
+        if (bestLayer && bestDist < 30) {
+            // Fire Leaflet's click event directly on the layer. This
+            // triggers .on('click', handler) bindings without going
+            // through the DOM event system, so it works regardless of
+            // pointer-events / asset-lock state.
+            try {
+                let containerPoint, layerPoint;
+                try {
+                    containerPoint = map.latLngToContainerPoint([cLat, cLng]);
+                    layerPoint = map.containerPointToLayerPoint(containerPoint);
+                } catch (e) { /* not fatal */ }
+                bestLayer.fire('click', {
+                    type: 'click',
+                    target: bestLayer,
+                    latlng: { lat: cLat, lng: cLng },
+                    containerPoint: containerPoint || { x: 0, y: 0 },
+                    layerPoint: layerPoint || { x: 0, y: 0 },
+                    originalEvent: new MouseEvent('click', { shiftKey: true, bubbles: true, cancelable: true }),
+                });
+                showToast(`Opened ${entity.name || entity.id}`);
+                console.log(`${TAG} fired click on layer (dist ${bestDist.toFixed(1)}m from entity)`);
+                return;
+            } catch (e) {
+                console.warn(`${TAG} layer.fire threw, falling back to clipboard:`, e);
+            }
         } else {
-            lat = entity.coords[0].lat;
-            lng = entity.coords[0].lng;
+            console.log(`${TAG} no Leaflet layer within 30m (best dist: ${bestDist === Infinity ? 'none' : bestDist.toFixed(1) + 'm'}); falling back to clipboard`);
         }
-        let pt;
-        try { pt = map.latLngToContainerPoint([lat, lng]); }
-        catch (e) {
-            showToast('Map projection failed', 'rgba(255,96,96,0.55)');
-            return;
-        }
-        const cRect = map.getContainer().getBoundingClientRect();
-        const sx = cRect.left + pt.x;
-        const sy = cRect.top + pt.y;
-        const target = document.elementFromPoint(sx, sy);
-        if (!target) {
-            showToast('Nothing at that screen point — pan first?', 'rgba(255,96,96,0.55)');
-            return;
-        }
-        ['mousedown', 'mouseup', 'click'].forEach(typ => {
-            const ev = new MouseEvent(typ, {
-                bubbles: true, cancelable: true, view: window,
-                clientX: sx, clientY: sy, button: 0,
-                shiftKey: true, // bypass asset.locked
-            });
-            target.dispatchEvent(ev);
-        });
-        showToast(`Opened ${entity.name || entity.id} in editor`);
+
+        // Fallback: copy name to clipboard so user can paste into Map
+        // Entities sidebar — the same workflow they're already using
+        // manually, but one-click.
+        fallbackCopyName(entity);
+    }
+
+    function fallbackCopyName(entity) {
+        const name = entity.name || String(entity.id);
+        copyToClipboard(name, `Copied "${name}" — paste into Map Entities sidebar`);
     }
 
     // ============================================================
