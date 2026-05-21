@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '2.3';
+    const SCRIPT_VERSION = '2.4';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -418,22 +418,12 @@
         const footer = document.createElement('div');
         footer.style.cssText = 'display:flex;gap:6px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
 
-        // "Copy & Find in Map Entities" — copies the name to clipboard so
-        // user can paste it into the sidebar's Map Entities search. v2.0-v2.2
-        // tried to fire Leaflet click events to open the native editor
-        // directly; matching the layer worked (console showed 0.7m match)
-        // but Percepto's selection handler isn't bound through Leaflet's
-        // .on('click') so the dispatched events were no-ops. Until we sniff
-        // the actual selector for their sidebar search input, copying the
-        // name to clipboard is the most reliable path — the same workflow
-        // the user is already doing manually, just one-click.
         const findBtn = document.createElement('button');
-        findBtn.textContent = '📋 Copy name → paste in Map Entities';
+        findBtn.textContent = '🔍 Find in Map Entities';
         findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
         findBtn.onclick = (ev) => {
             ev.stopPropagation();
-            const nm = entity.name || String(entity.id);
-            copyToClipboard(nm, `Copied "${nm}" — paste in Map Entities sidebar`);
+            findEntityInSidebar(entity);
             closeInspector();
         };
         footer.appendChild(findBtn);
@@ -517,15 +507,78 @@
         }
     }
 
-    // Earlier versions (v2.0–v2.2) had an `openInEditor()` function that
-    // tried to fire Leaflet click events or synthetic DOM clicks to trigger
-    // Percepto's native edit dialog. Layer matching worked (console showed
-    // sub-meter matches) but the dispatched events were no-ops — Percepto's
-    // selection handler isn't bound via Leaflet's .on('click', …) or any
-    // simple DOM listener we could reach. The popup button now just copies
-    // the name to clipboard so the user can paste it into the Map Entities
-    // sidebar — the same manual workflow, just one-click. Once we have the
-    // sidebar's DOM selectors, v2.4 can automate the paste + filter.
+    // ============================================================
+    // "Find in Map Entities" — paste entity name into the sidebar's
+    // Search input and trigger the filter.
+    //
+    // Why this instead of dispatching map clicks:
+    //   v2.0–v2.2 tried synthetic DOM clicks and layer.fire('click') on
+    //   the matched map layer. Layer matching worked (console showed
+    //   sub-meter matches) but the dispatched events were no-ops —
+    //   Percepto's selection handler isn't bound via Leaflet's
+    //   .on('click', …) or any DOM listener we could reach. The sidebar
+    //   route bypasses the whole map-click problem.
+    //
+    // Why the React-aware value setter:
+    //   The sidebar input is an Ant Design <input> driven by React.
+    //   Setting input.value directly doesn't notify React — its onChange
+    //   doesn't fire and the filter doesn't apply. The workaround is to
+    //   call the native HTMLInputElement.value setter via prototype, then
+    //   dispatch a bubbling 'input' event. React's synthetic event system
+    //   picks it up.
+    //
+    // What's still manual:
+    //   v2.4 only filters the list. User still clicks the matching result
+    //   row to open the editor. Auto-clicking the result requires a
+    //   selector for the result row, which I haven't sniffed yet. v2.5
+    //   can add that once the result row's outerHTML is shared.
+    // ============================================================
+    const SIDEBAR_INPUT_SELECTOR = 'input.ant-input[placeholder="Search entity"]';
+
+    function findEntityInSidebar(entity) {
+        const name = entity && entity.name;
+        if (!name) {
+            showToast('No name on entity to search', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        // Sidebar input might be in TOP or IFRAME. Try our own document
+        // first; if it's not here, walk frames.
+        let input = document.querySelector(SIDEBAR_INPUT_SELECTOR);
+        if (!input) {
+            try {
+                const allFrames = Array.from(window.top.document.querySelectorAll('iframe'));
+                input = window.top.document.querySelector(SIDEBAR_INPUT_SELECTOR);
+                for (let i = 0; !input && i < allFrames.length; i++) {
+                    try { input = allFrames[i].contentDocument.querySelector(SIDEBAR_INPUT_SELECTOR); }
+                    catch (e) { /* cross-origin frame */ }
+                }
+            } catch (e) { /* cross-origin top */ }
+        }
+        if (!input) {
+            showToast('Map Entities search input not found — sidebar open?', 'rgba(255,96,96,0.55)');
+            console.warn(`${TAG} sidebar input not found via "${SIDEBAR_INPUT_SELECTOR}"`);
+            return;
+        }
+        // React-aware value setter — bypasses React's input-tracking guard.
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (descriptor && descriptor.set) {
+                descriptor.set.call(input, name);
+            } else {
+                input.value = name;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            // Also focus the input so the user can immediately keyboard-arrow
+            // through results if they want.
+            try { input.focus(); } catch (e) {}
+            showToast(`Filtered Map Entities to "${name}" — click the result to open`);
+        } catch (e) {
+            console.warn(`${TAG} sidebar paste failed, falling back to clipboard:`, e);
+            copyToClipboard(name, `Copied "${name}" — paste in Map Entities sidebar`);
+        }
+    }
 
     // ============================================================
     // Right-click handler — capture phase on window, gated to map area
