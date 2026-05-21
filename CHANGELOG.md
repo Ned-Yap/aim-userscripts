@@ -8,6 +8,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-21
 
+- **AIM Asset Inspector v3.8** — four Stats popup fixes from v3.7 testing.
+  - **Equipment split bug fixed** — was splitting subtype on bare `-` so "v-well - empty" became `["v", "well", "empty"]` and the equipment showed as "V" with state "Well". Now splits on literal ` - ` (with spaces) so "v-well" stays intact. Same fix applied to state extraction + Equipment × State matrix.
+  - **Dropped name-tag pass for equipment auto-detect** — earlier surfaced false positives (TEXAS, PU, ARICK, OVAL, LONG, YATER, LEONA — all asset-name prefixes, not equipment types). Per user feedback: subtype is the only source of truth.
+  - **Percentages on the keyword cards** — Asset Equipment / Asset States / GM Groups rows now show `count · % of total` (% of total assets for the asset cards, % of total GMs for the GM card). Quick read on what proportion of the site each category represents.
+  - **Equipment × State matrix rebranded "Asset Health by Equipment"** with semantic colors per Percepto's classification scheme: **POSITIVE states** rendered green-family (Normal = `#5fff5f` neon green per user request, HY = `#00e5ff` bright cyan for High Yield bonus); **NEGATIVE states** rendered in escalating warning palette (Empty yellow → Inactive orange → Unshielded orange-red → Unreachable red). Segments in each bar render in canonical order so positive states are always on the left and severity escalates rightward — at a glance you see the green/warning transition for each equipment type's health.
+  - Hover any segment for `<state>: <count> (X% of <equipment>)` tooltip.
 - **AIM Asset Inspector v3.7** — Stats popup goes auto-detect + adds a real Google Sheets export. Big quality-of-life push.
   - **Auto-detected Asset equipment** — was a hardcoded 6-item list (H-Well / V-Well / Compressor / Battery / SAT / SWD). Now extracted from the data: split each asset's `poi_type_str` on " - " and use the first part as the equipment kind. Names like "MILLIKEN C 3D SWD" with no SWD in subtype get caught by a secondary "all-caps token in name" pass with stopword filtering. Surfaces new equipment kinds (Compressor, SAT, anything Percepto adds later) without code changes.
   - **Auto-detected Asset states** — was hardcoded Empty / Unshielded / Unreachable. Now extracts everything after " - " in subtype as a state tag and groups counts.

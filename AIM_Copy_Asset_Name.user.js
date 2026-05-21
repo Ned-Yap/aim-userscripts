@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.7
+// @version      3.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.7';
+    const SCRIPT_VERSION = '3.8';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1607,67 +1607,41 @@
                 e.arcs.forEach(a => { if (typeof a.distance === 'number') fpDistanceM += a.distance; });
             }
         });
-        // ---- Auto-detected breakdowns ----
-        // Subtypes in this dataset look like "battery - empty",
-        // "v-well - unreachable", "h-well", "compressor". The piece
-        // BEFORE " - " is the equipment kind; the piece(s) AFTER are
-        // state tags. Both are auto-extracted now instead of hand-
-        // listed — when a site adds new categories (rare but possible)
-        // they show up automatically.
+        // ---- Auto-detected breakdowns from subtype ONLY ----
+        // Subtypes use " - " (space-dash-space) as the equipment/state
+        // separator: e.g. "battery - empty", "v-well - unreachable".
+        // The equipment names themselves CONTAIN hyphens ("v-well",
+        // "h-well") so splitting on a bare `-` broke them apart into
+        // "v" + "well". Required: split only on " - " with surrounding
+        // spaces.
         //
-        // Auto-detect equipment: group assets by subtype.split(' - ')[0],
-        // counts >= 1 are surfaced. SWD is special — lives in NAME not
-        // subtype (e.g. "MILLIKEN C 3D SWD") — so we tack on any
-        // common name-tags as a second pass.
+        // Names are NOT used for equipment auto-detect — earlier
+        // versions had a name-tag pass that surfaced false positives
+        // like "TEXAS", "PU", "ARICK" (asset name prefixes, not
+        // equipment types). Per user feedback, subtype is the only
+        // source of truth here.
+        const SPLIT = ' - ';
         const equipMap = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
             if (!sub) return;
-            const head = sub.split(/\s*-\s*/)[0].trim();
+            const head = sub.split(SPLIT)[0].trim();
             if (!head) return;
             const key = prettyKey(head);
             equipMap[key] = (equipMap[key] || 0) + 1;
         });
-        // Name-tag pass: short ALL-CAPS tokens in asset names (length
-        // 3-5) caught for tags like SWD that don't appear in subtypes.
-        // Filter out common false positives (numbers etc.) by
-        // requiring at least one letter.
-        const nameTagMap = {};
-        const NAME_TAG_RE = /\b([A-Z]{2,5})\b/g;
-        byType[3].forEach(r => {
-            const matches = (r.name || '').match(NAME_TAG_RE);
-            if (!matches) return;
-            // Dedupe within a single name so "TEXAS TEN ZZ 13" doesn't
-            // count ZZ twice.
-            new Set(matches).forEach(tag => {
-                nameTagMap[tag] = (nameTagMap[tag] || 0) + 1;
-            });
-        });
-        // Filter name-tags: drop ones that look like generic words
-        // ("TEN", "AND", "OR"), keep ones that appear >= 2 times AND
-        // aren't already in equipMap (case-insensitive).
-        const equipKeysLower = new Set(Object.keys(equipMap).map(k => k.toLowerCase()));
-        const NAME_TAG_STOPWORDS = new Set(['TEN', 'AND', 'OR', 'THE', 'OF', 'IN', 'AT', 'TO',
-            'TRD', 'AB', 'CD', 'GS', 'WS', 'PER', 'NW', 'NE', 'SW', 'SE',
-            'WELL', 'BMS', 'IT', 'IS', 'AS', 'BY', 'FOR', 'NOT', 'NO',
-            'UTC', 'GPS', 'API', 'ZZ']);
-        Object.entries(nameTagMap).forEach(([tag, count]) => {
-            if (count < 2) return;
-            if (equipKeysLower.has(tag.toLowerCase())) return;
-            if (NAME_TAG_STOPWORDS.has(tag)) return;
-            equipMap[tag] = count; // surfaces SWD, SAT (if not already), etc.
-        });
-        // Sort by count descending and cap at top 12 for display sanity.
         const assetEquipment = sortAndCap(equipMap, 12);
 
-        // Auto-detect states: parts AFTER " - " in subtype. So
-        // "battery - empty" yields "empty". "v-well - unshielded"
-        // yields "unshielded". Counts independent of equipment.
+        // States = parts AFTER " - " in subtype.
+        // "battery - empty" → state = "empty". "v-well" → no state.
+        // Counts independent of equipment (an asset's state tag is
+        // counted once toward its equipment row and once toward the
+        // global state row).
         const stateMap = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
             if (!sub) return;
-            const parts = sub.split(/\s*-\s*/).slice(1);
+            const parts = sub.split(SPLIT).slice(1);
             parts.forEach(p => {
                 const k = p.trim();
                 if (!k) return;
@@ -1692,14 +1666,16 @@
         const gmGroups = sortAndCap(gmMap, 12);
 
         // Equipment × State matrix — for each equipment kind, count
-        // how many are in each state (or "Normal" if no state suffix).
-        // Powers the new stacked-bar chart in the popup.
+        // how many are in each state. "Normal" means no state suffix
+        // on the subtype = the asset is in good operating condition
+        // (per Percepto's convention: no modifier = baseline-good).
+        // Splits use " - " (with spaces) so "v-well" stays intact.
         const equipStateMatrix = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
-            const head = prettyKey((sub.split(/\s*-\s*/)[0] || '').trim());
+            const head = prettyKey((sub.split(SPLIT)[0] || '').trim());
             if (!head) return;
-            const states = sub.split(/\s*-\s*/).slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
+            const states = sub.split(SPLIT).slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
             const stateKey = states.length ? states.join(' + ') : 'Normal';
             if (!equipStateMatrix[head]) equipStateMatrix[head] = {};
             equipStateMatrix[head][stateKey] = (equipStateMatrix[head][stateKey] || 0) + 1;
@@ -1828,31 +1804,52 @@
         return wrap;
     }
 
-    // Stacked-bar chart card for Equipment × State. Each row =
-    // equipment kind. Bar fills proportional to the equipment's
-    // share of the largest equipment count (so the biggest bar fills
-    // the row). Segments inside the bar are colored per state.
+    // Asset Health by Equipment — stacked horizontal bars per
+    // equipment kind, segmented by status. Per user's classification:
+    //   POSITIVE: no modifier = "Normal" (good baseline), HY (High
+    //             Yield bonus). Both rendered with green-family colors.
+    //   NEGATIVE: Empty, Inactive, Unshielded, Unreachable. Escalating
+    //             warning palette from yellow → orange → red.
+    // Segment order in each bar matches the legend order so positive
+    // states are always on the left, negatives on the right increasing
+    // in severity — at a glance you see "how much of this equipment
+    // is healthy" by where the bar transitions from green to warning.
     function makeEquipStateMatrixCard(matrix, cardBuilder) {
-        const c = cardBuilder('Asset Equipment × State');
+        const c = cardBuilder('Asset Health by Equipment');
+        // Semantic palette per state. Tweaked greens for the positive
+        // bloc so they stand apart from the validation-card greens.
         const STATE_COLORS = {
-            'Normal':      '#ffffff',
-            'Empty':       '#ffd54f',
-            'Unshielded':  '#ff9800',
-            'Unreachable': '#ff5555',
+            'Normal':      '#5fff5f',   // baseline good (no modifier)
+            'HY':          '#00e5ff',   // High Yield bonus modifier
+            'Empty':       '#ffd54f',   // mild concern
+            'Inactive':    '#ff9800',   // moderate concern
+            'Unshielded':  '#ff5722',   // drone-safety concern
+            'Unreachable': '#ff5555',   // worst
         };
+        const STATE_ORDER = ['Normal', 'HY', 'Empty', 'Inactive', 'Unshielded', 'Unreachable'];
         const stateColor = (s) => STATE_COLORS[s] || '#888888';
+        const orderIndex = (s) => {
+            const i = STATE_ORDER.indexOf(s);
+            return i === -1 ? STATE_ORDER.length : i; // unknowns at end
+        };
         // Compute totals per equipment + global max for proportional sizing.
         const equipTotals = Object.entries(matrix).map(([eq, states]) => {
             const total = Object.values(states).reduce((a, b) => a + b, 0);
             return { eq, states, total };
         }).sort((a, b) => b.total - a.total);
         const globalMax = Math.max(0, ...equipTotals.map(x => x.total));
-        // Legend at top so colors are documented in one place.
+        // Legend at top — known states first (in canonical order),
+        // any unrecognized states appended alphabetically.
         const legend = document.createElement('div');
         legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06);font-size:10px';
         const seenStates = new Set();
         equipTotals.forEach(({ states }) => Object.keys(states).forEach(s => seenStates.add(s)));
-        Array.from(seenStates).sort().forEach(s => {
+        const orderedLegendStates = Array.from(seenStates).sort((a, b) => {
+            const da = orderIndex(a), db = orderIndex(b);
+            if (da !== db) return da - db;
+            return a.localeCompare(b);
+        });
+        orderedLegendStates.forEach(s => {
             const item = document.createElement('span');
             item.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb';
             const sw = document.createElement('span');
@@ -1873,18 +1870,21 @@
             cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:36px;text-align:right';
             cnt.textContent = fmtNum(total);
             // Stacked bar — width proportional to total/globalMax, then
-            // segmented by state proportions inside.
+            // segmented by state proportions inside. Segments rendered
+            // in canonical order: positives on the left, negatives on
+            // the right increasing in severity.
             const barWrap = document.createElement('span');
             const barTotalPct = globalMax > 0 ? (total / globalMax) * 100 : 0;
             barWrap.style.cssText = `flex:1 1 auto;min-width:0;max-width:55%;height:10px;background:rgba(255,255,255,0.06);border-radius:3px;display:flex;overflow:hidden`;
             const stackInner = document.createElement('span');
             stackInner.style.cssText = `display:flex;width:${barTotalPct.toFixed(1)}%;height:100%;border-radius:3px;overflow:hidden`;
-            Object.entries(states).forEach(([state, count]) => {
+            const orderedStateEntries = Object.entries(states).sort((a, b) => orderIndex(a[0]) - orderIndex(b[0]));
+            orderedStateEntries.forEach(([state, count]) => {
                 if (!count) return;
                 const seg = document.createElement('span');
                 const segPct = total > 0 ? (count / total) * 100 : 0;
                 seg.style.cssText = `display:inline-block;width:${segPct.toFixed(1)}%;height:100%;background:${stateColor(state)}`;
-                seg.title = `${state}: ${fmtNum(count)}`;
+                seg.title = `${state}: ${fmtNum(count)} (${(count / total * 100).toFixed(1)}% of ${eq})`;
                 stackInner.appendChild(seg);
             });
             barWrap.appendChild(stackInner);
@@ -2123,36 +2123,45 @@
         body.appendChild(cFP);
 
         // --- KEYWORD BREAKDOWN cards (with proportional bars) ---
-        const kwCard = (titleText, dict, color) => {
+        // kwCard renders a keyword breakdown with count + percent + bar.
+        // denominator: what each row's count divides into for the %
+        //   column. Pass total assets / total GMs / etc. so percentages
+        //   read as "X% of all assets" rather than "X% of this card's
+        //   sum" (which is misleading when items overlap or are partial).
+        const kwCard = (titleText, dict, color, denominator) => {
             const c = card(titleText);
             const maxVal = Math.max(0, ...Object.values(dict));
-            // overflow:hidden + min-width:0 on bar wrap lets the row
-            // shrink cleanly when the card column is narrow (responsive
-            // grid). Was: 120px-fixed bar spilled past edges.
+            const denom = denominator != null ? denominator : Object.values(dict).reduce((a, b) => a + b, 0);
             Object.entries(dict).forEach(([k, v]) => {
                 const row = document.createElement('div');
                 row.style.cssText = 'display:flex;align-items:center;padding:4px 0;font-size:12px;gap:8px;overflow:hidden';
                 const lbl = document.createElement('span');
-                lbl.style.cssText = 'flex:0 0 auto;max-width:50%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                lbl.style.cssText = 'flex:0 0 auto;max-width:45%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
                 lbl.title = k;
                 lbl.textContent = k;
                 const cnt = document.createElement('span');
-                cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
+                cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:40px;text-align:right';
                 cnt.textContent = fmtNum(v);
-                row.appendChild(lbl); row.appendChild(cnt);
+                const pct = document.createElement('span');
+                pct.style.cssText = 'flex:0 0 auto;color:#888;font-size:10px;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
+                pct.textContent = denom > 0 ? `${(v / denom * 100).toFixed(1)}%` : '—';
+                row.appendChild(lbl); row.appendChild(cnt); row.appendChild(pct);
                 row.appendChild(makeProportionBar(v, maxVal, color));
                 c.appendChild(row);
             });
             return c;
         };
-        body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color));
-        body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d'));
-        // Equipment × State stacked bars — for each equipment kind,
-        // show its total broken down by state. Color-coded per state:
-        //   Normal = white, Empty = yellow, Unshielded = orange,
-        //   Unreachable = red. Unknown states fall back to gray.
+        // Asset percentages are vs total assets so each row reads as
+        // "X% of all assets on the site" — natural denominator for
+        // both equipment and state cards.
+        const totalAssets = stats.counts[3];
+        const totalGMs = stats.counts[19];
+        body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color, totalAssets));
+        body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d', totalAssets));
+        // Equipment Health matrix — stacked horizontal bars per
+        // equipment kind, segmented by status. See makeEquipStateMatrixCard.
         body.appendChild(makeEquipStateMatrixCard(stats.equipStateMatrix, card));
-        body.appendChild(kwCard('General Markers · Groups (auto)', stats.gmGroups, typeReg(19).color));
+        body.appendChild(kwCard('General Markers · Groups (auto)', stats.gmGroups, typeReg(19).color, totalGMs));
 
         // --- OTHER card ---
         const cOther = card('Other');
