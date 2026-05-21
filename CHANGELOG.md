@@ -9,6 +9,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.2** — second round of summary-panel polish. A lot in one push.
+  - **NFZ (No-Fly Zone) entity type 4** now recognized everywhere: right-click matching, type chip in the toolbar, sort priority, type color (red — opposite of FFZ green). NFZs use the same `restrictions.minAlt/maxAlt` schema as FFZs.
+  - **Validation only applies to FFZ / FP / NFZ.** Assets and Markers hide Percepto's Validated toggle entirely; v3.1 was incorrectly treating their `validated: false` as a real "unvalidated" status. Now those types render `—` in the Valid column and the Validated / Unvalidated filters exclude them (they have no valid/invalid state to match).
+  - **Red ✗ for unvalidated FFZ/FP/NFZ** (was just dim `—`). Green ✓ for validated. Makes invalid stuff visually obvious in a long list.
+  - **Marker color** → light purple `#c084fc` (was orange) to match AIM's altitude marker palette.
+  - **Default sort** → by type priority (FP → FFZ → NFZ → Asset → Marker), then A→Z by name within each group. Click any column header to override.
+  - **Unit toggle** (ft / m) — checkbox in the toolbar. Affects Elev / Min Alt / Max Alt column headers and cell values. Default = ft. Sort is unit-agnostic (uses raw meters internally, so order is identical).
+  - **Columns ▾ menu** — toggle visibility per column (Type / Name / Subtype / Elev / Min Alt / Max Alt / Valid). Hidden columns are also omitted from CSV / TSV exports.
+  - **Multi-select via row checkboxes** — first column. Select-all checkbox in the header (with indeterminate state when partial). When any rows are selected, Copy buttons act on the **selection** instead of the filter; when nothing is selected, they fall back to the current filtered set.
+  - **Copy → Sheets** button (TSV format) — paste directly into Google Sheets / Excel and it auto-splits into rows/columns. Cell contents have embedded tabs/newlines stripped to keep the layout intact.
+  - **Inspector popup × close button** in the top-right corner — was previously close-on-outside-click only, which the user reported as unintuitive.
+  - Deferred to v3.3: draggable column reorder + individual column resize.
 - **AIM Asset Inspector v3.1** — Summary panel polish based on first-test feedback.
   - **New filters**: **Unvalidated only**, **Unshielded only**, **Has notes**. The Validated/Unvalidated pair is mutually exclusive (toggling one auto-clears the other — both ON would show nothing).
   - **"Valid" column header** (was just `✓` which wasn't clear). Same `✓ / —` data in the cells.

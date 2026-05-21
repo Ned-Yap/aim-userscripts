@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.1';
+    const SCRIPT_VERSION = '3.2';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -142,11 +142,12 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
         const entities = bucket.entities || [];
-        // 1. Polygon hit (assets type 3, FFZs type 16) — prefer smaller area
-        //    on ties so user can pick a small asset inside a larger zone.
+        // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16) — prefer
+        //    smaller area on ties so user can pick a small asset inside a
+        //    larger zone.
         let bestPoly = null, bestPolyArea = Infinity;
         for (const e of entities) {
-            if ((e.type === 3 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
+            if ((e.type === 3 || e.type === 4 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
                 if (pointInPolygon(lat, lng, e.coords)) {
                     // Rough area via bounding box (cheap, no real area calc).
                     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
@@ -209,22 +210,35 @@
         }
     }
 
+    // Central type registry. Single source of truth — every label,
+    // color, sort-priority, short-name lookup goes through this.
+    //   - 3  = Asset (white, drone-mission target)
+    //   - 4  = NFZ (no-fly zone — red, forbidden airspace)
+    //   - 15 = Flight Path (blue)
+    //   - 16 = FFZ (free fly zone — green, allowed airspace)
+    //   - 19 = General Marker (purple — matches AIM altitude markers)
+    //
+    // sortPrio matches the user's preferred default order:
+    //   FP → FFZ → NFZ → Asset → Marker.
+    // hasValidStatus marks types where the `validated` flag is
+    // meaningful in Percepto's UI — Assets and Markers hide the
+    // toggle entirely, so we treat their `validated` value as N/A.
+    const TYPE_REG = {
+        3:  { short: 'Ast', long: 'Asset',           color: '#ffffff', sortPrio: 4, hasValidStatus: false },
+        4:  { short: 'NFZ', long: 'No Fly Zone',     color: '#ff5555', sortPrio: 3, hasValidStatus: true  },
+        15: { short: 'FP',  long: 'Flight Path',     color: '#1ca0de', sortPrio: 1, hasValidStatus: true  },
+        16: { short: 'FFZ', long: 'Free Fly Zone',   color: '#5fff5f', sortPrio: 2, hasValidStatus: true  },
+        19: { short: 'Mkr', long: 'Marker',          color: '#c084fc', sortPrio: 5, hasValidStatus: false },
+    };
+    function typeReg(t) { return TYPE_REG[t] || { short: '?', long: `Type ${t}`, color: '#7adfe6', sortPrio: 99, hasValidStatus: false }; }
+
     function entityTypeLabel(e) {
-        const t = e.type;
-        if (t === 3) return e.custom && e.custom.poi_type_str ? `Asset · ${e.custom.poi_type_str}` : 'Asset';
-        if (t === 15) return 'Flight Path';
-        if (t === 16) return 'Free Fly Zone';
-        if (t === 19) return e.general_marker_type ? `Marker · ${e.general_marker_type}` : 'Marker';
-        return `Type ${t}`;
+        const reg = typeReg(e.type);
+        if (e.type === 3) return e.custom && e.custom.poi_type_str ? `${reg.long} · ${e.custom.poi_type_str}` : reg.long;
+        if (e.type === 19) return e.general_marker_type ? `${reg.long} · ${e.general_marker_type}` : reg.long;
+        return reg.long;
     }
-    function entityTypeColor(e) {
-        const t = e.type;
-        if (t === 3) return '#ffffff';
-        if (t === 15) return '#1ca0de';
-        if (t === 16) return '#5fff5f';
-        if (t === 19) return '#ff9800';
-        return '#7adfe6';
-    }
+    function entityTypeColor(e) { return typeReg(e.type).color; }
 
     // Build a dual-unit row: feet (converted from meters) / meters,
     // each number separately click-to-copy. Units are display-only,
@@ -343,12 +357,21 @@
         `;
 
         const header = document.createElement('div');
-        header.style.cssText = `padding:7px 12px;color:${typeColor};font-weight:600;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;font-size:13px;line-height:1.25`;
+        header.style.cssText = `padding:7px 32px 7px 12px;color:${typeColor};font-weight:600;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;font-size:13px;line-height:1.25;position:relative`;
         header.textContent = entity.name || '(unnamed)';
         const sub = document.createElement('div');
         sub.style.cssText = 'font-size:10px;color:#888;font-weight:normal;text-transform:uppercase;letter-spacing:0.5px;margin-top:2px';
         sub.textContent = typeLabel;
         header.appendChild(sub);
+        // × close button — top-right corner.
+        const xBtn = document.createElement('button');
+        xBtn.textContent = '×';
+        xBtn.title = 'Close';
+        xBtn.style.cssText = 'position:absolute;top:4px;right:6px;background:transparent;border:none;color:#888;font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:3px';
+        xBtn.onmouseenter = () => { xBtn.style.color = '#e6e6e6'; xBtn.style.background = 'rgba(255,255,255,0.06)'; };
+        xBtn.onmouseleave = () => { xBtn.style.color = '#888'; xBtn.style.background = 'transparent'; };
+        xBtn.onclick = (ev) => { ev.stopPropagation(); closeInspector(); };
+        header.appendChild(xBtn);
         popup.appendChild(header);
 
         const rows = buildEntityFields(entity);
@@ -691,17 +714,27 @@
     // ============================================================
     const SUM_BTN_ID = 'aim-sum-trigger-btn';
     const SUM_PANEL_ID = 'aim-sum-panel';
+    // Default visible columns — user can toggle via "Columns ▾" menu.
+    // 'sel' is the multi-select checkbox column (always on, not in the menu).
+    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'elev', 'altMin', 'altMax', 'validated'];
     let sumPanelState = {
         search: '',
-        typeFilter: new Set(['3', '15', '16', '19']), // All types on by default
+        typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
         validatedOnly: false,
         unvalidatedOnly: false,
         unshieldedOnly: false,
         notesOnly: false,
-        sortKey: 'name',
-        sortDir: 1, // 1 = asc, -1 = desc
-        x: null, y: null,         // last drag position (px from viewport)
-        w: 720, h: null,          // last drag size (null = use default)
+        unitsFt: true,             // false → display meters
+        // Default sort = by type-priority (FP → FFZ → NFZ → Asset → Marker),
+        // then A→Z within each type group. Sort by 'typePrio' uses the
+        // numeric priority; the secondary tie-break by name happens in
+        // filterAndSortRows when sortKey === 'typePrio'.
+        sortKey: 'typePrio',
+        sortDir: 1,
+        x: null, y: null,          // last drag position (px from viewport)
+        w: 720, h: null,           // last drag size (null = use default max-height)
+        selectedIds: new Set(),    // multi-select state — survives panel reopen
+        visibleCols: new Set(ALL_COL_KEYS),
     };
 
     function injectSumButton(doc) {
@@ -786,20 +819,10 @@
         renderSummaryPanel(siteID);
     }
 
-    function typeShortLabel(t) {
-        if (t === 3) return 'Ast';
-        if (t === 15) return 'FP';
-        if (t === 16) return 'FFZ';
-        if (t === 19) return 'Mkr';
-        return '?';
-    }
-    function typeBadgeColor(t) {
-        if (t === 3) return '#ffffff';
-        if (t === 15) return '#1ca0de';
-        if (t === 16) return '#5fff5f';
-        if (t === 19) return '#ff9800';
-        return '#7adfe6';
-    }
+    // Shorthand for the summary table — route through TYPE_REG so labels
+    // and colors come from a single source of truth.
+    function typeShortLabel(t) { return typeReg(t).short; }
+    function typeBadgeColor(t) { return typeReg(t).color; }
 
     // Build the flat row-set for the table. Each row is { entity, name,
     // typeLabel, subtype, elevFt, altRangeFt, validated } — pre-computed
@@ -808,23 +831,33 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return [];
         return (bucket.entities || []).map(e => {
+            const reg = typeReg(e.type);
             const row = {
                 entity: e,
                 type: e.type,
-                typeShort: typeShortLabel(e.type),
+                typeShort: reg.short,
+                typePrio: reg.sortPrio,
                 name: e.name || '',
                 subtype: '',
-                elevFt: null,
-                altMinFt: null,
-                altMaxFt: null,
-                validated: !!e.validated,
+                // Altitudes/elevations stored in METERS (source of truth);
+                // display converts to ft when sumPanelState.unitsFt is on.
+                // Sort uses the meter value directly — relative ordering is
+                // the same in either unit.
+                elevM: null,
+                altMinM: null,
+                altMaxM: null,
+                // validated is null for types where Percepto hides the
+                // toggle (Assets, Markers) — we treat those as N/A so the
+                // Validated/Unvalidated filters don't accidentally hide
+                // every asset on the site.
+                validated: reg.hasValidStatus ? !!e.validated : null,
                 unshielded: !!e.is_unshielded,
                 hasNotes: !!(e.description && String(e.description).trim()),
             };
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
                 if (typeof e.custom.elevation_asl === 'number') {
-                    row.elevFt = e.custom.elevation_asl * 3.28084;
+                    row.elevM = e.custom.elevation_asl;
                 }
             }
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
@@ -833,12 +866,13 @@
                     if (typeof a.min_alt === 'number' && a.min_alt < minA) minA = a.min_alt;
                     if (typeof a.max_alt === 'number' && a.max_alt > maxA) maxA = a.max_alt;
                 }
-                if (isFinite(minA)) row.altMinFt = minA * 3.28084;
-                if (isFinite(maxA)) row.altMaxFt = maxA * 3.28084;
+                if (isFinite(minA)) row.altMinM = minA;
+                if (isFinite(maxA)) row.altMaxM = maxA;
             }
-            if (e.type === 16 && e.restrictions && typeof e.restrictions === 'object') {
-                if (typeof e.restrictions.minAlt === 'number') row.altMinFt = e.restrictions.minAlt * 3.28084;
-                if (typeof e.restrictions.maxAlt === 'number') row.altMaxFt = e.restrictions.maxAlt * 3.28084;
+            // NFZ (4) and FFZ (16) both store altitude range in restrictions.
+            if ((e.type === 4 || e.type === 16) && e.restrictions && typeof e.restrictions === 'object') {
+                if (typeof e.restrictions.minAlt === 'number') row.altMinM = e.restrictions.minAlt;
+                if (typeof e.restrictions.maxAlt === 'number') row.altMaxM = e.restrictions.maxAlt;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
             return row;
@@ -849,21 +883,36 @@
         const q = (state.search || '').trim().toLowerCase();
         let out = rows.filter(r => {
             if (!state.typeFilter.has(String(r.type))) return false;
-            if (state.validatedOnly && !r.validated) return false;
-            if (state.unvalidatedOnly && r.validated) return false;
+            // Validation filters apply only to types where validation is
+            // meaningful (FFZ / FP / NFZ). N/A rows (r.validated === null)
+            // are excluded by both filters when active — they have no
+            // valid/invalid state to match against.
+            if (state.validatedOnly && r.validated !== true) return false;
+            if (state.unvalidatedOnly && r.validated !== false) return false;
             if (state.unshieldedOnly && !r.unshielded) return false;
             if (state.notesOnly && !r.hasNotes) return false;
             if (q && !r.name.toLowerCase().includes(q) && !r.subtype.toLowerCase().includes(q)) return false;
             return true;
         });
         const dir = state.sortDir;
-        out.sort((a, b) => {
-            const va = a[state.sortKey], vb = b[state.sortKey];
+        const cmp = (a, b, key) => {
+            const va = a[key], vb = b[key];
             if (va == null && vb == null) return 0;
             if (va == null) return 1;
             if (vb == null) return -1;
-            if (typeof va === 'number' && typeof vb === 'number') return dir * (va - vb);
-            return dir * String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+            if (typeof va === 'number' && typeof vb === 'number') return va - vb;
+            return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+        };
+        out.sort((a, b) => {
+            // Special handling when sorting by type — secondary sort by name
+            // gives the "FP A→Z, FFZ A→Z, NFZ A→Z, Asset A→Z, Marker A→Z"
+            // group layout the user wants by default.
+            if (state.sortKey === 'typePrio') {
+                const d = a.typePrio - b.typePrio;
+                if (d !== 0) return dir * d;
+                return dir * cmp(a, b, 'name');
+            }
+            return dir * cmp(a, b, state.sortKey);
         });
         return out;
     }
@@ -953,10 +1002,14 @@
 
         const chipRow = document.createElement('div');
         chipRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+        // Type chips ordered to match the default sort priority
+        // (FP → FFZ → NFZ → Asset → Marker) so the toolbar reads in
+        // the same direction as the table.
         const chipDefs = [
-            { tNum: '3',  label: 'Assets'        },
             { tNum: '15', label: 'Flight Paths'  },
             { tNum: '16', label: 'FFZs'          },
+            { tNum: '4',  label: 'NFZs'          },
+            { tNum: '3',  label: 'Assets'        },
             { tNum: '19', label: 'Markers'       },
         ];
         chipDefs.forEach(({ tNum, label }) => {
@@ -1005,6 +1058,77 @@
         chipRow.appendChild(makeFilterCheckbox('Unshielded only', 'unshieldedOnly'));
         chipRow.appendChild(makeFilterCheckbox('Has notes', 'notesOnly'));
         toolbar.appendChild(chipRow);
+
+        // Unit toggle + Columns menu — second toolbar row.
+        const optsRow = document.createElement('div');
+        optsRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding-top:4px;border-top:1px dashed rgba(255,255,255,0.06)';
+        // Units: simple checkbox toggle between ft (checked) and m (unchecked).
+        const unitsLbl = document.createElement('label');
+        unitsLbl.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb;font-size:11px;cursor:pointer';
+        const unitsCb = document.createElement('input');
+        unitsCb.type = 'checkbox';
+        unitsCb.checked = !!sumPanelState.unitsFt;
+        unitsCb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+        unitsCb.onchange = () => {
+            sumPanelState.unitsFt = unitsCb.checked;
+            redrawTable();
+        };
+        unitsLbl.appendChild(unitsCb);
+        unitsLbl.appendChild(document.createTextNode('Show in feet (uncheck for meters)'));
+        optsRow.appendChild(unitsLbl);
+
+        // Columns menu — opens a small popover with one checkbox per column.
+        // Hidden columns are also omitted from CSV/TSV exports.
+        const colsBtn = document.createElement('button');
+        colsBtn.type = 'button';
+        colsBtn.textContent = 'Columns ▾';
+        colsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:auto';
+        let colsMenuEl = null;
+        colsBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (colsMenuEl) { colsMenuEl.remove(); colsMenuEl = null; return; }
+            colsMenuEl = document.createElement('div');
+            colsMenuEl.style.cssText = 'position:absolute;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 10px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:160px';
+            const colDefs = [
+                { key: 'typeShort', label: 'Type' },
+                { key: 'name',      label: 'Name' },
+                { key: 'subtype',   label: 'Subtype' },
+                { key: 'elev',      label: 'Elevation' },
+                { key: 'altMin',    label: 'Min Alt' },
+                { key: 'altMax',    label: 'Max Alt' },
+                { key: 'validated', label: 'Valid' },
+            ];
+            colDefs.forEach(({ key, label }) => {
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = sumPanelState.visibleCols.has(key);
+                cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+                cb.onchange = () => {
+                    if (cb.checked) sumPanelState.visibleCols.add(key);
+                    else sumPanelState.visibleCols.delete(key);
+                    redrawTable();
+                };
+                row.appendChild(cb);
+                row.appendChild(document.createTextNode(label));
+                colsMenuEl.appendChild(row);
+            });
+            // Position just below the button.
+            const r = colsBtn.getBoundingClientRect();
+            colsMenuEl.style.left = r.left + 'px';
+            colsMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(colsMenuEl);
+            const onDocClick = (e) => {
+                if (colsMenuEl && !colsMenuEl.contains(e.target) && e.target !== colsBtn) {
+                    colsMenuEl.remove(); colsMenuEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(colsBtn);
+        toolbar.appendChild(optsRow);
         panel.appendChild(toolbar);
 
         // --- Table area ---
@@ -1014,19 +1138,25 @@
 
         // --- Footer ---
         const footer = document.createElement('div');
-        footer.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.15)';
+        footer.style.cssText = 'display:flex;align-items:center;gap:6px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.15);flex-wrap:wrap';
         const countEl = document.createElement('div');
-        countEl.style.cssText = 'flex:1;color:#888;font-size:11px';
+        countEl.style.cssText = 'flex:1;color:#888;font-size:11px;min-width:140px';
         footer.appendChild(countEl);
+        // Button style helper — three Copy buttons + Refresh need it.
+        const BTN_CSS = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px';
         const csvBtn = document.createElement('button');
         csvBtn.textContent = 'Copy CSV';
-        csvBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px';
+        csvBtn.style.cssText = BTN_CSS;
+        const tsvBtn = document.createElement('button');
+        tsvBtn.textContent = 'Copy → Sheets';
+        tsvBtn.title = 'Tab-separated — paste directly into Google Sheets / Excel';
+        tsvBtn.style.cssText = BTN_CSS;
         const jsonBtn = document.createElement('button');
         jsonBtn.textContent = 'Copy JSON';
-        jsonBtn.style.cssText = csvBtn.style.cssText;
+        jsonBtn.style.cssText = BTN_CSS;
         const refreshBtn = document.createElement('button');
         refreshBtn.textContent = 'Refresh';
-        refreshBtn.style.cssText = csvBtn.style.cssText;
+        refreshBtn.style.cssText = BTN_CSS;
         refreshBtn.onclick = () => {
             const sid = getCurrentSiteID();
             if (!sid) return;
@@ -1039,6 +1169,7 @@
             }, 1500);
         };
         footer.appendChild(csvBtn);
+        footer.appendChild(tsvBtn);
         footer.appendChild(jsonBtn);
         footer.appendChild(refreshBtn);
         panel.appendChild(footer);
@@ -1086,30 +1217,61 @@
             const rows = filterAndSortRows(allRows, sumPanelState);
             tableWrap.innerHTML = '';
             const table = document.createElement('table');
-            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:auto';
 
-            // Header row
+            // Build the active column list — checkbox column always first,
+            // then user-selected columns in canonical order. Each col has
+            // dataKey (the property on the row for the value) and a render
+            // function for the cell.
+            const unitLbl = sumPanelState.unitsFt ? 'ft' : 'm';
+            const fmtAlt = (m) => {
+                if (m == null) return '—';
+                return sumPanelState.unitsFt ? (m * 3.28084).toFixed(0) : m.toFixed(1);
+            };
+            const allColDefs = [
+                { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
+                { key: 'name',      label: 'Name',           w: 230, num: false, dataKey: 'name' },
+                { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
+                { key: 'elev',      label: `Elev (${unitLbl})`,   w: 80,  num: true,  dataKey: 'elevM',   fmt: fmtAlt },
+                { key: 'altMin',    label: `Min Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMinM', fmt: fmtAlt },
+                { key: 'altMax',    label: `Max Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMaxM', fmt: fmtAlt },
+                { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+            ];
+            const cols = allColDefs.filter(c => sumPanelState.visibleCols.has(c.key));
+
+            // Header row — first cell is the select-all checkbox, then
+            // user-selected columns sorted by their canonical position.
             const thead = document.createElement('thead');
             thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:1';
-            const cols = [
-                { key: 'typeShort', label: 'Type',   w: 50  },
-                { key: 'name',      label: 'Name',   w: 240 },
-                { key: 'subtype',   label: 'Subtype', w: 100 },
-                { key: 'elevFt',    label: 'Elev (ft)', w: 75, num: true },
-                { key: 'altMinFt',  label: 'Min Alt', w: 70, num: true },
-                { key: 'altMaxFt',  label: 'Max Alt', w: 70, num: true },
-                { key: 'validated', label: 'Valid', w: 50 },
-            ];
             const headRow = document.createElement('tr');
+            // Select-all checkbox
+            const thSel = document.createElement('th');
+            thSel.style.cssText = 'width:32px;padding:6px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.12)';
+            const selAll = document.createElement('input');
+            selAll.type = 'checkbox';
+            selAll.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+            // Indeterminate when partial selection
+            const rowIds = rows.map(r => r.entity.id);
+            const selCount = rowIds.filter(id => sumPanelState.selectedIds.has(id)).length;
+            selAll.checked = selCount > 0 && selCount === rows.length;
+            selAll.indeterminate = selCount > 0 && selCount < rows.length;
+            selAll.onchange = () => {
+                if (selAll.checked) rowIds.forEach(id => sumPanelState.selectedIds.add(id));
+                else rowIds.forEach(id => sumPanelState.selectedIds.delete(id));
+                redrawTable();
+            };
+            thSel.appendChild(selAll);
+            headRow.appendChild(thSel);
             cols.forEach(col => {
                 const th = document.createElement('th');
                 th.textContent = col.label;
-                const isSorted = sumPanelState.sortKey === col.key;
-                th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;width:${col.w}px`;
+                const isSorted = sumPanelState.sortKey === (col.dataKey || col.key);
+                th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;min-width:${col.w}px;white-space:nowrap`;
                 if (isSorted) th.textContent += sumPanelState.sortDir === 1 ? ' ▲' : ' ▼';
                 th.onclick = () => {
-                    if (sumPanelState.sortKey === col.key) sumPanelState.sortDir *= -1;
-                    else { sumPanelState.sortKey = col.key; sumPanelState.sortDir = 1; }
+                    const k = col.dataKey || col.key;
+                    if (sumPanelState.sortKey === k) sumPanelState.sortDir *= -1;
+                    else { sumPanelState.sortKey = k; sumPanelState.sortDir = 1; }
                     redrawTable();
                 };
                 headRow.appendChild(th);
@@ -1121,80 +1283,141 @@
             const tbody = document.createElement('tbody');
             rows.forEach((r) => {
                 const tr = document.createElement('tr');
-                tr.style.cssText = 'cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.05)';
+                tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
                 tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
                 tr.onmouseleave = () => { tr.style.background = 'transparent'; };
-                tr.onclick = () => {
+
+                // Checkbox cell — clicks here don't trigger row navigation.
+                const tdSel = document.createElement('td');
+                tdSel.style.cssText = 'width:32px;padding:5px 6px;text-align:center';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = sumPanelState.selectedIds.has(r.entity.id);
+                cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+                cb.onclick = (ev) => ev.stopPropagation();
+                cb.onchange = () => {
+                    if (cb.checked) sumPanelState.selectedIds.add(r.entity.id);
+                    else sumPanelState.selectedIds.delete(r.entity.id);
+                    // Update header select-all state without full redraw
+                    const newSel = rowIds.filter(id => sumPanelState.selectedIds.has(id)).length;
+                    selAll.checked = newSel > 0 && newSel === rows.length;
+                    selAll.indeterminate = newSel > 0 && newSel < rows.length;
+                    countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
+                };
+                tdSel.appendChild(cb);
+                tr.appendChild(tdSel);
+
+                // Body cell click → row action (pan + open inspector). Each
+                // td handles its own click so the checkbox td above can
+                // stopPropagation to avoid triggering this.
+                const onRowClick = () => {
                     panToEntity(r.entity);
-                    // Open the inspector popup at the panel's position so it
-                    // doesn't get hidden behind the summary panel.
-                    const px = sumPanelState.x != null ? sumPanelState.x + 730 : 60;
+                    const px = sumPanelState.x != null ? sumPanelState.x + (sumPanelState.w || 720) + 10 : 60;
                     const py = sumPanelState.y != null ? sumPanelState.y + 40 : 100;
                     showInspectorPopup(
-                        Math.min(px, window.innerWidth - 320),
-                        Math.min(py, window.innerHeight - 320),
+                        Math.min(px, window.innerWidth - 360),
+                        Math.min(py, window.innerHeight - 380),
                         r.entity
                     );
                 };
-                const tdType = document.createElement('td');
-                tdType.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px`;
-                tdType.textContent = r.typeShort;
-                tr.appendChild(tdType);
-                const tdName = document.createElement('td');
-                tdName.style.cssText = 'padding:5px 8px;color:#e6e6e6';
-                tdName.textContent = r.name || '(unnamed)';
-                tr.appendChild(tdName);
-                const tdSub = document.createElement('td');
-                tdSub.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px';
-                tdSub.textContent = r.subtype || '—';
-                tr.appendChild(tdSub);
-                const tdElev = document.createElement('td');
-                tdElev.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums';
-                tdElev.textContent = r.elevFt != null ? r.elevFt.toFixed(0) : '—';
-                tr.appendChild(tdElev);
-                const tdMin = document.createElement('td');
-                tdMin.style.cssText = tdElev.style.cssText;
-                tdMin.textContent = r.altMinFt != null ? r.altMinFt.toFixed(0) : '—';
-                tr.appendChild(tdMin);
-                const tdMax = document.createElement('td');
-                tdMax.style.cssText = tdElev.style.cssText;
-                tdMax.textContent = r.altMaxFt != null ? r.altMaxFt.toFixed(0) : '—';
-                tr.appendChild(tdMax);
-                const tdVal = document.createElement('td');
-                tdVal.style.cssText = `padding:5px 8px;text-align:center;color:${r.validated ? '#5fff5f' : '#666'}`;
-                tdVal.textContent = r.validated ? '✓' : '—';
-                tr.appendChild(tdVal);
+
+                cols.forEach(col => {
+                    const td = document.createElement('td');
+                    td.style.cursor = 'pointer';
+                    td.onclick = onRowClick;
+                    if (col.key === 'typeShort') {
+                        td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
+                        td.textContent = r.typeShort;
+                    } else if (col.key === 'name') {
+                        td.style.cssText = 'padding:5px 8px;color:#e6e6e6;cursor:pointer';
+                        td.textContent = r.name || '(unnamed)';
+                    } else if (col.key === 'subtype') {
+                        td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
+                        td.textContent = r.subtype || '—';
+                    } else if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
+                        td.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        td.textContent = col.fmt(r[col.dataKey]);
+                    } else if (col.key === 'validated') {
+                        // null → N/A (Assets/Markers — Percepto hides the toggle for these).
+                        // true → green ✓, false → red ✗ for FFZ/FP/NFZ.
+                        let txt = '—', color = '#666';
+                        if (r.validated === true) { txt = '✓'; color = '#5fff5f'; }
+                        else if (r.validated === false) { txt = '✗'; color = '#ff5555'; }
+                        td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
+                        td.textContent = txt;
+                    }
+                    tr.appendChild(td);
+                });
                 tbody.appendChild(tr);
             });
             table.appendChild(tbody);
             tableWrap.appendChild(table);
 
-            countEl.textContent = `Showing ${rows.length} of ${allRows.length}${rows.length !== allRows.length ? ' (filtered)' : ''}`;
+            countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
 
-            // Wire footer buttons against THIS filter+sort snapshot
+            // Helper — pick which rows to export. Selection wins when any
+            // are checked; otherwise the current filter+sort snapshot.
+            const exportRows = () => {
+                if (sumPanelState.selectedIds.size > 0) {
+                    return rows.filter(r => sumPanelState.selectedIds.has(r.entity.id));
+                }
+                return rows;
+            };
+
+            // Tabular row generator — used for both CSV and TSV. Returns
+            // [header, ...dataRows] where each row is an array of stringy
+            // cell values. Only includes visible columns (the user toggled
+            // them off, so they don't want them in exports either).
+            const tabular = () => {
+                const header = cols.map(c => c.label);
+                const data = exportRows().map(r => cols.map(col => {
+                    if (col.key === 'typeShort') return r.typeShort;
+                    if (col.key === 'name') return r.name || '';
+                    if (col.key === 'subtype') return r.subtype || '';
+                    if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
+                        const v = r[col.dataKey];
+                        if (v == null) return '';
+                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
+                    }
+                    if (col.key === 'validated') {
+                        if (r.validated === true) return 'yes';
+                        if (r.validated === false) return 'no';
+                        return ''; // N/A
+                    }
+                    return '';
+                }));
+                return [header, ...data];
+            };
+
             csvBtn.onclick = () => {
-                const header = 'Type,Name,Subtype,Elev (ft),Min Alt (ft),Max Alt (ft),Validated';
-                const lines = [header];
-                rows.forEach(r => {
-                    const cells = [
-                        r.typeShort,
-                        csvQuote(r.name),
-                        csvQuote(r.subtype),
-                        r.elevFt != null ? r.elevFt.toFixed(0) : '',
-                        r.altMinFt != null ? r.altMinFt.toFixed(0) : '',
-                        r.altMaxFt != null ? r.altMaxFt.toFixed(0) : '',
-                        r.validated ? 'yes' : 'no',
-                    ];
-                    lines.push(cells.join(','));
-                });
-                copyToClipboard(lines.join('\n'), `Copied CSV (${rows.length} row${rows.length === 1 ? '' : 's'})`);
+                const tab = tabular();
+                const lines = tab.map(row => row.map(csvQuote).join(','));
+                copyToClipboard(lines.join('\n'), `Copied CSV (${tab.length - 1} row${tab.length - 1 === 1 ? '' : 's'})`);
+            };
+            tsvBtn.onclick = () => {
+                // TSV — tabs as separators. Spreadsheets paste this directly
+                // into rows/columns instead of dumping it into a single cell.
+                // Strip embedded tabs/newlines from cell contents to keep
+                // the layout intact.
+                const tab = tabular();
+                const lines = tab.map(row => row.map(c =>
+                    String(c == null ? '' : c).replace(/[\t\r\n]+/g, ' ')
+                ).join('\t'));
+                copyToClipboard(lines.join('\n'), `Copied for Sheets (${tab.length - 1} row${tab.length - 1 === 1 ? '' : 's'})`);
             };
             jsonBtn.onclick = () => {
-                const fullEntities = rows.map(r => r.entity);
-                copyToClipboard(JSON.stringify(fullEntities, null, 2), `Copied JSON (${rows.length} entit${rows.length === 1 ? 'y' : 'ies'})`);
+                const fullEntities = exportRows().map(r => r.entity);
+                copyToClipboard(JSON.stringify(fullEntities, null, 2), `Copied JSON (${fullEntities.length} entit${fullEntities.length === 1 ? 'y' : 'ies'})`);
             };
         }
         redrawTable();
+    }
+
+    function makeCountText(shown, total, selected) {
+        let s = `Showing ${shown} of ${total}`;
+        if (shown !== total) s += ' (filtered)';
+        if (selected > 0) s += ` · ${selected} selected`;
+        return s;
     }
 
     function csvQuote(s) {
