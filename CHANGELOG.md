@@ -9,6 +9,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.5** — three Summary popup fixes.
+  - **Site name in both panel headers.** Pulled from the TOP-frame `.site-select .ant-select-selection-item`'s `title` attribute (e.g. "Exxon 34 - Texas Ten Y Pu 3901H"). SUM panel header is now `AIM Entities · <name> · Site 1596`; Stats popup is `Site Summary · <name>` with a `Site 1596 · X entities total` subtitle. Falls back to just the ID if the site dropdown hasn't rendered yet. Long names truncate with ellipsis so the close button isn't pushed off the panel.
+  - **Stats popup is now draggable** — same pattern as the SUM panel (drag the header). Position persists across reopens in a new `statsPopupState`.
+  - **Stats popup is now resizable** — bottom-right corner grip, min 400×300, max 96vw×90vh. Size persists across reopens. Default first-open is centered.
+  - All document-level mousemove/mouseup listeners are cleaned up when the popup closes (wrapped `popup.remove`) to avoid leaks.
 - **AIM Asset Inspector v3.4** — **Site Summary stats popup**. New 📊 Summary button on the SUM panel toolbar (next to "Show in feet") opens a centered modal with statistical breakdowns of the whole site.
   - **Entity Types card** — SVG donut chart with five segments (FPs / FFZs / NFZs / Assets / GMs in their proper colors) + a legend showing count + percentage per type. Center of the donut = total entity count.
   - **Validation card** — secondary donut for the validatable types only (FFZ + FP + NFZ). Green = validated, red = unvalidated.

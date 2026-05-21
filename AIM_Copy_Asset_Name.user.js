@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.4';
+    const SCRIPT_VERSION = '3.5';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -72,6 +72,32 @@
             if (m2) return m2[1];
         } catch (e) {}
         return null;
+    }
+
+    // Pull the human-readable site name from the page header's site
+    // dropdown. Lives in the TOP frame (Percepto's app shell — the
+    // map iframe doesn't have it). Same-origin so cross-frame access
+    // works. Returns null if the dropdown hasn't rendered yet — the
+    // caller can fall back to showing just the site ID.
+    function getCurrentSiteName() {
+        try {
+            const topDoc = (window.top || window).document;
+            const el = topDoc.querySelector('.site-select .ant-select-selection-item');
+            if (el) {
+                const t = el.getAttribute('title') || el.textContent || '';
+                return t.trim() || null;
+            }
+        } catch (e) {
+            // Cross-origin or DOM access issue — fall through to null
+        }
+        return null;
+    }
+    // Combined "Site 1596 · Exxon 34 - Texas Ten" string for headers.
+    // If no name resolves, just returns "Site 1596".
+    function siteHeaderLabel(siteID) {
+        const name = getCurrentSiteName();
+        if (name) return `${name} · Site ${siteID}`;
+        return `Site ${siteID}`;
     }
 
     // ============================================================
@@ -941,8 +967,12 @@
         const head = document.createElement('div');
         head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.08);cursor:move;user-select:none;background:rgba(20,210,220,0.06)';
         const title = document.createElement('div');
-        title.style.cssText = 'flex:1;color:#7adfe6;font-weight:600;font-size:13px';
-        title.textContent = `AIM Entities · Site ${siteID}`;
+        title.style.cssText = 'flex:1;color:#7adfe6;font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+        // Include the human-readable site name if the page header has
+        // rendered it; otherwise fall back to just the ID. Ellipsis
+        // for long names so the close button doesn't get pushed off.
+        title.textContent = `AIM Entities · ${siteHeaderLabel(siteID)}`;
+        title.title = title.textContent; // tooltip with full text on hover
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '×';
         closeBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:18px;cursor:pointer;padding:0 4px;line-height:1';
@@ -1506,6 +1536,13 @@
     // at-a-glance site report, not a filtered summary.
     // ============================================================
     const STATS_POPUP_ID = 'aim-stats-popup';
+    // Persistent position + size for the stats popup. Mirrors the SUM
+    // panel's pattern so users get the same draggable/resizable UX
+    // throughout. null = use default (centered on first open).
+    let statsPopupState = {
+        x: null, y: null,
+        w: 620, h: null,
+    };
 
     function closeStatsPopup() {
         const el = document.getElementById(STATS_POPUP_ID);
@@ -1676,33 +1713,71 @@
         }
         const popup = document.createElement('div');
         popup.id = STATS_POPUP_ID;
+        // Explicit left/top driven by state — first open centers, then
+        // user-dragged position persists across reopens.
+        const startW = statsPopupState.w || 620;
+        const startH = statsPopupState.h;
+        const startX = statsPopupState.x != null ? statsPopupState.x : Math.max(0, (window.innerWidth - startW) / 2);
+        const startY = statsPopupState.y != null ? statsPopupState.y : Math.max(0, (window.innerHeight - 600) / 2);
         popup.style.cssText = `
-            position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;
-            width:620px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;
+            position:fixed;left:${startX}px;top:${startY}px;z-index:100000;
+            width:${startW}px;${startH ? `height:${startH}px;` : 'max-height:90vh;'}
+            max-width:96vw;display:flex;flex-direction:column;
             background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:8px;
             box-shadow:0 10px 40px rgba(0,0,0,0.75);
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
             color:#e6e6e6;
         `;
 
-        // Header
+        // Header — draggable. Two-line layout: site name on top (bigger),
+        // ID + entity count subtitle below. Falls back to "Site <id>" if
+        // the page header's site name isn't readable.
         const head = document.createElement('div');
-        head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(20,210,220,0.06);border-radius:8px 8px 0 0';
+        head.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(20,210,220,0.06);border-radius:8px 8px 0 0;cursor:move;user-select:none';
+        const titleWrap = document.createElement('div');
+        titleWrap.style.cssText = 'flex:1;min-width:0';
         const title = document.createElement('div');
-        title.style.cssText = 'flex:1;color:#7adfe6;font-weight:600;font-size:14px';
-        title.textContent = `Site Summary · ${siteID}`;
+        title.style.cssText = 'color:#7adfe6;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+        const siteName = getCurrentSiteName();
+        title.textContent = siteName ? `Site Summary · ${siteName}` : `Site Summary · Site ${siteID}`;
+        title.title = title.textContent;
         const subtitle = document.createElement('div');
-        subtitle.style.cssText = 'color:#888;font-size:11px;font-weight:normal';
-        subtitle.textContent = `${stats.totalEntities} entities total`;
-        title.appendChild(document.createElement('br'));
-        title.appendChild(subtitle);
+        subtitle.style.cssText = 'color:#888;font-size:11px;font-weight:normal;margin-top:2px';
+        subtitle.textContent = siteName ? `Site ${siteID} · ${stats.totalEntities} entities total` : `${stats.totalEntities} entities total`;
+        titleWrap.appendChild(title);
+        titleWrap.appendChild(subtitle);
         const xBtn = document.createElement('button');
         xBtn.textContent = '×';
-        xBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:20px;cursor:pointer;padding:0 6px;line-height:1';
+        xBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:20px;cursor:pointer;padding:0 6px;line-height:1;flex:0 0 auto';
         xBtn.onclick = closeStatsPopup;
-        head.appendChild(title);
+        head.appendChild(titleWrap);
         head.appendChild(xBtn);
         popup.appendChild(head);
+
+        // Drag — same pattern as the SUM panel. Track on header
+        // mousedown, follow mousemove, clamp to viewport. Final
+        // position lands in statsPopupState so it survives reopen.
+        let dragging = false, dragOffX = 0, dragOffY = 0;
+        head.addEventListener('mousedown', (e) => {
+            if (e.target === xBtn) return;
+            dragging = true;
+            const r = popup.getBoundingClientRect();
+            dragOffX = e.clientX - r.left;
+            dragOffY = e.clientY - r.top;
+            e.preventDefault();
+        });
+        const onDragMove = (e) => {
+            if (!dragging) return;
+            let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
+            nx = Math.max(0, Math.min(window.innerWidth - 80, nx));
+            ny = Math.max(0, Math.min(window.innerHeight - 40, ny));
+            popup.style.left = nx + 'px';
+            popup.style.top = ny + 'px';
+            statsPopupState.x = nx; statsPopupState.y = ny;
+        };
+        const onDragUp = () => { dragging = false; };
+        document.addEventListener('mousemove', onDragMove);
+        document.addEventListener('mouseup', onDragUp);
 
         // Scrollable body
         const body = document.createElement('div');
@@ -1857,6 +1932,45 @@
         footer.appendChild(copyBtn);
         footer.appendChild(closeBtn2);
         popup.appendChild(footer);
+
+        // Resize handle — bottom-right corner. Min 400x300, max 96vw x 90vh.
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = 'position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,rgba(20,210,220,0.55) 40%,rgba(20,210,220,0.55) 50%,transparent 50%,transparent 65%,rgba(20,210,220,0.45) 65%,rgba(20,210,220,0.45) 75%,transparent 75%);border-bottom-right-radius:8px';
+        let resizing = false, rStartX = 0, rStartY = 0, rStartW = 0, rStartH = 0;
+        resizeHandle.addEventListener('mousedown', (e) => {
+            resizing = true;
+            const r = popup.getBoundingClientRect();
+            rStartX = e.clientX; rStartY = e.clientY;
+            rStartW = r.width; rStartH = r.height;
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        const onResizeMove = (e) => {
+            if (!resizing) return;
+            const nw = Math.max(400, Math.min(window.innerWidth * 0.96, rStartW + (e.clientX - rStartX)));
+            const nh = Math.max(300, Math.min(window.innerHeight * 0.90, rStartH + (e.clientY - rStartY)));
+            popup.style.width = nw + 'px';
+            popup.style.height = nh + 'px';
+            popup.style.maxHeight = 'none';
+            statsPopupState.w = nw;
+            statsPopupState.h = nh;
+        };
+        const onResizeUp = () => { resizing = false; };
+        document.addEventListener('mousemove', onResizeMove);
+        document.addEventListener('mouseup', onResizeUp);
+        popup.appendChild(resizeHandle);
+
+        // Cleanup — drop all document-level listeners when popup closes
+        // so we don't leak. Wrap the native remove() rather than relying
+        // on every close path remembering to do it manually.
+        const origRemove = popup.remove.bind(popup);
+        popup.remove = () => {
+            document.removeEventListener('mousemove', onDragMove);
+            document.removeEventListener('mouseup', onDragUp);
+            document.removeEventListener('mousemove', onResizeMove);
+            document.removeEventListener('mouseup', onResizeUp);
+            origRemove();
+        };
 
         document.body.appendChild(popup);
     }
