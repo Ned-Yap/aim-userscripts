@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.8
+// @version      3.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.8';
+    const SCRIPT_VERSION = '3.9';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1632,22 +1632,32 @@
         });
         const assetEquipment = sortAndCap(equipMap, 12);
 
-        // States = parts AFTER " - " in subtype.
-        // "battery - empty" → state = "empty". "v-well" → no state.
-        // Counts independent of equipment (an asset's state tag is
-        // counted once toward its equipment row and once toward the
-        // global state row).
+        // States = parts AFTER " - " in subtype, plus an implicit
+        // "Normal" bucket for assets that have NO modifier (the
+        // baseline-good state — per Percepto's classification, no
+        // modifier means the asset is healthy). Each asset counts
+        // toward exactly one state so the percentages add to 100%
+        // and the card gives a true distribution.
+        // "battery - empty" → state = "Empty"
+        // "v-well"          → state = "Normal"
+        // Multi-modifier subtypes are rare in practice; if seen, we
+        // bucket on the FIRST modifier to preserve the 100%-sum.
         const stateMap = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
             if (!sub) return;
             const parts = sub.split(SPLIT).slice(1);
-            parts.forEach(p => {
-                const k = p.trim();
-                if (!k) return;
-                const key = prettyKey(k);
-                stateMap[key] = (stateMap[key] || 0) + 1;
-            });
+            if (parts.length === 0) {
+                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
+                return;
+            }
+            const firstMod = (parts[0] || '').trim();
+            if (!firstMod) {
+                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
+                return;
+            }
+            const key = prettyKey(firstMod);
+            stateMap[key] = (stateMap[key] || 0) + 1;
         });
         const assetStates = sortAndCap(stateMap, 10);
 
@@ -1790,13 +1800,21 @@
 
     // Simple proportional bar for keyword breakdown rows. Returns a
     // span the renderer can append after the count.
-    function makeProportionBar(value, max, color) {
-        // Flex-sized so the bar fills available space without
-        // overflowing the card. Inner fill uses % so it shrinks
-        // along with the bar wrap. Previously the wrap was a fixed
-        // 120px which spilled past card edges in narrow grid columns.
+    // makeProportionBar — small horizontal bar showing value/max.
+    // `opts.fillCell: true` makes the bar fill its container 100%
+    //   (use when placing inside a fixed-width table cell so all
+    //   bars start at the same column position and end relative to
+    //   each other's proportion of `max`).
+    // No options = legacy flex-sized bar with a 160px cap (kept for
+    //   any callers still using the old free-flow layout).
+    function makeProportionBar(value, max, color, opts) {
+        opts = opts || {};
         const wrap = document.createElement('span');
-        wrap.style.cssText = 'flex:1 1 auto;min-width:0;max-width:160px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;display:block';
+        if (opts.fillCell) {
+            wrap.style.cssText = 'display:block;width:100%;height:6px;background:rgba(255,255,255,0.08);border-radius:3px';
+        } else {
+            wrap.style.cssText = 'flex:1 1 auto;min-width:0;max-width:160px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;display:block';
+        }
         const fill = document.createElement('span');
         const pct = max > 0 ? (value / max) * 100 : 0;
         fill.style.cssText = `display:block;width:${pct.toFixed(1)}%;height:100%;background:${color};border-radius:3px`;
@@ -1859,23 +1877,54 @@
             legend.appendChild(item);
         });
         c.appendChild(legend);
+        // Table layout matches the kwCards: [Equipment] [#] [Stacked bar]
+        // so labels + counts + bars all line up in the same columns
+        // across cards. % column omitted — the stacked bar itself
+        // visually shows the per-state split, so an extra % column
+        // would be redundant.
+        if (equipTotals.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'color:#888;font-size:12px;padding:8px 0;text-align:center';
+            empty.textContent = 'No asset equipment data on this site.';
+            c.appendChild(empty);
+            return c;
+        }
+        const table = document.createElement('table');
+        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
+        const cg = document.createElement('colgroup');
+        cg.innerHTML = '<col><col style="width:50px"><col style="width:55%">';
+        table.appendChild(cg);
+        const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
+        const thead = document.createElement('thead');
+        const thr = document.createElement('tr');
+        [['Equipment', 'left'], ['#', 'right'], ['Health', 'left']].forEach(([txt, align]) => {
+            const th = document.createElement('th');
+            th.textContent = txt;
+            th.style.cssText = `${HEADER_CSS};text-align:${align}`;
+            thr.appendChild(th);
+        });
+        thead.appendChild(thr);
+        table.appendChild(thead);
+        const tbody = document.createElement('tbody');
         equipTotals.forEach(({ eq, states, total }) => {
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;align-items:center;padding:5px 0;font-size:12px;gap:8px;overflow:hidden';
-            const lbl = document.createElement('span');
-            lbl.style.cssText = 'flex:0 0 auto;max-width:38%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-            lbl.title = eq;
-            lbl.textContent = eq;
-            const cnt = document.createElement('span');
-            cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:36px;text-align:right';
-            cnt.textContent = fmtNum(total);
-            // Stacked bar — width proportional to total/globalMax, then
-            // segmented by state proportions inside. Segments rendered
-            // in canonical order: positives on the left, negatives on
-            // the right increasing in severity.
-            const barWrap = document.createElement('span');
+            const tr = document.createElement('tr');
+            const tdName = document.createElement('td');
+            tdName.style.cssText = 'padding:5px 6px;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+            tdName.title = eq;
+            tdName.textContent = eq;
+            tr.appendChild(tdName);
+            const tdCnt = document.createElement('td');
+            tdCnt.style.cssText = 'padding:5px 6px;color:#e6e6e6;text-align:right;font-weight:600;font-variant-numeric:tabular-nums';
+            tdCnt.textContent = fmtNum(total);
+            tr.appendChild(tdCnt);
+            const tdBar = document.createElement('td');
+            tdBar.style.cssText = 'padding:5px 6px;vertical-align:middle';
+            // Stacked bar fills the cell width; the proportion of the
+            // cell that's painted (vs the gray track) is total/globalMax
+            // so cross-row comparison of equipment sizes is still visible.
+            const barTrack = document.createElement('span');
+            barTrack.style.cssText = 'display:block;width:100%;height:10px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden';
             const barTotalPct = globalMax > 0 ? (total / globalMax) * 100 : 0;
-            barWrap.style.cssText = `flex:1 1 auto;min-width:0;max-width:55%;height:10px;background:rgba(255,255,255,0.06);border-radius:3px;display:flex;overflow:hidden`;
             const stackInner = document.createElement('span');
             stackInner.style.cssText = `display:flex;width:${barTotalPct.toFixed(1)}%;height:100%;border-radius:3px;overflow:hidden`;
             const orderedStateEntries = Object.entries(states).sort((a, b) => orderIndex(a[0]) - orderIndex(b[0]));
@@ -1887,16 +1936,13 @@
                 seg.title = `${state}: ${fmtNum(count)} (${(count / total * 100).toFixed(1)}% of ${eq})`;
                 stackInner.appendChild(seg);
             });
-            barWrap.appendChild(stackInner);
-            row.appendChild(lbl); row.appendChild(cnt); row.appendChild(barWrap);
-            c.appendChild(row);
+            barTrack.appendChild(stackInner);
+            tdBar.appendChild(barTrack);
+            tr.appendChild(tdBar);
+            tbody.appendChild(tr);
         });
-        if (equipTotals.length === 0) {
-            const empty = document.createElement('div');
-            empty.style.cssText = 'color:#888;font-size:12px;padding:8px 0;text-align:center';
-            empty.textContent = 'No asset equipment data on this site.';
-            c.appendChild(empty);
-        }
+        table.appendChild(tbody);
+        c.appendChild(table);
         return c;
     }
 
@@ -2123,32 +2169,77 @@
         body.appendChild(cFP);
 
         // --- KEYWORD BREAKDOWN cards (with proportional bars) ---
-        // kwCard renders a keyword breakdown with count + percent + bar.
-        // denominator: what each row's count divides into for the %
-        //   column. Pass total assets / total GMs / etc. so percentages
-        //   read as "X% of all assets" rather than "X% of this card's
-        //   sum" (which is misleading when items overlap or are partial).
-        const kwCard = (titleText, dict, color, denominator) => {
+        // kwCard renders a keyword breakdown as a 4-column table:
+        //   [Type/Subtype] [%] [#] [Bar share]
+        // The table layout lets numbers stack in straight columns and
+        // every bar start at the same X position regardless of label
+        // length. Header row labels the columns (per user request —
+        // each tile is its own little table).
+        //
+        // denominator: what each row's count divides into for the %.
+        //   Pass total assets / total GMs / etc. so percentages read
+        //   as "X% of all assets" rather than "X% of this card's sum"
+        //   (which would be misleading when items partially overlap).
+        // labelHeader: customize the first column header (defaults to
+        //   "Type" — but "Subtype" or "Group" reads better in context).
+        const kwCard = (titleText, dict, color, denominator, labelHeader) => {
             const c = card(titleText);
             const maxVal = Math.max(0, ...Object.values(dict));
             const denom = denominator != null ? denominator : Object.values(dict).reduce((a, b) => a + b, 0);
-            Object.entries(dict).forEach(([k, v]) => {
-                const row = document.createElement('div');
-                row.style.cssText = 'display:flex;align-items:center;padding:4px 0;font-size:12px;gap:8px;overflow:hidden';
-                const lbl = document.createElement('span');
-                lbl.style.cssText = 'flex:0 0 auto;max-width:45%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-                lbl.title = k;
-                lbl.textContent = k;
-                const cnt = document.createElement('span');
-                cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:40px;text-align:right';
-                cnt.textContent = fmtNum(v);
-                const pct = document.createElement('span');
-                pct.style.cssText = 'flex:0 0 auto;color:#888;font-size:10px;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
-                pct.textContent = denom > 0 ? `${(v / denom * 100).toFixed(1)}%` : '—';
-                row.appendChild(lbl); row.appendChild(cnt); row.appendChild(pct);
-                row.appendChild(makeProportionBar(v, maxVal, color));
-                c.appendChild(row);
+            const table = document.createElement('table');
+            // table-layout:fixed + colgroup so the % / # / Bar columns
+            // have predictable widths even with mixed label lengths.
+            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
+            const cg = document.createElement('colgroup');
+            cg.innerHTML = '<col><col style="width:52px"><col style="width:46px"><col style="width:38%">';
+            table.appendChild(cg);
+
+            const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
+            const thead = document.createElement('thead');
+            const thr = document.createElement('tr');
+            const headers = [
+                { txt: labelHeader || 'Type', align: 'left' },
+                { txt: '%',  align: 'right' },
+                { txt: '#',  align: 'right' },
+                { txt: 'Share', align: 'left' },
+            ];
+            headers.forEach(h => {
+                const th = document.createElement('th');
+                th.textContent = h.txt;
+                th.style.cssText = `${HEADER_CSS};text-align:${h.align}`;
+                thr.appendChild(th);
             });
+            thead.appendChild(thr);
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+            Object.entries(dict).forEach(([k, v]) => {
+                const tr = document.createElement('tr');
+                const tdName = document.createElement('td');
+                tdName.style.cssText = 'padding:4px 6px;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                tdName.title = k;
+                tdName.textContent = k;
+                tr.appendChild(tdName);
+
+                const tdPct = document.createElement('td');
+                tdPct.style.cssText = 'padding:4px 6px;color:#888;text-align:right;font-variant-numeric:tabular-nums;font-size:11px';
+                tdPct.textContent = denom > 0 ? `${(v / denom * 100).toFixed(1)}%` : '—';
+                tr.appendChild(tdPct);
+
+                const tdCnt = document.createElement('td');
+                tdCnt.style.cssText = 'padding:4px 6px;color:#e6e6e6;text-align:right;font-weight:600;font-variant-numeric:tabular-nums';
+                tdCnt.textContent = fmtNum(v);
+                tr.appendChild(tdCnt);
+
+                const tdBar = document.createElement('td');
+                tdBar.style.cssText = 'padding:4px 6px;vertical-align:middle';
+                tdBar.appendChild(makeProportionBar(v, maxVal, color, { fillCell: true }));
+                tr.appendChild(tdBar);
+
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            c.appendChild(table);
             return c;
         };
         // Asset percentages are vs total assets so each row reads as
@@ -2156,12 +2247,12 @@
         // both equipment and state cards.
         const totalAssets = stats.counts[3];
         const totalGMs = stats.counts[19];
-        body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color, totalAssets));
-        body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d', totalAssets));
+        body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color, totalAssets, 'Subtype'));
+        body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d', totalAssets, 'State'));
         // Equipment Health matrix — stacked horizontal bars per
         // equipment kind, segmented by status. See makeEquipStateMatrixCard.
         body.appendChild(makeEquipStateMatrixCard(stats.equipStateMatrix, card));
-        body.appendChild(kwCard('General Markers · Groups (auto)', stats.gmGroups, typeReg(19).color, totalGMs));
+        body.appendChild(kwCard('General Markers · Groups (auto)', stats.gmGroups, typeReg(19).color, totalGMs, 'Group'));
 
         // --- OTHER card ---
         const cOther = card('Other');

@@ -8,6 +8,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-21
 
+- **AIM Asset Inspector v3.9** — tabular alignment + "Normal" baseline in states.
+  - **Keyword cards now use proper `<table>` layout** — Asset Equipment / Asset States / GM Groups / Asset Health by Equipment. Each has a header row with the columns labeled (`Subtype`/`State`/`Group`/`Equipment`, `%`, `#`, `Share` or `Health`), and `table-layout:fixed` + `<colgroup>` so the `%`, `#`, and bar columns line up exactly across rows. Bars now all start at the same X position and end relative to each other's proportion of the row max — no more ragged-edge bars or numbers drifting left/right.
+  - **Column order is now Subtype → % → # → Bar** (was Subtype → # → % → Bar). Reading the % right next to the label feels more natural for a stats card.
+  - **"Normal" added to Asset States (auto)** — assets with no state modifier in their subtype (the baseline-good condition per Percepto's classification) now show up as a "Normal" row. Each asset is counted toward exactly one state so the percentages add to **100%** of total assets — the missing piece you flagged.
+  - Bars cleanly fill their cells (`fillCell: true` option on `makeProportionBar`) so they always stretch the full bar column regardless of label length or popup width.
+  - Equipment Health matrix card uses the same table layout for column alignment: `Equipment | # | Health`. The stacked bar still segments by state in canonical order (positive states left → negatives right, same v3.8 palette).
 - **AIM Asset Inspector v3.8** — four Stats popup fixes from v3.7 testing.
   - **Equipment split bug fixed** — was splitting subtype on bare `-` so "v-well - empty" became `["v", "well", "empty"]` and the equipment showed as "V" with state "Well". Now splits on literal ` - ` (with spaces) so "v-well" stays intact. Same fix applied to state extraction + Equipment × State matrix.
   - **Dropped name-tag pass for equipment auto-detect** — earlier surfaced false positives (TEXAS, PU, ARICK, OVAL, LONG, YATER, LEONA — all asset-name prefixes, not equipment types). Per user feedback: subtype is the only source of truth.
