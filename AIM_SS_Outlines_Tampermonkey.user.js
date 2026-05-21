@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.34
+// @version      34.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.34';
+    const SCRIPT_VERSION = '34.35';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -168,6 +168,7 @@
                 { id: 'distro.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
                 { id: 'distro-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-distro' },
                 { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'distro-add-new', label: 'Add new line (draw on map)', type: 'button', action: 'add-new-distro' },
                 { id: 'distro-commit', label: 'Commit pending changes', type: 'button', action: 'commit-distro' },
                 { id: 'distro-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-distro' },
                 { type: 'header', label: 'KML data tools' },
@@ -193,6 +194,7 @@
                 { id: 'trans.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
                 { id: 'trans-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-trans' },
                 { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'trans-add-new', label: 'Add new line (draw on map)', type: 'button', action: 'add-new-trans' },
                 { id: 'trans-commit', label: 'Commit pending changes', type: 'button', action: 'commit-trans' },
                 { id: 'trans-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-trans' },
                 { type: 'header', label: 'KML data tools' },
@@ -1569,6 +1571,18 @@
     // ============================================================
     let vertexEditState = null;
 
+    // ============================================================
+    // Draw new line session state (E4)
+    //
+    // Click-to-add-vertex mode. Only one drawing session at a time.
+    // Active shape:
+    //   { type,
+    //     coords: [[lng,lat], ...],           // KML order — append on click
+    //     clickHandler, escHandler,           // for cleanup on exit
+    //     toolbarEl: HTMLDivElement }
+    // ============================================================
+    let drawingState = null;
+
     function markPlacemarkForDelete(siteID, type, pmIdx) {
         const co = getCommitOps(siteID, type);
         co.ops[String(pmIdx)] = { op: 'delete' };
@@ -1822,12 +1836,24 @@
             const type = path.getAttribute('data-kml-type');
             if (!type) return;
             if (toggleState[`${type}.edit-mode`] !== true) return;
+            const siteID = getCurrentSiteID();
+            if (!siteID) return;
+            // E4: pending-add lines have data-kml-added-idx instead of pmIdx.
+            // Route to their own menu (only Discard, since the line doesn't
+            // exist in the file yet).
+            const addedIdxStr = path.getAttribute('data-kml-added-idx');
+            if (addedIdxStr !== null) {
+                const addedIdx = parseInt(addedIdxStr, 10);
+                if (isNaN(addedIdx)) return;
+                e.preventDefault();
+                e.stopPropagation();
+                showAddedLineContextMenu(e.clientX, e.clientY, type, addedIdx);
+                return;
+            }
             const pmIdx = parseInt(path.getAttribute('data-kml-pm-idx'), 10);
             if (isNaN(pmIdx)) return;
             e.preventDefault();
             e.stopPropagation();
-            const siteID = getCurrentSiteID();
-            if (!siteID) return;
             const features = kmlFeatures[kmlKey(siteID, type)] || [];
             const f = features.find(ff => ff.pmIdx === pmIdx);
             if (!f) return;
@@ -2592,6 +2618,251 @@
         if (isActive) runUpdate();
     }
 
+    // ============================================================
+    // E4 — Draw new line (click-to-add-vertex mode)
+    //
+    // Entry: enterDrawMode(type) — attaches Leaflet click handler to
+    // the map; each click appends [lng,lat] to drawingState.coords.
+    // Floating toolbar shows running vertex count + Save/Undo/Cancel.
+    // Esc cancels.
+    //
+    // Save → opens a name input modal → on confirm, appends
+    //   { name, coords:[[lng,lat],...] } to commitOps.added.
+    // The next "Commit pending changes" batches it with any other ops.
+    //
+    // Drawing-in-progress line renders dashed-green (preview).
+    // Saved-but-pending added lines render solid green.
+    // Only one drawing session at a time across both types.
+    // ============================================================
+    function enterDrawMode(type) {
+        if (drawingState) exitDrawMode({ silent: true });
+        if (vertexEditState) exitVertexEdit({ save: false, silent: true });
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const map = getLeafletMap();
+        if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
+        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null };
+        const onClick = (e) => {
+            if (!drawingState) return;
+            const ll = e.latlng;
+            if (!ll) return;
+            drawingState.coords.push([ll.lng, ll.lat]);
+            updateDrawToolbar();
+            if (isActive) runUpdate();
+        };
+        try { map.on('click', onClick); } catch (e) {}
+        drawingState.clickHandler = onClick;
+        const onEsc = (e) => { if (e.key === 'Escape') exitDrawMode({ silent: false }); };
+        window.addEventListener('keydown', onEsc, true);
+        drawingState.escHandler = onEsc;
+        // Crosshair cursor so it's obvious clicks are being captured
+        const container = map.getContainer ? map.getContainer() : null;
+        if (container) container.style.cursor = 'crosshair';
+        buildDrawToolbar();
+        showKMLToast(`Drawing new ${type} line — click map to add vertices · Save when done · Esc to cancel.`, 7000);
+    }
+
+    function buildDrawToolbar() {
+        if (!drawingState) return;
+        const tb = document.createElement('div');
+        tb.id = 'aim-draw-toolbar';
+        tb.style.cssText = `
+            position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
+            background:#1f2228;border:2px solid #5fff5f;border-radius:8px;
+            padding:10px 16px;z-index:99999;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;display:flex;align-items:center;gap:12px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+        `;
+        const label = document.createElement('span');
+        label.id = 'aim-draw-label';
+        label.textContent = `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
+        label.style.cssText = 'color:#5fff5f;font-weight:600';
+        tb.appendChild(label);
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '✓ Save';
+        saveBtn.setAttribute('data-role', 'save');
+        saveBtn.style.cssText = 'padding:7px 14px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;opacity:0.4';
+        saveBtn.disabled = true;
+        saveBtn.onclick = () => finishDrawing();
+        tb.appendChild(saveBtn);
+        const undoBtn = document.createElement('button');
+        undoBtn.textContent = '↶ Undo vertex';
+        undoBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        undoBtn.onclick = () => {
+            if (!drawingState || drawingState.coords.length === 0) return;
+            drawingState.coords.pop();
+            updateDrawToolbar();
+            if (isActive) runUpdate();
+        };
+        tb.appendChild(undoBtn);
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '✗ Cancel';
+        cancelBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        cancelBtn.onclick = () => exitDrawMode({ silent: false });
+        tb.appendChild(cancelBtn);
+        document.body.appendChild(tb);
+        drawingState.toolbarEl = tb;
+    }
+
+    function updateDrawToolbar() {
+        if (!drawingState || !drawingState.toolbarEl) return;
+        const n = drawingState.coords.length;
+        const label = drawingState.toolbarEl.querySelector('#aim-draw-label');
+        if (label) {
+            label.textContent = `Drawing ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
+        }
+        const saveBtn = drawingState.toolbarEl.querySelector('button[data-role="save"]');
+        if (saveBtn) {
+            saveBtn.disabled = n < 2;
+            saveBtn.style.opacity = saveBtn.disabled ? '0.4' : '1';
+            saveBtn.style.cursor = saveBtn.disabled ? 'not-allowed' : 'pointer';
+        }
+    }
+
+    function finishDrawing() {
+        if (!drawingState || drawingState.coords.length < 2) return;
+        const type = drawingState.type;
+        const coords = drawingState.coords.slice();
+        showNameInputModal(type, (name) => {
+            if (name === null) return; // user cancelled the name modal
+            const siteID = getCurrentSiteID();
+            if (!siteID) { showKMLToast('No site loaded — drawing discarded.', 4000); exitDrawMode({ silent: true }); return; }
+            const co = getCommitOps(siteID, type);
+            const finalName = (name && name.trim()) || `New ${type} line (added ${new Date().toISOString().substring(0, 10)})`;
+            co.added.push({ name: finalName, coords });
+            setCommitOps(siteID, type, co);
+            const count = commitOpsCount(siteID, type);
+            showKMLToast(`Added new ${type} line "${finalName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 6000);
+            exitDrawMode({ silent: true });
+        });
+    }
+
+    function exitDrawMode(opts) {
+        if (!drawingState) return;
+        const silent = !!(opts && opts.silent);
+        const { clickHandler, escHandler, toolbarEl } = drawingState;
+        const map = getLeafletMap();
+        if (map && clickHandler) { try { map.off('click', clickHandler); } catch (e) {} }
+        if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
+        if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
+        const container = map && map.getContainer ? map.getContainer() : null;
+        if (container) container.style.cursor = '';
+        if (!silent) showKMLToast('Drawing cancelled.', 2500);
+        drawingState = null;
+        if (isActive) runUpdate();
+    }
+
+    // Small modal for naming a newly-drawn line. Optional input;
+    // callback receives the entered string (possibly empty, never
+    // trimmed) on Save, or null on Cancel. Enter saves, Esc cancels.
+    function showNameInputModal(type, callback) {
+        const existing = document.getElementById('aim-name-modal');
+        if (existing) existing.remove();
+        const backdrop = document.createElement('div');
+        backdrop.id = 'aim-name-modal';
+        backdrop.style.cssText = `
+            position:fixed;inset:0;background:rgba(0,0,0,0.55);
+            z-index:99999;display:flex;align-items:center;justify-content:center;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+        `;
+        const box = document.createElement('div');
+        box.style.cssText = `
+            background:#1f2228;border:2px solid #14d2dc;border-radius:8px;
+            padding:22px;min-width:360px;max-width:80vw;color:#e6e6e6;
+            box-shadow:0 8px 28px rgba(0,0,0,0.6);
+        `;
+        const title = document.createElement('div');
+        title.textContent = `Name for the new ${type} line (optional):`;
+        title.style.cssText = 'margin-bottom:10px;color:#7adfe6;font-size:13px;text-transform:uppercase;letter-spacing:0.5px';
+        box.appendChild(title);
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = `e.g. Mainline 3940 spur`;
+        input.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 10px;background:#0f1216;border:1px solid #3a3f48;border-radius:4px;color:#e6e6e6;font:inherit;font-size:14px;margin-bottom:16px';
+        box.appendChild(input);
+        const helper = document.createElement('div');
+        helper.style.cssText = 'font-size:11px;color:#888;margin-bottom:14px';
+        helper.textContent = 'Leave blank to auto-name. Enter to save, Esc to cancel.';
+        box.appendChild(helper);
+        const btns = document.createElement('div');
+        btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:8px 16px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        cancelBtn.onclick = () => { try { backdrop.remove(); } catch (e) {} callback(null); };
+        btns.appendChild(cancelBtn);
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = 'Save line';
+        saveBtn.style.cssText = 'padding:8px 16px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
+        saveBtn.onclick = () => { const v = input.value; try { backdrop.remove(); } catch (e) {} callback(v); };
+        btns.appendChild(saveBtn);
+        box.appendChild(btns);
+        backdrop.appendChild(box);
+        document.body.appendChild(backdrop);
+        setTimeout(() => { try { input.focus(); } catch (e) {} }, 0);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); saveBtn.click(); }
+            else if (e.key === 'Escape') { e.preventDefault(); cancelBtn.click(); }
+        });
+    }
+
+    // Right-click on a pending-add line — only option is Discard
+    // (no hide/delete/modify since the line doesn't exist on disk yet).
+    function showAddedLineContextMenu(x, y, type, addedIdx) {
+        closeKMLContextMenu();
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        const co = getCommitOps(siteID, type);
+        const item = co.added[addedIdx];
+        if (!item) return;
+        const menu = document.createElement('div');
+        menu.id = KML_CTX_MENU_ID;
+        menu.style.cssText = `
+            position:fixed;left:${x}px;top:${y}px;z-index:99999;
+            background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:6px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+            padding:4px 0;min-width:200px;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;
+        `;
+        const header = document.createElement('div');
+        header.style.cssText = 'padding:4px 12px;color:#5fff5f;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
+        header.textContent = `NEW ${type === 'distro' ? 'Distribution' : 'Transmission'} line (pending)`;
+        menu.appendChild(header);
+        const nameLine = document.createElement('div');
+        nameLine.style.cssText = 'padding:4px 12px;color:#9ad;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+        nameLine.textContent = item.name || '(no name)';
+        menu.appendChild(nameLine);
+        const discardAction = document.createElement('button');
+        discardAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
+        discardAction.onmouseenter = () => { discardAction.style.background = 'rgba(255,80,80,0.18)'; };
+        discardAction.onmouseleave = () => { discardAction.style.background = 'transparent'; };
+        discardAction.textContent = '🗑  Discard this new line';
+        discardAction.onclick = (e) => {
+            e.stopPropagation();
+            const co2 = getCommitOps(siteID, type);
+            co2.added.splice(addedIdx, 1);
+            setCommitOps(siteID, type, co2);
+            const count = commitOpsCount(siteID, type);
+            showKMLToast(`Discarded new ${type} line. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+            closeKMLContextMenu();
+            if (isActive) runUpdate();
+        };
+        menu.appendChild(discardAction);
+        document.body.appendChild(menu);
+        const r = menu.getBoundingClientRect();
+        if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 4}px`;
+        if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 4}px`;
+        setTimeout(() => {
+            kmlMenuOutsideListener = (e) => {
+                if (menu.contains(e.target)) return;
+                closeKMLContextMenu();
+            };
+            document.addEventListener('mousedown', kmlMenuOutsideListener, true);
+        }, 0);
+    }
+
     // Converts the current site's KML features into SVG-user-space point
     // arrays using the Leaflet map's projection. Returns [] if the map
     // isn't available yet (the next runUpdate will retry).
@@ -2599,8 +2870,12 @@
     function shieldingFeaturePointsInSVG(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) return [];
-        const features = kmlFeatures[kmlKey(siteID, type)];
-        if (!features || !features.length) return [];
+        const features = kmlFeatures[kmlKey(siteID, type)] || [];
+        const co = getCommitOps(siteID, type);
+        const hasDrawing = drawingState && drawingState.type === type && drawingState.coords.length >= 2;
+        // Bail only if there's truly nothing to render — file empty AND
+        // no pending-add lines AND no drawing in progress.
+        if (!features.length && !co.added.length && !hasDrawing) return [];
         const map = getLeafletMap();
         if (!map || typeof map.latLngToContainerPoint !== 'function') return [];
         const container = map.getContainer ? map.getContainer() : document.querySelector('.leaflet-container');
@@ -2612,17 +2887,13 @@
         if (!ctm) return [];
         const inv = ctm.inverse();
         const cRect = container.getBoundingClientRect();
-        const out = [];
-        features.forEach(f => {
-            // Coords source priority: live vertex-edit → saved modify op →
-            // original file coords. See effectiveCoordsForFeature for details.
-            const coords = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
+        const projectCoords = (coordsArr) => {
+            // latLngToContainerPoint = pixel offset from the map container's
+            // top-left, accounting for all current pan/zoom. Add container's
+            // screen position, then invert SVG CTM to land in SVG user space.
             const pts = [];
-            for (let i = 0; i < coords.length; i++) {
-                const c = coords[i];
-                // latLngToContainerPoint = pixel offset from the map container's
-                // top-left, accounting for all current pan/zoom. Add container's
-                // screen position, then invert SVG CTM to land in SVG user space.
+            for (let i = 0; i < coordsArr.length; i++) {
+                const c = coordsArr[i];
                 let cp;
                 try { cp = map.latLngToContainerPoint([c.lat, c.lng]); } catch (e) { continue; }
                 if (!cp) continue;
@@ -2632,11 +2903,37 @@
                 const p = svgPt.matrixTransform(inv);
                 pts.push({ x: p.x, y: p.y });
             }
+            return pts;
+        };
+        const out = [];
+        // 1. File features (with effective coords from active edit / saved modify)
+        features.forEach(f => {
+            const coords = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
+            const pts = projectCoords(coords);
             if (pts.length >= 2) out.push({
                 type: f.type, points: pts,
                 pmIdx: f.pmIdx, visible: f.visible,
             });
         });
+        // 2. Pending-add lines from commitOps.added
+        co.added.forEach((added, addedIdx) => {
+            if (!Array.isArray(added.coords) || added.coords.length < 2) return;
+            const coords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            const pts = projectCoords(coords);
+            if (pts.length >= 2) out.push({
+                type: 'line', points: pts,
+                addedIdx, visible: true,
+            });
+        });
+        // 3. Drawing in progress (preview)
+        if (hasDrawing) {
+            const coords = drawingState.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            const pts = projectCoords(coords);
+            if (pts.length >= 2) out.push({
+                type: 'line', points: pts,
+                drawing: true, visible: true,
+            });
+        }
         return out;
     }
 
@@ -2677,6 +2974,44 @@
         const showHidden = toggleState[`${type}.show-hidden`] === true;
         const siteID = getCurrentSiteID();
         feats.forEach(f => {
+            // E4: pending-add lines and drawing-in-progress preview render
+            // ahead of all the file-feature visual logic (no pmIdx, no hide
+            // check). Always visible.
+            if (f.addedIdx !== undefined || f.drawing) {
+                const d = pointsToPathD(f.points, false);
+                if (!d) return;
+                const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                p.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
+                p.setAttribute('data-buffer-kind', `kml-${type}`);
+                p.setAttribute('data-kml-type', type);
+                p.setAttribute('d', d);
+                p.setAttribute('fill', 'none');
+                p.setAttribute('stroke', '#5fff5f');
+                p.setAttribute('stroke-linejoin', 'round');
+                p.setAttribute('stroke-linecap', 'round');
+                if (f.addedIdx !== undefined) {
+                    // Saved pending-add → solid green, slightly thicker
+                    p.setAttribute('data-kml-added-idx', String(f.addedIdx));
+                    p.setAttribute('stroke-opacity', '0.95');
+                    p.setAttribute('stroke-width', String(thickness + 1));
+                    // Right-clickable when edit mode is on (to discard)
+                    if (editMode) {
+                        p.setAttribute('class', 'leaflet-interactive');
+                        p.setAttribute('pointer-events', 'visibleStroke');
+                    } else {
+                        p.setAttribute('pointer-events', 'none');
+                    }
+                } else {
+                    // Drawing-in-progress preview → dashed green, no right-click
+                    p.setAttribute('stroke-opacity', '0.85');
+                    p.setAttribute('stroke-width', String(thickness));
+                    p.setAttribute('stroke-dasharray', '6 4');
+                    p.setAttribute('pointer-events', 'none');
+                }
+                if (g.firstChild) g.insertBefore(p, g.firstChild);
+                else g.appendChild(p);
+                return;
+            }
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
             const commitOp = getOpForPlacemark(siteID, type, f.pmIdx);
             // Marked-for-commit lines ALWAYS render (even if user has them
@@ -3749,6 +4084,8 @@
                 else if (msg.actionId === 'commit-trans') commitPendingOps('trans');
                 else if (msg.actionId === 'discard-commits-distro') discardCommitOps('distro');
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
+                else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
+                else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.
@@ -3899,10 +4236,12 @@
         const sid = getCurrentSiteID();
         if (sid === lastSiteID) return;
         lastSiteID = sid;
-        // Any in-progress vertex edit belongs to the previous site —
-        // bail out silently so handles don't linger and accidentally
-        // save against the wrong KML on the new site.
+        // Any in-progress vertex edit OR draw mode belongs to the
+        // previous site — bail out silently so handles/clicks don't
+        // linger and accidentally save against the wrong KML on the
+        // new site.
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
+        if (drawingState) exitDrawMode({ silent: true });
         loadValidatorResults();
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
