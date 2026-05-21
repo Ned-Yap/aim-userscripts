@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.3
+// @version      3.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.3';
+    const SCRIPT_VERSION = '3.4';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1087,6 +1087,18 @@
         unitsLbl.appendChild(document.createTextNode('Show in feet (uncheck for meters)'));
         optsRow.appendChild(unitsLbl);
 
+        // "Summary" button — opens the site stats popup.
+        const summaryBtn = document.createElement('button');
+        summaryBtn.type = 'button';
+        summaryBtn.textContent = '📊 Summary';
+        summaryBtn.title = 'Statistical summary of all entities on this site';
+        summaryBtn.style.cssText = 'background:rgba(20,210,220,0.15);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:8px';
+        summaryBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            openStatsPopup(siteID);
+        };
+        optsRow.appendChild(summaryBtn);
+
         // Columns menu — opens a small popover with one checkbox per column.
         // Hidden columns are also omitted from CSV/TSV exports.
         const colsBtn = document.createElement('button');
@@ -1484,6 +1496,414 @@
         }
         try { map.setView([lat, lng], Math.max(18, map.getZoom())); }
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
+    }
+
+    // ============================================================
+    // SITE STATS POPUP — opened by the "Summary" button on the SUM
+    // panel toolbar. Shows counts/breakdowns + a donut chart + a
+    // "Copy as Text" export. Always reflects the full site dataset
+    // (not the SUM panel's current filter) — it's meant as an
+    // at-a-glance site report, not a filtered summary.
+    // ============================================================
+    const STATS_POPUP_ID = 'aim-stats-popup';
+
+    function closeStatsPopup() {
+        const el = document.getElementById(STATS_POPUP_ID);
+        if (el) el.remove();
+    }
+
+    // Case-insensitive substring search across a row's name + subtype.
+    // SWD appears in asset NAMES (e.g. "MILLIKEN C 3D SWD") not in
+    // their poi_type_str subtype, so unifying name+subtype catches all
+    // the keywords the user listed without per-keyword routing.
+    function rowContains(r, keyword) {
+        const k = keyword.toLowerCase();
+        const n = (r.name || '').toLowerCase();
+        const s = (r.subtype || '').toLowerCase();
+        return n.includes(k) || s.includes(k);
+    }
+    function countContains(rows, keyword) {
+        return rows.filter(r => rowContains(r, keyword)).length;
+    }
+
+    function computeSiteStats(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket) return null;
+        const entities = bucket.entities || [];
+        const allRows = buildSummaryRows(siteID); // reuses the same row shape as the SUM panel
+        const byType = {
+            15: allRows.filter(r => r.type === 15), // FPs
+            16: allRows.filter(r => r.type === 16), // FFZs
+            4:  allRows.filter(r => r.type === 4),  // NFZs
+            3:  allRows.filter(r => r.type === 3),  // Assets
+            19: allRows.filter(r => r.type === 19), // GMs
+        };
+        // Validation counts only for types with a meaningful validated
+        // flag (FFZ + FP + NFZ). Assets and GMs hide the toggle so
+        // their `validated` is null and they get excluded.
+        const validatable = allRows.filter(r => r.validated !== null);
+        const validated = validatable.filter(r => r.validated === true).length;
+        const unvalidated = validatable.length - validated;
+        // Flight-path totals — segments + cumulative distance (meters).
+        // Sum of arc.distance across every FP entity.
+        let fpSegments = 0, fpDistanceM = 0;
+        entities.forEach(e => {
+            if (e.type !== 15) return;
+            if (Array.isArray(e.arcs)) {
+                fpSegments += e.arcs.length;
+                e.arcs.forEach(a => { if (typeof a.distance === 'number') fpDistanceM += a.distance; });
+            }
+        });
+        // Asset state keywords (search subtype). Battery rows like
+        // "battery - empty" / "v-well - unreachable" / "battery -
+        // unshielded" satisfy multiple categories — that's expected,
+        // they're independent dimensions.
+        const assetStates = {
+            'Empty': countContains(byType[3], 'empty'),
+            'Unshielded': countContains(byType[3], 'unshielded'),
+            'Unreachable': countContains(byType[3], 'unreachable'),
+        };
+        // Asset equipment keywords. SWD lives in name (e.g.
+        // "MILLIKEN C 3D SWD"), the rest in subtype — rowContains
+        // searches both so a single helper suffices.
+        const assetEquipment = {
+            'H-Well': countContains(byType[3], 'h-well'),
+            'V-Well': countContains(byType[3], 'v-well'),
+            'Compressor': countContains(byType[3], 'compressor'),
+            'Battery': countContains(byType[3], 'battery'),
+            'SAT': countContains(byType[3], 'sat'),
+            'SWD': countContains(byType[3], 'swd'),
+        };
+        // GM keywords — names like "Elevator 1", "Flare 2", "Guywire
+        // 2-2", and any "Bridge" labels in other sites.
+        const gmKeywords = {
+            'Elevators': countContains(byType[19], 'elevator'),
+            'Flare': countContains(byType[19], 'flare'),
+            'Guy wire': byType[19].filter(r => rowContains(r, 'guywire') || rowContains(r, 'guy wire')).length,
+            'Bridge': countContains(byType[19], 'bridge'),
+        };
+        // Other rolled-up stats — useful at a glance.
+        const other = {
+            'With notes': allRows.filter(r => r.hasNotes).length,
+            'Unshielded (all types)': allRows.filter(r => r.unshielded).length,
+        };
+        return {
+            siteID,
+            totalEntities: allRows.length,
+            byType,
+            counts: {
+                15: byType[15].length, 16: byType[16].length, 4: byType[4].length,
+                3: byType[3].length, 19: byType[19].length,
+            },
+            validation: { validated, unvalidated, total: validatable.length },
+            flightPaths: { entities: byType[15].length, segments: fpSegments, distanceM: fpDistanceM },
+            assetStates, assetEquipment, gmKeywords, other,
+        };
+    }
+
+    // Small SVG donut chart. Items: [{label, count, color}, ...].
+    // Total is sum of counts. Empty (count=0) segments skipped so the
+    // chart isn't polluted with zero-length arcs.
+    function makeDonutChart(items, total, size) {
+        const sz = size || 110;
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', `0 0 ${sz} ${sz}`);
+        svg.setAttribute('width', sz);
+        svg.setAttribute('height', sz);
+        const cx = sz / 2, cy = sz / 2;
+        const r = sz * 0.4;
+        const sw = sz * 0.18;
+        const C = 2 * Math.PI * r;
+        // Background ring so even at total=0 the chart still draws.
+        const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        bg.setAttribute('cx', cx); bg.setAttribute('cy', cy); bg.setAttribute('r', r);
+        bg.setAttribute('fill', 'none'); bg.setAttribute('stroke', '#2a2e36'); bg.setAttribute('stroke-width', sw);
+        svg.appendChild(bg);
+        if (total > 0) {
+            let offsetFrac = 0;
+            items.forEach(item => {
+                if (!item.count) return;
+                const frac = item.count / total;
+                const seg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                seg.setAttribute('cx', cx); seg.setAttribute('cy', cy); seg.setAttribute('r', r);
+                seg.setAttribute('fill', 'none');
+                seg.setAttribute('stroke', item.color);
+                seg.setAttribute('stroke-width', sw);
+                seg.setAttribute('stroke-dasharray', `${C * frac} ${C * (1 - frac)}`);
+                seg.setAttribute('stroke-dashoffset', `${-offsetFrac * C}`);
+                seg.setAttribute('transform', `rotate(-90 ${cx} ${cy})`);
+                svg.appendChild(seg);
+                offsetFrac += frac;
+            });
+        }
+        // Center text — total count.
+        const totalText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        totalText.setAttribute('x', cx); totalText.setAttribute('y', cy - 3);
+        totalText.setAttribute('text-anchor', 'middle');
+        totalText.setAttribute('fill', '#e6e6e6');
+        totalText.setAttribute('font-size', sz * 0.18);
+        totalText.setAttribute('font-weight', '600');
+        totalText.textContent = String(total);
+        svg.appendChild(totalText);
+        const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        lbl.setAttribute('x', cx); lbl.setAttribute('y', cy + 10);
+        lbl.setAttribute('text-anchor', 'middle');
+        lbl.setAttribute('fill', '#888');
+        lbl.setAttribute('font-size', sz * 0.10);
+        lbl.textContent = 'TOTAL';
+        svg.appendChild(lbl);
+        return svg;
+    }
+
+    // Simple proportional bar for keyword breakdown rows. Returns a
+    // span the renderer can append after the count.
+    function makeProportionBar(value, max, color) {
+        const wrap = document.createElement('span');
+        wrap.style.cssText = 'display:inline-block;width:120px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-left:8px;vertical-align:middle';
+        const fill = document.createElement('span');
+        const w = max > 0 ? (value / max) * 120 : 0;
+        fill.style.cssText = `display:block;width:${w}px;height:100%;background:${color};border-radius:3px`;
+        wrap.appendChild(fill);
+        return wrap;
+    }
+
+    function openStatsPopup(siteID) {
+        closeStatsPopup();
+        const stats = computeSiteStats(siteID);
+        if (!stats) {
+            showToast('No entity data loaded yet — refresh and try again', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const popup = document.createElement('div');
+        popup.id = STATS_POPUP_ID;
+        popup.style.cssText = `
+            position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;
+            width:620px;max-width:96vw;max-height:90vh;display:flex;flex-direction:column;
+            background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:8px;
+            box-shadow:0 10px 40px rgba(0,0,0,0.75);
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;
+        `;
+
+        // Header
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(20,210,220,0.06);border-radius:8px 8px 0 0';
+        const title = document.createElement('div');
+        title.style.cssText = 'flex:1;color:#7adfe6;font-weight:600;font-size:14px';
+        title.textContent = `Site Summary · ${siteID}`;
+        const subtitle = document.createElement('div');
+        subtitle.style.cssText = 'color:#888;font-size:11px;font-weight:normal';
+        subtitle.textContent = `${stats.totalEntities} entities total`;
+        title.appendChild(document.createElement('br'));
+        title.appendChild(subtitle);
+        const xBtn = document.createElement('button');
+        xBtn.textContent = '×';
+        xBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:20px;cursor:pointer;padding:0 6px;line-height:1';
+        xBtn.onclick = closeStatsPopup;
+        head.appendChild(title);
+        head.appendChild(xBtn);
+        popup.appendChild(head);
+
+        // Scrollable body
+        const body = document.createElement('div');
+        body.style.cssText = 'flex:1;overflow:auto;padding:12px 14px;min-height:0;display:flex;flex-direction:column;gap:12px';
+        popup.appendChild(body);
+
+        // --- Card helper ---
+        const card = (titleText) => {
+            const c = document.createElement('div');
+            c.style.cssText = 'border:1px solid rgba(255,255,255,0.10);border-radius:6px;padding:10px 12px;background:rgba(0,0,0,0.18)';
+            const h = document.createElement('div');
+            h.style.cssText = 'color:#7adfe6;font-size:10px;font-weight:600;letter-spacing:0.6px;text-transform:uppercase;margin-bottom:8px;padding-bottom:5px;border-bottom:1px solid rgba(20,210,220,0.20)';
+            h.textContent = titleText;
+            c.appendChild(h);
+            return c;
+        };
+        const kvRow = (label, value, color) => {
+            const r = document.createElement('div');
+            r.style.cssText = 'display:flex;align-items:center;padding:3px 0;font-size:12px';
+            const l = document.createElement('span');
+            l.style.cssText = `flex:1;color:${color || '#bbb'}`;
+            l.textContent = label;
+            const v = document.createElement('span');
+            v.style.cssText = 'color:#e6e6e6;font-variant-numeric:tabular-nums;font-weight:600;min-width:40px;text-align:right';
+            v.textContent = String(value);
+            r.appendChild(l); r.appendChild(v);
+            return r;
+        };
+
+        // --- TYPES card with donut + counts ---
+        const cTypes = card('Entity Types');
+        const typesGrid = document.createElement('div');
+        typesGrid.style.cssText = 'display:flex;align-items:center;gap:16px';
+        const donutItems = [
+            { label: 'FPs',    count: stats.counts[15], color: typeReg(15).color },
+            { label: 'FFZs',   count: stats.counts[16], color: typeReg(16).color },
+            { label: 'NFZs',   count: stats.counts[4],  color: typeReg(4).color  },
+            { label: 'Assets', count: stats.counts[3],  color: typeReg(3).color  },
+            { label: 'GMs',    count: stats.counts[19], color: typeReg(19).color },
+        ];
+        typesGrid.appendChild(makeDonutChart(donutItems, stats.totalEntities, 110));
+        const legend = document.createElement('div');
+        legend.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:3px';
+        donutItems.forEach(it => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px';
+            const sw = document.createElement('span');
+            sw.style.cssText = `width:10px;height:10px;background:${it.color};border-radius:2px;flex:0 0 auto`;
+            const lbl = document.createElement('span');
+            lbl.style.cssText = `flex:1;color:${it.color};font-weight:600`;
+            lbl.textContent = it.label;
+            const cnt = document.createElement('span');
+            cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums';
+            cnt.textContent = String(it.count);
+            const pct = document.createElement('span');
+            pct.style.cssText = 'color:#888;font-size:10px;min-width:38px;text-align:right;font-variant-numeric:tabular-nums';
+            pct.textContent = stats.totalEntities > 0 ? `${(it.count / stats.totalEntities * 100).toFixed(1)}%` : '—';
+            row.appendChild(sw); row.appendChild(lbl); row.appendChild(cnt); row.appendChild(pct);
+            legend.appendChild(row);
+        });
+        typesGrid.appendChild(legend);
+        cTypes.appendChild(typesGrid);
+        body.appendChild(cTypes);
+
+        // --- VALIDATION card (FFZ + FP + NFZ only) ---
+        const cVal = card('Validation · FFZs + FPs + NFZs');
+        const valGrid = document.createElement('div');
+        valGrid.style.cssText = 'display:flex;align-items:center;gap:16px';
+        const valDonutItems = [
+            { label: 'Validated',   count: stats.validation.validated,   color: '#5fff5f' },
+            { label: 'Unvalidated', count: stats.validation.unvalidated, color: '#ff5555' },
+        ];
+        valGrid.appendChild(makeDonutChart(valDonutItems, stats.validation.total, 90));
+        const valLeg = document.createElement('div');
+        valLeg.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px';
+        valDonutItems.forEach(it => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px';
+            const sw = document.createElement('span');
+            sw.style.cssText = `width:10px;height:10px;background:${it.color};border-radius:2px;flex:0 0 auto`;
+            const lbl = document.createElement('span');
+            lbl.style.cssText = `flex:1;color:${it.color};font-weight:600`;
+            lbl.textContent = (it.label === 'Validated' ? '✓ ' : '✗ ') + it.label;
+            const cnt = document.createElement('span');
+            cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums';
+            cnt.textContent = String(it.count);
+            const pct = document.createElement('span');
+            pct.style.cssText = 'color:#888;font-size:10px;min-width:38px;text-align:right;font-variant-numeric:tabular-nums';
+            pct.textContent = stats.validation.total > 0 ? `${(it.count / stats.validation.total * 100).toFixed(1)}%` : '—';
+            row.appendChild(sw); row.appendChild(lbl); row.appendChild(cnt); row.appendChild(pct);
+            valLeg.appendChild(row);
+        });
+        valGrid.appendChild(valLeg);
+        cVal.appendChild(valGrid);
+        body.appendChild(cVal);
+
+        // --- FLIGHT PATHS card ---
+        const cFP = card('Flight Paths');
+        cFP.appendChild(kvRow('Flight path entities', stats.flightPaths.entities, typeReg(15).color));
+        cFP.appendChild(kvRow('Total segments', stats.flightPaths.segments));
+        const distM = stats.flightPaths.distanceM;
+        const distFt = distM * 3.28084;
+        const distMi = distM / 1609.34;
+        const distKm = distM / 1000;
+        cFP.appendChild(kvRow('Total length (ft)', distFt.toFixed(0)));
+        cFP.appendChild(kvRow('Total length (m)', distM.toFixed(0)));
+        cFP.appendChild(kvRow('Total length (mi / km)', `${distMi.toFixed(2)} / ${distKm.toFixed(2)}`));
+        body.appendChild(cFP);
+
+        // --- KEYWORD BREAKDOWN cards (with proportional bars) ---
+        const kwCard = (titleText, dict, color) => {
+            const c = card(titleText);
+            const maxVal = Math.max(0, ...Object.values(dict));
+            Object.entries(dict).forEach(([k, v]) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;padding:4px 0;font-size:12px';
+                const lbl = document.createElement('span');
+                lbl.style.cssText = 'flex:0 0 110px;color:#bbb';
+                lbl.textContent = k;
+                const cnt = document.createElement('span');
+                cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:36px;text-align:right';
+                cnt.textContent = String(v);
+                row.appendChild(lbl); row.appendChild(cnt);
+                row.appendChild(makeProportionBar(v, maxVal, color));
+                c.appendChild(row);
+            });
+            return c;
+        };
+        body.appendChild(kwCard('Asset · States', stats.assetStates, typeReg(3).color));
+        body.appendChild(kwCard('Asset · Equipment', stats.assetEquipment, typeReg(3).color));
+        body.appendChild(kwCard('General Markers · Keywords', stats.gmKeywords, typeReg(19).color));
+
+        // --- OTHER card ---
+        const cOther = card('Other');
+        Object.entries(stats.other).forEach(([k, v]) => cOther.appendChild(kvRow(k, v)));
+        body.appendChild(cOther);
+
+        // Footer with Copy + Close
+        const footer = document.createElement('div');
+        footer.style.cssText = 'display:flex;gap:6px;padding:8px 12px;border-top:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.15);border-radius:0 0 8px 8px';
+        const spacer = document.createElement('div');
+        spacer.style.cssText = 'flex:1';
+        footer.appendChild(spacer);
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = '📋 Copy as Text';
+        copyBtn.style.cssText = 'background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+        copyBtn.onclick = () => copyToClipboard(formatStatsAsText(stats), 'Copied site summary to clipboard');
+        const closeBtn2 = document.createElement('button');
+        closeBtn2.textContent = 'Close';
+        closeBtn2.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+        closeBtn2.onclick = closeStatsPopup;
+        footer.appendChild(copyBtn);
+        footer.appendChild(closeBtn2);
+        popup.appendChild(footer);
+
+        document.body.appendChild(popup);
+    }
+
+    // Pretty plain-text export — drops into any chat / email / spreadsheet
+    // cell preserving the section layout. Numbers right-aligned in a
+    // monospace-friendly way so the user can paste straight into a
+    // ```code``` block on Slack.
+    function formatStatsAsText(stats) {
+        const pad = (label, val, w) => `  ${label.padEnd(w || 22)} ${String(val).padStart(6)}`;
+        const lines = [];
+        lines.push(`SITE SUMMARY · Site ${stats.siteID}`);
+        lines.push('='.repeat(40));
+        lines.push('');
+        lines.push('ENTITY TYPES');
+        lines.push(pad('FPs',    stats.counts[15]));
+        lines.push(pad('FFZs',   stats.counts[16]));
+        lines.push(pad('NFZs',   stats.counts[4]));
+        lines.push(pad('Assets', stats.counts[3]));
+        lines.push(pad('GMs',    stats.counts[19]));
+        lines.push(pad('TOTAL',  stats.totalEntities));
+        lines.push('');
+        lines.push('VALIDATION (FFZ + FP + NFZ)');
+        lines.push(pad('Validated',   stats.validation.validated));
+        lines.push(pad('Unvalidated', stats.validation.unvalidated));
+        lines.push('');
+        lines.push('FLIGHT PATHS');
+        lines.push(pad('Entities', stats.flightPaths.entities));
+        lines.push(pad('Total segments', stats.flightPaths.segments));
+        const distFt = stats.flightPaths.distanceM * 3.28084;
+        const distMi = stats.flightPaths.distanceM / 1609.34;
+        lines.push(pad('Total length (ft)', distFt.toFixed(0)));
+        lines.push(pad('Total length (m)',  stats.flightPaths.distanceM.toFixed(0)));
+        lines.push(pad('Total length (mi)', distMi.toFixed(2)));
+        lines.push('');
+        lines.push('ASSET · STATES');
+        Object.entries(stats.assetStates).forEach(([k, v]) => lines.push(pad(k, v)));
+        lines.push('');
+        lines.push('ASSET · EQUIPMENT');
+        Object.entries(stats.assetEquipment).forEach(([k, v]) => lines.push(pad(k, v)));
+        lines.push('');
+        lines.push('GENERAL MARKERS · KEYWORDS');
+        Object.entries(stats.gmKeywords).forEach(([k, v]) => lines.push(pad(k, v)));
+        lines.push('');
+        lines.push('OTHER');
+        Object.entries(stats.other).forEach(([k, v]) => lines.push(pad(k, v)));
+        return lines.join('\n');
     }
 
     // ============================================================

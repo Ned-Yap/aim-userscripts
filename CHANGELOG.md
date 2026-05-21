@@ -9,6 +9,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.4** — **Site Summary stats popup**. New 📊 Summary button on the SUM panel toolbar (next to "Show in feet") opens a centered modal with statistical breakdowns of the whole site.
+  - **Entity Types card** — SVG donut chart with five segments (FPs / FFZs / NFZs / Assets / GMs in their proper colors) + a legend showing count + percentage per type. Center of the donut = total entity count.
+  - **Validation card** — secondary donut for the validatable types only (FFZ + FP + NFZ). Green = validated, red = unvalidated.
+  - **Flight Paths card** — entity count · total segments (sum of `arc.length`s) · total length in ft / m / mi / km.
+  - **Asset · States card** — keyword counts (Empty / Unshielded / Unreachable) from poi_type_str subtypes, each with a proportional bar showing relative size.
+  - **Asset · Equipment card** — H-Well / V-Well / Compressor / Battery / SAT / SWD counts. SWD matches against name (since it lives there, e.g. "MILLIKEN C 3D SWD") while the rest match subtype; row search unifies both.
+  - **GMs · Keywords card** — Elevators / Flare / Guy wire / Bridge counts. "Guy wire" matches both "guywire" and "guy wire" since AIM data uses both spellings.
+  - **Other card** — Total with notes · Total unshielded.
+  - **Copy as Text** button — pretty-formatted plain-text export (section headers, padded numbers) you can paste into Slack `code` blocks, emails, spreadsheet cells, etc.
+  - Reflects the full site dataset always — not the SUM panel's current filter. The popup is meant as an at-a-glance site report.
+  - Deferred to v3.5: column reorder + per-column resize.
 - **AIM Asset Inspector v3.3** — quick polish on top of v3.2.
   - **Shorter chip labels** — "Flight Paths" → "FPs", "Markers" → "GMs". Five chips now fit comfortably without wrapping.
   - **Colored chips** when active — each chip uses its type's color (FP cyan / FFZ neon green / NFZ red / Asset white / GMs light purple) at ~22% background + full-color text + 67% border. Inactive chips stay subtle gray. Toolbar visually mirrors the colored Type column.
