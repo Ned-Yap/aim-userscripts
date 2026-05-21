@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.30
+// @version      34.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.30';
+    const SCRIPT_VERSION = '34.31';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1517,28 +1517,14 @@
         action.onclick = (e) => {
             e.stopPropagation();
             const desired = !isCurrentlyVisible;
-            // Heavy logging until E1 is confirmed stable — strip in a
-            // follow-up version once we've verified the round-trip works.
-            console.log(`${TAG} E1 click → site=${siteID} type=${type} pmIdx=${pmIdx} fileVis=${fileVisible} cur=${isCurrentlyVisible} desired=${desired}`);
-            const beforeP = getPending(siteID, type);
-            console.log(`${TAG} E1 click → pending BEFORE:`, JSON.stringify(beforeP));
             setDesiredVisibility(siteID, type, pmIdx, fileVisible, desired);
-            const afterP = getPending(siteID, type);
-            console.log(`${TAG} E1 click → pending AFTER:`, JSON.stringify(afterP));
-            const effVis = effectiveVisible(siteID, type, pmIdx, fileVisible);
-            console.log(`${TAG} E1 click → effectiveVisible now = ${effVis}; isActive = ${isActive}`);
             const count = pendingCount(siteID, type);
             showKMLToast(
-                `${desired ? 'Unhid' : 'Hid'} ${type} line #${pmIdx}. ${count} pending — click Commit to push.`,
+                `${desired ? 'Unhid' : 'Hid'} ${type} line #${pmIdx}. ${count} hide${count === 1 ? '' : 's'} on this site.`,
                 3500
             );
             closeKMLContextMenu();
-            if (isActive) {
-                runUpdate();
-                console.log(`${TAG} E1 click → runUpdate() dispatched`);
-            } else {
-                console.warn(`${TAG} E1 click → isActive=false, skipping runUpdate (overlays may be off)`);
-            }
+            if (isActive) runUpdate();
         };
         menu.appendChild(action);
 
@@ -1589,17 +1575,6 @@
     function installKMLEditHandlers() {
         window.addEventListener('contextmenu', (e) => {
             const t = e.target;
-            // Debug: only log when at least one edit mode is on so we don't
-            // spam the console for every right-click. Tells us "did the
-            // event reach us, and what was the target?" without needing
-            // browser DevTools breakpoints.
-            const anyEdit = toggleState['distro.edit-mode'] === true || toggleState['trans.edit-mode'] === true;
-            if (anyEdit) {
-                const tag = (t && t.tagName) || '?';
-                const cls = (t && t.getAttribute && t.getAttribute('class')) || '';
-                const kt = (t && t.getAttribute && t.getAttribute('data-kml-type')) || '';
-                console.log(`${TAG} contextmenu → tag=${tag} class="${cls}" data-kml-type="${kt}"`);
-            }
             if (!t || typeof t.getAttribute !== 'function') return;
             const path = (typeof t.closest === 'function') ? t.closest('path[data-kml-type]') : null;
             if (!path) return;
@@ -2096,19 +2071,6 @@
         const editMode = toggleState[`${type}.edit-mode`] === true;
         const showHidden = toggleState[`${type}.show-hidden`] === true;
         const siteID = getCurrentSiteID();
-        // Diagnostic: per-render summary when in edit mode. Confirms the
-        // renderer is reading pending correctly and shows how many features
-        // are being skipped vs ghosted vs rendered normally.
-        if (editMode) {
-            const pCount = pendingCount(siteID, type);
-            let nVis = 0, nHidden = 0, nGhost = 0, nSkip = 0;
-            feats.forEach(f => {
-                const iv = effectiveVisible(siteID, type, f.pmIdx, f.visible);
-                if (iv) nVis++;
-                else { nHidden++; if (showHidden) nGhost++; else nSkip++; }
-            });
-            console.log(`${TAG} render[${type}] site=${siteID} feats=${feats.length} vis=${nVis} hidden=${nHidden} (${showHidden ? `ghost ${nGhost}` : `skip ${nSkip}`}) pending=${pCount}`);
-        }
         feats.forEach(f => {
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
             if (!isVis && !showHidden) return; // hidden + not asked to show → skip

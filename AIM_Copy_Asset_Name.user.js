@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '2.2';
+    const SCRIPT_VERSION = '2.3';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -418,15 +418,25 @@
         const footer = document.createElement('div');
         footer.style.cssText = 'display:flex;gap:6px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
 
-        const editBtn = document.createElement('button');
-        editBtn.textContent = 'Open in editor';
-        editBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
-        editBtn.onclick = (ev) => {
+        // "Copy & Find in Map Entities" — copies the name to clipboard so
+        // user can paste it into the sidebar's Map Entities search. v2.0-v2.2
+        // tried to fire Leaflet click events to open the native editor
+        // directly; matching the layer worked (console showed 0.7m match)
+        // but Percepto's selection handler isn't bound through Leaflet's
+        // .on('click') so the dispatched events were no-ops. Until we sniff
+        // the actual selector for their sidebar search input, copying the
+        // name to clipboard is the most reliable path — the same workflow
+        // the user is already doing manually, just one-click.
+        const findBtn = document.createElement('button');
+        findBtn.textContent = '📋 Copy name → paste in Map Entities';
+        findBtn.style.cssText = 'flex:1;background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
+        findBtn.onclick = (ev) => {
             ev.stopPropagation();
-            openInEditor(entity);
+            const nm = entity.name || String(entity.id);
+            copyToClipboard(nm, `Copied "${nm}" — paste in Map Entities sidebar`);
             closeInspector();
         };
-        footer.appendChild(editBtn);
+        footer.appendChild(findBtn);
 
         const jsonBtn = document.createElement('button');
         jsonBtn.textContent = 'Copy JSON';
@@ -507,126 +517,15 @@
         }
     }
 
-    // ============================================================
-    // "Open in editor" — try Leaflet's layer-fire first (the only
-    // reliable way to trigger Percepto's `.on('click', ...)` handlers,
-    // since synthetic DOM events don't satisfy Leaflet's internal click
-    // dispatcher). Fall back to copying the entity name to clipboard
-    // so the user can paste it into the Map Entities sidebar.
-    // ============================================================
-    function openInEditor(entity) {
-        const map = getLeafletMap();
-        if (!map) {
-            showToast('Map not ready — try again in a sec', 'rgba(255,96,96,0.55)');
-            return;
-        }
-        if (!Array.isArray(entity.coords) || entity.coords.length === 0) {
-            fallbackCopyName(entity);
-            return;
-        }
-        // Entity centroid
-        let cLat = 0, cLng = 0;
-        for (const c of entity.coords) { cLat += c.lat; cLng += c.lng; }
-        cLat /= entity.coords.length;
-        cLng /= entity.coords.length;
-
-        // Walk Leaflet's layer tree, find the layer whose centroid is
-        // closest to the entity's centroid. Match within 30m to avoid
-        // accidentally firing on a neighbor.
-        let bestLayer = null, bestDist = Infinity;
-        try {
-            if (typeof map.eachLayer === 'function') {
-                map.eachLayer(layer => {
-                    if (!layer) return;
-                    let llCenter = null;
-                    try {
-                        if (typeof layer.getBounds === 'function') {
-                            const b = layer.getBounds();
-                            if (b && typeof b.isValid === 'function' && b.isValid() && typeof b.getCenter === 'function') {
-                                llCenter = b.getCenter();
-                            }
-                        } else if (typeof layer.getLatLng === 'function') {
-                            llCenter = layer.getLatLng();
-                        }
-                    } catch (e) { return; }
-                    if (!llCenter || typeof llCenter.lat !== 'number') return;
-                    const d = approxMeters(cLat, cLng, llCenter.lat, llCenter.lng);
-                    if (d < bestDist) { bestDist = d; bestLayer = layer; }
-                });
-            }
-        } catch (e) {
-            console.warn(`${TAG} eachLayer threw:`, e);
-        }
-
-        if (bestLayer && bestDist < 30) {
-            console.log(`${TAG} open-in-editor: matched layer at ${bestDist.toFixed(1)}m`);
-            let containerPoint, layerPoint;
-            try {
-                containerPoint = map.latLngToContainerPoint([cLat, cLng]);
-                layerPoint = map.containerPointToLayerPoint(containerPoint);
-            } catch (e) { /* not fatal */ }
-            const cp = containerPoint || { x: 0, y: 0 };
-            const lp = layerPoint || { x: 0, y: 0 };
-            // 1. Fire Leaflet's click event directly on the layer.
-            //    Triggers .on('click', handler) bindings without going
-            //    through the DOM event system, so it works regardless of
-            //    pointer-events / asset-lock state.
-            let fired = false;
-            try {
-                bestLayer.fire('click', {
-                    type: 'click',
-                    target: bestLayer,
-                    latlng: { lat: cLat, lng: cLng },
-                    containerPoint: cp,
-                    layerPoint: lp,
-                    originalEvent: new MouseEvent('click', { shiftKey: true, bubbles: true, cancelable: true }),
-                });
-                fired = true;
-            } catch (e) {
-                console.warn(`${TAG} layer.fire('click') threw:`, e);
-            }
-            // 2. Belt-and-suspenders: also dispatch a real DOM Shift+click
-            //    on the element under the centroid. v2.1 reports show this
-            //    helps on subsequent opens — Percepto may detach the
-            //    Leaflet handler after one fire, but the DOM listener it
-            //    rebinds afterwards picks up the dispatch. Shift bypasses
-            //    asset.lock pointer-events: none.
-            try {
-                const cRect = map.getContainer().getBoundingClientRect();
-                const sx = cRect.left + cp.x;
-                const sy = cRect.top + cp.y;
-                const target = document.elementFromPoint(sx, sy);
-                if (target) {
-                    ['mousedown', 'mouseup', 'click'].forEach(typ => {
-                        target.dispatchEvent(new MouseEvent(typ, {
-                            bubbles: true, cancelable: true, view: window,
-                            clientX: sx, clientY: sy, button: 0,
-                            shiftKey: true,
-                        }));
-                    });
-                    fired = true;
-                }
-            } catch (e) {
-                console.warn(`${TAG} DOM dispatch threw:`, e);
-            }
-            if (fired) {
-                showToast(`Opened ${entity.name || entity.id}`);
-                return;
-            }
-        } else {
-            console.log(`${TAG} open-in-editor: no Leaflet layer within 30m (best dist: ${bestDist === Infinity ? 'none' : bestDist.toFixed(1) + 'm'})`);
-        }
-
-        // Fallback: copy name to clipboard so user can paste into Map
-        // Entities sidebar — the same workflow they're already using
-        // manually, just automated to one click.
-        fallbackCopyName(entity);
-    }
-
-    function fallbackCopyName(entity) {
-        const name = entity.name || String(entity.id);
-        copyToClipboard(name, `Copied "${name}" — paste into Map Entities sidebar`);
-    }
+    // Earlier versions (v2.0–v2.2) had an `openInEditor()` function that
+    // tried to fire Leaflet click events or synthetic DOM clicks to trigger
+    // Percepto's native edit dialog. Layer matching worked (console showed
+    // sub-meter matches) but the dispatched events were no-ops — Percepto's
+    // selection handler isn't bound via Leaflet's .on('click', …) or any
+    // simple DOM listener we could reach. The popup button now just copies
+    // the name to clipboard so the user can paste it into the Map Entities
+    // sidebar — the same manual workflow, just one-click. Once we have the
+    // sidebar's DOM selectors, v2.4 can automate the paste + filter.
 
     // ============================================================
     // Right-click handler — capture phase on window, gated to map area
