@@ -9,6 +9,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.0** — **Summary of All Entities** panel — the big phase the user previously called out. New **SUM** button injected next to the existing ALT and VAL buttons on Percepto's entity toolbar (same `#aim-automation-container` + `setInterval(2000)` re-injection pattern as Bulk Altitude Updater / Bulk Validator → native look, survives React re-renders, hides in edit mode). Click SUM to open a floating draggable panel listing every entity on the site:
+  - **Search** (live filter by name or subtype)
+  - **Type chips**: Assets / Flight Paths / FFZs / Markers (multi-select toggle)
+  - **Validated only** checkbox
+  - **Sortable columns**: Type · Name · Subtype · Elev (ft) · Min Alt · Max Alt · ✓
+  - **Click a row** → pans/zooms the map to the entity AND opens the inspector popup beside the summary panel
+  - **Copy CSV** — visible-columns snapshot of the current filter+sort
+  - **Copy JSON** — full raw entity records from the API for the current filter+sort
+  - **Refresh** — re-fetches `/map_objects/` (catches changes other teammates made)
+  - Panel is draggable from the header; position persists across open/close. Resizing deferred to a later version.
+  - Reuses the same `/map_objects/` cache the right-click inspector built — no duplicate fetches. Build pipeline pre-computes Elev/Alt in feet (converted from JSON meters) so sort works numerically and column display is the unit the user actually wants.
 - **AIM Asset Inspector v2.4** — **"Find in Map Entities" button now auto-pastes + filters** instead of just copying to clipboard. Targets the sidebar input `input.ant-input[placeholder="Search entity"]` (always-open sidebar per user confirmation). Uses the React-aware value-setter trick (`Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, name)` + bubbling `input` event) since direct `input.value = …` doesn't trip Ant Design's onChange. After fire: input is focused so user can keyboard-arrow through results. v2.5 can auto-click the first result row once we have its outerHTML.
 - **AIM Asset Inspector v2.3** — **"Open in editor" replaced with reliable "Copy name → paste in Map Entities".** v2.0–v2.2 chased synthetic events to trigger Percepto's native edit dialog. v2.2 console proved the layer matching works (sub-meter matches) but the dispatched click events were no-ops — Percepto's selection handler isn't bound via Leaflet's `.on('click', …)` or any DOM listener we could reach. The button now just copies the entity name to clipboard with a "paste in Map Entities sidebar" toast — same manual workflow you were already doing, just one-click. Once we have the sidebar's DOM selectors, v2.4 can fully automate the paste + filter.
 - **AIM Asset Inspector v2.2** — two fixes.

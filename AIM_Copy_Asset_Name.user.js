@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      3.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '2.4';
+    const SCRIPT_VERSION = '3.0';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -678,6 +678,488 @@
     setupControlPanel();
     registerWithControlPanel();
     installRightClickHandler();
+
+    // ============================================================
+    // SUMMARY VIEW — floating panel listing every entity on the site.
+    // Reuses the same /map_objects cache the right-click inspector
+    // already builds, so no duplicate fetches.
+    //
+    // Triggered by a SUM button injected next to Percepto's native
+    // entity-header toolbar (alongside the existing ALT and VAL buttons
+    // from AIM_Bulk_Altitude_Updater and AIM_Bulk_Validator, which
+    // already inject into #aim-automation-container — we just append).
+    // ============================================================
+    const SUM_BTN_ID = 'aim-sum-trigger-btn';
+    const SUM_PANEL_ID = 'aim-sum-panel';
+    let sumPanelState = {
+        search: '',
+        typeFilter: new Set(['3', '15', '16', '19']), // All types on by default
+        validatedOnly: false,
+        sortKey: 'name',
+        sortDir: 1, // 1 = asc, -1 = desc
+        x: null, y: null, // last drag position
+    };
+
+    function injectSumButton(doc) {
+        // Don't inject in edit mode — Bulk Validator hides the whole
+        // toolbar then, and SUM should follow the same convention.
+        if (doc.querySelector('.upsert-entity')) {
+            const existing = doc.getElementById(SUM_BTN_ID);
+            if (existing) existing.style.display = 'none';
+            return;
+        }
+        if (doc.getElementById(SUM_BTN_ID)) {
+            doc.getElementById(SUM_BTN_ID).style.display = '';
+            return;
+        }
+        const header = doc.querySelector('.site-setup-header--all-entities');
+        if (!header) return;
+        let container = doc.getElementById('aim-automation-container');
+        // If neither ALT nor VAL ran first, create the container. Use
+        // the same styling they use so layout stays consistent.
+        if (!container) {
+            container = doc.createElement('div');
+            container.id = 'aim-automation-container';
+            Object.assign(container.style, {
+                width: '100%', display: 'flex', justifyContent: 'flex-start',
+                padding: '4px 0 8px 16px', borderBottom: '1px solid #f0f0f0',
+                marginTop: '-4px', gap: '10px',
+            });
+            header.after(container);
+        }
+        const newBtnRef = header.querySelector('.site-setup-header__new_entity-button');
+        const btn = doc.createElement('button');
+        btn.id = SUM_BTN_ID;
+        btn.type = 'button';
+        btn.className = newBtnRef ? newBtnRef.className : 'ant-btn ant-btn-primary ant-btn-sm';
+        Object.assign(btn.style, {
+            minWidth: 'unset', padding: '0 12px', height: '24px',
+            fontSize: '10px', fontWeight: 'bold',
+        });
+        btn.innerHTML = 'SUM';
+        btn.title = 'Open entities summary (AIM Asset Inspector)';
+        btn.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openSummaryPanel();
+        };
+        container.appendChild(btn);
+    }
+    function recursiveSumInject(win) {
+        try {
+            injectSumButton(win.document);
+            const frames = win.document.querySelectorAll('iframe');
+            frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
+        } catch (e) {}
+    }
+    function runSumInjection() {
+        if (!masterEnabled) return;
+        recursiveSumInject(window);
+    }
+    if (CONTEXT === 'IFRAME') {
+        setInterval(runSumInjection, 2000);
+        setTimeout(runSumInjection, 500);
+    }
+
+    // ----- Summary panel UI -----
+    function closeSummaryPanel() {
+        const el = document.getElementById(SUM_PANEL_ID);
+        if (el) el.remove();
+    }
+
+    function openSummaryPanel() {
+        closeInspector();
+        const siteID = getCurrentSiteID();
+        if (!siteID) {
+            showToast('No site loaded', 'rgba(255,96,96,0.55)');
+            return;
+        }
+        if (!mapObjectsBySite[siteID]) {
+            fetchMapObjects(siteID);
+            showToast('Loading entities — try again in a sec', 'rgba(255,180,0,0.55)');
+            return;
+        }
+        renderSummaryPanel(siteID);
+    }
+
+    function typeShortLabel(t) {
+        if (t === 3) return 'Ast';
+        if (t === 15) return 'FP';
+        if (t === 16) return 'FFZ';
+        if (t === 19) return 'Mkr';
+        return '?';
+    }
+    function typeBadgeColor(t) {
+        if (t === 3) return '#ffffff';
+        if (t === 15) return '#1ca0de';
+        if (t === 16) return '#5fff5f';
+        if (t === 19) return '#ff9800';
+        return '#7adfe6';
+    }
+
+    // Build the flat row-set for the table. Each row is { entity, name,
+    // typeLabel, subtype, elevFt, altRangeFt, validated } — pre-computed
+    // so sort/filter are cheap.
+    function buildSummaryRows(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket) return [];
+        return (bucket.entities || []).map(e => {
+            const row = {
+                entity: e,
+                type: e.type,
+                typeShort: typeShortLabel(e.type),
+                name: e.name || '',
+                subtype: '',
+                elevFt: null,
+                altMinFt: null,
+                altMaxFt: null,
+                validated: !!e.validated,
+                unshielded: !!e.is_unshielded,
+            };
+            if (e.type === 3 && e.custom) {
+                row.subtype = e.custom.poi_type_str || '';
+                if (typeof e.custom.elevation_asl === 'number') {
+                    row.elevFt = e.custom.elevation_asl * 3.28084;
+                }
+            }
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+                let minA = Infinity, maxA = -Infinity;
+                for (const a of e.arcs) {
+                    if (typeof a.min_alt === 'number' && a.min_alt < minA) minA = a.min_alt;
+                    if (typeof a.max_alt === 'number' && a.max_alt > maxA) maxA = a.max_alt;
+                }
+                if (isFinite(minA)) row.altMinFt = minA * 3.28084;
+                if (isFinite(maxA)) row.altMaxFt = maxA * 3.28084;
+            }
+            if (e.type === 16 && e.restrictions && typeof e.restrictions === 'object') {
+                if (typeof e.restrictions.minAlt === 'number') row.altMinFt = e.restrictions.minAlt * 3.28084;
+                if (typeof e.restrictions.maxAlt === 'number') row.altMaxFt = e.restrictions.maxAlt * 3.28084;
+            }
+            if (e.type === 19) row.subtype = e.general_marker_type || '';
+            return row;
+        });
+    }
+
+    function filterAndSortRows(rows, state) {
+        const q = (state.search || '').trim().toLowerCase();
+        let out = rows.filter(r => {
+            if (!state.typeFilter.has(String(r.type))) return false;
+            if (state.validatedOnly && !r.validated) return false;
+            if (q && !r.name.toLowerCase().includes(q) && !r.subtype.toLowerCase().includes(q)) return false;
+            return true;
+        });
+        const dir = state.sortDir;
+        out.sort((a, b) => {
+            const va = a[state.sortKey], vb = b[state.sortKey];
+            if (va == null && vb == null) return 0;
+            if (va == null) return 1;
+            if (vb == null) return -1;
+            if (typeof va === 'number' && typeof vb === 'number') return dir * (va - vb);
+            return dir * String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+        });
+        return out;
+    }
+
+    function renderSummaryPanel(siteID) {
+        closeSummaryPanel();
+        const allRows = buildSummaryRows(siteID);
+
+        const panel = document.createElement('div');
+        panel.id = SUM_PANEL_ID;
+        const startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - 760);
+        const startY = sumPanelState.y != null ? sumPanelState.y : 80;
+        panel.style.cssText = `
+            position:fixed;left:${startX}px;top:${startY}px;z-index:99998;
+            width:720px;max-width:96vw;max-height:80vh;display:flex;flex-direction:column;
+            background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:8px;
+            box-shadow:0 6px 28px rgba(0,0,0,0.65);
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;
+        `;
+
+        // --- Header (draggable) ---
+        const head = document.createElement('div');
+        head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.08);cursor:move;user-select:none;background:rgba(20,210,220,0.06)';
+        const title = document.createElement('div');
+        title.style.cssText = 'flex:1;color:#7adfe6;font-weight:600;font-size:13px';
+        title.textContent = `AIM Entities · Site ${siteID}`;
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:18px;cursor:pointer;padding:0 4px;line-height:1';
+        closeBtn.onclick = closeSummaryPanel;
+        head.appendChild(title);
+        head.appendChild(closeBtn);
+        panel.appendChild(head);
+
+        // Drag handling — track on head mousedown, follow mousemove, snap
+        // back to viewport on release. Stored in sumPanelState so position
+        // persists between open/close.
+        let dragging = false, dragOffX = 0, dragOffY = 0;
+        head.addEventListener('mousedown', (e) => {
+            if (e.target === closeBtn) return;
+            dragging = true;
+            const r = panel.getBoundingClientRect();
+            dragOffX = e.clientX - r.left;
+            dragOffY = e.clientY - r.top;
+            e.preventDefault();
+        });
+        const onMove = (e) => {
+            if (!dragging) return;
+            let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
+            nx = Math.max(0, Math.min(window.innerWidth - 80, nx));
+            ny = Math.max(0, Math.min(window.innerHeight - 40, ny));
+            panel.style.left = nx + 'px';
+            panel.style.top = ny + 'px';
+            sumPanelState.x = nx; sumPanelState.y = ny;
+        };
+        const onUp = () => { dragging = false; };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        // Clean up listeners when panel closes
+        const origRemove = panel.remove.bind(panel);
+        panel.remove = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            origRemove();
+        };
+
+        // --- Toolbar (search + filters) ---
+        const toolbar = document.createElement('div');
+        toolbar.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.08)';
+        const searchRow = document.createElement('div');
+        searchRow.style.cssText = 'display:flex;gap:8px;align-items:center';
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = '🔍  Search name or subtype…';
+        searchInput.value = sumPanelState.search;
+        searchInput.style.cssText = 'flex:1;background:#15171c;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:5px 8px;font:inherit;font-size:12px';
+        searchInput.oninput = () => {
+            sumPanelState.search = searchInput.value;
+            redrawTable();
+        };
+        searchRow.appendChild(searchInput);
+        toolbar.appendChild(searchRow);
+
+        const chipRow = document.createElement('div');
+        chipRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
+        const chipDefs = [
+            { tNum: '3',  label: 'Assets'        },
+            { tNum: '15', label: 'Flight Paths'  },
+            { tNum: '16', label: 'FFZs'          },
+            { tNum: '19', label: 'Markers'       },
+        ];
+        chipDefs.forEach(({ tNum, label }) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            const update = () => {
+                const on = sumPanelState.typeFilter.has(tNum);
+                chip.style.cssText = `background:${on ? 'rgba(20,210,220,0.25)' : 'transparent'};color:${on ? '#7adfe6' : '#888'};border:1px solid ${on ? 'rgba(20,210,220,0.55)' : 'rgba(255,255,255,0.18)'};border-radius:12px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px`;
+            };
+            chip.textContent = label;
+            chip.onclick = () => {
+                if (sumPanelState.typeFilter.has(tNum)) sumPanelState.typeFilter.delete(tNum);
+                else sumPanelState.typeFilter.add(tNum);
+                update();
+                redrawTable();
+            };
+            update();
+            chipRow.appendChild(chip);
+        });
+        const validatedLabel = document.createElement('label');
+        validatedLabel.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb;font-size:11px;cursor:pointer;margin-left:8px';
+        const validatedCb = document.createElement('input');
+        validatedCb.type = 'checkbox';
+        validatedCb.checked = sumPanelState.validatedOnly;
+        validatedCb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+        validatedCb.onchange = () => {
+            sumPanelState.validatedOnly = validatedCb.checked;
+            redrawTable();
+        };
+        validatedLabel.appendChild(validatedCb);
+        validatedLabel.appendChild(document.createTextNode('Validated only'));
+        chipRow.appendChild(validatedLabel);
+        toolbar.appendChild(chipRow);
+        panel.appendChild(toolbar);
+
+        // --- Table area ---
+        const tableWrap = document.createElement('div');
+        tableWrap.style.cssText = 'flex:1;overflow:auto;min-height:0';
+        panel.appendChild(tableWrap);
+
+        // --- Footer ---
+        const footer = document.createElement('div');
+        footer.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.15)';
+        const countEl = document.createElement('div');
+        countEl.style.cssText = 'flex:1;color:#888;font-size:11px';
+        footer.appendChild(countEl);
+        const csvBtn = document.createElement('button');
+        csvBtn.textContent = 'Copy CSV';
+        csvBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const jsonBtn = document.createElement('button');
+        jsonBtn.textContent = 'Copy JSON';
+        jsonBtn.style.cssText = csvBtn.style.cssText;
+        const refreshBtn = document.createElement('button');
+        refreshBtn.textContent = 'Refresh';
+        refreshBtn.style.cssText = csvBtn.style.cssText;
+        refreshBtn.onclick = () => {
+            const sid = getCurrentSiteID();
+            if (!sid) return;
+            delete mapObjectsBySite[sid];
+            fetchMapObjects(sid, true);
+            showToast('Refreshing entities…');
+            // Re-render after a short delay so the new data is in the cache.
+            setTimeout(() => {
+                if (mapObjectsBySite[sid]) renderSummaryPanel(sid);
+            }, 1500);
+        };
+        footer.appendChild(csvBtn);
+        footer.appendChild(jsonBtn);
+        footer.appendChild(refreshBtn);
+        panel.appendChild(footer);
+
+        document.body.appendChild(panel);
+
+        // --- Table draw helper (called on filter/sort changes) ---
+        function redrawTable() {
+            const rows = filterAndSortRows(allRows, sumPanelState);
+            tableWrap.innerHTML = '';
+            const table = document.createElement('table');
+            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px';
+
+            // Header row
+            const thead = document.createElement('thead');
+            thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:1';
+            const cols = [
+                { key: 'typeShort', label: 'Type',   w: 50  },
+                { key: 'name',      label: 'Name',   w: 240 },
+                { key: 'subtype',   label: 'Subtype', w: 100 },
+                { key: 'elevFt',    label: 'Elev (ft)', w: 75, num: true },
+                { key: 'altMinFt',  label: 'Min Alt', w: 70, num: true },
+                { key: 'altMaxFt',  label: 'Max Alt', w: 70, num: true },
+                { key: 'validated', label: '✓',     w: 30 },
+            ];
+            const headRow = document.createElement('tr');
+            cols.forEach(col => {
+                const th = document.createElement('th');
+                th.textContent = col.label;
+                const isSorted = sumPanelState.sortKey === col.key;
+                th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;width:${col.w}px`;
+                if (isSorted) th.textContent += sumPanelState.sortDir === 1 ? ' ▲' : ' ▼';
+                th.onclick = () => {
+                    if (sumPanelState.sortKey === col.key) sumPanelState.sortDir *= -1;
+                    else { sumPanelState.sortKey = col.key; sumPanelState.sortDir = 1; }
+                    redrawTable();
+                };
+                headRow.appendChild(th);
+            });
+            thead.appendChild(headRow);
+            table.appendChild(thead);
+
+            // Body rows
+            const tbody = document.createElement('tbody');
+            rows.forEach((r) => {
+                const tr = document.createElement('tr');
+                tr.style.cssText = 'cursor:pointer;border-bottom:1px solid rgba(255,255,255,0.05)';
+                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
+                tr.onmouseleave = () => { tr.style.background = 'transparent'; };
+                tr.onclick = () => {
+                    panToEntity(r.entity);
+                    // Open the inspector popup at the panel's position so it
+                    // doesn't get hidden behind the summary panel.
+                    const px = sumPanelState.x != null ? sumPanelState.x + 730 : 60;
+                    const py = sumPanelState.y != null ? sumPanelState.y + 40 : 100;
+                    showInspectorPopup(
+                        Math.min(px, window.innerWidth - 320),
+                        Math.min(py, window.innerHeight - 320),
+                        r.entity
+                    );
+                };
+                const tdType = document.createElement('td');
+                tdType.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px`;
+                tdType.textContent = r.typeShort;
+                tr.appendChild(tdType);
+                const tdName = document.createElement('td');
+                tdName.style.cssText = 'padding:5px 8px;color:#e6e6e6';
+                tdName.textContent = r.name || '(unnamed)';
+                tr.appendChild(tdName);
+                const tdSub = document.createElement('td');
+                tdSub.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px';
+                tdSub.textContent = r.subtype || '—';
+                tr.appendChild(tdSub);
+                const tdElev = document.createElement('td');
+                tdElev.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums';
+                tdElev.textContent = r.elevFt != null ? r.elevFt.toFixed(0) : '—';
+                tr.appendChild(tdElev);
+                const tdMin = document.createElement('td');
+                tdMin.style.cssText = tdElev.style.cssText;
+                tdMin.textContent = r.altMinFt != null ? r.altMinFt.toFixed(0) : '—';
+                tr.appendChild(tdMin);
+                const tdMax = document.createElement('td');
+                tdMax.style.cssText = tdElev.style.cssText;
+                tdMax.textContent = r.altMaxFt != null ? r.altMaxFt.toFixed(0) : '—';
+                tr.appendChild(tdMax);
+                const tdVal = document.createElement('td');
+                tdVal.style.cssText = `padding:5px 8px;text-align:center;color:${r.validated ? '#5fff5f' : '#666'}`;
+                tdVal.textContent = r.validated ? '✓' : '—';
+                tr.appendChild(tdVal);
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+            tableWrap.appendChild(table);
+
+            countEl.textContent = `Showing ${rows.length} of ${allRows.length}${rows.length !== allRows.length ? ' (filtered)' : ''}`;
+
+            // Wire footer buttons against THIS filter+sort snapshot
+            csvBtn.onclick = () => {
+                const header = 'Type,Name,Subtype,Elev (ft),Min Alt (ft),Max Alt (ft),Validated';
+                const lines = [header];
+                rows.forEach(r => {
+                    const cells = [
+                        r.typeShort,
+                        csvQuote(r.name),
+                        csvQuote(r.subtype),
+                        r.elevFt != null ? r.elevFt.toFixed(0) : '',
+                        r.altMinFt != null ? r.altMinFt.toFixed(0) : '',
+                        r.altMaxFt != null ? r.altMaxFt.toFixed(0) : '',
+                        r.validated ? 'yes' : 'no',
+                    ];
+                    lines.push(cells.join(','));
+                });
+                copyToClipboard(lines.join('\n'), `Copied CSV (${rows.length} row${rows.length === 1 ? '' : 's'})`);
+            };
+            jsonBtn.onclick = () => {
+                const fullEntities = rows.map(r => r.entity);
+                copyToClipboard(JSON.stringify(fullEntities, null, 2), `Copied JSON (${rows.length} entit${rows.length === 1 ? 'y' : 'ies'})`);
+            };
+        }
+        redrawTable();
+    }
+
+    function csvQuote(s) {
+        if (s == null) return '';
+        const str = String(s);
+        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+        }
+        return str;
+    }
+
+    function panToEntity(entity) {
+        const map = getLeafletMap();
+        if (!map || !Array.isArray(entity.coords) || entity.coords.length === 0) return;
+        let lat, lng;
+        if (entity.coords.length >= 3) {
+            let sLat = 0, sLng = 0;
+            for (const c of entity.coords) { sLat += c.lat; sLng += c.lng; }
+            lat = sLat / entity.coords.length;
+            lng = sLng / entity.coords.length;
+        } else {
+            lat = entity.coords[0].lat;
+            lng = entity.coords[0].lng;
+        }
+        try { map.setView([lat, lng], Math.max(18, map.getZoom())); }
+        catch (e) { console.warn(`${TAG} setView threw:`, e); }
+    }
 
     // ============================================================
     // Initial fetch + site-change refetch (IFRAME only — TOP has no
