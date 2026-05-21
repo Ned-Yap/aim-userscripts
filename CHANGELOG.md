@@ -9,6 +9,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.1** — Summary panel polish based on first-test feedback.
+  - **New filters**: **Unvalidated only**, **Unshielded only**, **Has notes**. The Validated/Unvalidated pair is mutually exclusive (toggling one auto-clears the other — both ON would show nothing).
+  - **"Valid" column header** (was just `✓` which wasn't clear). Same `✓ / —` data in the cells.
+  - **Resizable panel** — drag the bottom-right corner. Min 480 × 300, max 96 vw × 90 vh. Final size persists across open/close alongside the position.
+  - Deferred to v3.2: column visibility toggle, per-row checkboxes for selective export.
+  - Big future phase: **live editing of entity values in the SUM panel**. Two viable approaches under consideration — direct PATCH to Percepto's update endpoint, or driving the existing edit dialog programmatically. Will scope after v3.1 testing.
 - **AIM Asset Inspector v3.0** — **Summary of All Entities** panel — the big phase the user previously called out. New **SUM** button injected next to the existing ALT and VAL buttons on Percepto's entity toolbar (same `#aim-automation-container` + `setInterval(2000)` re-injection pattern as Bulk Altitude Updater / Bulk Validator → native look, survives React re-renders, hides in edit mode). Click SUM to open a floating draggable panel listing every entity on the site:
   - **Search** (live filter by name or subtype)
   - **Type chips**: Assets / Flight Paths / FFZs / Markers (multi-select toggle)

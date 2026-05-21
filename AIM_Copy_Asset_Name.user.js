@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.0';
+    const SCRIPT_VERSION = '3.1';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -695,9 +695,13 @@
         search: '',
         typeFilter: new Set(['3', '15', '16', '19']), // All types on by default
         validatedOnly: false,
+        unvalidatedOnly: false,
+        unshieldedOnly: false,
+        notesOnly: false,
         sortKey: 'name',
         sortDir: 1, // 1 = asc, -1 = desc
-        x: null, y: null, // last drag position
+        x: null, y: null,         // last drag position (px from viewport)
+        w: 720, h: null,          // last drag size (null = use default)
     };
 
     function injectSumButton(doc) {
@@ -815,6 +819,7 @@
                 altMaxFt: null,
                 validated: !!e.validated,
                 unshielded: !!e.is_unshielded,
+                hasNotes: !!(e.description && String(e.description).trim()),
             };
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
@@ -845,6 +850,9 @@
         let out = rows.filter(r => {
             if (!state.typeFilter.has(String(r.type))) return false;
             if (state.validatedOnly && !r.validated) return false;
+            if (state.unvalidatedOnly && r.validated) return false;
+            if (state.unshieldedOnly && !r.unshielded) return false;
+            if (state.notesOnly && !r.hasNotes) return false;
             if (q && !r.name.toLowerCase().includes(q) && !r.subtype.toLowerCase().includes(q)) return false;
             return true;
         });
@@ -866,11 +874,14 @@
 
         const panel = document.createElement('div');
         panel.id = SUM_PANEL_ID;
-        const startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - 760);
+        const startW = sumPanelState.w || 720;
+        const startH = sumPanelState.h; // null = use max-height: 80vh
+        const startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - startW - 40);
         const startY = sumPanelState.y != null ? sumPanelState.y : 80;
         panel.style.cssText = `
             position:fixed;left:${startX}px;top:${startY}px;z-index:99998;
-            width:720px;max-width:96vw;max-height:80vh;display:flex;flex-direction:column;
+            width:${startW}px;${startH ? `height:${startH}px;` : 'max-height:80vh;'}
+            max-width:96vw;display:flex;flex-direction:column;
             background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:8px;
             box-shadow:0 6px 28px rgba(0,0,0,0.65);
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
@@ -965,19 +976,34 @@
             update();
             chipRow.appendChild(chip);
         });
-        const validatedLabel = document.createElement('label');
-        validatedLabel.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb;font-size:11px;cursor:pointer;margin-left:8px';
-        const validatedCb = document.createElement('input');
-        validatedCb.type = 'checkbox';
-        validatedCb.checked = sumPanelState.validatedOnly;
-        validatedCb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
-        validatedCb.onchange = () => {
-            sumPanelState.validatedOnly = validatedCb.checked;
-            redrawTable();
-        };
-        validatedLabel.appendChild(validatedCb);
-        validatedLabel.appendChild(document.createTextNode('Validated only'));
-        chipRow.appendChild(validatedLabel);
+        // Filter checkboxes. Validated and Unvalidated are mutually
+        // exclusive — toggling one auto-clears the other (otherwise
+        // both ON shows nothing, which is just confusing).
+        function makeFilterCheckbox(labelText, stateKey, opts) {
+            const lbl = document.createElement('label');
+            lbl.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb;font-size:11px;cursor:pointer;margin-left:8px';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = !!sumPanelState[stateKey];
+            cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+            cb.onchange = () => {
+                sumPanelState[stateKey] = cb.checked;
+                if (cb.checked && opts && opts.unset) {
+                    // Re-render the panel so the paired checkbox visually unsets too.
+                    sumPanelState[opts.unset] = false;
+                    renderSummaryPanel(siteID);
+                    return;
+                }
+                redrawTable();
+            };
+            lbl.appendChild(cb);
+            lbl.appendChild(document.createTextNode(labelText));
+            return lbl;
+        }
+        chipRow.appendChild(makeFilterCheckbox('Validated only', 'validatedOnly', { unset: 'unvalidatedOnly' }));
+        chipRow.appendChild(makeFilterCheckbox('Unvalidated only', 'unvalidatedOnly', { unset: 'validatedOnly' }));
+        chipRow.appendChild(makeFilterCheckbox('Unshielded only', 'unshieldedOnly'));
+        chipRow.appendChild(makeFilterCheckbox('Has notes', 'notesOnly'));
         toolbar.appendChild(chipRow);
         panel.appendChild(toolbar);
 
@@ -1017,6 +1043,42 @@
         footer.appendChild(refreshBtn);
         panel.appendChild(footer);
 
+        // Resize handle — small grip in the bottom-right corner. Drag to
+        // change panel width + height. Min 480x300, max 96vw x 90vh.
+        // Final size persists in sumPanelState so it survives close/reopen.
+        const resizeHandle = document.createElement('div');
+        resizeHandle.style.cssText = 'position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,rgba(20,210,220,0.55) 40%,rgba(20,210,220,0.55) 50%,transparent 50%,transparent 65%,rgba(20,210,220,0.45) 65%,rgba(20,210,220,0.45) 75%,transparent 75%);border-bottom-right-radius:8px';
+        let resizing = false, rStartX = 0, rStartY = 0, rStartW = 0, rStartH = 0;
+        resizeHandle.addEventListener('mousedown', (e) => {
+            resizing = true;
+            const r = panel.getBoundingClientRect();
+            rStartX = e.clientX; rStartY = e.clientY;
+            rStartW = r.width; rStartH = r.height;
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        const onResizeMove = (e) => {
+            if (!resizing) return;
+            const nw = Math.max(480, Math.min(window.innerWidth * 0.96, rStartW + (e.clientX - rStartX)));
+            const nh = Math.max(300, Math.min(window.innerHeight * 0.90, rStartH + (e.clientY - rStartY)));
+            panel.style.width = nw + 'px';
+            panel.style.height = nh + 'px';
+            panel.style.maxHeight = 'none'; // override the default cap once user resizes
+            sumPanelState.w = nw;
+            sumPanelState.h = nh;
+        };
+        const onResizeUp = () => { resizing = false; };
+        document.addEventListener('mousemove', onResizeMove);
+        document.addEventListener('mouseup', onResizeUp);
+        panel.appendChild(resizeHandle);
+        // Extend the cleanup remove() to drop the resize listeners too.
+        const prevRemove = panel.remove;
+        panel.remove = () => {
+            document.removeEventListener('mousemove', onResizeMove);
+            document.removeEventListener('mouseup', onResizeUp);
+            prevRemove();
+        };
+
         document.body.appendChild(panel);
 
         // --- Table draw helper (called on filter/sort changes) ---
@@ -1036,7 +1098,7 @@
                 { key: 'elevFt',    label: 'Elev (ft)', w: 75, num: true },
                 { key: 'altMinFt',  label: 'Min Alt', w: 70, num: true },
                 { key: 'altMaxFt',  label: 'Max Alt', w: 70, num: true },
-                { key: 'validated', label: '✓',     w: 30 },
+                { key: 'validated', label: 'Valid', w: 50 },
             ];
             const headRow = document.createElement('tr');
             cols.forEach(col => {
