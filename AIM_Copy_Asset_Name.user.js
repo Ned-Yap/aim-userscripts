@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.6';
+    const SCRIPT_VERSION = '3.7';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1607,34 +1607,103 @@
                 e.arcs.forEach(a => { if (typeof a.distance === 'number') fpDistanceM += a.distance; });
             }
         });
-        // Asset state keywords (search subtype). Battery rows like
-        // "battery - empty" / "v-well - unreachable" / "battery -
-        // unshielded" satisfy multiple categories — that's expected,
-        // they're independent dimensions.
-        const assetStates = {
-            'Empty': countContains(byType[3], 'empty'),
-            'Unshielded': countContains(byType[3], 'unshielded'),
-            'Unreachable': countContains(byType[3], 'unreachable'),
-        };
-        // Asset equipment keywords. SWD lives in name (e.g.
-        // "MILLIKEN C 3D SWD"), the rest in subtype — rowContains
-        // searches both so a single helper suffices.
-        const assetEquipment = {
-            'H-Well': countContains(byType[3], 'h-well'),
-            'V-Well': countContains(byType[3], 'v-well'),
-            'Compressor': countContains(byType[3], 'compressor'),
-            'Battery': countContains(byType[3], 'battery'),
-            'SAT': countContains(byType[3], 'sat'),
-            'SWD': countContains(byType[3], 'swd'),
-        };
-        // GM keywords — names like "Elevator 1", "Flare 2", "Guywire
-        // 2-2", and any "Bridge" labels in other sites.
-        const gmKeywords = {
-            'Elevators': countContains(byType[19], 'elevator'),
-            'Flare': countContains(byType[19], 'flare'),
-            'Guy wire': byType[19].filter(r => rowContains(r, 'guywire') || rowContains(r, 'guy wire')).length,
-            'Bridge': countContains(byType[19], 'bridge'),
-        };
+        // ---- Auto-detected breakdowns ----
+        // Subtypes in this dataset look like "battery - empty",
+        // "v-well - unreachable", "h-well", "compressor". The piece
+        // BEFORE " - " is the equipment kind; the piece(s) AFTER are
+        // state tags. Both are auto-extracted now instead of hand-
+        // listed — when a site adds new categories (rare but possible)
+        // they show up automatically.
+        //
+        // Auto-detect equipment: group assets by subtype.split(' - ')[0],
+        // counts >= 1 are surfaced. SWD is special — lives in NAME not
+        // subtype (e.g. "MILLIKEN C 3D SWD") — so we tack on any
+        // common name-tags as a second pass.
+        const equipMap = {};
+        byType[3].forEach(r => {
+            const sub = (r.subtype || '').trim();
+            if (!sub) return;
+            const head = sub.split(/\s*-\s*/)[0].trim();
+            if (!head) return;
+            const key = prettyKey(head);
+            equipMap[key] = (equipMap[key] || 0) + 1;
+        });
+        // Name-tag pass: short ALL-CAPS tokens in asset names (length
+        // 3-5) caught for tags like SWD that don't appear in subtypes.
+        // Filter out common false positives (numbers etc.) by
+        // requiring at least one letter.
+        const nameTagMap = {};
+        const NAME_TAG_RE = /\b([A-Z]{2,5})\b/g;
+        byType[3].forEach(r => {
+            const matches = (r.name || '').match(NAME_TAG_RE);
+            if (!matches) return;
+            // Dedupe within a single name so "TEXAS TEN ZZ 13" doesn't
+            // count ZZ twice.
+            new Set(matches).forEach(tag => {
+                nameTagMap[tag] = (nameTagMap[tag] || 0) + 1;
+            });
+        });
+        // Filter name-tags: drop ones that look like generic words
+        // ("TEN", "AND", "OR"), keep ones that appear >= 2 times AND
+        // aren't already in equipMap (case-insensitive).
+        const equipKeysLower = new Set(Object.keys(equipMap).map(k => k.toLowerCase()));
+        const NAME_TAG_STOPWORDS = new Set(['TEN', 'AND', 'OR', 'THE', 'OF', 'IN', 'AT', 'TO',
+            'TRD', 'AB', 'CD', 'GS', 'WS', 'PER', 'NW', 'NE', 'SW', 'SE',
+            'WELL', 'BMS', 'IT', 'IS', 'AS', 'BY', 'FOR', 'NOT', 'NO',
+            'UTC', 'GPS', 'API', 'ZZ']);
+        Object.entries(nameTagMap).forEach(([tag, count]) => {
+            if (count < 2) return;
+            if (equipKeysLower.has(tag.toLowerCase())) return;
+            if (NAME_TAG_STOPWORDS.has(tag)) return;
+            equipMap[tag] = count; // surfaces SWD, SAT (if not already), etc.
+        });
+        // Sort by count descending and cap at top 12 for display sanity.
+        const assetEquipment = sortAndCap(equipMap, 12);
+
+        // Auto-detect states: parts AFTER " - " in subtype. So
+        // "battery - empty" yields "empty". "v-well - unshielded"
+        // yields "unshielded". Counts independent of equipment.
+        const stateMap = {};
+        byType[3].forEach(r => {
+            const sub = (r.subtype || '').trim();
+            if (!sub) return;
+            const parts = sub.split(/\s*-\s*/).slice(1);
+            parts.forEach(p => {
+                const k = p.trim();
+                if (!k) return;
+                const key = prettyKey(k);
+                stateMap[key] = (stateMap[key] || 0) + 1;
+            });
+        });
+        const assetStates = sortAndCap(stateMap, 10);
+
+        // Auto-detect GM groups from names. Strategy:
+        //   1. tokenize on whitespace / underscore / dash
+        //   2. drop trailing tokens that contain digits ("1", "2-2", "14K")
+        //   3. join the remaining tokens — that's the group name
+        // Result: "Elevator 1", "Elevator 2" both → "Elevator".
+        // "Tattu Range N5 - 14K" → "Tattu Range". Site-agnostic.
+        const gmMap = {};
+        byType[19].forEach(r => {
+            const base = gmBaseName(r.name || '');
+            if (!base) return;
+            gmMap[base] = (gmMap[base] || 0) + 1;
+        });
+        const gmGroups = sortAndCap(gmMap, 12);
+
+        // Equipment × State matrix — for each equipment kind, count
+        // how many are in each state (or "Normal" if no state suffix).
+        // Powers the new stacked-bar chart in the popup.
+        const equipStateMatrix = {};
+        byType[3].forEach(r => {
+            const sub = (r.subtype || '').trim();
+            const head = prettyKey((sub.split(/\s*-\s*/)[0] || '').trim());
+            if (!head) return;
+            const states = sub.split(/\s*-\s*/).slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
+            const stateKey = states.length ? states.join(' + ') : 'Normal';
+            if (!equipStateMatrix[head]) equipStateMatrix[head] = {};
+            equipStateMatrix[head][stateKey] = (equipStateMatrix[head][stateKey] || 0) + 1;
+        });
         // Other rolled-up stats — useful at a glance.
         const other = {
             'With notes': allRows.filter(r => r.hasNotes).length,
@@ -1650,8 +1719,43 @@
             },
             validationByType,
             flightPaths: { entities: byType[15].length, segments: fpSegments, distanceM: fpDistanceM },
-            assetStates, assetEquipment, gmKeywords, other,
+            assetStates, assetEquipment, equipStateMatrix,
+            gmGroups, other,
         };
+    }
+
+    // Title-case-ish key normalizer: turn "h-well" → "H-Well",
+    // "battery" → "Battery", "v-well" → "V-Well". Preserves embedded
+    // hyphens (the "-Well" suffix) and uppercases ALL-CAPS tokens.
+    function prettyKey(raw) {
+        return raw.split(/\s+/).map(word =>
+            word.split('-').map(part => {
+                if (!part) return part;
+                if (part.length <= 3 && part === part.toUpperCase()) return part; // SAT, SWD, NFZ
+                return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+            }).join('-')
+        ).join(' ');
+    }
+
+    // Strip trailing numeric/short-alphanumeric tokens from a GM name
+    // to find its "group base". Detail in computeSiteStats; called by
+    // the gmMap aggregator.
+    function gmBaseName(name) {
+        if (!name) return '';
+        const tokens = name.split(/[\s_\-]+/).filter(Boolean);
+        while (tokens.length > 1 && /\d/.test(tokens[tokens.length - 1])) {
+            tokens.pop();
+        }
+        const base = tokens.join(' ').trim();
+        return base || name.trim();
+    }
+
+    function sortAndCap(dict, cap) {
+        const entries = Object.entries(dict).sort((a, b) => b[1] - a[1]);
+        const capped = cap ? entries.slice(0, cap) : entries;
+        const out = {};
+        capped.forEach(([k, v]) => { out[k] = v; });
+        return out;
     }
 
     // Small SVG donut chart. Items: [{label, count, color}, ...].
@@ -1711,13 +1815,89 @@
     // Simple proportional bar for keyword breakdown rows. Returns a
     // span the renderer can append after the count.
     function makeProportionBar(value, max, color) {
+        // Flex-sized so the bar fills available space without
+        // overflowing the card. Inner fill uses % so it shrinks
+        // along with the bar wrap. Previously the wrap was a fixed
+        // 120px which spilled past card edges in narrow grid columns.
         const wrap = document.createElement('span');
-        wrap.style.cssText = 'display:inline-block;width:120px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-left:8px;vertical-align:middle';
+        wrap.style.cssText = 'flex:1 1 auto;min-width:0;max-width:160px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;display:block';
         const fill = document.createElement('span');
-        const w = max > 0 ? (value / max) * 120 : 0;
-        fill.style.cssText = `display:block;width:${w}px;height:100%;background:${color};border-radius:3px`;
+        const pct = max > 0 ? (value / max) * 100 : 0;
+        fill.style.cssText = `display:block;width:${pct.toFixed(1)}%;height:100%;background:${color};border-radius:3px`;
         wrap.appendChild(fill);
         return wrap;
+    }
+
+    // Stacked-bar chart card for Equipment × State. Each row =
+    // equipment kind. Bar fills proportional to the equipment's
+    // share of the largest equipment count (so the biggest bar fills
+    // the row). Segments inside the bar are colored per state.
+    function makeEquipStateMatrixCard(matrix, cardBuilder) {
+        const c = cardBuilder('Asset Equipment × State');
+        const STATE_COLORS = {
+            'Normal':      '#ffffff',
+            'Empty':       '#ffd54f',
+            'Unshielded':  '#ff9800',
+            'Unreachable': '#ff5555',
+        };
+        const stateColor = (s) => STATE_COLORS[s] || '#888888';
+        // Compute totals per equipment + global max for proportional sizing.
+        const equipTotals = Object.entries(matrix).map(([eq, states]) => {
+            const total = Object.values(states).reduce((a, b) => a + b, 0);
+            return { eq, states, total };
+        }).sort((a, b) => b.total - a.total);
+        const globalMax = Math.max(0, ...equipTotals.map(x => x.total));
+        // Legend at top so colors are documented in one place.
+        const legend = document.createElement('div');
+        legend.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06);font-size:10px';
+        const seenStates = new Set();
+        equipTotals.forEach(({ states }) => Object.keys(states).forEach(s => seenStates.add(s)));
+        Array.from(seenStates).sort().forEach(s => {
+            const item = document.createElement('span');
+            item.style.cssText = 'display:flex;align-items:center;gap:4px;color:#bbb';
+            const sw = document.createElement('span');
+            sw.style.cssText = `display:inline-block;width:9px;height:9px;background:${stateColor(s)};border-radius:2px`;
+            item.appendChild(sw);
+            item.appendChild(document.createTextNode(s));
+            legend.appendChild(item);
+        });
+        c.appendChild(legend);
+        equipTotals.forEach(({ eq, states, total }) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;padding:5px 0;font-size:12px;gap:8px;overflow:hidden';
+            const lbl = document.createElement('span');
+            lbl.style.cssText = 'flex:0 0 auto;max-width:38%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+            lbl.title = eq;
+            lbl.textContent = eq;
+            const cnt = document.createElement('span');
+            cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:36px;text-align:right';
+            cnt.textContent = fmtNum(total);
+            // Stacked bar — width proportional to total/globalMax, then
+            // segmented by state proportions inside.
+            const barWrap = document.createElement('span');
+            const barTotalPct = globalMax > 0 ? (total / globalMax) * 100 : 0;
+            barWrap.style.cssText = `flex:1 1 auto;min-width:0;max-width:55%;height:10px;background:rgba(255,255,255,0.06);border-radius:3px;display:flex;overflow:hidden`;
+            const stackInner = document.createElement('span');
+            stackInner.style.cssText = `display:flex;width:${barTotalPct.toFixed(1)}%;height:100%;border-radius:3px;overflow:hidden`;
+            Object.entries(states).forEach(([state, count]) => {
+                if (!count) return;
+                const seg = document.createElement('span');
+                const segPct = total > 0 ? (count / total) * 100 : 0;
+                seg.style.cssText = `display:inline-block;width:${segPct.toFixed(1)}%;height:100%;background:${stateColor(state)}`;
+                seg.title = `${state}: ${fmtNum(count)}`;
+                stackInner.appendChild(seg);
+            });
+            barWrap.appendChild(stackInner);
+            row.appendChild(lbl); row.appendChild(cnt); row.appendChild(barWrap);
+            c.appendChild(row);
+        });
+        if (equipTotals.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'color:#888;font-size:12px;padding:8px 0;text-align:center';
+            empty.textContent = 'No asset equipment data on this site.';
+            c.appendChild(empty);
+        }
+        return c;
     }
 
     function openStatsPopup(siteID) {
@@ -1946,14 +2126,18 @@
         const kwCard = (titleText, dict, color) => {
             const c = card(titleText);
             const maxVal = Math.max(0, ...Object.values(dict));
+            // overflow:hidden + min-width:0 on bar wrap lets the row
+            // shrink cleanly when the card column is narrow (responsive
+            // grid). Was: 120px-fixed bar spilled past edges.
             Object.entries(dict).forEach(([k, v]) => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display:flex;align-items:center;padding:4px 0;font-size:12px';
+                row.style.cssText = 'display:flex;align-items:center;padding:4px 0;font-size:12px;gap:8px;overflow:hidden';
                 const lbl = document.createElement('span');
-                lbl.style.cssText = 'flex:0 0 110px;color:#bbb';
+                lbl.style.cssText = 'flex:0 0 auto;max-width:50%;color:#bbb;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                lbl.title = k;
                 lbl.textContent = k;
                 const cnt = document.createElement('span');
-                cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
+                cnt.style.cssText = 'flex:0 0 auto;color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
                 cnt.textContent = fmtNum(v);
                 row.appendChild(lbl); row.appendChild(cnt);
                 row.appendChild(makeProportionBar(v, maxVal, color));
@@ -1961,9 +2145,14 @@
             });
             return c;
         };
-        body.appendChild(kwCard('Asset · States', stats.assetStates, typeReg(3).color));
-        body.appendChild(kwCard('Asset · Equipment', stats.assetEquipment, typeReg(3).color));
-        body.appendChild(kwCard('General Markers · Keywords', stats.gmKeywords, typeReg(19).color));
+        body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color));
+        body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d'));
+        // Equipment × State stacked bars — for each equipment kind,
+        // show its total broken down by state. Color-coded per state:
+        //   Normal = white, Empty = yellow, Unshielded = orange,
+        //   Unreachable = red. Unknown states fall back to gray.
+        body.appendChild(makeEquipStateMatrixCard(stats.equipStateMatrix, card));
+        body.appendChild(kwCard('General Markers · Groups (auto)', stats.gmGroups, typeReg(19).color));
 
         // --- OTHER card ---
         const cOther = card('Other');
@@ -1976,14 +2165,21 @@
         const spacer = document.createElement('div');
         spacer.style.cssText = 'flex:1';
         footer.appendChild(spacer);
+        const sheetBtn = document.createElement('button');
+        sheetBtn.innerHTML = '📊 Copy → Sheets';
+        sheetBtn.title = 'Copy as formatted HTML table — paste directly into Google Sheets / Excel with colors + bolding';
+        sheetBtn.style.cssText = 'background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+        sheetBtn.onclick = () => copyStatsAsSheet(stats, getCurrentSiteName());
         const copyBtn = document.createElement('button');
         copyBtn.textContent = '📋 Copy as Text';
-        copyBtn.style.cssText = 'background:rgba(20,210,220,0.18);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
-        copyBtn.onclick = () => copyToClipboard(formatStatsAsText(stats), 'Copied site summary to clipboard');
+        copyBtn.title = 'Copy as plain text — ASCII headers, padded numbers, paste into Slack / email';
+        copyBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+        copyBtn.onclick = () => copyToClipboard(formatStatsAsText(stats), 'Copied site summary as plain text');
         const closeBtn2 = document.createElement('button');
         closeBtn2.textContent = 'Close';
         closeBtn2.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
         closeBtn2.onclick = closeStatsPopup;
+        footer.appendChild(sheetBtn);
         footer.appendChild(copyBtn);
         footer.appendChild(closeBtn2);
         popup.appendChild(footer);
@@ -2074,18 +2270,152 @@
         lines.push(pad('Total length (m)',  Math.round(stats.flightPaths.distanceM)));
         lines.push(pad('Total length (mi)', distMi.toFixed(2)));
         lines.push('');
-        lines.push('ASSET · STATES');
-        Object.entries(stats.assetStates).forEach(([k, v]) => lines.push(pad(k, v)));
-        lines.push('');
-        lines.push('ASSET · EQUIPMENT');
+        lines.push('ASSET · EQUIPMENT (auto-detected)');
         Object.entries(stats.assetEquipment).forEach(([k, v]) => lines.push(pad(k, v)));
         lines.push('');
-        lines.push('GENERAL MARKERS · KEYWORDS');
-        Object.entries(stats.gmKeywords).forEach(([k, v]) => lines.push(pad(k, v)));
+        lines.push('ASSET · STATES (auto-detected)');
+        Object.entries(stats.assetStates).forEach(([k, v]) => lines.push(pad(k, v)));
+        lines.push('');
+        lines.push('EQUIPMENT × STATE MATRIX');
+        Object.entries(stats.equipStateMatrix).forEach(([eq, states]) => {
+            lines.push(`  ${eq}:`);
+            Object.entries(states).forEach(([s, n]) => lines.push(pad(`    ${s}`, n)));
+        });
+        lines.push('');
+        lines.push('GENERAL MARKERS · GROUPS (auto-detected)');
+        Object.entries(stats.gmGroups).forEach(([k, v]) => lines.push(pad(k, v)));
         lines.push('');
         lines.push('OTHER');
         Object.entries(stats.other).forEach(([k, v]) => lines.push(pad(k, v)));
         return lines.join('\n');
+    }
+
+    // ============================================================
+    // Google Sheets / Excel export — copies rich HTML to the
+    // clipboard as text/html alongside a plain-text fallback. When
+    // pasted into Google Sheets or Excel, the spreadsheet engine
+    // parses the HTML table and lays out properly formatted cells
+    // (headers bolded, color-coded section bands, right-aligned
+    // numbers). Charts don't carry over from HTML — the user can
+    // insert a chart from the pasted data in two clicks.
+    // ============================================================
+    function buildStatsHtmlForSheets(stats, siteName) {
+        const tdNum = 'style="text-align:right;font-variant-numeric:tabular-nums"';
+        const tdLbl = 'style="text-align:left"';
+        const sectionTr = (title, color) =>
+            `<tr><td colspan="3" style="background:${color || '#1f2228'};color:#7adfe6;font-weight:bold;padding:6px 8px;letter-spacing:0.5px">${title}</td></tr>`;
+        const dataTr = (label, value, extra) =>
+            `<tr><td ${tdLbl}>${label}</td><td ${tdNum}>${fmtNum(value)}</td><td ${tdNum}>${extra || ''}</td></tr>`;
+        const cellsToString = (cells) => cells.map(c => `<td ${tdLbl}>${c}</td>`).join('');
+
+        const hdr = siteName ? `Site Summary — ${siteName} (Site ${stats.siteID})` : `Site Summary — Site ${stats.siteID}`;
+        const out = [];
+        out.push('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:11pt">');
+        out.push(`<tr><td colspan="3" style="background:#1f2228;color:#7adfe6;font-weight:bold;font-size:13pt;padding:8px">${hdr}</td></tr>`);
+        out.push(`<tr><td colspan="3" style="color:#666;padding:4px 8px">${fmtNum(stats.totalEntities)} entities total</td></tr>`);
+
+        // Type breakdown
+        out.push(sectionTr('ENTITY TYPES'));
+        const typeRows = [
+            ['FPs',    stats.counts[15], '#1ca0de'],
+            ['FFZs',   stats.counts[16], '#5fff5f'],
+            ['NFZs',   stats.counts[4],  '#ff5555'],
+            ['Assets', stats.counts[3],  '#ffffff'],
+            ['GMs',    stats.counts[19], '#c084fc'],
+        ];
+        typeRows.forEach(([label, n, color]) => {
+            const pct = stats.totalEntities > 0 ? `${(n / stats.totalEntities * 100).toFixed(1)}%` : '';
+            out.push(`<tr><td ${tdLbl} style="border-left:3px solid ${color};padding-left:8px">${label}</td><td ${tdNum}>${fmtNum(n)}</td><td ${tdNum} style="color:#888">${pct}</td></tr>`);
+        });
+        out.push(`<tr><td ${tdLbl} style="font-weight:bold">TOTAL</td><td ${tdNum} style="font-weight:bold">${fmtNum(stats.totalEntities)}</td><td></td></tr>`);
+
+        // Validation per type
+        out.push(sectionTr('VALIDATION'));
+        out.push(`<tr><th ${tdLbl}>Type</th><th ${tdNum}>Validated</th><th ${tdNum}>Unvalidated</th></tr>`);
+        [[15, 'Flight Paths'], [16, 'FFZs'], [4, 'NFZs']].forEach(([t, label]) => {
+            const v = stats.validationByType[t];
+            if (!v || v.total === 0) return;
+            out.push(`<tr><td ${tdLbl}>${label}</td><td ${tdNum} style="color:#0a0">${fmtNum(v.validated)}</td><td ${tdNum} style="color:#a00">${fmtNum(v.unvalidated)}</td></tr>`);
+        });
+
+        // Flight path totals
+        out.push(sectionTr('FLIGHT PATHS'));
+        out.push(dataTr('Entities', stats.flightPaths.entities));
+        out.push(dataTr('Total segments', stats.flightPaths.segments));
+        out.push(dataTr('Total length (ft)', Math.round(stats.flightPaths.distanceM * 3.28084)));
+        out.push(dataTr('Total length (m)',  Math.round(stats.flightPaths.distanceM)));
+        out.push(dataTr('Total length (mi)', (stats.flightPaths.distanceM / 1609.34).toFixed(2)));
+
+        // Asset equipment / states / matrix
+        out.push(sectionTr('ASSET — EQUIPMENT'));
+        Object.entries(stats.assetEquipment).forEach(([k, v]) => out.push(dataTr(k, v)));
+        out.push(sectionTr('ASSET — STATES'));
+        Object.entries(stats.assetStates).forEach(([k, v]) => out.push(dataTr(k, v)));
+
+        // Equipment × State matrix as its own sub-table for clarity
+        out.push(sectionTr('EQUIPMENT × STATE MATRIX'));
+        const states = new Set();
+        Object.values(stats.equipStateMatrix).forEach(obj => Object.keys(obj).forEach(s => states.add(s)));
+        const stateList = Array.from(states).sort();
+        out.push(`<tr><th ${tdLbl}>Equipment</th>${stateList.map(s => `<th ${tdNum}>${s}</th>`).join('')}<th ${tdNum} style="font-weight:bold">TOTAL</th></tr>`);
+        Object.entries(stats.equipStateMatrix).forEach(([eq, smap]) => {
+            const total = Object.values(smap).reduce((a, b) => a + b, 0);
+            const cells = stateList.map(s => `<td ${tdNum}>${smap[s] ? fmtNum(smap[s]) : ''}</td>`).join('');
+            out.push(`<tr><td ${tdLbl}>${eq}</td>${cells}<td ${tdNum} style="font-weight:bold">${fmtNum(total)}</td></tr>`);
+        });
+
+        // GM groups
+        out.push(sectionTr('GENERAL MARKERS — GROUPS'));
+        Object.entries(stats.gmGroups).forEach(([k, v]) => out.push(dataTr(k, v)));
+
+        // Other
+        out.push(sectionTr('OTHER'));
+        Object.entries(stats.other).forEach(([k, v]) => out.push(dataTr(k, v)));
+
+        out.push('</table>');
+        return out.join('');
+    }
+
+    // Multi-MIME clipboard write — Sheets and Excel pick up text/html,
+    // plain-text editors fall back to the .toLocaleString() text. We
+    // wrap both in a single ClipboardItem so the OS clipboard carries
+    // both flavors and the destination app picks the best one.
+    async function copyStatsAsSheet(stats, siteName) {
+        const html = buildStatsHtmlForSheets(stats, siteName);
+        const text = formatStatsAsText(stats);
+        try {
+            if (navigator.clipboard && window.ClipboardItem) {
+                const item = new ClipboardItem({
+                    'text/html': new Blob([html], { type: 'text/html' }),
+                    'text/plain': new Blob([text], { type: 'text/plain' }),
+                });
+                await navigator.clipboard.write([item]);
+                showToast('Copied as formatted table — paste into Google Sheets / Excel');
+                return;
+            }
+        } catch (e) {
+            console.warn(`${TAG} ClipboardItem write failed, falling back:`, e);
+        }
+        // Fallback: write HTML via execCommand on a contenteditable div
+        // — works in older browsers / when Clipboard API is restricted.
+        try {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            tmp.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+            document.body.appendChild(tmp);
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(tmp);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('copy');
+            sel.removeAllRanges();
+            document.body.removeChild(tmp);
+            showToast('Copied as formatted table — paste into Google Sheets / Excel');
+        } catch (e) {
+            console.error(`${TAG} Sheets fallback also failed:`, e);
+            copyToClipboard(text, 'Copied as plain text (HTML copy unavailable)');
+        }
     }
 
     // ============================================================

@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-21
+
+- **AIM Asset Inspector v3.7** — Stats popup goes auto-detect + adds a real Google Sheets export. Big quality-of-life push.
+  - **Auto-detected Asset equipment** — was a hardcoded 6-item list (H-Well / V-Well / Compressor / Battery / SAT / SWD). Now extracted from the data: split each asset's `poi_type_str` on " - " and use the first part as the equipment kind. Names like "MILLIKEN C 3D SWD" with no SWD in subtype get caught by a secondary "all-caps token in name" pass with stopword filtering. Surfaces new equipment kinds (Compressor, SAT, anything Percepto adds later) without code changes.
+  - **Auto-detected Asset states** — was hardcoded Empty / Unshielded / Unreachable. Now extracts everything after " - " in subtype as a state tag and groups counts.
+  - **Auto-detected GM groups** — was hardcoded Elevators / Flare / Guy wire / Bridge. Now strips trailing numeric tokens from each GM name to find its "base" group. "Elevator 1" / "Elevator 2" → "Elevator". "Tattu Range N5 - 14K" / "Tattu Range S5 - 14K" → "Tattu Range". "general_marker_4" → "general marker". Top 12 surfaced sorted by count.
+  - **New card: Asset Equipment × State Matrix** — stacked horizontal bars per equipment kind, colored by state (Normal=white, Empty=yellow, Unshielded=orange, Unreachable=red). Bar width is proportional to the equipment's share of the biggest equipment total. Hover any segment for state + count tooltip. Legend at top of card documents the colors. Lets you instantly see "of 46 V-Wells, how many are empty / unshielded / unreachable" at a glance.
+  - **Fixed bar overflow** in keyword cards (V-Well, Empty, Guy wire were spilling past card edges in the responsive grid). Bars now use `flex:1 1 auto; max-width:160px; min-width:0`, labels use `text-overflow:ellipsis` for long names, rows use `overflow:hidden` as a hard stop.
+  - **New "Copy → Sheets" button** in the footer — writes a **formatted HTML table** to the clipboard as `text/html` (alongside a plain-text fallback as `text/plain`). Paste into Google Sheets or Excel: gets proper cells, bolded section headers, color-coded type bands (left border colored per type), right-aligned numbers, the full Equipment × State matrix as a real spreadsheet sub-table. Charts don't carry over from HTML — Sheets users can insert a chart from the pasted data in two clicks. Uses the Clipboard API's `ClipboardItem` for multi-MIME write; falls back to `execCommand('copy')` on a hidden contenteditable when Clipboard API isn't available.
+  - Existing "Copy as Text" stays for plain-text use (Slack code blocks, email, etc.) — now demoted to secondary footer button.
+  - Plain-text export updated for the new auto-detected dicts + equipment matrix.
+
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
