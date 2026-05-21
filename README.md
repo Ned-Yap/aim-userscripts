@@ -64,17 +64,17 @@ Click each link below. Because the filenames end in `.user.js`, Tampermonkey wil
 | # | Script | Install link |
 |---|---|---|
 | 1 | **AIM Control Panel** (the gear icon + settings hub) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js) |
-| 2 | **AIM Map Styler** (outlines, buffers, KML shielding, Coverage Validator — Shift+O) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js) |
+| 2 | **AIM Map Styler** (outlines, buffers, KML shielding, Coverage Validator — Shift+O; Shift+K kicks the map if it gets stuck after refresh) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js) |
 | 3 | **AIM Inspector** (Leaflet diagnostic panel — Shift+I) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js) |
 | 4 | **AIM Absolute Altitude** (Shift+A) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js) |
 | 5 | **AIM Measure / Ruler** (Shift+R) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js) |
 | 6 | **AIM Clear All** (Shift+C) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js) |
-| 7 | **AIM Copy Asset Name** (Shift+Ctrl+Q on a hovered asset) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js) |
+| 7 | **AIM Asset Inspector** (right-click any entity for inspector popup; SUM button on the toolbar opens the Summary panel + 📊 site stats — installs as `AIM Copy Asset Name`) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js) |
 | 8 | **AIM New Entity Macro** (1–6 to create, Shift+S/D D/Z/X) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js) |
 | 9 | **AIM Bulk Mission Adder** (Shift+B) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js) |
-| 10 | **AIM Bulk Altitude Updater** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js) |
-| 11 | **AIM Bulk Validator** | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js) |
-| 12 | **AIM Performance Shield** (blocks session-replay recorder that was leaking ~200MB/30s) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js) |
+| 10 | **AIM Bulk Altitude Updater** (Shift+E) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js) |
+| 11 | **AIM Bulk Validator** (Shift+V) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js) |
+| 12 | **AIM Performance Shield** (blocks session-replay + chat + weather network traffic; optional hide-satellite / ortho low-res for slow hardware) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js) |
 
 > ⚠ **AIM Sidebar Resizer** is temporarily unavailable (was breaking AIM load). Existing installs will auto-update to a no-op version on Tampermonkey's next check — safe to leave installed. Will be re-added once fixed.
 
