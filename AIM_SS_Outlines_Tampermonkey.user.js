@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.29
+// @version      34.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.29';
+    const SCRIPT_VERSION = '34.30';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -2987,30 +2987,80 @@
         }, true);
     }
 
-    // Asset lockdown click/mousedown interceptor. Installed unconditionally
-    // (one set of listeners per page) but only swallows events when the
-    // `asset.locked` toggle is on AND the user isn't holding Shift (the
-    // per-asset bypass). Capture phase so we run before Leaflet's bubble
-    // handlers — once we stopPropagation it's as if the click never happened
-    // as far as Leaflet / the host app is concerned.
+    // Asset lockdown via CSS pointer-events.
+    //
+    // v34.29 and earlier used a capture-phase event handler that called
+    // stopImmediatePropagation on mousedown/click of asset paths. Two bugs:
+    //   - Map pan didn't work over assets (mousedown was killed, so Leaflet
+    //     never started the pan drag).
+    //   - Pin-drop tools couldn't fire INSIDE assets (the host app's click
+    //     handler on the map container never received the event — we'd
+    //     stopped propagation).
+    //
+    // The new approach: inject a CSS rule that sets `pointer-events: none`
+    // on white asset paths when body has the `aim-asset-locked` class.
+    // Clicks pass through to the map underneath, so pan + pin-drop work.
+    // The asset's own Leaflet click handler doesn't fire because no events
+    // reach the element at all. Shift held temporarily removes the body
+    // class (re-enables events) so the user can still click the asset to
+    // interact with it.
+    //
+    // Tradeoff: hover events also don't fire while locked → tooltips don't
+    // appear → Copy Asset Name (Shift+Ctrl+Q) doesn't see a tooltip unless
+    // the user moves the cursor across the asset while Shift is held.
+    // Acceptable for E1; document in CHANGELOG.
+    const ASSET_LOCK_STYLE_ID = 'aim-asset-lock-css';
+    const ASSET_LOCK_CSS = `
+        body.aim-asset-locked path.leaflet-interactive[stroke="#ffffff"] {
+            pointer-events: none !important;
+        }
+    `;
+    const ASSET_LOCK_BODY_CLASS = 'aim-asset-locked';
+    let shiftIsHeld = false;
+
+    function ensureAssetLockStyle() {
+        if (document.getElementById(ASSET_LOCK_STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = ASSET_LOCK_STYLE_ID;
+        style.textContent = ASSET_LOCK_CSS;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function applyAssetLockClass() {
+        if (!document.body) return;
+        const locked = toggleState['asset.locked'] === true && !shiftIsHeld;
+        document.body.classList.toggle(ASSET_LOCK_BODY_CLASS, locked);
+    }
+
     function installAssetLockHandler() {
         if (window.aimAssetLockInstalled) return;
         window.aimAssetLockInstalled = true;
-        const handler = (e) => {
-            if (toggleState['asset.locked'] !== true) return;
-            if (e.shiftKey) return; // bypass
-            const t = e.target;
-            if (!t || !t.closest) return;
-            if (t.closest('path.leaflet-interactive[stroke="#ffffff"]')) {
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation();
+        ensureAssetLockStyle();
+        // Track Shift modifier — when held, lift the lock so the user can
+        // click through to the asset for interaction. Capture phase so we
+        // catch it regardless of focus target. Re-applies the class on
+        // every transition.
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Shift' && !shiftIsHeld) {
+                shiftIsHeld = true;
+                applyAssetLockClass();
             }
-        };
-        // mousedown is what Leaflet actually uses for selection; click is
-        // included as belt-and-suspenders.
-        document.addEventListener('mousedown', handler, true);
-        document.addEventListener('click', handler, true);
+        }, true);
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'Shift' && shiftIsHeld) {
+                shiftIsHeld = false;
+                applyAssetLockClass();
+            }
+        }, true);
+        // If focus leaves the window mid-shift, we may miss the keyup and
+        // be stuck in shift-held state. Reset on blur as a safety net.
+        window.addEventListener('blur', () => {
+            if (shiftIsHeld) {
+                shiftIsHeld = false;
+                applyAssetLockClass();
+            }
+        }, true);
+        applyAssetLockClass();
     }
 
     function setupControlPanel() {
@@ -3047,6 +3097,12 @@
                             toggleId: hiddenKey, value: true, enabled: true,
                         });
                     }
+                }
+                // Asset lock toggled — apply/remove the body class immediately
+                // so the user sees the pointer-events effect without waiting
+                // for the next runUpdate or interaction.
+                if (msg.toggleId === 'asset.locked') {
+                    applyAssetLockClass();
                 }
                 if (msg.toggleId === 'master') {
                     // Only log when the value actually transitions. The Control
