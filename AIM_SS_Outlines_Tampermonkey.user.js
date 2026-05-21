@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.33
+// @version      34.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.33';
+    const SCRIPT_VERSION = '34.34';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1585,6 +1585,42 @@
         setCommitOps(siteID, type, emptyCommitOps());
     }
 
+    // After ANY successful commit/split PUT, refresh local state from
+    // the xmlText we just sent — NOT from a refetch.
+    //
+    // Why: fetchKMLForSite() pulls via raw.githubusercontent.com, which
+    // has a 5-min CDN cache. Two commits in quick succession would see
+    // the second refetch return the FIRST commit's content (cached),
+    // so the user's second change appears to revert until the cache
+    // expires. Diagnosed 2026-05-21 from a vertex-edit double-commit
+    // round trip — line snapped back to the first-edit position.
+    //
+    // We already have the authoritative bytes (GitHub accepted them),
+    // so parse them here. Other tabs / users still get the cached
+    // version until edge TTL expires — that's a Percepto-wide limit
+    // we can't fix from a userscript.
+    function applyCommittedXmlToLocalState(siteID, type, xmlText) {
+        const k = kmlKey(siteID, type);
+        try {
+            const features = parseKML(xmlText);
+            kmlFeatures[k] = features;
+            const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
+            gmSet(KML_CACHE_PREFIX + k, { features, at: Date.now(), path });
+            kmlMissing.delete(k);
+            return true;
+        } catch (e) {
+            // Shouldn't happen — we just built this XML ourselves. Fall
+            // back to forced refetch (CDN-stale risk accepted) so the
+            // render at least gets SOMETHING.
+            console.warn(`${TAG} post-commit local parse failed; falling back to refetch:`, e);
+            delete kmlFeatures[k];
+            gmSet(KML_CACHE_PREFIX + k, null);
+            kmlMissing.delete(k);
+            fetchKMLForSite(siteID, true);
+            return false;
+        }
+    }
+
     function discardCommitOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
@@ -1949,12 +1985,7 @@
                     if (resp.status === 200 || resp.status === 201) {
                         setPending(siteID, type, {});
                         showKMLToast(`✓ Committed ${count} ${type} change${count === 1 ? '' : 's'}.`, 4000);
-                        // Force refetch so render reflects committed file.
-                        const k = kmlKey(siteID, type);
-                        delete kmlFeatures[k];
-                        gmSet(KML_CACHE_PREFIX + k, null);
-                        kmlMissing.delete(k);
-                        fetchKMLForSite(siteID, true);
+                        applyCommittedXmlToLocalState(siteID, type, xmlText);
                         if (isActive) runUpdate();
                     } else if (resp.status === 409) {
                         showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
@@ -2172,15 +2203,11 @@
                 onload: (resp) => {
                     if (resp.status === 200 || resp.status === 201) {
                         showKMLToast(`✓ Split ${result.splitCount} ${type} placemark${result.splitCount === 1 ? '' : 's'} into ${result.newCount} segments.`, 6000);
-                        // Force refetch so render reflects committed file (with
-                        // the new placemark indices) — also clears any stale
-                        // pending state for safety.
+                        // Split shifts every placemark's pmIdx — clear any
+                        // stale local hides since stored indices would now
+                        // reference different placemarks.
                         setPending(siteID, type, {});
-                        const k = kmlKey(siteID, type);
-                        delete kmlFeatures[k];
-                        gmSet(KML_CACHE_PREFIX + k, null);
-                        kmlMissing.delete(k);
-                        fetchKMLForSite(siteID, true);
+                        applyCommittedXmlToLocalState(siteID, type, xmlText);
                         if (isActive) runUpdate();
                     } else if (resp.status === 409) {
                         showKMLToast('Split conflict: file changed on GitHub since GET. Refresh and try again.', 9000);
@@ -2406,11 +2433,7 @@
                         } else {
                             showKMLToast(`✓ Committed ${summaryText}.`, 4000);
                         }
-                        const k = kmlKey(siteID, type);
-                        delete kmlFeatures[k];
-                        gmSet(KML_CACHE_PREFIX + k, null);
-                        kmlMissing.delete(k);
-                        fetchKMLForSite(siteID, true);
+                        applyCommittedXmlToLocalState(siteID, type, xmlText);
                         if (isActive) runUpdate();
                     } else if (resp.status === 409) {
                         showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
