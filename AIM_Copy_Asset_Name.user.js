@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '2.1';
+    const SCRIPT_VERSION = '2.2';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -226,19 +226,51 @@
         return '#7adfe6';
     }
 
+    // Build a dual-unit row: feet (converted from meters) / meters,
+    // each number separately click-to-copy. Units are display-only,
+    // never included in the copied text.
+    //
+    //   Input: meters as a number (from Percepto's JSON, which stores
+    //          altitudes/elevations/distances in meters even though the
+    //          UI displays feet).
+    //   Output: row with `parts` array — renderer splits into copyable
+    //           spans (with `copy`) and plain spans (`copy: null`).
+    function meterRow(label, meters, ftDecimals, mDecimals) {
+        if (typeof meters !== 'number' || !isFinite(meters)) return null;
+        const ft = meters * 3.28084;
+        const ftStr = ft.toFixed(ftDecimals != null ? ftDecimals : (ft < 100 ? 1 : 0));
+        const mStr = meters.toFixed(mDecimals != null ? mDecimals : 2);
+        return {
+            label,
+            parts: [
+                { text: ftStr, copy: ftStr },
+                { text: ' ft / ', copy: null },
+                { text: mStr, copy: mStr },
+                { text: ' m', copy: null },
+            ],
+        };
+    }
+
     function buildEntityFields(e) {
         const out = [];
         out.push({ label: 'Name', value: e.name });
         out.push({ label: 'ID', value: e.id });
         if (e.type === 3 && e.custom) {
             if (e.custom.poi_type_str) out.push({ label: 'Subtype', value: e.custom.poi_type_str });
+            // Elevation ASL is in meters in the JSON despite Percepto's
+            // UI labeling it as ft elsewhere. Show both.
             if (typeof e.custom.elevation_asl === 'number') {
-                out.push({ label: 'Elev ASL', value: `${e.custom.elevation_asl.toFixed(2)} ft` });
+                const row = meterRow('Elev ASL', e.custom.elevation_asl);
+                if (row) out.push(row);
             }
-            if (e.custom.altitude !== undefined && e.custom.altitude !== 0) {
-                out.push({ label: 'Altitude', value: e.custom.altitude });
+            if (typeof e.custom.altitude === 'number' && e.custom.altitude !== 0) {
+                const row = meterRow('Altitude', e.custom.altitude);
+                if (row) out.push(row);
             }
-            if (e.custom.height_agl != null) out.push({ label: 'Height AGL', value: e.custom.height_agl });
+            if (typeof e.custom.height_agl === 'number') {
+                const row = meterRow('Height AGL', e.custom.height_agl);
+                if (row) out.push(row);
+            }
             if (e.custom.poi_id) out.push({ label: 'POI ID', value: e.custom.poi_id });
             out.push({ label: 'Unshielded', value: e.is_unshielded ? 'yes' : 'no' });
         }
@@ -255,18 +287,30 @@
                     if (typeof a.max_alt === 'number' && a.max_alt > maxA) maxA = a.max_alt;
                 }
                 if (totalM > 0) {
-                    out.push({ label: 'Total len', value: `${totalM.toFixed(1)} m (${(totalM * 3.28084).toFixed(0)} ft)` });
+                    const row = meterRow('Total len', totalM, 0, 1);
+                    if (row) out.push(row);
                 }
-                if (isFinite(minA) && isFinite(maxA)) {
-                    out.push({ label: 'Alt range', value: `${minA} – ${maxA} ft` });
+                if (isFinite(minA)) {
+                    const row = meterRow('Min Alt', minA);
+                    if (row) out.push(row);
+                }
+                if (isFinite(maxA)) {
+                    const row = meterRow('Max Alt', maxA);
+                    if (row) out.push(row);
                 }
             }
         }
         if (e.type === 16) {
             out.push({ label: 'Vertices', value: Array.isArray(e.coords) ? e.coords.length : 0 });
             if (e.restrictions && typeof e.restrictions === 'object') {
-                if (e.restrictions.minAlt !== undefined) out.push({ label: 'Min Alt', value: `${e.restrictions.minAlt} ft` });
-                if (e.restrictions.maxAlt !== undefined) out.push({ label: 'Max Alt', value: `${e.restrictions.maxAlt} ft` });
+                if (typeof e.restrictions.minAlt === 'number') {
+                    const row = meterRow('Min Alt', e.restrictions.minAlt);
+                    if (row) out.push(row);
+                }
+                if (typeof e.restrictions.maxAlt === 'number') {
+                    const row = meterRow('Max Alt', e.restrictions.maxAlt);
+                    if (row) out.push(row);
+                }
             }
         }
         if (e.type === 19) {
@@ -308,7 +352,45 @@
         popup.appendChild(header);
 
         const rows = buildEntityFields(entity);
-        rows.forEach(({ label, value }) => {
+        rows.forEach(rowSpec => {
+            if (!rowSpec) return;
+            const { label, value, parts } = rowSpec;
+            // Multi-part rows (dual-unit altitudes etc.) — each `part`
+            // is either copyable (has .copy) or plain text (.copy null).
+            if (Array.isArray(parts) && parts.length) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;padding:5px 12px;align-items:flex-start;gap:8px';
+                const lbl = document.createElement('span');
+                lbl.style.cssText = 'flex:0 0 75px;color:#888;font-size:11px;line-height:1.4';
+                lbl.textContent = label;
+                row.appendChild(lbl);
+                const val = document.createElement('span');
+                val.style.cssText = 'flex:1;color:#e6e6e6;font-size:12px;word-break:break-word;line-height:1.4';
+                parts.forEach(p => {
+                    const span = document.createElement('span');
+                    span.textContent = p.text;
+                    if (p.copy !== null && p.copy !== undefined) {
+                        span.style.cssText = 'cursor:pointer;padding:0 2px;border-radius:2px';
+                        span.onmouseenter = () => { span.style.background = 'rgba(20,210,220,0.25)'; };
+                        span.onmouseleave = () => { span.style.background = 'transparent'; };
+                        span.onclick = (ev) => {
+                            ev.stopPropagation();
+                            copyToClipboard(String(p.copy), `Copied ${p.copy}`);
+                        };
+                    } else {
+                        span.style.cssText = 'color:#888;font-size:11px';
+                    }
+                    val.appendChild(span);
+                });
+                row.appendChild(val);
+                const icon = document.createElement('span');
+                icon.style.cssText = 'flex:0 0 14px;color:#7adfe6;font-size:11px;text-align:right;opacity:0.55';
+                icon.textContent = '⧉';
+                row.appendChild(icon);
+                popup.appendChild(row);
+                return;
+            }
+            // Single-value rows — whole row click-to-copy as before.
             if (value === '' || value === null || value === undefined) return;
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;padding:5px 12px;cursor:pointer;align-items:flex-start;gap:8px';
@@ -477,37 +559,67 @@
         }
 
         if (bestLayer && bestDist < 30) {
-            // Fire Leaflet's click event directly on the layer. This
-            // triggers .on('click', handler) bindings without going
-            // through the DOM event system, so it works regardless of
-            // pointer-events / asset-lock state.
+            console.log(`${TAG} open-in-editor: matched layer at ${bestDist.toFixed(1)}m`);
+            let containerPoint, layerPoint;
             try {
-                let containerPoint, layerPoint;
-                try {
-                    containerPoint = map.latLngToContainerPoint([cLat, cLng]);
-                    layerPoint = map.containerPointToLayerPoint(containerPoint);
-                } catch (e) { /* not fatal */ }
+                containerPoint = map.latLngToContainerPoint([cLat, cLng]);
+                layerPoint = map.containerPointToLayerPoint(containerPoint);
+            } catch (e) { /* not fatal */ }
+            const cp = containerPoint || { x: 0, y: 0 };
+            const lp = layerPoint || { x: 0, y: 0 };
+            // 1. Fire Leaflet's click event directly on the layer.
+            //    Triggers .on('click', handler) bindings without going
+            //    through the DOM event system, so it works regardless of
+            //    pointer-events / asset-lock state.
+            let fired = false;
+            try {
                 bestLayer.fire('click', {
                     type: 'click',
                     target: bestLayer,
                     latlng: { lat: cLat, lng: cLng },
-                    containerPoint: containerPoint || { x: 0, y: 0 },
-                    layerPoint: layerPoint || { x: 0, y: 0 },
+                    containerPoint: cp,
+                    layerPoint: lp,
                     originalEvent: new MouseEvent('click', { shiftKey: true, bubbles: true, cancelable: true }),
                 });
-                showToast(`Opened ${entity.name || entity.id}`);
-                console.log(`${TAG} fired click on layer (dist ${bestDist.toFixed(1)}m from entity)`);
-                return;
+                fired = true;
             } catch (e) {
-                console.warn(`${TAG} layer.fire threw, falling back to clipboard:`, e);
+                console.warn(`${TAG} layer.fire('click') threw:`, e);
+            }
+            // 2. Belt-and-suspenders: also dispatch a real DOM Shift+click
+            //    on the element under the centroid. v2.1 reports show this
+            //    helps on subsequent opens — Percepto may detach the
+            //    Leaflet handler after one fire, but the DOM listener it
+            //    rebinds afterwards picks up the dispatch. Shift bypasses
+            //    asset.lock pointer-events: none.
+            try {
+                const cRect = map.getContainer().getBoundingClientRect();
+                const sx = cRect.left + cp.x;
+                const sy = cRect.top + cp.y;
+                const target = document.elementFromPoint(sx, sy);
+                if (target) {
+                    ['mousedown', 'mouseup', 'click'].forEach(typ => {
+                        target.dispatchEvent(new MouseEvent(typ, {
+                            bubbles: true, cancelable: true, view: window,
+                            clientX: sx, clientY: sy, button: 0,
+                            shiftKey: true,
+                        }));
+                    });
+                    fired = true;
+                }
+            } catch (e) {
+                console.warn(`${TAG} DOM dispatch threw:`, e);
+            }
+            if (fired) {
+                showToast(`Opened ${entity.name || entity.id}`);
+                return;
             }
         } else {
-            console.log(`${TAG} no Leaflet layer within 30m (best dist: ${bestDist === Infinity ? 'none' : bestDist.toFixed(1) + 'm'}); falling back to clipboard`);
+            console.log(`${TAG} open-in-editor: no Leaflet layer within 30m (best dist: ${bestDist === Infinity ? 'none' : bestDist.toFixed(1) + 'm'})`);
         }
 
         // Fallback: copy name to clipboard so user can paste into Map
         // Entities sidebar — the same workflow they're already using
-        // manually, but one-click.
+        // manually, just automated to one click.
         fallbackCopyName(entity);
     }
 
