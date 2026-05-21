@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.5
+// @version      3.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.5';
+    const SCRIPT_VERSION = '3.6';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1549,6 +1549,17 @@
         if (el) el.remove();
     }
 
+    // Pretty-print integers with thousands separators. Decimals already
+    // formatted to a fixed width are passed through (toLocaleString
+    // would re-format them). Falls through for null / non-finite.
+    function fmtNum(n) {
+        if (n == null) return '';
+        if (typeof n === 'string') return n; // already-formatted strings (e.g. "26.26")
+        if (!isFinite(n)) return String(n);
+        if (Number.isInteger(n)) return n.toLocaleString('en-US');
+        return n.toLocaleString('en-US');
+    }
+
     // Case-insensitive substring search across a row's name + subtype.
     // SWD appears in asset NAMES (e.g. "MILLIKEN C 3D SWD") not in
     // their poi_type_str subtype, so unifying name+subtype catches all
@@ -1575,12 +1586,17 @@
             3:  allRows.filter(r => r.type === 3),  // Assets
             19: allRows.filter(r => r.type === 19), // GMs
         };
-        // Validation counts only for types with a meaningful validated
-        // flag (FFZ + FP + NFZ). Assets and GMs hide the toggle so
-        // their `validated` is null and they get excluded.
-        const validatable = allRows.filter(r => r.validated !== null);
-        const validated = validatable.filter(r => r.validated === true).length;
-        const unvalidated = validatable.length - validated;
+        // Per-type validation counts so the popup can render separate
+        // donuts for FPs / FFZs / NFZs. Only types with a meaningful
+        // validated flag have a chart; Assets and GMs (validated=null)
+        // are excluded entirely.
+        const validationByType = {};
+        [15, 16, 4].forEach(t => {
+            const rows = byType[t] || [];
+            const v = rows.filter(r => r.validated === true).length;
+            const u = rows.filter(r => r.validated === false).length;
+            validationByType[t] = { validated: v, unvalidated: u, total: v + u };
+        });
         // Flight-path totals — segments + cumulative distance (meters).
         // Sum of arc.distance across every FP entity.
         let fpSegments = 0, fpDistanceM = 0;
@@ -1632,7 +1648,7 @@
                 15: byType[15].length, 16: byType[16].length, 4: byType[4].length,
                 3: byType[3].length, 19: byType[19].length,
             },
-            validation: { validated, unvalidated, total: validatable.length },
+            validationByType,
             flightPaths: { entities: byType[15].length, segments: fpSegments, distanceM: fpDistanceM },
             assetStates, assetEquipment, gmKeywords, other,
         };
@@ -1680,7 +1696,7 @@
         totalText.setAttribute('fill', '#e6e6e6');
         totalText.setAttribute('font-size', sz * 0.18);
         totalText.setAttribute('font-weight', '600');
-        totalText.textContent = String(total);
+        totalText.textContent = (typeof total === 'number') ? total.toLocaleString('en-US') : String(total);
         svg.appendChild(totalText);
         const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         lbl.setAttribute('x', cx); lbl.setAttribute('y', cy + 10);
@@ -1779,9 +1795,13 @@
         document.addEventListener('mousemove', onDragMove);
         document.addEventListener('mouseup', onDragUp);
 
-        // Scrollable body
+        // Scrollable body — CSS grid with auto-fit so cards re-flow
+        // horizontally when the popup is widened, vertically when
+        // narrowed. minmax(280px, 1fr) gives one column under ~280px
+        // and packs additional columns when there's room (great for
+        // wide-screenshot exports).
         const body = document.createElement('div');
-        body.style.cssText = 'flex:1;overflow:auto;padding:12px 14px;min-height:0;display:flex;flex-direction:column;gap:12px';
+        body.style.cssText = 'flex:1;overflow:auto;padding:12px 14px;min-height:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;align-content:start';
         popup.appendChild(body);
 
         // --- Card helper ---
@@ -1801,8 +1821,9 @@
             l.style.cssText = `flex:1;color:${color || '#bbb'}`;
             l.textContent = label;
             const v = document.createElement('span');
-            v.style.cssText = 'color:#e6e6e6;font-variant-numeric:tabular-nums;font-weight:600;min-width:40px;text-align:right';
-            v.textContent = String(value);
+            v.style.cssText = 'color:#e6e6e6;font-variant-numeric:tabular-nums;font-weight:600;min-width:60px;text-align:right';
+            // Comma-format integers; pass through pre-formatted strings.
+            v.textContent = fmtNum(value);
             r.appendChild(l); r.appendChild(v);
             return r;
         };
@@ -1831,7 +1852,7 @@
             lbl.textContent = it.label;
             const cnt = document.createElement('span');
             cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums';
-            cnt.textContent = String(it.count);
+            cnt.textContent = fmtNum(it.count);
             const pct = document.createElement('span');
             pct.style.cssText = 'color:#888;font-size:10px;min-width:38px;text-align:right;font-variant-numeric:tabular-nums';
             pct.textContent = stats.totalEntities > 0 ? `${(it.count / stats.totalEntities * 100).toFixed(1)}%` : '—';
@@ -1842,36 +1863,67 @@
         cTypes.appendChild(typesGrid);
         body.appendChild(cTypes);
 
-        // --- VALIDATION card (FFZ + FP + NFZ only) ---
-        const cVal = card('Validation · FFZs + FPs + NFZs');
-        const valGrid = document.createElement('div');
-        valGrid.style.cssText = 'display:flex;align-items:center;gap:16px';
-        const valDonutItems = [
-            { label: 'Validated',   count: stats.validation.validated,   color: '#5fff5f' },
-            { label: 'Unvalidated', count: stats.validation.unvalidated, color: '#ff5555' },
+        // --- VALIDATION card with separate donuts per type ---
+        // One mini-donut per validatable type (FPs / FFZs / NFZs).
+        // NFZs are only shown when the site actually has any — no
+        // sense rendering an empty ring with no slices for sites
+        // without NFZ data.
+        const cVal = card('Validation');
+        const valFlex = document.createElement('div');
+        valFlex.style.cssText = 'display:flex;gap:16px;flex-wrap:wrap;justify-content:space-around';
+        const validationCharts = [
+            { type: 15, label: 'Flight Paths', color: typeReg(15).color },
+            { type: 16, label: 'FFZs',         color: typeReg(16).color },
+            { type: 4,  label: 'NFZs',         color: typeReg(4).color  },
         ];
-        valGrid.appendChild(makeDonutChart(valDonutItems, stats.validation.total, 90));
-        const valLeg = document.createElement('div');
-        valLeg.style.cssText = 'flex:1;display:flex;flex-direction:column;gap:4px';
-        valDonutItems.forEach(it => {
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px';
-            const sw = document.createElement('span');
-            sw.style.cssText = `width:10px;height:10px;background:${it.color};border-radius:2px;flex:0 0 auto`;
-            const lbl = document.createElement('span');
-            lbl.style.cssText = `flex:1;color:${it.color};font-weight:600`;
-            lbl.textContent = (it.label === 'Validated' ? '✓ ' : '✗ ') + it.label;
-            const cnt = document.createElement('span');
-            cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums';
-            cnt.textContent = String(it.count);
-            const pct = document.createElement('span');
-            pct.style.cssText = 'color:#888;font-size:10px;min-width:38px;text-align:right;font-variant-numeric:tabular-nums';
-            pct.textContent = stats.validation.total > 0 ? `${(it.count / stats.validation.total * 100).toFixed(1)}%` : '—';
-            row.appendChild(sw); row.appendChild(lbl); row.appendChild(cnt); row.appendChild(pct);
-            valLeg.appendChild(row);
+        validationCharts.forEach(({ type, label, color }) => {
+            const v = stats.validationByType[type];
+            // Skip empty charts for types that don't exist on this
+            // site (NFZs on most sites).
+            if (!v || v.total === 0) return;
+            const sub = document.createElement('div');
+            sub.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:6px;min-width:100px';
+            const subTitle = document.createElement('div');
+            subTitle.style.cssText = `color:${color};font-weight:600;font-size:11px;letter-spacing:0.4px`;
+            subTitle.textContent = label;
+            sub.appendChild(subTitle);
+            const donutItems = [
+                { label: 'Validated',   count: v.validated,   color: '#5fff5f' },
+                { label: 'Unvalidated', count: v.unvalidated, color: '#ff5555' },
+            ];
+            sub.appendChild(makeDonutChart(donutItems, v.total, 90));
+            const legend = document.createElement('div');
+            legend.style.cssText = 'display:flex;flex-direction:column;gap:2px;font-size:11px;width:100%';
+            // ✓ row
+            const okRow = document.createElement('div');
+            okRow.style.cssText = 'display:flex;justify-content:space-between;color:#5fff5f';
+            const okL = document.createElement('span'); okL.textContent = '✓ Valid';
+            const okR = document.createElement('span'); okR.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums';
+            okR.textContent = fmtNum(v.validated);
+            okRow.appendChild(okL); okRow.appendChild(okR);
+            legend.appendChild(okRow);
+            // ✗ row
+            const noRow = document.createElement('div');
+            noRow.style.cssText = 'display:flex;justify-content:space-between;color:#ff5555';
+            const noL = document.createElement('span'); noL.textContent = '✗ Invalid';
+            const noR = document.createElement('span'); noR.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums';
+            noR.textContent = fmtNum(v.unvalidated);
+            noRow.appendChild(noL); noRow.appendChild(noR);
+            legend.appendChild(noRow);
+            sub.appendChild(legend);
+            valFlex.appendChild(sub);
         });
-        valGrid.appendChild(valLeg);
-        cVal.appendChild(valGrid);
+        // If somehow nothing showed (no FPs/FFZs/NFZs on the site),
+        // render a clear "nothing to validate" message instead of an
+        // empty card body.
+        if (valFlex.childElementCount === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'color:#888;font-size:12px;padding:8px 0;text-align:center';
+            empty.textContent = 'No FPs, FFZs, or NFZs on this site.';
+            cVal.appendChild(empty);
+        } else {
+            cVal.appendChild(valFlex);
+        }
         body.appendChild(cVal);
 
         // --- FLIGHT PATHS card ---
@@ -1882,8 +1934,11 @@
         const distFt = distM * 3.28084;
         const distMi = distM / 1609.34;
         const distKm = distM / 1000;
-        cFP.appendChild(kvRow('Total length (ft)', distFt.toFixed(0)));
-        cFP.appendChild(kvRow('Total length (m)', distM.toFixed(0)));
+        // Pre-format integers + decimals before passing to kvRow (which
+        // routes through fmtNum). Integers get commas; the mi/km combo
+        // is pre-built so both numbers are visible in one cell.
+        cFP.appendChild(kvRow('Total length (ft)', Math.round(distFt)));
+        cFP.appendChild(kvRow('Total length (m)',  Math.round(distM)));
         cFP.appendChild(kvRow('Total length (mi / km)', `${distMi.toFixed(2)} / ${distKm.toFixed(2)}`));
         body.appendChild(cFP);
 
@@ -1898,8 +1953,8 @@
                 lbl.style.cssText = 'flex:0 0 110px;color:#bbb';
                 lbl.textContent = k;
                 const cnt = document.createElement('span');
-                cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:36px;text-align:right';
-                cnt.textContent = String(v);
+                cnt.style.cssText = 'color:#e6e6e6;font-weight:600;font-variant-numeric:tabular-nums;min-width:48px;text-align:right';
+                cnt.textContent = fmtNum(v);
                 row.appendChild(lbl); row.appendChild(cnt);
                 row.appendChild(makeProportionBar(v, maxVal, color));
                 c.appendChild(row);
@@ -1980,7 +2035,10 @@
     // monospace-friendly way so the user can paste straight into a
     // ```code``` block on Slack.
     function formatStatsAsText(stats) {
-        const pad = (label, val, w) => `  ${label.padEnd(w || 22)} ${String(val).padStart(6)}`;
+        // Numbers get thousands separators in the text export too —
+        // matches what the popup shows so copy-paste reads identically.
+        const f = (n) => (typeof n === 'number' ? n.toLocaleString('en-US') : String(n));
+        const pad = (label, val, w) => `  ${label.padEnd(w || 22)} ${f(val).padStart(8)}`;
         const lines = [];
         lines.push(`SITE SUMMARY · Site ${stats.siteID}`);
         lines.push('='.repeat(40));
@@ -1993,17 +2051,27 @@
         lines.push(pad('GMs',    stats.counts[19]));
         lines.push(pad('TOTAL',  stats.totalEntities));
         lines.push('');
-        lines.push('VALIDATION (FFZ + FP + NFZ)');
-        lines.push(pad('Validated',   stats.validation.validated));
-        lines.push(pad('Unvalidated', stats.validation.unvalidated));
+        lines.push('VALIDATION');
+        const valDefs = [
+            { type: 15, label: 'Flight Paths' },
+            { type: 16, label: 'FFZs' },
+            { type: 4,  label: 'NFZs' },
+        ];
+        valDefs.forEach(({ type, label }) => {
+            const v = stats.validationByType[type];
+            if (!v || v.total === 0) return;
+            lines.push(`  ${label}:`);
+            lines.push(pad('    Validated',   v.validated));
+            lines.push(pad('    Unvalidated', v.unvalidated));
+        });
         lines.push('');
         lines.push('FLIGHT PATHS');
         lines.push(pad('Entities', stats.flightPaths.entities));
         lines.push(pad('Total segments', stats.flightPaths.segments));
         const distFt = stats.flightPaths.distanceM * 3.28084;
         const distMi = stats.flightPaths.distanceM / 1609.34;
-        lines.push(pad('Total length (ft)', distFt.toFixed(0)));
-        lines.push(pad('Total length (m)',  stats.flightPaths.distanceM.toFixed(0)));
+        lines.push(pad('Total length (ft)', Math.round(distFt)));
+        lines.push(pad('Total length (m)',  Math.round(stats.flightPaths.distanceM)));
         lines.push(pad('Total length (mi)', distMi.toFixed(2)));
         lines.push('');
         lines.push('ASSET · STATES');
