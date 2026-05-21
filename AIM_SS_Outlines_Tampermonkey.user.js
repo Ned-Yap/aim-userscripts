@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.32
+// @version      34.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.32';
+    const SCRIPT_VERSION = '34.33';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1539,6 +1539,36 @@
         return co.ops[String(pmIdx)] || null;
     }
 
+    // Returns the coords array the renderer + commit pipeline should use
+    // for a given placemark. Priority order:
+    //   1. Active vertex-edit session (live drag → instant feedback)
+    //   2. Previously-saved modify op (still pending commit)
+    //   3. Original file coords (default)
+    // Output is always [{lat,lng}, ...] (Leaflet-friendly internal format).
+    function effectiveCoordsForFeature(siteID, type, pmIdx, originalCoords) {
+        if (vertexEditState && vertexEditState.type === type && vertexEditState.pmIdx === pmIdx) {
+            return vertexEditState.currentCoords;
+        }
+        const op = getOpForPlacemark(siteID, type, pmIdx);
+        if (op && op.op === 'modify' && Array.isArray(op.coords)) {
+            return op.coords.map(c => ({ lat: c[1], lng: c[0] }));
+        }
+        return originalCoords;
+    }
+
+    // ============================================================
+    // Vertex edit session state (E3)
+    //
+    // Only one line can be vertex-edited at a time across both types.
+    // Active shape:
+    //   { type, pmIdx,
+    //     originalCoords: [{lat,lng}, ...],   // snapshot at entry
+    //     currentCoords:  [{lat,lng}, ...],   // mutated by drag
+    //     handles:        [L.Marker, ...],    // one per vertex
+    //     toolbarEl:      HTMLDivElement }    // floating Save/Discard
+    // ============================================================
+    let vertexEditState = null;
+
     function markPlacemarkForDelete(siteID, type, pmIdx) {
         const co = getCommitOps(siteID, type);
         co.ops[String(pmIdx)] = { op: 'delete' };
@@ -1633,33 +1663,75 @@
 
         const opNow = getOpForPlacemark(siteID, type, pmIdx);
         const isMarkedDelete = opNow && opNow.op === 'delete';
+        const isMarkedModify = opNow && opNow.op === 'modify';
 
-        const deleteAction = document.createElement('button');
-        deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
-        deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
-        deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
-        if (isMarkedDelete) {
-            deleteAction.textContent = '↩  Unmark for deletion';
-            deleteAction.onclick = (e) => {
-                e.stopPropagation();
-                unmarkPlacemarkOp(siteID, type, pmIdx);
-                const count = commitOpsCount(siteID, type);
-                showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
-                closeKMLContextMenu();
-                if (isActive) runUpdate();
-            };
-        } else {
-            deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
-            deleteAction.onclick = (e) => {
-                e.stopPropagation();
-                markPlacemarkForDelete(siteID, type, pmIdx);
-                const count = commitOpsCount(siteID, type);
-                showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
-                closeKMLContextMenu();
-                if (isActive) runUpdate();
-            };
+        // Delete row — hidden when there's a pending modify (a single
+        // placemark can only carry one op; if user wants to delete a
+        // modified line they revert first, then mark for deletion).
+        if (!isMarkedModify) {
+            const deleteAction = document.createElement('button');
+            deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
+            deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
+            deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
+            if (isMarkedDelete) {
+                deleteAction.textContent = '↩  Unmark for deletion';
+                deleteAction.onclick = (e) => {
+                    e.stopPropagation();
+                    unmarkPlacemarkOp(siteID, type, pmIdx);
+                    const count = commitOpsCount(siteID, type);
+                    showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+                    closeKMLContextMenu();
+                    if (isActive) runUpdate();
+                };
+            } else {
+                deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
+                deleteAction.onclick = (e) => {
+                    e.stopPropagation();
+                    markPlacemarkForDelete(siteID, type, pmIdx);
+                    const count = commitOpsCount(siteID, type);
+                    showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
+                    closeKMLContextMenu();
+                    if (isActive) runUpdate();
+                };
+            }
+            menu.appendChild(deleteAction);
         }
-        menu.appendChild(deleteAction);
+
+        // Vertex-edit row — hidden when marked for deletion (no point
+        // editing what we're deleting). When a modify is already saved,
+        // show both "Edit again" and "Revert" options.
+        if (!isMarkedDelete) {
+            const editVertAction = document.createElement('button');
+            editVertAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ffd96b;cursor:pointer;font:inherit';
+            editVertAction.onmouseenter = () => { editVertAction.style.background = 'rgba(255,217,107,0.18)'; };
+            editVertAction.onmouseleave = () => { editVertAction.style.background = 'transparent'; };
+            editVertAction.textContent = isMarkedModify
+                ? '✏️  Edit vertices again'
+                : '✏️  Edit vertices (commits to GitHub)';
+            editVertAction.onclick = (e) => {
+                e.stopPropagation();
+                closeKMLContextMenu();
+                enterVertexEdit(type, pmIdx);
+            };
+            menu.appendChild(editVertAction);
+
+            if (isMarkedModify) {
+                const revertAction = document.createElement('button');
+                revertAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ffd96b;cursor:pointer;font:inherit';
+                revertAction.onmouseenter = () => { revertAction.style.background = 'rgba(255,217,107,0.18)'; };
+                revertAction.onmouseleave = () => { revertAction.style.background = 'transparent'; };
+                revertAction.textContent = '↩  Revert vertex edits';
+                revertAction.onclick = (e) => {
+                    e.stopPropagation();
+                    unmarkPlacemarkOp(siteID, type, pmIdx);
+                    const count = commitOpsCount(siteID, type);
+                    showKMLToast(`Reverted ${type} #${pmIdx} vertex edits. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+                    closeKMLContextMenu();
+                    if (isActive) runUpdate();
+                };
+                menu.appendChild(revertAction);
+            }
+        }
 
         document.body.appendChild(menu);
         // Reposition if off-screen to the right or bottom.
@@ -2361,6 +2433,142 @@
         }
     }
 
+    // ============================================================
+    // E3 — Vertex edit (in-map drag handles for individual vertices)
+    //
+    // Entry: enterVertexEdit(type, pmIdx) — drops L.Marker handles on
+    // each vertex of the chosen line, plus a floating Save/Discard
+    // toolbar. The line renders YELLOW (modify visual) for as long
+    // as it has a pending modify op.
+    //
+    // Drag → vertexEditState.currentCoords[i] updates → runUpdate
+    // re-projects via effectiveCoordsForFeature so the line follows
+    // the handles in real time.
+    //
+    // Save → writes { op:'modify', coords:[[lng,lat],...] } into the
+    // commit-ops store. The next "Commit pending changes" click on
+    // the panel batches it with any other ops and PUTs to GitHub.
+    //
+    // Only one line at a time can be in vertex-edit; entering a new
+    // session auto-discards any in-progress one (without saving).
+    // ============================================================
+    function enterVertexEdit(type, pmIdx) {
+        if (vertexEditState) exitVertexEdit({ save: false, silent: true });
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const features = kmlFeatures[kmlKey(siteID, type)];
+        if (!features) { showKMLToast('KML not loaded yet — try again in a moment.', 3500); return; }
+        const feature = features.find(f => f.pmIdx === pmIdx && f.type === 'line');
+        if (!feature) {
+            showKMLToast('Vertex edit is only supported on line features.', 4000);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map) { showKMLToast('Map not ready — try again in a moment.', 3000); return; }
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { L = null; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') {
+            showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
+            return;
+        }
+        // Use already-modified coords as the starting point if a modify op
+        // exists, so re-edit picks up where the user left off (not a reset
+        // to original).
+        const startCoords = effectiveCoordsForFeature(siteID, type, pmIdx, feature.coords);
+        vertexEditState = {
+            type, pmIdx,
+            originalCoords: feature.coords.map(c => ({ lat: c.lat, lng: c.lng })),
+            currentCoords: startCoords.map(c => ({ lat: c.lat, lng: c.lng })),
+            handles: [],
+            toolbarEl: null,
+        };
+        const icon = L.divIcon({
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
+            className: 'aim-vertex-handle',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+        });
+        vertexEditState.currentCoords.forEach((coord, vertexIdx) => {
+            const marker = L.marker([coord.lat, coord.lng], { icon, draggable: true, zIndexOffset: 1000 });
+            marker.addTo(map);
+            marker.on('drag', (e) => {
+                const ll = e.target.getLatLng();
+                if (!vertexEditState) return;
+                vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
+                if (isActive) runUpdate();
+            });
+            vertexEditState.handles.push(marker);
+        });
+        buildVertexEditToolbar();
+        showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles · Save or Discard from the toolbar.`, 6000);
+        if (isActive) runUpdate();
+    }
+
+    function buildVertexEditToolbar() {
+        if (!vertexEditState) return;
+        const tb = document.createElement('div');
+        tb.id = 'aim-vertex-edit-toolbar';
+        tb.style.cssText = `
+            position:fixed;bottom:100px;left:50%;transform:translateX(-50%);
+            background:#1f2228;border:2px solid #14d2dc;border-radius:8px;
+            padding:10px 16px;z-index:99999;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            color:#e6e6e6;display:flex;align-items:center;gap:12px;
+            box-shadow:0 4px 16px rgba(0,0,0,0.5);
+        `;
+        const label = document.createElement('span');
+        label.textContent = `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+        label.style.cssText = 'color:#7adfe6;font-weight:600';
+        tb.appendChild(label);
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = '✓ Save edits';
+        saveBtn.style.cssText = 'padding:7px 14px;background:#5fff5f;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700';
+        saveBtn.onclick = () => exitVertexEdit({ save: true });
+        tb.appendChild(saveBtn);
+        const discardBtn = document.createElement('button');
+        discardBtn.textContent = '✗ Discard';
+        discardBtn.style.cssText = 'padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit';
+        discardBtn.onclick = () => exitVertexEdit({ save: false });
+        tb.appendChild(discardBtn);
+        document.body.appendChild(tb);
+        vertexEditState.toolbarEl = tb;
+    }
+
+    function exitVertexEdit(opts) {
+        if (!vertexEditState) return;
+        const save = !!(opts && opts.save);
+        const silent = !!(opts && opts.silent);
+        const { type, pmIdx, currentCoords, originalCoords, handles, toolbarEl } = vertexEditState;
+        if (save) {
+            // Skip writing a no-op modify if nothing actually moved (within
+            // tolerance — float drift from drag-end serialization shouldn't
+            // create a phantom commit).
+            const changed = currentCoords.length !== originalCoords.length ||
+                            currentCoords.some((c, i) =>
+                                Math.abs(c.lat - originalCoords[i].lat) > 1e-9 ||
+                                Math.abs(c.lng - originalCoords[i].lng) > 1e-9);
+            if (changed) {
+                const siteID = getCurrentSiteID();
+                const co = getCommitOps(siteID, type);
+                co.ops[String(pmIdx)] = {
+                    op: 'modify',
+                    coords: currentCoords.map(c => [c.lng, c.lat]),
+                };
+                setCommitOps(siteID, type, co);
+                const count = commitOpsCount(siteID, type);
+                if (!silent) showKMLToast(`Saved vertex edits to ${type} #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+            } else {
+                if (!silent) showKMLToast(`No vertex changes to save.`, 2500);
+            }
+        } else {
+            if (!silent) showKMLToast(`Discarded vertex edits.`, 3000);
+        }
+        handles.forEach(h => { try { h.remove(); } catch (e) {} });
+        if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
+        vertexEditState = null;
+        if (isActive) runUpdate();
+    }
+
     // Converts the current site's KML features into SVG-user-space point
     // arrays using the Leaflet map's projection. Returns [] if the map
     // isn't available yet (the next runUpdate will retry).
@@ -2383,9 +2591,12 @@
         const cRect = container.getBoundingClientRect();
         const out = [];
         features.forEach(f => {
+            // Coords source priority: live vertex-edit → saved modify op →
+            // original file coords. See effectiveCoordsForFeature for details.
+            const coords = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
             const pts = [];
-            for (let i = 0; i < f.coords.length; i++) {
-                const c = f.coords[i];
+            for (let i = 0; i < coords.length; i++) {
+                const c = coords[i];
                 // latLngToContainerPoint = pixel offset from the map container's
                 // top-left, accounting for all current pan/zoom. Add container's
                 // screen position, then invert SVG CTM to land in SVG user space.
@@ -2466,6 +2677,12 @@
                 p.setAttribute('stroke-opacity', '0.95');
                 p.setAttribute('stroke-width', String(thickness + 2));
                 p.setAttribute('stroke-dasharray', '10 4');
+            } else if (commitOp && commitOp.op === 'modify') {
+                // Modified vertices → yellow/amber, slightly thicker, solid.
+                // Distinct from delete (red dashed) and hide (gray dashed).
+                p.setAttribute('stroke', '#ffd96b');
+                p.setAttribute('stroke-opacity', '0.95');
+                p.setAttribute('stroke-width', String(thickness + 1));
             } else if (!isVis) {
                 // Ghost-render: dashed in the user's hidden-color over the
                 // line's true placement. Width matches normal thickness so
@@ -3659,6 +3876,10 @@
         const sid = getCurrentSiteID();
         if (sid === lastSiteID) return;
         lastSiteID = sid;
+        // Any in-progress vertex edit belongs to the previous site —
+        // bail out silently so handles don't linger and accidentally
+        // save against the wrong KML on the new site.
+        if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         loadValidatorResults();
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
