@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.31
+// @version      34.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.31';
+    const SCRIPT_VERSION = '34.32';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -162,12 +162,15 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'distro.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 3, unit: 'px' },
-                { type: 'header', label: 'Local hides (per-user view)' },
-                { id: 'distro.edit-mode', label: 'Hide mode (right-click a line)', type: 'boolean', default: false },
+                { type: 'header', label: 'Edit mode' },
+                { id: 'distro.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
                 { id: 'distro.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
                 { id: 'distro.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
-                { id: 'distro-clear-hides', label: 'Clear all my hides for this site', type: 'button', action: 'clear-hides-distro' },
-                { type: 'header', label: 'KML data (commits to GitHub)' },
+                { id: 'distro-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-distro' },
+                { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'distro-commit', label: 'Commit pending changes', type: 'button', action: 'commit-distro' },
+                { id: 'distro-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-distro' },
+                { type: 'header', label: 'KML data tools' },
                 { id: 'distro-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-distro' },
             ],
         },
@@ -184,12 +187,15 @@
                   min: 0.05, max: 1, step: 0.05, default: 0.9, unit: 'fill' },
                 { id: 'trans.thickness', label: 'Outline thickness', type: 'number',
                   min: 1, max: 12, step: 1, default: 4, unit: 'px' },
-                { type: 'header', label: 'Local hides (per-user view)' },
-                { id: 'trans.edit-mode', label: 'Hide mode (right-click a line)', type: 'boolean', default: false },
+                { type: 'header', label: 'Edit mode' },
+                { id: 'trans.edit-mode', label: 'Enable right-click actions', type: 'boolean', default: false },
                 { id: 'trans.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
                 { id: 'trans.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
-                { id: 'trans-clear-hides', label: 'Clear all my hides for this site', type: 'button', action: 'clear-hides-trans' },
-                { type: 'header', label: 'KML data (commits to GitHub)' },
+                { id: 'trans-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-trans' },
+                { type: 'header', label: 'Pending commits to GitHub' },
+                { id: 'trans-commit', label: 'Commit pending changes', type: 'button', action: 'commit-trans' },
+                { id: 'trans-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-trans' },
+                { type: 'header', label: 'KML data tools' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
             ],
         },
@@ -304,7 +310,8 @@
     // v2 (34.21): features carry pmIdx + visible.
     // Bumping skips old cache entries; small refetch cost on first load.
     const KML_CACHE_PREFIX = 'aim-kml-cache-v3-';
-    const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}`
+    const KML_PENDING_PREFIX = 'aim-kml-pending-'; // suffixed with `${siteID}-${type}` — LOCAL HIDES ONLY, never commits
+    const KML_COMMIT_OPS_PREFIX = 'aim-kml-commit-ops-'; // suffixed with `${siteID}-${type}` — commit-bound ops (delete/modify/add)
     const GITHUB_API_BASE = 'https://api.github.com';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
 
@@ -1472,6 +1479,96 @@
         if (isActive) runUpdate();
     }
 
+    // ============================================================
+    // Commit-bound ops state (E2 delete, E3 modify, E4 add)
+    //
+    // SEPARATE store from getPending() — those are LOCAL HIDES,
+    // never commit. The schema here is richer because each op has
+    // its own payload:
+    //
+    //   {
+    //     ops:   { <pmIdx>: { op:'delete' }
+    //              <pmIdx>: { op:'modify', coords:[[lng,lat,alt?],...] } },
+    //     added: [ { name, coords:[[lng,lat,alt?],...] }, ... ]
+    //   }
+    //
+    // Lines marked here are NOT hidden from the user — they render
+    // with op-specific visual treatment (red strikethrough for
+    // delete, yellow for modify, green for added) so the user can
+    // see what they're about to commit.
+    // ============================================================
+    function commitOpsKey(siteID, type) {
+        return `${KML_COMMIT_OPS_PREFIX}${siteID}-${type}`;
+    }
+
+    function emptyCommitOps() { return { ops: {}, added: [] }; }
+
+    function getCommitOps(siteID, type) {
+        if (!siteID) return emptyCommitOps();
+        const v = gmGet(commitOpsKey(siteID, type), null);
+        if (!v || typeof v !== 'object') return emptyCommitOps();
+        return {
+            ops: (v.ops && typeof v.ops === 'object') ? v.ops : {},
+            added: Array.isArray(v.added) ? v.added : [],
+        };
+    }
+
+    function setCommitOps(siteID, type, obj) {
+        if (!siteID) return;
+        gmSet(commitOpsKey(siteID, type), obj || emptyCommitOps());
+    }
+
+    function commitOpsCount(siteID, type) {
+        const co = getCommitOps(siteID, type);
+        return Object.keys(co.ops).length + co.added.length;
+    }
+
+    function summarizeCommitOps(co) {
+        const deleteCount = Object.values(co.ops).filter(o => o.op === 'delete').length;
+        const modifyCount = Object.values(co.ops).filter(o => o.op === 'modify').length;
+        const addCount = co.added.length;
+        const parts = [];
+        if (deleteCount) parts.push(`${deleteCount} delete${deleteCount === 1 ? '' : 's'}`);
+        if (modifyCount) parts.push(`${modifyCount} modif${modifyCount === 1 ? 'ication' : 'ications'}`);
+        if (addCount) parts.push(`${addCount} new line${addCount === 1 ? '' : 's'}`);
+        return { parts, text: parts.join(' · '), total: deleteCount + modifyCount + addCount };
+    }
+
+    function getOpForPlacemark(siteID, type, pmIdx) {
+        const co = getCommitOps(siteID, type);
+        return co.ops[String(pmIdx)] || null;
+    }
+
+    function markPlacemarkForDelete(siteID, type, pmIdx) {
+        const co = getCommitOps(siteID, type);
+        co.ops[String(pmIdx)] = { op: 'delete' };
+        setCommitOps(siteID, type, co);
+    }
+
+    function unmarkPlacemarkOp(siteID, type, pmIdx) {
+        const co = getCommitOps(siteID, type);
+        delete co.ops[String(pmIdx)];
+        setCommitOps(siteID, type, co);
+    }
+
+    function clearAllCommitOps(siteID, type) {
+        setCommitOps(siteID, type, emptyCommitOps());
+    }
+
+    function discardCommitOps(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const count = commitOpsCount(siteID, type);
+        if (count === 0) {
+            showKMLToast(`No pending ${type} commits to discard.`, 2500);
+            return;
+        }
+        if (!confirm(`Discard ${count} pending ${type} commit${count === 1 ? '' : 's'}?\n\nNothing will be sent to GitHub.`)) return;
+        clearAllCommitOps(siteID, type);
+        showKMLToast(`Discarded ${count} pending ${type} commit${count === 1 ? '' : 's'}.`, 3500);
+        if (isActive) runUpdate();
+    }
+
     // --- KML edit UI: right-click context menu + toast ---
     const KML_CTX_MENU_ID = 'aim-kml-ctx-menu';
     const KML_TOAST_ID = 'aim-kml-toast';
@@ -1513,7 +1610,7 @@
         action.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#e6e6e6;cursor:pointer;font:inherit';
         action.onmouseenter = () => { action.style.background = 'rgba(20,210,220,0.15)'; };
         action.onmouseleave = () => { action.style.background = 'transparent'; };
-        action.textContent = isCurrentlyVisible ? '🚫  Hide line' : '👁  Unhide line';
+        action.textContent = isCurrentlyVisible ? '🚫  Hide line (local only)' : '👁  Unhide line (local only)';
         action.onclick = (e) => {
             e.stopPropagation();
             const desired = !isCurrentlyVisible;
@@ -1527,6 +1624,42 @@
             if (isActive) runUpdate();
         };
         menu.appendChild(action);
+
+        // Separator before commit-bound actions so the user sees the
+        // visual break between local (cheap) and commit (canonical) ops.
+        const sep = document.createElement('div');
+        sep.style.cssText = 'height:1px;background:rgba(255,255,255,0.08);margin:4px 0';
+        menu.appendChild(sep);
+
+        const opNow = getOpForPlacemark(siteID, type, pmIdx);
+        const isMarkedDelete = opNow && opNow.op === 'delete';
+
+        const deleteAction = document.createElement('button');
+        deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
+        deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
+        deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
+        if (isMarkedDelete) {
+            deleteAction.textContent = '↩  Unmark for deletion';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                unmarkPlacemarkOp(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        } else {
+            deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                markPlacemarkForDelete(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        }
+        menu.appendChild(deleteAction);
 
         document.body.appendChild(menu);
         // Reposition if off-screen to the right or bottom.
@@ -1789,7 +1922,12 @@
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
         const pCount = pendingCount(siteID, type);
         if (pCount > 0) {
-            showKMLToast(`Refusing to split: ${pCount} pending ${type} change${pCount === 1 ? '' : 's'}. Commit or clear them first (the split would shift placemark indices).`, 9000);
+            showKMLToast(`Refusing to split: ${pCount} pending ${type} hide${pCount === 1 ? '' : 's'}. Clear them first (the split would shift placemark indices).`, 9000);
+            return;
+        }
+        const cCount = commitOpsCount(siteID, type);
+        if (cCount > 0) {
+            showKMLToast(`Refusing to split: ${cCount} pending ${type} commit${cCount === 1 ? '' : 's'}. Commit or discard them first (the split would shift placemark indices).`, 9000);
             return;
         }
         const token = cachedToken || gmGet(TOKEN_KEY, '');
@@ -1990,6 +2128,239 @@
         }
     }
 
+    // ============================================================
+    // Commit-bound ops → GitHub (E2 delete, E3 modify, E4 add)
+    //
+    // commitPendingOps(type)
+    //   GET current KML from GitHub (for the SHA optimistic lock) →
+    //   applyCommitOpsToKML(xml, ops) mutates the DOM →
+    //   putCommitOpsToGitHub(...) PUTs the mutated content back →
+    //   on success: clear commit-ops, clear local-hides (indices
+    //   shifted), force-refetch + re-render.
+    //
+    // Confirmation: a confirm() up front summarizing the batch so the
+    // user knows what's about to be committed canonically.
+    // ============================================================
+    function commitPendingOps(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        const co = getCommitOps(siteID, type);
+        const summary = summarizeCommitOps(co);
+        if (summary.total === 0) {
+            showKMLToast(`No pending ${type} commits.`, 2500);
+            return;
+        }
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) {
+            showKMLToast('No GitHub token — set one in AIM Controls first.', 4500);
+            return;
+        }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        if (!confirm(`Commit ${summary.text} to GitHub?\n\nThis updates the canonical ${type} KML for ALL coworkers. Continue?`)) {
+            return;
+        }
+        showKMLToast(`Committing ${summary.text}…`, 8000);
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+                onload: (resp) => {
+                    if (resp.status !== 200) {
+                        if (resp.status === 401 || resp.status === 403) {
+                            showKMLToast('GitHub denied read access — check your PAT scope.', 6000);
+                        } else if (resp.status === 404) {
+                            showKMLToast(`File ${path} not found on GitHub.`, 5000);
+                        } else {
+                            showKMLToast(`Commit GET failed: HTTP ${resp.status}.`, 5000);
+                        }
+                        console.warn(`${TAG} commit-ops GET HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 400));
+                        return;
+                    }
+                    let json;
+                    try { json = JSON.parse(resp.responseText); }
+                    catch (e) {
+                        showKMLToast('Commit failed: unexpected GitHub response.', 5000);
+                        console.error(`${TAG} commit-ops GET JSON parse failed:`, e);
+                        return;
+                    }
+                    const sha = json && json.sha;
+                    const b64 = (json && json.content) ? String(json.content).replace(/\s/g, '') : '';
+                    if (!sha || !b64) {
+                        showKMLToast('Commit failed: missing sha/content from GitHub.', 5000);
+                        return;
+                    }
+                    let xmlText;
+                    try { xmlText = atob(b64); }
+                    catch (e) {
+                        showKMLToast('Commit failed: cannot decode GitHub content.', 5000);
+                        console.error(`${TAG} commit-ops atob failed:`, e);
+                        return;
+                    }
+                    let mutated;
+                    try { mutated = applyCommitOpsToKML(xmlText, co); }
+                    catch (e) {
+                        showKMLToast(`Commit failed: ${e.message || 'XML mutation error'}.`, 6000);
+                        console.error(`${TAG} applyCommitOpsToKML failed:`, e);
+                        return;
+                    }
+                    putCommitOpsToGitHub(siteID, type, mutated, sha, token, summary.text);
+                },
+                onerror: () => showKMLToast('Commit failed: network error.', 5000),
+                ontimeout: () => showKMLToast('Commit failed: timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Commit threw: ${e.message}.`, 5000);
+            console.error(`${TAG} commit-ops GET threw:`, e);
+        }
+    }
+
+    // Mutates the DOM:
+    //   delete ops → removes the Placemark at pmIdx
+    //   modify ops → replaces the LineString coordinates (E3, future)
+    //   added items → appends new Placemark to the first Document/Folder (E4, future)
+    //
+    // Delete ordering: sort descending by index so removing one does
+    // NOT shift the indices of the remaining deletes still to apply.
+    function applyCommitOpsToKML(xmlText, co) {
+        const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
+        if (doc.querySelector('parsererror')) throw new Error('XML parse error');
+        const placemarks = Array.from(doc.querySelectorAll('Placemark'));
+
+        // 1. Apply modify ops first (before deletes shift the indices).
+        Object.keys(co.ops).forEach(key => {
+            const op = co.ops[key];
+            if (op.op !== 'modify') return;
+            const idx = parseInt(key, 10);
+            if (isNaN(idx) || idx < 0 || idx >= placemarks.length) return;
+            const pm = placemarks[idx];
+            const coordsEl = pm.querySelector('LineString > coordinates');
+            if (!coordsEl) return;
+            const text = (op.coords || []).map(c => {
+                const lng = Number(c[0]), lat = Number(c[1]);
+                const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
+                return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
+            }).join(' ');
+            coordsEl.textContent = text;
+        });
+
+        // 2. Apply delete ops, descending order so live placemarks
+        //    array indices stay valid for the remaining deletes.
+        const deleteIdxs = Object.keys(co.ops)
+            .filter(k => co.ops[k].op === 'delete')
+            .map(k => parseInt(k, 10))
+            .filter(n => !isNaN(n) && n >= 0 && n < placemarks.length)
+            .sort((a, b) => b - a);
+        deleteIdxs.forEach(idx => {
+            const pm = placemarks[idx];
+            if (pm && pm.parentNode) pm.parentNode.removeChild(pm);
+        });
+
+        // 3. Apply added placemarks — append into the first Document
+        //    (or Folder, or root kml element if no container).
+        if (co.added && co.added.length) {
+            const NS = 'http://www.opengis.net/kml/2.2';
+            const container = doc.querySelector('Document') || doc.querySelector('Folder') || doc.documentElement;
+            co.added.forEach(item => {
+                if (!item || !Array.isArray(item.coords) || item.coords.length < 2) return;
+                const pm = doc.createElementNS(NS, 'Placemark');
+                if (item.name) {
+                    const nameEl = doc.createElementNS(NS, 'name');
+                    nameEl.textContent = String(item.name);
+                    pm.appendChild(nameEl);
+                }
+                const ls = doc.createElementNS(NS, 'LineString');
+                const coordsEl = doc.createElementNS(NS, 'coordinates');
+                coordsEl.textContent = item.coords.map(c => {
+                    const lng = Number(c[0]), lat = Number(c[1]);
+                    const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
+                    return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
+                }).join(' ');
+                ls.appendChild(coordsEl);
+                pm.appendChild(ls);
+                container.appendChild(pm);
+            });
+        }
+
+        return new XMLSerializer().serializeToString(doc);
+    }
+
+    function putCommitOpsToGitHub(siteID, type, xmlText, sha, token, summaryText) {
+        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
+        let contentB64;
+        try {
+            const utf8 = new TextEncoder().encode(xmlText);
+            let bin = '';
+            for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+            contentB64 = btoa(bin);
+        } catch (e) {
+            showKMLToast('Commit failed: cannot encode XML.', 5000);
+            console.error(`${TAG} commit-ops btoa failed:`, e);
+            return;
+        }
+        const message = `[AIM site ${siteID}] ${type}: ${summaryText}`;
+        try {
+            GM_xmlhttpRequest({
+                method: 'PUT',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                    'Content-Type': 'application/json',
+                },
+                data: JSON.stringify({ message, content: contentB64, sha, branch: KMLS_BRANCH }),
+                timeout: 20000,
+                onload: (resp) => {
+                    if (resp.status === 200 || resp.status === 201) {
+                        clearAllCommitOps(siteID, type);
+                        // After a structural change (delete/add), placemark
+                        // indices shift — any stored local hides on this
+                        // type now reference different lines. Safer to
+                        // clear them than to silently mis-hide.
+                        const hideCount = pendingCount(siteID, type);
+                        if (hideCount > 0) {
+                            setPending(siteID, type, {});
+                            showKMLToast(`✓ Committed ${summaryText}. ${hideCount} local hide${hideCount === 1 ? '' : 's'} cleared (line indices shifted).`, 6000);
+                        } else {
+                            showKMLToast(`✓ Committed ${summaryText}.`, 4000);
+                        }
+                        const k = kmlKey(siteID, type);
+                        delete kmlFeatures[k];
+                        gmSet(KML_CACHE_PREFIX + k, null);
+                        kmlMissing.delete(k);
+                        fetchKMLForSite(siteID, true);
+                        if (isActive) runUpdate();
+                    } else if (resp.status === 409) {
+                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
+                    } else if (resp.status === 401 || resp.status === 403) {
+                        showKMLToast('GitHub denied write — your PAT needs contents:write scope on aim-userscripts-data.', 9000);
+                    } else if (resp.status === 422) {
+                        showKMLToast('GitHub rejected the write (422 — branch protection?). See console.', 6000);
+                        console.warn(`${TAG} commit-ops PUT 422:`, (resp.responseText || '').substring(0, 600));
+                    } else {
+                        showKMLToast(`Commit failed: HTTP ${resp.status}.`, 5000);
+                        console.warn(`${TAG} commit-ops PUT HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 600));
+                    }
+                },
+                onerror: () => showKMLToast('Commit failed: network error during PUT.', 5000),
+                ontimeout: () => showKMLToast('Commit failed: PUT timed out.', 5000),
+            });
+        } catch (e) {
+            showKMLToast(`Commit PUT threw: ${e.message}.`, 5000);
+            console.error(`${TAG} commit-ops PUT threw:`, e);
+        }
+    }
+
     // Converts the current site's KML features into SVG-user-space point
     // arrays using the Leaflet map's projection. Returns [] if the map
     // isn't available yet (the next runUpdate will retry).
@@ -2073,7 +2444,11 @@
         const siteID = getCurrentSiteID();
         feats.forEach(f => {
             const isVis = effectiveVisible(siteID, type, f.pmIdx, f.visible);
-            if (!isVis && !showHidden) return; // hidden + not asked to show → skip
+            const commitOp = getOpForPlacemark(siteID, type, f.pmIdx);
+            // Marked-for-commit lines ALWAYS render (even if user has them
+            // locally hidden) — otherwise they'd commit a delete on something
+            // they can't see, which is dangerous. Override hide for them.
+            if (!isVis && !showHidden && !commitOp) return;
             const d = pointsToPathD(f.points, f.type === 'polygon');
             if (!d) return;
             const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -2083,7 +2458,15 @@
             p.setAttribute('data-kml-pm-idx', String(f.pmIdx));
             p.setAttribute('d', d);
             p.setAttribute('fill', 'none');
-            if (!isVis) {
+            if (commitOp && commitOp.op === 'delete') {
+                // Marked for deletion → red, thicker, dashed strikethrough.
+                // Distinct from local-hide (gray dash) so the user can
+                // tell at a glance which is which.
+                p.setAttribute('stroke', '#ff3838');
+                p.setAttribute('stroke-opacity', '0.95');
+                p.setAttribute('stroke-width', String(thickness + 2));
+                p.setAttribute('stroke-dasharray', '10 4');
+            } else if (!isVis) {
                 // Ghost-render: dashed in the user's hidden-color over the
                 // line's true placement. Width matches normal thickness so
                 // the right-click hit-target is identical to a visible
@@ -3122,6 +3505,10 @@
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
                 else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
                 else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
+                else if (msg.actionId === 'commit-distro') commitPendingOps('distro');
+                else if (msg.actionId === 'commit-trans') commitPendingOps('trans');
+                else if (msg.actionId === 'discard-commits-distro') discardCommitOps('distro');
+                else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.
