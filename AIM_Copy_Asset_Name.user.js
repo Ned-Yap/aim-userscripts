@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.2';
+    const SCRIPT_VERSION = '3.3';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1003,21 +1003,31 @@
         const chipRow = document.createElement('div');
         chipRow.style.cssText = 'display:flex;gap:6px;align-items:center;flex-wrap:wrap';
         // Type chips ordered to match the default sort priority
-        // (FP → FFZ → NFZ → Asset → Marker) so the toolbar reads in
-        // the same direction as the table.
+        // (FP → FFZ → NFZ → Asset → Marker). Compact labels — full names
+        // were chewing up the toolbar width. Each chip uses its type's
+        // color so the toolbar visually mirrors the colored Type column.
         const chipDefs = [
-            { tNum: '15', label: 'Flight Paths'  },
-            { tNum: '16', label: 'FFZs'          },
-            { tNum: '4',  label: 'NFZs'          },
-            { tNum: '3',  label: 'Assets'        },
-            { tNum: '19', label: 'Markers'       },
+            { tNum: '15', label: 'FPs'    },
+            { tNum: '16', label: 'FFZs'   },
+            { tNum: '4',  label: 'NFZs'   },
+            { tNum: '3',  label: 'Assets' },
+            { tNum: '19', label: 'GMs'    },
         ];
         chipDefs.forEach(({ tNum, label }) => {
+            const reg = typeReg(parseInt(tNum, 10));
+            const color = reg.color;
             const chip = document.createElement('button');
             chip.type = 'button';
             const update = () => {
                 const on = sumPanelState.typeFilter.has(tNum);
-                chip.style.cssText = `background:${on ? 'rgba(20,210,220,0.25)' : 'transparent'};color:${on ? '#7adfe6' : '#888'};border:1px solid ${on ? 'rgba(20,210,220,0.55)' : 'rgba(255,255,255,0.18)'};border-radius:12px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px`;
+                if (on) {
+                    // Use the type's color: 22%-opacity background + full-color
+                    // text + 70%-opacity border. Hex "33" = ~20% alpha,
+                    // "aa" = ~67%, both nicely visible on the dark panel.
+                    chip.style.cssText = `background:${color}33;color:${color};border:1px solid ${color}aa;border-radius:12px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600`;
+                } else {
+                    chip.style.cssText = 'background:transparent;color:#666;border:1px solid rgba(255,255,255,0.15);border-radius:12px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+                }
             };
             chip.textContent = label;
             chip.onclick = () => {
@@ -1088,7 +1098,11 @@
             ev.stopPropagation();
             if (colsMenuEl) { colsMenuEl.remove(); colsMenuEl = null; return; }
             colsMenuEl = document.createElement('div');
-            colsMenuEl.style.cssText = 'position:absolute;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 10px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:160px';
+            // position:fixed so the menu doesn't extend the document scroll
+            // region — `absolute` was pinning to the body and adding right-
+            // edge / bottom-edge horizontal scrollbars to the page when the
+            // menu sat near the panel's right corner.
+            colsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 10px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:160px';
             const colDefs = [
                 { key: 'typeShort', label: 'Type' },
                 { key: 'name',      label: 'Name' },
@@ -1114,11 +1128,21 @@
                 row.appendChild(document.createTextNode(label));
                 colsMenuEl.appendChild(row);
             });
-            // Position just below the button.
+            // Position just below the button, then clamp post-mount so it
+            // doesn't push past the viewport edge (which used to trigger
+            // a page-level scrollbar).
             const r = colsBtn.getBoundingClientRect();
             colsMenuEl.style.left = r.left + 'px';
             colsMenuEl.style.top = (r.bottom + 4) + 'px';
             document.body.appendChild(colsMenuEl);
+            const menuRect = colsMenuEl.getBoundingClientRect();
+            if (menuRect.right > window.innerWidth - 8) {
+                colsMenuEl.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
+            }
+            if (menuRect.bottom > window.innerHeight - 8) {
+                // Flip above the button if there's no room below.
+                colsMenuEl.style.top = (r.top - menuRect.height - 4) + 'px';
+            }
             const onDocClick = (e) => {
                 if (colsMenuEl && !colsMenuEl.contains(e.target) && e.target !== colsBtn) {
                     colsMenuEl.remove(); colsMenuEl = null;
@@ -1264,14 +1288,30 @@
             headRow.appendChild(thSel);
             cols.forEach(col => {
                 const th = document.createElement('th');
+                const key = col.dataKey || col.key;
+                const isSorted = sumPanelState.sortKey === key;
+                // 3-state cycle on every column: asc → desc → default
+                // (typePrio asc, name secondary). Resets when a column
+                // hits its third click instead of locking into desc
+                // forever; user was getting stuck unable to return to the
+                // grouped-by-type default sort without a full refresh.
                 th.textContent = col.label;
-                const isSorted = sumPanelState.sortKey === (col.dataKey || col.key);
                 th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;min-width:${col.w}px;white-space:nowrap`;
                 if (isSorted) th.textContent += sumPanelState.sortDir === 1 ? ' ▲' : ' ▼';
+                th.title = isSorted
+                    ? (sumPanelState.sortDir === 1 ? 'Click for descending; click again to reset to default sort' : 'Click to reset to default sort (grouped by type)')
+                    : 'Click to sort ascending';
                 th.onclick = () => {
-                    const k = col.dataKey || col.key;
-                    if (sumPanelState.sortKey === k) sumPanelState.sortDir *= -1;
-                    else { sumPanelState.sortKey = k; sumPanelState.sortDir = 1; }
+                    if (sumPanelState.sortKey !== key) {
+                        sumPanelState.sortKey = key;
+                        sumPanelState.sortDir = 1;
+                    } else if (sumPanelState.sortDir === 1) {
+                        sumPanelState.sortDir = -1;
+                    } else {
+                        // Third click → back to default (type-grouped, name asc within)
+                        sumPanelState.sortKey = 'typePrio';
+                        sumPanelState.sortDir = 1;
+                    }
                     redrawTable();
                 };
                 headRow.appendChild(th);

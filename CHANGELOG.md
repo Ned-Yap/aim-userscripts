@@ -9,6 +9,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 ## 2026-05-20
 
 - **AIM Map Styler v34.31** — **kill diagnostic log spam.** v34.23 added a per-render `render[distro/trans] site=… feats=… vis=… hidden=…` log to debug the KML right-click pipeline. Stayed in v34.24–v34.30 by accident. With distro Edit mode ON, runUpdate fires constantly (mutation observer + 3 s heartbeat) so the log was emitting **600+ lines/min** — enough to make Chrome DevTools effectively unresponsive (user reported "I can no longer right-click on elements"). Also removed the matching contextmenu-target diagnostic from v34.23. KML hide/show is stable now; the diagnostics served their purpose.
+- **AIM Asset Inspector v3.3** — quick polish on top of v3.2.
+  - **Shorter chip labels** — "Flight Paths" → "FPs", "Markers" → "GMs". Five chips now fit comfortably without wrapping.
+  - **Colored chips** when active — each chip uses its type's color (FP cyan / FFZ neon green / NFZ red / Asset white / GMs light purple) at ~22% background + full-color text + 67% border. Inactive chips stay subtle gray. Toolbar visually mirrors the colored Type column.
+  - **3-state column sort cycle** — click 1 = asc · click 2 = desc · click 3 = reset to default sort (type-grouped, A→Z within). Previously you could click into a sort but couldn't get back to the grouped default without a page refresh.
+  - **Columns menu no longer triggers a page scrollbar** — switched the popover from `position: absolute` to `fixed`, plus a clamp pass that keeps it inside the viewport (flips above the button if there's no room below).
+  - Deferred to v3.4: draggable column reorder + per-column resize.
 - **AIM Asset Inspector v3.2** — second round of summary-panel polish. A lot in one push.
   - **NFZ (No-Fly Zone) entity type 4** now recognized everywhere: right-click matching, type chip in the toolbar, sort priority, type color (red — opposite of FFZ green). NFZs use the same `restrictions.minAlt/maxAlt` schema as FFZs.
   - **Validation only applies to FFZ / FP / NFZ.** Assets and Markers hide Percepto's Validated toggle entirely; v3.1 was incorrectly treating their `validated: false` as a real "unvalidated" status. Now those types render `—` in the Valid column and the Validated / Unvalidated filters exclude them (they have no valid/invalid state to match).
