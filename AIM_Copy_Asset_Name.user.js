@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.9';
+    const SCRIPT_VERSION = '3.10';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1841,8 +1841,8 @@
             'HY':          '#00e5ff',   // High Yield bonus modifier
             'Empty':       '#ffd54f',   // mild concern
             'Inactive':    '#ff9800',   // moderate concern
-            'Unshielded':  '#ff5722',   // drone-safety concern
-            'Unreachable': '#ff5555',   // worst
+            'Unshielded':  '#ff5722',   // drone-safety concern (orange-red)
+            'Unreachable': '#a855f7',   // worst — purple for clear contrast vs Unshielded
         };
         const STATE_ORDER = ['Normal', 'HY', 'Empty', 'Inactive', 'Unshielded', 'Unreachable'];
         const stateColor = (s) => STATE_COLORS[s] || '#888888';
@@ -2095,6 +2095,13 @@
         // sense rendering an empty ring with no slices for sites
         // without NFZ data.
         const cVal = card('Validation');
+        // Tooltip on the card title with the pilot-flown framing —
+        // makes the validation semantics explicit for anyone who's
+        // looking at the donuts and wondering what "Validated" means.
+        try {
+            const h = cVal.firstChild;
+            if (h) h.title = 'Validated = pilot has flown this entity and confirmed it as safe. Unvalidated = area to fly with caution.';
+        } catch (e) {}
         const valFlex = document.createElement('div');
         valFlex.style.cssText = 'display:flex;gap:16px;flex-wrap:wrap;justify-content:space-around';
         const validationCharts = [
@@ -2123,7 +2130,7 @@
             // ✓ row
             const okRow = document.createElement('div');
             okRow.style.cssText = 'display:flex;justify-content:space-between;color:#5fff5f';
-            const okL = document.createElement('span'); okL.textContent = '✓ Valid';
+            const okL = document.createElement('span'); okL.textContent = '✓ Validated';
             const okR = document.createElement('span'); okR.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums';
             okR.textContent = fmtNum(v.validated);
             okRow.appendChild(okL); okRow.appendChild(okR);
@@ -2131,7 +2138,7 @@
             // ✗ row
             const noRow = document.createElement('div');
             noRow.style.cssText = 'display:flex;justify-content:space-between;color:#ff5555';
-            const noL = document.createElement('span'); noL.textContent = '✗ Invalid';
+            const noL = document.createElement('span'); noL.textContent = '✗ Unvalidated';
             const noR = document.createElement('span'); noR.style.cssText = 'font-weight:600;font-variant-numeric:tabular-nums';
             noR.textContent = fmtNum(v.unvalidated);
             noRow.appendChild(noL); noRow.appendChild(noR);

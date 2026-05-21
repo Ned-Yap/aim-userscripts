@@ -8,6 +8,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-21
 
+- **AIM Asset Inspector v3.10** — three small Stats popup tweaks.
+  - **Validation labels reworded** — `✓ Valid` / `✗ Invalid` → `✓ Validated` / `✗ Unvalidated`. Matches Percepto's terminology and the way the team actually uses the flag (per user: "Validated = pilot has flown this entity and confirmed it as safe; Unvalidated = area to fly with caution").
+  - **Hover tooltip** added to the Validation card title with that pilot-flown framing — anyone wondering what "Validated" means gets the answer without leaving the popup.
+  - **Unreachable color → purple `#a855f7`** in the Asset Health by Equipment legend + stacked bars. The previous `#ff5555` red was too close to Unshielded's `#ff5722` orange-red. Purple still reads as "worst/anomalous" while clearly differentiating from Unshielded at a glance.
+  - **Asset Health by Equipment auto-adapts** to whatever subtypes a site has — equipment names come straight from the data, so non-upstream sites (midstream / downstream / T&D inspection) will show their own subtype taxonomies. The state palette is currently tuned for upstream conventions (Normal / HY / Empty / Inactive / Unshielded / Unreachable); unrecognized states fall through to gray. If team needs first-class color treatment for non-upstream states (e.g. "Active" / "Passive" / "Tagged for repair"), let me know which sites + which state terms and we can map them.
 - **AIM Asset Inspector v3.9** — tabular alignment + "Normal" baseline in states.
   - **Keyword cards now use proper `<table>` layout** — Asset Equipment / Asset States / GM Groups / Asset Health by Equipment. Each has a header row with the columns labeled (`Subtype`/`State`/`Group`/`Equipment`, `%`, `#`, `Share` or `Health`), and `table-layout:fixed` + `<colgroup>` so the `%`, `#`, and bar columns line up exactly across rows. Bars now all start at the same X position and end relative to each other's proportion of the row max — no more ragged-edge bars or numbers drifting left/right.
   - **Column order is now Subtype → % → # → Bar** (was Subtype → # → % → Bar). Reading the % right next to the label feels more natural for a stats card.
