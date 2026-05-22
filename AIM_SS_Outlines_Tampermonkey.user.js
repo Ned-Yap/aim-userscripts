@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.36
+// @version      34.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.36';
+    const SCRIPT_VERSION = '34.37';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1258,7 +1258,16 @@
                 return;
             }
             const c = candidates[i];
-            const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${c.name}`;
+            // Cache-bust the raw URL. raw.githubusercontent.com sends
+            // cache-control: max-age=300, so two page loads within 5 min
+            // can return stale content. Bug surfaced 2026-05-22 after a
+            // Split: the post-refresh fetch returned the pre-split file
+            // and overwrote local cache with stale features, making the
+            // split appear to "revert" on screen. Appending a unique
+            // query string forces the CDN to treat every request as a
+            // miss — the local cache layer above (line ~1210) still
+            // provides instant first-render so there's no perf hit.
+            const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${c.name}?_=${Date.now()}`;
             const opts = {
                 method: 'GET',
                 url,
