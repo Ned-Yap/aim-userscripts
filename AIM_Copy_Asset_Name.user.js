@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.10
+// @version      3.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.10';
+    const SCRIPT_VERSION = '3.11';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -635,6 +635,13 @@
     function installRightClickHandler() {
         window.addEventListener('contextmenu', (e) => {
             if (!masterEnabled) return;
+            // Skip synthetic events (e.isTrusted=false). The Altitude and
+            // Ruler scripts dispatch synthetic 'contextmenu' as part of
+            // their Pin & Clean cleanup pattern — those are meant for
+            // Leaflet's internal vertex-delete handler, NOT for us.
+            // Without this guard, dropping an altitude pin near an entity
+            // would pop the inspector unexpectedly.
+            if (!e.isTrusted) return;
             const target = e.target;
             // Don't intercept inputs / editable areas — preserve native context menu there
             if (target && target.tagName) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.35
+// @version      34.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -42,7 +42,7 @@
     // Bump this whenever the @version header changes — it's what the control
     // panel displays next to the script name so you can verify which version
     // is actually loaded in Tampermonkey.
-    const SCRIPT_VERSION = '34.35';
+    const SCRIPT_VERSION = '34.36';
     // Schema: each category owns its own sub-toggles (shielding, edit-mode,
     // hide-native, force-thickness). No global masters for those — each
     // category controls what applies to itself. Shielding's visual styling
@@ -1829,6 +1829,13 @@
     // lines still go through to Leaflet's normal behavior when not editing.
     function installKMLEditHandlers() {
         window.addEventListener('contextmenu', (e) => {
+            // Skip synthetic events (e.isTrusted=false). The Altitude and
+            // Ruler scripts dispatch synthetic 'contextmenu' as part of
+            // Pin & Clean cleanup — those are meant for Leaflet's vertex
+            // delete handler, not for us. Without this guard, dropping a
+            // pin over a KML line in edit mode would pop the hide/delete
+            // menu unexpectedly.
+            if (!e.isTrusted) return;
             const t = e.target;
             if (!t || typeof t.getAttribute !== 'function') return;
             const path = (typeof t.closest === 'function') ? t.closest('path[data-kml-type]') : null;
