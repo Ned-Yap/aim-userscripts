@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.21
+// @version      1.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.20';
+    const VERSION = '1.22';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -69,10 +69,69 @@
     const INJECT_MAX_TRIES = 60; // 30s of retries then give up
 
     // ============================================================
+    // URL SCOPE — v1.22 (page-aware panel + hotkey routing)
+    //
+    // Each registered script may declare a `scope` field in REGISTER:
+    //   - 'site-setup'   → only on /#/site/<id>/control-panel/site-setup
+    //                      OR on /admin/.../merge_available_apps/step<N>/...
+    //                      (the Bulk Mission Adder's admin URL counts as
+    //                      Site Setup for visibility purposes)
+    //   - 'mission-bank' → only on /#/site/<id>/control-panel/mission-bank
+    //                      (incl. deep children)
+    //   - 'admin-merge'  → only on /admin/.../merge_available_apps/step<N>/...
+    //                      (used by Bulk Mission Adder so it never renders
+    //                      in the panel anywhere — that page has no map,
+    //                      so the panel never displays there either)
+    //   - undefined      → "always visible" (default; backward compatible)
+    //
+    // Scripts whose scope doesn't match the current URL are:
+    //   1. Hidden from the rendered panel
+    //   2. Silently skipped by HOTKEY_FIRED routing
+    //
+    // Cross-frame: we read window.top so both TOP and IFRAME contexts
+    // see the same SPA URL (same-origin within percepto.app).
+    // ============================================================
+    function getUrlScope() {
+        let pathname = '';
+        let hash = '';
+        try {
+            const top = window.top || window;
+            pathname = top.location.pathname || '';
+            hash = top.location.hash || '';
+        } catch (e) {
+            // Cross-origin guard (shouldn't trigger on percepto.app) — fall
+            // back to the iframe's own URL so we degrade gracefully.
+            pathname = location.pathname || '';
+            hash = location.hash || '';
+        }
+        if (/^\/admin\/percepto\/availableapp\/merge_available_apps\/step\d+\//.test(pathname)) {
+            return 'admin-merge';
+        }
+        if (/#\/site\/\d+\/control-panel\/site-setup/.test(hash)) return 'site-setup';
+        if (/#\/site\/\d+\/control-panel\/mission-bank/.test(hash)) return 'mission-bank';
+        return 'other';
+    }
+
+    // Site Setup Macros scripts (scope:'site-setup') also appear on
+    // admin-merge so the workflow stays coherent — Bulk Mission Adder's
+    // admin page is part of the Site Setup mental model even though the
+    // URL shape is different. Mission Bank scope stays strict.
+    function scopeMatches(scriptScope) {
+        if (!scriptScope) return true; // unscoped scripts always show
+        const current = state.urlScope || getUrlScope();
+        if (scriptScope === current) return true;
+        if (scriptScope === 'site-setup' && current === 'admin-merge') return true;
+        return false;
+    }
+
+    // ============================================================
     // 2. STATE
     // ============================================================
     const state = {
         channel: null,
+        // v1.22 — current URL scope for page-aware filtering. Recomputed
+        // on hashchange. See getUrlScope() above.
+        urlScope: 'other',
         // scriptId -> { name, version, toggles, hotkeys, frame, lastSeen }
         registry: new Map(),
         // { [scriptId]: { [toggleId]: bool } }
@@ -407,6 +466,32 @@
         return false;
     }
 
+    // Listen for SPA navigation that changes the URL scope. Attach to
+    // window.top so IFRAME instances see the SPA-level hash change. TOP
+    // instance attaches to its own window. Recomputes state.urlScope and
+    // re-renders if the value actually changed.
+    function installScopeWatcher() {
+        const update = () => {
+            const next = getUrlScope();
+            if (next !== state.urlScope) {
+                state.urlScope = next;
+                if (state.panelOpen) renderPanel();
+            }
+        };
+        try {
+            const top = window.top || window;
+            top.addEventListener('hashchange', update);
+            // Also listen for popstate in case Percepto ever moves off
+            // hash-based routing (defensive — costs nothing today).
+            top.addEventListener('popstate', update);
+        } catch (e) {
+            window.addEventListener('hashchange', update);
+            window.addEventListener('popstate', update);
+        }
+        // Initialize current value.
+        state.urlScope = getUrlScope();
+    }
+
     function installHotkeyRouter() {
         window.addEventListener('keydown', (e) => {
             // Rebinding capture takes priority — when the user is binding a key,
@@ -448,8 +533,11 @@
                 return;
             }
             if (inputGuard(e)) return;
-            // Route to any registered script whose hotkey matches.
+            // Route to any registered script whose hotkey matches AND whose
+            // declared scope matches the current URL. Out-of-scope scripts
+            // silently drop the hotkey (v1.22 page-awareness).
             for (const [scriptId, script] of state.registry) {
+                if (!scopeMatches(script.scope)) continue;
                 if (!Array.isArray(script.hotkeys)) continue;
                 for (const hk of script.hotkeys) {
                     const bound = getHotkey(scriptId, hk.id, hk.default);
@@ -1267,9 +1355,14 @@
         // Group registered scripts by their declared `group`. Scripts
         // without a group get a section with the script's own name as the
         // header (visually consistent with grouped sections).
+        // v1.22 — filter by URL scope BEFORE bucketing into standalone/groups
+        // so out-of-scope scripts disappear entirely from the panel.
+        // Groups whose members all get filtered out simply won't be created,
+        // so their section header doesn't render either.
+        const visibleScripts = scripts.filter(s => scopeMatches(s.scope));
         const standalone = [];
         const groups = new Map(); // groupName -> [scripts]
-        scripts.forEach(s => {
+        visibleScripts.forEach(s => {
             if (s.group) {
                 if (!groups.has(s.group)) groups.set(s.group, []);
                 groups.get(s.group).push(s);
@@ -1289,7 +1382,12 @@
         const SECTION_PRIORITY = {
             'script:aim-styler': 10,            // Outlines (primary feature)
             'script:aim-perf-shield': 20,       // Performance
-            'group:Hotkeys': 30,                // Hotkeys group (incl. bulk scripts)
+            'group:Hotkeys': 30,                // Universal hotkeys (Altitude, Ruler, Clear All)
+            'group:Site Setup Macros': 40,      // v1.22 — site-setup-scoped macros
+            // PLACEHOLDER for future phase — when Mission Bank Macros ships:
+            //   'group:Mission Bank Macros': 50,
+            // (and the corresponding scripts will REGISTER with
+            //  group: 'Mission Bank Macros', scope: 'mission-bank')
         };
         const sectionEntries = [];
         standalone.forEach(s => {
@@ -1369,6 +1467,7 @@
         state.tokenStatus = getToken() ? 'unknown' : 'missing';
         setupChannel();
         installHotkeyRouter();
+        installScopeWatcher();
         const start = () => {
             // .map-tools only ever exists in the iframe context where
             // Percepto mounts its Leaflet map. The TOP-frame instance of

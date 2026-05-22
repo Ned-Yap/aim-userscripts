@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Bulk Altitude Updater
 // @namespace    http://tampermonkey.net/
-// @version      4.11
+// @version      4.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js
 // @description  Pause-enabled bulk altitude updater with double-check logic. Prep Pass -> Pause (Update Data) -> Final Pass.
@@ -36,7 +36,7 @@
         const IS_TOP = window === window.top;
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-altitude-updater';
-        const SCRIPT_VERSION = '4.11';
+        const SCRIPT_VERSION = '4.12';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;
@@ -60,7 +60,7 @@
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Bulk Altitude Updater',
                 description: 'Pause-enabled bulk altitude updater with double-check (prep → pause → final).',
                 version: SCRIPT_VERSION,
-                group: 'Hotkeys', priority: 80,
+                group: 'Site Setup Macros', scope: 'site-setup', priority: 80,
                 toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
                 hotkeys: [{ id: 'invoke', label: 'Open Bulk Altitude Updater', default: 'Shift+E' }],
             });
