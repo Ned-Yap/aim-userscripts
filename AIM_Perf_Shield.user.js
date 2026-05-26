@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -156,15 +156,28 @@
     // Wrap console.log/info/warn/debug exactly once per context. Tracked
     // on unsafeWindow so the same context (TOP or IFRAME) can't double-wrap
     // — stacked wrappers would inflate per-log overhead unnecessarily.
+    //
+    // v1.9 fix: wrap unsafeWindow.console (the PAGE console), NOT the
+    // sandboxed `console` reference. Perf Shield has @grant GM_setValue
+    // → runs in Tampermonkey's sandboxed context → `console` here is a
+    // SANDBOXED copy that Percepto never uses. Percepto's console.log
+    // calls go to the page console (unsafeWindow.console). v1.8 wrapped
+    // the sandboxed copy and silently filtered nothing.
+    //
+    // Cross-check: every OTHER override in this file (fetch, XHR,
+    // script.src, sendBeacon) already uses unsafeWindow correctly —
+    // this was a v1.8-only regression on the new suppressor.
     function installLogSuppressor() {
         const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const pageConsole = win.console;
+        if (!pageConsole) return;
         if (win.__aim_perf_console_patched) return;
         win.__aim_perf_console_patched = true;
         win.__aim_perf_log_counts = win.__aim_perf_log_counts || {};
         ['log', 'info', 'warn', 'debug'].forEach(m => {
-            const orig = console[m];
+            const orig = pageConsole[m];
             if (typeof orig !== 'function') return;
-            console[m] = function (...args) {
+            pageConsole[m] = function (...args) {
                 if (suppressDebugLogs) {
                     const matched = shouldSuppressLog(args);
                     if (matched) {
@@ -172,7 +185,7 @@
                         return; // silently drop
                     }
                 }
-                return orig.apply(console, args);
+                return orig.apply(pageConsole, args);
             };
         });
     }
@@ -216,7 +229,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.8';
+    const SCRIPT_VERSION = '1.9';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
