@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      1.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -114,28 +114,41 @@
     let suppressDebugLogs = true;
     try { suppressDebugLogs = GM_getValue(STORAGE_KEY_SUPPRESS_LOGS, true) === true; } catch (e) {}
 
-    // Predicate list. Each entry: [name, fn(args) → boolean]. Conservative
-    // by design — if the pattern accidentally matches something useful we
-    // want it obvious which entry to tweak. Patterns derived from real
-    // Mission Bank console output, 2026-05-26.
+    // Predicate list. Each entry: [name, fn(args) → boolean]. v1.10 rewrite:
+    // - Patterns use regex on either args[0] OR the joined-string form so
+    //   single-arg ("Drone 5 already exists in OGI") AND multi-arg
+    //   (console.log("Drone", 5, "already exists...")) both match. v1.8/v1.9
+    //   only handled multi-arg → most patterns missed real Percepto logs.
+    // - Allow leading whitespace via ^\s* — some Percepto logs have leading
+    //   spaces in args[0] which broke startsWith() checks.
+    //
+    // Helper: cheaply join args for joined-string regex tests. Skips
+    // object serialization to avoid allocation cost on every log.
+    function joinArgs(a) {
+        let s = '';
+        for (let i = 0; i < a.length; i++) {
+            const x = a[i];
+            if (typeof x === 'string') s += (s ? ' ' : '') + x;
+            else if (typeof x === 'number' || typeof x === 'boolean') s += (s ? ' ' : '') + String(x);
+        }
+        return s;
+    }
     const LOG_SUPPRESS_PATTERNS = [
-        ['RAZTEST', a => typeof a[0] === 'string' && a[0].startsWith('RAZTEST ')],
-        ['WeatherStore', a => typeof a[0] === 'string' && a[0].startsWith('WeatherStore:')],
-        ['STATE CHANGED', a => typeof a[0] === 'string' && (a[0] === 'STATE CHANGED' || a[0].startsWith('STATE CHANGED'))],
-        ['Drone already exists', a => typeof a[0] === 'string'
-            && (a[0] === 'Drone' || a[0].startsWith('Drone '))
-            && a.slice(1).some(x => typeof x === 'string' && x.includes('already exists in OGI'))],
-        ['Added drone to OGI', a => typeof a[0] === 'string'
-            && (a[0] === 'Added drone' || a[0].startsWith('Added drone '))
-            && a.slice(1).some(x => typeof x === 'string' && x.includes('to OGI state'))],
-        ['Amplitude unexpected EOI', a => typeof a[0] === 'string'
-            && a[0].includes('Amplitude Logger [Warn]: Unexpected end of input')],
-        ['Unhandled rejection {}', a => a.some(x => typeof x === 'string' && x.includes('Possibly unhandled rejection'))],
-        ['no active group', a => typeof a[0] === 'string' && a[0] === 'no active group'],
-        ['in recalcWeather', a => typeof a[0] === 'string' && a[0] === 'in recalcWeather'],
-        ['in init. ids are', a => typeof a[0] === 'string' && a[0].startsWith('in init. ids are')],
-        ['mapElementScope', a => typeof a[0] === 'string' && a[0].startsWith('mapElementScope scope removed')],
-        ['news feed', a => typeof a[0] === 'string' && a[0].startsWith('news feed:')],
+        ['RAZTEST', a => typeof a[0] === 'string' && /^\s*RAZTEST\b/.test(a[0])],
+        ['WeatherStore', a => typeof a[0] === 'string' && /^\s*WeatherStore:/.test(a[0])],
+        ['STATE CHANGED', a => typeof a[0] === 'string' && /^\s*STATE CHANGED/.test(a[0])],
+        ['Drone already exists', a => /\bDrone\s+\d+\s+already exists in OGI/.test(joinArgs(a))],
+        ['Added drone to OGI', a => /\bAdded drone\s+\d+\s+to OGI state/.test(joinArgs(a))],
+        ['Amplitude unexpected EOI', a => typeof a[0] === 'string' && /Amplitude Logger \[Warn\]: Unexpected end of input/.test(a[0])],
+        ['Unhandled rejection {}', a => a.some(x => typeof x === 'string' && /Possibly unhandled rejection/.test(x))],
+        ['no active group', a => typeof a[0] === 'string' && /^\s*no active group\s*$/.test(a[0])],
+        ['in recalcWeather', a => typeof a[0] === 'string' && /^\s*in recalcWeather\s*$/.test(a[0])],
+        ['in init. ids are', a => typeof a[0] === 'string' && /^\s*in init\. ids are/.test(a[0])],
+        ['mapElementScope', a => typeof a[0] === 'string' && /^\s*mapElementScope scope removed/.test(a[0])],
+        ['news feed', a => typeof a[0] === 'string' && /^\s*news feed:/.test(a[0])],
+        ['Initializing library', a => typeof a[0] === 'string' && /^\s*Initializing library\s*$/.test(a[0])],
+        ['ws.init', a => typeof a[0] === 'string' && /^\s*ws\.init called with ip:/.test(a[0])],
+        ['createNewSocket', a => typeof a[0] === 'string' && /^\s*createNewSocket connecting/.test(a[0])],
     ];
 
     function shouldSuppressLog(args) {
@@ -229,7 +242,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.9';
+    const SCRIPT_VERSION = '1.10';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
