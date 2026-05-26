@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -102,6 +102,81 @@
     try { orthoLowRes = GM_getValue(STORAGE_KEY_ORTHO_LOWRES, false) === true; } catch (e) {}
     try { orthoLowResZoom = Number(GM_getValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, 15)) || 15; } catch (e) {}
 
+    // Debug-log suppression (v1.8) — Percepto floods console.log with
+    // non-actionable state-change noise (RAZTEST, WeatherStore:_calcweather,
+    // STATE CHANGED Action: ..., Drone X already exists in OGI state, etc.).
+    // When DevTools is open the browser pays formatting + render cost for
+    // every line, which is a major perf drag on dense pages like Mission Bank.
+    // This toggle wraps console.log/info/warn/debug and silently drops
+    // matched lines. Default ON. Per-pattern counters at
+    // window.__aim_perf_log_counts for diagnostics.
+    const STORAGE_KEY_SUPPRESS_LOGS = 'aim-perf-suppress-debug-logs';
+    let suppressDebugLogs = true;
+    try { suppressDebugLogs = GM_getValue(STORAGE_KEY_SUPPRESS_LOGS, true) === true; } catch (e) {}
+
+    // Predicate list. Each entry: [name, fn(args) → boolean]. Conservative
+    // by design — if the pattern accidentally matches something useful we
+    // want it obvious which entry to tweak. Patterns derived from real
+    // Mission Bank console output, 2026-05-26.
+    const LOG_SUPPRESS_PATTERNS = [
+        ['RAZTEST', a => typeof a[0] === 'string' && a[0].startsWith('RAZTEST ')],
+        ['WeatherStore', a => typeof a[0] === 'string' && a[0].startsWith('WeatherStore:')],
+        ['STATE CHANGED', a => typeof a[0] === 'string' && (a[0] === 'STATE CHANGED' || a[0].startsWith('STATE CHANGED'))],
+        ['Drone already exists', a => typeof a[0] === 'string'
+            && (a[0] === 'Drone' || a[0].startsWith('Drone '))
+            && a.slice(1).some(x => typeof x === 'string' && x.includes('already exists in OGI'))],
+        ['Added drone to OGI', a => typeof a[0] === 'string'
+            && (a[0] === 'Added drone' || a[0].startsWith('Added drone '))
+            && a.slice(1).some(x => typeof x === 'string' && x.includes('to OGI state'))],
+        ['Amplitude unexpected EOI', a => typeof a[0] === 'string'
+            && a[0].includes('Amplitude Logger [Warn]: Unexpected end of input')],
+        ['Unhandled rejection {}', a => a.some(x => typeof x === 'string' && x.includes('Possibly unhandled rejection'))],
+        ['no active group', a => typeof a[0] === 'string' && a[0] === 'no active group'],
+        ['in recalcWeather', a => typeof a[0] === 'string' && a[0] === 'in recalcWeather'],
+        ['in init. ids are', a => typeof a[0] === 'string' && a[0].startsWith('in init. ids are')],
+        ['mapElementScope', a => typeof a[0] === 'string' && a[0].startsWith('mapElementScope scope removed')],
+        ['news feed', a => typeof a[0] === 'string' && a[0].startsWith('news feed:')],
+    ];
+
+    function shouldSuppressLog(args) {
+        if (!args || args.length === 0) return null;
+        // Hard safety rails — never filter:
+        //   - Our own [AIM …] logs (we want our diagnostics through)
+        //   - Anything where any arg is an actual Error object (real exceptions)
+        if (typeof args[0] === 'string' && args[0].startsWith('[AIM ')) return null;
+        for (let i = 0; i < args.length; i++) {
+            if (args[i] instanceof Error) return null;
+        }
+        for (const [name, pred] of LOG_SUPPRESS_PATTERNS) {
+            try { if (pred(args)) return name; } catch (e) {}
+        }
+        return null;
+    }
+
+    // Wrap console.log/info/warn/debug exactly once per context. Tracked
+    // on unsafeWindow so the same context (TOP or IFRAME) can't double-wrap
+    // — stacked wrappers would inflate per-log overhead unnecessarily.
+    function installLogSuppressor() {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        if (win.__aim_perf_console_patched) return;
+        win.__aim_perf_console_patched = true;
+        win.__aim_perf_log_counts = win.__aim_perf_log_counts || {};
+        ['log', 'info', 'warn', 'debug'].forEach(m => {
+            const orig = console[m];
+            if (typeof orig !== 'function') return;
+            console[m] = function (...args) {
+                if (suppressDebugLogs) {
+                    const matched = shouldSuppressLog(args);
+                    if (matched) {
+                        win.__aim_perf_log_counts[matched] = (win.__aim_perf_log_counts[matched] || 0) + 1;
+                        return; // silently drop
+                    }
+                }
+                return orig.apply(console, args);
+            };
+        });
+    }
+
     // Chat-bubble CSS-hide config. Declared up here (NOT inside the function
     // section below) because the init block calls applyChatBlockCss() before
     // those function-section declarations are evaluated — function
@@ -141,7 +216,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.7';
+    const SCRIPT_VERSION = '1.8';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -153,6 +228,11 @@
     // category can take effect without needing the session-replay master ON.
     // Each call is try/wrapped so one failure doesn't take down the rest
     // (and especially doesn't prevent control panel registration).
+    // Install the log suppressor FIRST so its early init can quiet the
+    // network-blocker logs below if you don't want them either (they're
+    // not in the pattern list so they still come through — but the wrap
+    // is in place for everything that follows).
+    try { installLogSuppressor(); } catch (e) { console.warn(`${TAG} log suppressor failed:`, e); }
     try { installScriptSrcSetterOverride(); } catch (e) { console.warn(`${TAG} src setter override failed:`, e); }
     try { installScriptTagBlocker(); } catch (e) { console.warn(`${TAG} tag blocker failed:`, e); }
     try { installFetchBlocker(); } catch (e) { console.warn(`${TAG} fetch blocker failed:`, e); }
@@ -169,6 +249,7 @@
     console.log(`${TAG} v${SCRIPT_VERSION} ready — active blocks: ${activeBlocks.length ? activeBlocks.join(', ') : 'none'}`);
     if (hideSatellite) console.log(`${TAG} hide-satellite ON — broadcasting to Map Styler`);
     if (orthoLowRes) console.log(`${TAG} ortho low-res ON (cap zoom ${orthoLowResZoom}) — broadcasting to Map Styler`);
+    if (suppressDebugLogs) console.log(`${TAG} log suppressor ON — Percepto debug spam filtered (counts at window.__aim_perf_log_counts)`);
 
     // 0. Override HTMLScriptElement.prototype.src setter — fires BEFORE
     //    the browser starts loading when JS sets `script.src = 'url'`.
@@ -360,6 +441,16 @@
                     broadcastPerfSettings();
                     return;
                 }
+                if (msg.toggleId === 'suppress-debug-logs') {
+                    if (newVal !== suppressDebugLogs) {
+                        suppressDebugLogs = newVal;
+                        try { GM_setValue(STORAGE_KEY_SUPPRESS_LOGS, newVal); } catch (e) {}
+                        // Use the original console (bypass our own filter) so
+                        // this status message ALWAYS prints regardless of state.
+                        console.log(`${TAG} log suppressor ${newVal ? 'ON' : 'OFF'}`);
+                    }
+                    return;
+                }
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
@@ -395,6 +486,13 @@
             // script-level master rendering still works; the header above it
             // visually anchors it in the Network blocks group.
             toggles: [
+                { type: 'header', label: 'Console' },
+                {
+                    id: 'suppress-debug-logs',
+                    label: 'Suppress noisy Percepto debug logs',
+                    type: 'boolean',
+                    default: true,
+                },
                 { type: 'header', label: 'Map performance' },
                 {
                     id: 'hide-satellite',
