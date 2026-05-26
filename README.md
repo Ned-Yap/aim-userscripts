@@ -76,6 +76,7 @@ Click each link below. Because the filenames end in `.user.js`, Tampermonkey wil
 | 11 | **AIM Bulk Validator** (Shift+V) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js) |
 | 12 | **AIM Performance Shield** (blocks session-replay + chat + weather network traffic; optional hide-satellite / ortho low-res for slow hardware) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js) |
 | 13 | **AIM Mission Bank Tools** (placeholder — installs now so you get future Mission Bank features automatically; does nothing today) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js) |
+| 14 | **AIM Quick Mission Editor** (bulk-reorder mission instructions — Ctrl+Click drag handles to select, Enter to open move dialog) | [Install](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js) |
 
 > ⚠ **AIM Sidebar Resizer** is temporarily unavailable (was breaking AIM load). Existing installs will auto-update to a no-op version on Tampermonkey's next check — safe to leave installed. Will be re-added once fixed.
 

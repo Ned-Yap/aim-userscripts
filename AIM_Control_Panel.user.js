@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.22
+// @version      1.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.22';
+    const VERSION = '1.23';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1384,10 +1384,7 @@
             'script:aim-perf-shield': 20,       // Performance
             'group:Hotkeys': 30,                // Universal hotkeys (Altitude, Ruler, Clear All)
             'group:Site Setup Macros': 40,      // v1.22 — site-setup-scoped macros
-            // PLACEHOLDER for future phase — when Mission Bank Macros ships:
-            //   'group:Mission Bank Macros': 50,
-            // (and the corresponding scripts will REGISTER with
-            //  group: 'Mission Bank Macros', scope: 'mission-bank')
+            'group:Mission Bank Macros': 50,    // v1.23 — first member: Quick Mission Editor (v0.1)
         };
         const sectionEntries = [];
         standalone.forEach(s => {
