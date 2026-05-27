@@ -8,6 +8,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-26
 
+- **AIM Mission Bank Tools v0.2** — **NEW: Mission Summary panel.** Replaces the v0.1 skeleton with the first real Mission Bank feature.
+  - **SUM button** injected on the Mission Bank toolbar (with floating bottom-right fallback if Percepto's DOM doesn't match the expected header selector). Same styling pattern as Asset Inspector's SUM.
+  - **Floating draggable/resizable panel** listing all missions on the current site with per-mission stats. Click any row → master-detail swap to drill-down view; Back button restores table at scroll position.
+  - **22 columns, 9 default-visible**, toggle-able via `Columns ▾` menu, visibility persisted in GM storage. Active dot, Site Name, Mission Name, Steps (excluding takeoff/return), Flight Time, Flight Distance, Battery %, Est. Flights, Total Consumption % visible by default. Per-phase Time + Consumption (Nav/Wait/Extra/Landing/Takeoff = 10 cols), Description, Robot Types, ID toggle-able.
+  - **Default sort: Flight Distance DESC** — clusters multi-missions (S- / N- / E- / W- prefixed pad-based missions) at top per user's build workflow. 3-state column sort cycle (asc → desc → reset).
+  - **Distance unit toggle** (mi ↔ km) in toolbar, default imperial, saved to GM storage.
+  - **Battery → Flights estimate column** using user's IFS formula (default thresholds 560/480/360/270/180/90). Settings cog (⚙) opens a popover with 7 number inputs to tune live + reset-to-default; persisted.
+  - **Drill-down detail view**: Mission Stats card + Flight Phase Breakdown card + Step Counts card (Snapshots/Navigates/Waits/Other) + Instructions table (filters out takeoff + returnHome, Step 1 = first real step) + Description + robot types.
+  - **Multi-select + exports**: Copy CSV (visible cols only, Active excluded), Copy → Sheets (TSV), Copy JSON (full raw mission objects). Selection wins over filter set.
+  - **Data**: one fetch per site to `/available_app/?site_id=X&type=1` (cookie auth, no PAT). Cached in memory; Refresh button forces re-fetch.
+
 - **AIM Quick Mission Editor v0.2** — reliability + UX pass after v0.1.
   - **Cache `reorderFn` once at queue start** — was walking the React fiber tree for every item. Pre-flight check now aborts before snapshot/cleanup if the function can't be found.
   - **Defensive fiber walk** — 4 candidate paths tried in order; clean `console.warn` with depth on full-walk failure. Future-proofs against a Percepto context-provider refactor.
