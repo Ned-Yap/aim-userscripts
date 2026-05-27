@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1624,23 +1624,39 @@
         const row = rows.find(r => r.id === missionId);
         if (!row) { renderTableView(); return; }
         panelState.drillId = missionId;
+        if (!panelState.detailFilter) panelState.detailFilter = 'all';
 
         const unit = panelState.distanceUnit;
         const t = panelState.thresholds;
-        const realSteps = row.realSteps;
+        const allSteps = row.realSteps;
 
-        // Build step counts with On/Off split for Thermal/GEM, ordered by
-        // importance (navigate → snapshot → Thermal On → GEM On → wait →
-        // GEM Off → Thermal Off → unknowns alphabetical).
-        const orderedCounts = buildOrderedStepCounts(realSteps);
+        // Discover distinct step types for filter buttons
+        const stepTypes = [];
+        const seen = new Set();
+        allSteps.forEach(s => {
+            const t = displayStepType(s);
+            if (!seen.has(t)) { seen.add(t); stepTypes.push(t); }
+        });
+
+        // Apply type filter (preserves original step numbering)
+        const filter = panelState.detailFilter;
+        const filteredSteps = filter === 'all' ? allSteps : allSteps.filter(s => displayStepType(s) === filter);
+
+        const orderedCounts = buildOrderedStepCounts(allSteps);
         const typeStatCards = orderedCounts
             .map(([k, v]) => stat(k, v, String(v)))
             .join('');
 
+        // Filter chips
+        const filterChips = [`<button class="aim-mb-tbtn${filter === 'all' ? ' active' : ''}" data-step-filter="all">All</button>`]
+            .concat(stepTypes.map(t =>
+                `<button class="aim-mb-tbtn${filter === t ? ' active' : ''}" data-step-filter="${escapeHtml(t)}">${escapeHtml(t)}</button>`
+            )).join('');
+
         const html = `
             <div class="aim-mb-detail-header">
                 <button class="aim-mb-detail-back" data-back>← Back</button>
-                <div class="aim-mb-detail-title">${escapeHtml(row.name)}</div>
+                <div class="aim-mb-detail-title" data-detail-name="${escapeHtml(row.name)}" title="Click to copy name" style="cursor:pointer;">${escapeHtml(row.name)} 📋</div>
                 <button class="aim-mb-tbtn ${unit === 'imperial' ? 'active' : ''}" data-unit-d="imperial">mi</button>
                 <button class="aim-mb-tbtn ${unit === 'metric' ? 'active' : ''}" data-unit-d="metric">km</button>
                 <div class="aim-mb-detail-id">ID ${row.id}${row.active ? '' : ' · <span style="color:#888">Inactive</span>'}</div>
@@ -1673,34 +1689,59 @@
                         ${typeStatCards || '<div style="color:#888;font-size:11px;">No real steps.</div>'}
                     </div>
                 </div>
-                <div class="aim-mb-card">
-                    <div class="aim-mb-card-title">Instructions (Step 1 = first after takeoff)</div>
-                    <table style="margin:0">
-                        <thead>
-                            <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
-                        </thead>
-                        <tbody>
-                            ${realSteps.map((s, i) => renderStepRow(s, i + 1, unit)).join('')}
-                        </tbody>
-                    </table>
-                    ${row.description ? `<div style="margin-top:10px;color:#aaa;font-size:11px;">Description: ${escapeHtml(row.description)}</div>` : ''}
-                    ${row.robotTypes ? `<div style="margin-top:4px;color:#aaa;font-size:11px;">Robot types: ${escapeHtml(row.robotTypes)}</div>` : ''}
+                <div class="aim-mb-card" style="padding-bottom:0;">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                        <div class="aim-mb-card-title" style="margin-bottom:0;">Instructions</div>
+                        <div style="display:flex;gap:4px;flex-wrap:wrap;flex:1;">${filterChips}</div>
+                        <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
+                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
+                    </div>
+                    <div style="overflow:auto;max-height:400px;">
+                        <table style="margin:0" id="aim-mb-detail-table">
+                            <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
+                                <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
+                            </thead>
+                            <tbody>
+                                ${filteredSteps.map(s => {
+                                    const origIdx = allSteps.indexOf(s) + 1;
+                                    return renderStepRow(s, origIdx, unit);
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    ${row.description ? `<div style="padding:8px 0;color:#aaa;font-size:11px;">Description: ${escapeHtml(row.description)}</div>` : ''}
+                    ${row.robotTypes ? `<div style="padding:0 0 8px;color:#aaa;font-size:11px;">Robot types: ${escapeHtml(row.robotTypes)}</div>` : ''}
                 </div>
             </div>
         `;
         setBodyHtml(html);
-        wireDetailEvents(missionId);
+        wireDetailEvents(missionId, row, filteredSteps, allSteps);
     }
 
-    function wireDetailEvents(missionId) {
+    function wireDetailEvents(missionId, row, filteredSteps, allSteps) {
+        const unit = panelState.distanceUnit;
         panelEl.querySelector('[data-back]').onclick = () => {
+            panelState.detailFilter = 'all';
             renderTableView();
+        };
+        // Copy mission name
+        const titleEl = panelEl.querySelector('[data-detail-name]');
+        if (titleEl) titleEl.onclick = () => {
+            copyToClipboard(titleEl.dataset.detailName);
+            showToast(`Copied: ${titleEl.dataset.detailName}`, '#5fff5f');
         };
         // Unit toggle on detail
         panelEl.querySelectorAll('[data-unit-d]').forEach(b => {
             b.onclick = () => {
                 panelState.distanceUnit = b.dataset.unitD;
                 gmSet(CACHE_KEY_DISTANCE_UNIT, panelState.distanceUnit);
+                renderDetailView(missionId);
+            };
+        });
+        // Step-type filter chips
+        panelEl.querySelectorAll('[data-step-filter]').forEach(b => {
+            b.onclick = () => {
+                panelState.detailFilter = b.dataset.stepFilter;
                 renderDetailView(missionId);
             };
         });
@@ -1713,10 +1754,14 @@
                 showToast(`Copied: ${v}`, '#5fff5f');
             };
         });
-        // Location cells — left-click opens Google Maps, right-click copies coords.
-        // Percepto's iframe is sandboxed WITHOUT allow-popups, so window.open
-        // from the iframe is blocked. We hop up to window.top which is not
-        // sandboxed (and is same-origin, so the call is allowed).
+        // Altitude click-to-copy: raw whole number only (no comma, no ft, no ALT)
+        panelEl.querySelectorAll('[data-alt-raw]').forEach(el => {
+            el.onclick = () => {
+                copyToClipboard(el.dataset.altRaw);
+                showToast(`Copied: ${el.dataset.altRaw}`, '#5fff5f');
+            };
+        });
+        // Location cells — left-click opens Google Maps, right-click copies coords
         panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
             el.onclick = (e) => {
                 e.preventDefault();
@@ -1728,8 +1773,6 @@
                 try { opened = (window.top || window).open(url, '_blank'); }
                 catch (er) { opened = null; }
                 if (!opened) {
-                    // Popup blocked even from top — fall back to clipboard so
-                    // the user can paste the URL manually.
                     copyToClipboard(url);
                     showToast(`Popup blocked. Copied URL: ${url}`, '#ff9800');
                 }
@@ -1745,6 +1788,103 @@
                 }
             };
         });
+        // Export visible instructions → Sheets (TSV)
+        const sheetsBtn = panelEl.querySelector('[data-detail-export="sheets"]');
+        if (sheetsBtn) sheetsBtn.onclick = () => exportDetailToSheets(filteredSteps, allSteps, unit, row.name);
+        // Export KML
+        const kmlBtn = panelEl.querySelector('[data-detail-export="kml"]');
+        if (kmlBtn) kmlBtn.onclick = () => exportDetailToKML(row, allSteps, unit);
+    }
+
+    function exportDetailToSheets(filteredSteps, allSteps, unit, missionName) {
+        const lines = ['Step\tType\tValue\tLocation'];
+        filteredSteps.forEach(s => {
+            const origIdx = allSteps.indexOf(s) + 1;
+            const type = displayStepType(s);
+            const val = displayStepValue(s, unit);
+            let loc = '';
+            if (s.location && typeof s.location === 'object' && s.location.lat != null) {
+                loc = `${Number(s.location.lat).toFixed(5)}, ${Number(s.location.lng).toFixed(5)}`;
+            }
+            lines.push(`${origIdx}\t${type}\t${val}\t${loc}`);
+        });
+        copyToClipboard(lines.join('\n'));
+        showToast(`Copied ${filteredSteps.length} steps → Sheets`, '#5fff5f');
+    }
+
+    function exportDetailToKML(row, allSteps, unit) {
+        const gpsSteps = allSteps.filter(s =>
+            s.location && typeof s.location === 'object' && s.location.lat != null
+            && (s.type_name === 'navigate' || s.type_name === 'snapshot')
+        );
+        if (gpsSteps.length === 0) {
+            showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800');
+            return;
+        }
+        const placemarks = gpsSteps.map((s, i) => {
+            const idx = allSteps.indexOf(s) + 1;
+            const type = displayStepType(s);
+            const altM = (s.value1 != null && s.value1_name === 'm') ? Number(s.value1) : 0;
+            const lat = Number(s.location.lat);
+            const lng = Number(s.location.lng);
+            return `    <Placemark>
+      <name>Step ${idx} — ${escapeXml(type)}</name>
+      <description>Altitude: ${Math.round(altM)} m (${Math.round(altM * 3.28084).toLocaleString()} ft)</description>
+      <Point>
+        <altitudeMode>absolute</altitudeMode>
+        <coordinates>${lng},${lat},${altM}</coordinates>
+      </Point>
+    </Placemark>`;
+        }).join('\n');
+        const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${escapeXml(row.name)} — GPS Steps</name>
+    <description>Navigate + Snapshot steps with 3D altitude pins. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+${placemarks}
+  </Document>
+</kml>`;
+        // Download as file. Percepto's iframe sandbox may block the
+        // download attribute, so try from top frame first, then fall
+        // back to clipboard so the user can paste into a .kml file.
+        const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+        const blobUrl = URL.createObjectURL(blob);
+        const safeName = (row.name || 'mission').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
+        let downloaded = false;
+        try {
+            const topDoc = (window.top || window).document;
+            const a = topDoc.createElement('a');
+            a.href = blobUrl;
+            a.download = `${safeName}_steps.kml`;
+            topDoc.body.appendChild(a);
+            a.click();
+            a.remove();
+            downloaded = true;
+        } catch (e) {}
+        if (!downloaded) {
+            try {
+                const a = document.createElement('a');
+                a.href = blobUrl;
+                a.download = `${safeName}_steps.kml`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                downloaded = true;
+            } catch (e) {}
+        }
+        if (!downloaded) {
+            copyToClipboard(kml);
+            showToast('Download blocked. KML copied to clipboard — paste into a .kml file.', '#ff9800');
+        } else {
+            showToast(`Exported ${gpsSteps.length} GPS steps as KML`, '#5fff5f');
+        }
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+    }
+
+    function escapeXml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
+        }[c]));
     }
 
     function stat(label, value, copyVal) {
@@ -1762,6 +1902,15 @@
         let rowClass = '';
         if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
         else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
+        // Altitude value: click-to-copy raw whole number (no comma, no unit)
+        let valCell;
+        if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
+            const u = unit || getDistanceUnit();
+            const rawNum = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+            valCell = `<td><span data-alt-raw="${rawNum}" style="cursor:pointer;" title="Click to copy raw altitude">${escapeHtml(val)}</span></td>`;
+        } else {
+            valCell = `<td>${escapeHtml(val)}</td>`;
+        }
         // Location cell — clickable link to Google Maps
         let locCell = '';
         if (s && s.location && typeof s.location === 'object' && s.location.lat != null) {
@@ -1769,7 +1918,7 @@
             const lng = Number(s.location.lng);
             locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
         }
-        return `<tr${rowClass}><td>${idx}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(val)}</td><td style="font-size:10px;">${locCell}</td></tr>`;
+        return `<tr${rowClass}><td>${idx}</td><td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td></tr>`;
     }
 
     // ========================================================
