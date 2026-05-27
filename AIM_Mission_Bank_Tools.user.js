@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.8';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -325,10 +325,14 @@
             // Raw instruction list for drill-down
             instructions: inst,
             realSteps: real,
-            // Counts by type for future stats popup
-            snapshots: countByType(inst, 'snapshot'),
-            navigates: countByType(inst, 'navigate'),
-            waits: countByType(inst, 'wait'),
+            // Step-type counts (used in table columns + drill-down card)
+            snapshots: countByType(real, 'snapshot'),
+            navigates: countByType(real, 'navigate'),
+            waits: countByType(real, 'wait'),
+            thermalOns: real.filter(s => s.type_name === 'cameraSelect' && (s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
+            thermalOffs: real.filter(s => s.type_name === 'cameraSelect' && !(s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
+            gemOns: real.filter(s => s.type_name === 'gemMode' && (s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
+            gemOffs: real.filter(s => s.type_name === 'gemMode' && !(s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
         };
     }
 
@@ -468,15 +472,25 @@
     //   defaultVisible, csvExclude, csvKey, csvFmt (override CSV string)
     // }
     const COLUMNS = [
+        // Default visible — user-specified order (v0.8)
         { id: 'active', label: 'Active', key: 'active', kind: 'dot', defaultVisible: true, csvExclude: true },
-        { id: 'siteName', label: 'Site Name', key: 'siteName', kind: 'text', defaultVisible: true },
         { id: 'name', label: 'Mission Name', key: 'name', kind: 'text', defaultVisible: true, primary: true },
-        { id: 'steps', label: 'Steps', key: 'steps', kind: 'num', defaultVisible: true },
-        { id: 'flightTime', label: 'Flight Time', key: 'flightTimeS', kind: 'time', defaultVisible: true },
         { id: 'flightDistance', label: 'Flight Distance', key: 'flightDistanceM', kind: 'distance', defaultVisible: true },
+        { id: 'flightTime', label: 'Flight Time', key: 'flightTimeS', kind: 'time', defaultVisible: true },
+        { id: 'steps', label: 'Steps', key: 'steps', kind: 'num', defaultVisible: true },
+        { id: 'navigates', label: 'Navigates', key: 'navigates', kind: 'num', defaultVisible: true },
+        { id: 'snapshots', label: 'Snapshots', key: 'snapshots', kind: 'num', defaultVisible: true },
         { id: 'batteryConsumption', label: 'Battery %', key: 'batteryConsumption', kind: 'pct', defaultVisible: true },
         { id: 'estFlights', label: 'Est. Flights', key: '__estFlights', kind: 'num', defaultVisible: true, derived: true },
         { id: 'totalConsumption', label: 'Total Consumption %', key: 'totalConsumption', kind: 'pct', defaultVisible: true },
+        // Step-type counts — toggle-able via Columns menu
+        { id: 'thermalOns', label: 'Thermal On', key: 'thermalOns', kind: 'num', defaultVisible: false },
+        { id: 'gemOns', label: 'GEM On', key: 'gemOns', kind: 'num', defaultVisible: false },
+        { id: 'waits', label: 'Waits', key: 'waits', kind: 'num', defaultVisible: false },
+        { id: 'thermalOffs', label: 'Thermal Off', key: 'thermalOffs', kind: 'num', defaultVisible: false },
+        { id: 'gemOffs', label: 'GEM Off', key: 'gemOffs', kind: 'num', defaultVisible: false },
+        // Other toggle-able columns
+        { id: 'siteName', label: 'Site Name', key: 'siteName', kind: 'text', defaultVisible: false },
         { id: 'navTime', label: 'Nav Time', key: 'navTimeS', kind: 'time', defaultVisible: false },
         { id: 'navConsumption', label: 'Nav Consumption %', key: 'navConsumption', kind: 'pct', defaultVisible: false },
         { id: 'waitTime', label: 'Wait Time', key: 'waitTimeS', kind: 'time', defaultVisible: false },
@@ -1004,9 +1018,14 @@
                 .aim-mb-menu-close { background: transparent; border: none; color: #000; font-size: 14px; cursor: pointer; font-weight: 700; padding: 0 4px; }
                 .aim-mb-menu-close:hover { color: #800; }
                 .aim-mb-menu-body { padding: 6px; overflow-y: auto; flex: 1; }
-                .aim-mb-cols-menu label { display: block; padding: 3px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
-                .aim-mb-cols-menu label:hover { background: rgba(20,210,220,0.15); }
-                .aim-mb-cols-menu input { margin-right: 6px; }
+                .aim-mb-col-row { display: flex; align-items: center; padding: 2px 8px; font-size: 11px; gap: 4px; }
+                .aim-mb-col-row:hover { background: rgba(20,210,220,0.1); }
+                .aim-mb-col-row input { margin: 0; flex-shrink: 0; }
+                .aim-mb-col-label { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                .aim-mb-col-arrows { display: flex; gap: 1px; flex-shrink: 0; }
+                .aim-mb-col-arrows button { background: #2a2a2a; border: 1px solid #444; color: #aaa; font-size: 9px; padding: 0 4px; cursor: pointer; border-radius: 2px; line-height: 16px; }
+                .aim-mb-col-arrows button:hover:not([disabled]) { border-color: #14d2dc; color: #14d2dc; }
+                .aim-mb-col-arrows button[disabled] { opacity: 0.3; cursor: default; }
                 .aim-mb-cols-menu .aim-mb-tbtn { background: #2a2a2a; border: 1px solid #444; color: #e6e6e6; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; }
                 .aim-mb-cols-menu .aim-mb-tbtn:hover { border-color: #14d2dc; color: #14d2dc; }
                 .aim-mb-settings-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; }
@@ -1320,49 +1339,9 @@
         closeOpenMenus();
         const menu = document.createElement('div');
         menu.className = 'aim-mb-cols-menu';
-        const visible = new Set(getVisibleColumnIds());
-        menu.innerHTML = `
-            <div class="aim-mb-menu-head">
-                <div class="aim-mb-menu-title">Columns</div>
-                <button class="aim-mb-menu-close" data-close-menu title="Close">✕</button>
-            </div>
-            <div class="aim-mb-menu-body">
-                ${COLUMNS.map(c => `
-                    <label><input type="checkbox" data-col-toggle="${c.id}" ${visible.has(c.id) ? 'checked' : ''} /> ${escapeHtml(c.label)}</label>
-                `).join('')}
-                <hr style="border:none;border-top:1px solid #444;margin:6px 0;" />
-                <button class="aim-mb-tbtn" data-cols-reset style="width:100%">Reset to defaults</button>
-            </div>
-        `;
         positionFloatingMenu(menu, anchor);
         document.body.appendChild(menu);
-
-        menu.querySelector('[data-close-menu]').onclick = () => menu.remove();
-        menu.querySelectorAll('[data-col-toggle]').forEach(cb => {
-            cb.onclick = (e) => {
-                e.stopPropagation();
-                const id = cb.dataset.colToggle;
-                const cur = new Set(getVisibleColumnIds());
-                if (cb.checked) cur.add(id);
-                else cur.delete(id);
-                // Preserve original column order
-                const next = COLUMNS.map(c => c.id).filter(id => cur.has(id));
-                setVisibleColumnIds(next);
-                renderTableView();
-                // Menu was appended to document.body so it survives the
-                // re-render — no need to re-open.
-            };
-        });
-        menu.querySelector('[data-cols-reset]').onclick = () => {
-            const next = COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
-            setVisibleColumnIds(next);
-            renderTableView();
-            // Refresh checkbox states in-place
-            const visNow = new Set(next);
-            menu.querySelectorAll('[data-col-toggle]').forEach(cb => {
-                cb.checked = visNow.has(cb.dataset.colToggle);
-            });
-        };
+        rebuildColumnsMenuBody(menu, anchor);
         // Outside click closes
         setTimeout(() => {
             const onDoc = (e) => {
@@ -1373,6 +1352,97 @@
             };
             document.addEventListener('mousedown', onDoc, true);
         }, 0);
+    }
+
+    function rebuildColumnsMenuBody(menu, anchor) {
+        const visIds = getVisibleColumnIds();
+        const visSet = new Set(visIds);
+        // Build the list: visible columns first in their stored order
+        // (with ↑/↓ arrows), then hidden columns below a divider.
+        const visibleRows = visIds.map(id => COL_BY_ID[id]).filter(Boolean);
+        const hiddenRows = COLUMNS.filter(c => !visSet.has(c.id));
+        menu.innerHTML = `
+            <div class="aim-mb-menu-head">
+                <div class="aim-mb-menu-title">Columns</div>
+                <button class="aim-mb-menu-close" data-close-menu title="Close">✕</button>
+            </div>
+            <div class="aim-mb-menu-body">
+                <div style="font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:2px 8px 4px;font-weight:700;">Visible (drag order with ↑↓)</div>
+                ${visibleRows.map((c, i) => `
+                    <div class="aim-mb-col-row" data-col-id="${c.id}">
+                        <input type="checkbox" data-col-toggle="${c.id}" checked />
+                        <span class="aim-mb-col-label">${escapeHtml(c.label)}</span>
+                        <span class="aim-mb-col-arrows">
+                            <button data-col-up="${c.id}" title="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
+                            <button data-col-down="${c.id}" title="Move down" ${i === visibleRows.length - 1 ? 'disabled' : ''}>↓</button>
+                        </span>
+                    </div>
+                `).join('')}
+                <hr style="border:none;border-top:1px solid #444;margin:6px 0;" />
+                <div style="font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:2px 8px 4px;font-weight:700;">Hidden</div>
+                ${hiddenRows.map(c => `
+                    <div class="aim-mb-col-row">
+                        <input type="checkbox" data-col-toggle="${c.id}" />
+                        <span class="aim-mb-col-label">${escapeHtml(c.label)}</span>
+                    </div>
+                `).join('')}
+                <hr style="border:none;border-top:1px solid #444;margin:6px 0;" />
+                <button class="aim-mb-tbtn" data-cols-reset style="width:100%">Reset to defaults</button>
+            </div>
+        `;
+        // Close
+        menu.querySelector('[data-close-menu]').onclick = () => menu.remove();
+        // Toggle
+        menu.querySelectorAll('[data-col-toggle]').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const id = cb.dataset.colToggle;
+                const cur = getVisibleColumnIds().slice();
+                if (cb.checked) {
+                    // Append at end — preserves custom order
+                    if (!cur.includes(id)) cur.push(id);
+                } else {
+                    const idx = cur.indexOf(id);
+                    if (idx >= 0) cur.splice(idx, 1);
+                }
+                setVisibleColumnIds(cur);
+                renderTableView();
+                rebuildColumnsMenuBody(menu, anchor);
+            };
+        });
+        // ↑ Move up
+        menu.querySelectorAll('[data-col-up]').forEach(btn => {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                const id = btn.dataset.colUp;
+                const cur = getVisibleColumnIds().slice();
+                const idx = cur.indexOf(id);
+                if (idx > 0) { cur.splice(idx, 1); cur.splice(idx - 1, 0, id); }
+                setVisibleColumnIds(cur);
+                renderTableView();
+                rebuildColumnsMenuBody(menu, anchor);
+            };
+        });
+        // ↓ Move down
+        menu.querySelectorAll('[data-col-down]').forEach(btn => {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                const id = btn.dataset.colDown;
+                const cur = getVisibleColumnIds().slice();
+                const idx = cur.indexOf(id);
+                if (idx >= 0 && idx < cur.length - 1) { cur.splice(idx, 1); cur.splice(idx + 1, 0, id); }
+                setVisibleColumnIds(cur);
+                renderTableView();
+                rebuildColumnsMenuBody(menu, anchor);
+            };
+        });
+        // Reset
+        menu.querySelector('[data-cols-reset]').onclick = () => {
+            const next = COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
+            setVisibleColumnIds(next);
+            renderTableView();
+            rebuildColumnsMenuBody(menu, anchor);
+        };
     }
 
     // ========================================================
