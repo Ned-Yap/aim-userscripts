@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -11,24 +11,51 @@
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        unsafeWindow
 // @run-at       document-start
 // ==/UserScript==
 
-// AIM Mission Bank Tools — v0.2
+// AIM Mission Bank Tools — v0.3
 // Feature: Mission Summary panel (#48 in features.csv).
 //
+// v0.3 changes (real-world testing pass):
+//   - SUM injection: correct selector `.missions-list__header`, inserted
+//     next to `.missions-list__new-button` reusing its className for
+//     native Ant Design styling. Recursive iframe walk removed (script
+//     is @match'd into the iframe directly; recursion was producing
+//     two SUM buttons).
+//   - Panel title shows actual site name (read from
+//     `.ant-select-selection-item` in top frame), not site ID.
+//   - Sticky toolbar + footer: panel body restructured to flex column
+//     so only the table scrolls. Toolbar (search/columns/unit/settings)
+//     and footer (exports) stay pinned during scroll.
+//   - Pointer-event drag + resize with setPointerCapture: no more
+//     "lose-the-mouse" off-corner dropouts.
+//   - Menus (Columns ▾ + Settings ⚙) appended to document.body with
+//     position:fixed so they don't get clipped by the panel and don't
+//     get destroyed by re-renders. Both gained explicit close (✕) buttons.
+//   - Settings input no longer steals focus on each keystroke: search
+//     field auto-focus removed; menus survive re-renders so the user
+//     can keep typing in them.
+//   - Detail view: unit toggle (mi/km), click-to-copy numeric stat
+//     cards, location cells are Google-Maps links (left-click opens,
+//     right-click copies coords), bold-colored step rows for navigate
+//     (neon green) and snapshot (orange), step-type display tidied
+//     (cameraSelect → Thermal On/Off; gemMode → GEM On/Off), step
+//     counts card auto-builds from all distinct types in the mission.
+//   - fmtPct adds a space before % per user spec.
+//
 // Architecture mirrors Asset Inspector's SUM panel:
-//   - SUM button injected on Mission Bank toolbar (with floating fallback
-//     if Percepto's DOM doesn't have the expected selector)
-//   - Floating draggable panel with sortable table of all missions
+//   - SUM button injected on Mission Bank toolbar
+//   - Floating draggable/resizable panel with sortable table of missions
 //   - Click row → master-detail swap to drill-down view (back button
 //     restores table at scroll position)
 //   - Columns toggle ▾ menu — visibility persisted in GM storage
 //   - Default sort: Flight Distance DESC (longest first — clusters
 //     user's multi-missions at top per their build pattern)
 //   - Settings cog → adjustable battery-to-flights thresholds
-//   - Exports: CSV / TSV / JSON / Copy-to-Sheets (visible cols only,
-//     excluding Active which is panel-only)
+//   - Exports: CSV / TSV / JSON (visible cols only, excluding Active
+//     which is panel-only)
 //
 // Data: /available_app/?site_id=X&type=1 (cookie auth, no PAT needed).
 // One fetch per site returns everything: instructions, app_data stats,
@@ -40,7 +67,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -117,13 +144,38 @@
     }
 
     // ========================================================
-    // Helpers — URL / site ID
+    // Helpers — URL / site ID / site name
     // ========================================================
     function getCurrentSiteID() {
         const top = (() => { try { return window.top; } catch (e) { return window; } })();
         const hash = (top && top.location && top.location.hash) || location.hash || '';
         const m = hash.match(/#\/site\/(\d+)\//);
         return m ? m[1] : null;
+    }
+
+    function getCurrentSiteName() {
+        // Percepto renders the site name in the top-frame site picker.
+        // The Ant Design select uses `.ant-select-selection-item` with
+        // a `title` attribute holding the full name (e.g. "Exxon 32 -
+        // XBC Giddings Estate 1184H"). Fall back to textContent if no
+        // title attribute, and to null if anything throws (cross-origin
+        // / racing the initial render).
+        try {
+            const top = window.top || window;
+            const candidates = [
+                '.site-header__site-name',
+                '.ant-select-selection-item',
+                '[class*="site-name"]',
+            ];
+            for (const sel of candidates) {
+                const el = top.document.querySelector(sel);
+                if (el) {
+                    const txt = (el.getAttribute && el.getAttribute('title')) || el.textContent;
+                    if (txt && txt.trim()) return txt.trim();
+                }
+            }
+        } catch (e) {}
+        return null;
     }
 
     function isOnMissionBank() {
@@ -272,12 +324,44 @@
 
     function fmtPct(n) {
         if (n == null || isNaN(n)) return '—';
-        return `${Math.round(n)}%`;
+        return `${Math.round(n)} %`;
     }
 
     function fmtNum(n) {
         if (n == null || isNaN(n)) return '—';
         return String(n);
+    }
+
+    // Display-friendly step type name. Default = raw type_name; specific
+    // overrides for types the user reads frequently.
+    function displayStepType(s) {
+        const t = s && s.type_name;
+        if (!t) return '?';
+        if (t === 'cameraSelect') return 'Thermal';
+        if (t === 'gemMode') return 'GEM';
+        return t;
+    }
+
+    // Display-friendly step value. Bool-ish/0-1 types render as On/Off.
+    function displayStepValue(s) {
+        if (!s) return '';
+        const t = s.type_name;
+        const v = s.value1;
+        if (t === 'cameraSelect') {
+            // Percepto stores camera type as a string ("Thermal"/"Visual")
+            // OR boolean — render whichever is meaningful.
+            if (typeof v === 'boolean') return v ? 'On' : 'Off';
+            if (v === 1 || v === '1') return 'On';
+            if (v === 0 || v === '0') return 'Off';
+            return v != null ? String(v) : '';
+        }
+        if (t === 'gemMode') {
+            if (v === 1 || v === '1' || v === true) return 'On';
+            if (v === 0 || v === '0' || v === false) return 'Off';
+            return v != null ? String(v) : '';
+        }
+        if (v == null) return '';
+        return `${v}${s.value1_name ? ' ' + s.value1_name : ''}`;
     }
 
     // ========================================================
@@ -352,6 +436,10 @@
     // ========================================================
     // SUM button injection (Mission Bank toolbar)
     // ========================================================
+    // The Mission Bank header in Percepto is `.missions-list__header`,
+    // and the "New mission" button inside it is `.missions-list__new-button`.
+    // We inject our SUM button as a sibling so it inherits the same
+    // Ant Design styling for visual consistency.
     function injectSumButton(doc) {
         if (!masterEnabled) return;
         if (!isOnMissionBank()) return;
@@ -359,61 +447,35 @@
             doc.getElementById(SUM_BTN_ID).style.display = '';
             return;
         }
-        // Candidate selectors for the Mission Bank toolbar. We don't know
-        // Percepto's exact class without DOM inspection, so try several
-        // patterns mirroring Site Setup. Falls back to a floating
-        // bottom-right button if none match.
-        const candidates = [
-            '.mission-bank-header--all-missions',
-            '.mission-bank-header',
-            '.mission-bank__header',
-            '[class*="mission-bank"][class*="header"]',
-            '.percepto-mission-bank-header',
-        ];
-        let header = null;
-        for (const sel of candidates) {
-            try {
-                header = doc.querySelector(sel);
-                if (header) break;
-            } catch (e) {}
-        }
+        const header = doc.querySelector('.missions-list__header');
         if (header) {
             injectButtonIntoHeader(doc, header);
-        } else {
+        } else if (doc.body) {
             injectFloatingButton(doc);
         }
     }
 
     function injectButtonIntoHeader(doc, header) {
-        let container = doc.getElementById('aim-mb-automation-container');
-        if (!container) {
-            container = doc.createElement('div');
-            container.id = 'aim-mb-automation-container';
-            Object.assign(container.style, {
-                width: '100%', display: 'flex', justifyContent: 'flex-start',
-                padding: '4px 0 8px 16px', borderBottom: '1px solid #f0f0f0',
-                marginTop: '-4px', gap: '10px',
-            });
-            header.after(container);
-        }
-        // Try to mirror an existing Ant button on the header for native styling
-        const refBtn = header.querySelector('button[class*="ant-btn"]');
+        const newBtn = header.querySelector('.missions-list__new-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        btn.className = refBtn ? refBtn.className : 'ant-btn ant-btn-primary ant-btn-sm';
-        Object.assign(btn.style, {
-            minWidth: 'unset', padding: '0 12px', height: '24px',
-            fontSize: '10px', fontWeight: 'bold',
-        });
-        btn.innerHTML = 'SUM';
+        // Reuse the className from the existing "New mission" button so
+        // SUM picks up Percepto's Ant theme (size, color, hover state).
+        btn.className = newBtn ? newBtn.className : 'ant-btn ant-btn-primary';
+        btn.style.marginLeft = '8px';
+        btn.innerHTML = '<span>SUM</span>';
         btn.title = 'Open mission summary (AIM Mission Bank Tools)';
         btn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
             openPanel();
         };
-        container.appendChild(btn);
+        if (newBtn && newBtn.parentNode) {
+            newBtn.parentNode.insertBefore(btn, newBtn.nextSibling);
+        } else {
+            header.appendChild(btn);
+        }
     }
 
     function injectFloatingButton(doc) {
@@ -437,17 +499,12 @@
         doc.body.appendChild(btn);
     }
 
-    function recursiveSumInject(win) {
-        try {
-            injectSumButton(win.document);
-            const frames = win.document.querySelectorAll('iframe');
-            frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
-        } catch (e) {}
-    }
-
     function runSumInjection() {
         if (!masterEnabled) return;
-        recursiveSumInject(window);
+        // Inject only into THIS context's document. The script is @match'd
+        // into both top and iframe, so each context handles its own DOM.
+        // Recursive iframe walk (v0.2) produced duplicate buttons.
+        try { injectSumButton(document); } catch (e) {}
     }
 
     function hideSumButton() {
@@ -480,6 +537,7 @@
 
     function closePanel() {
         if (panelEl) panelEl.style.display = 'none';
+        closeOpenMenus();
         panelState = null;
     }
 
@@ -506,17 +564,19 @@
             style.id = 'aim-mb-styles';
             style.textContent = `
                 #${PANEL_ID} { font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
-                #${PANEL_ID} .aim-mb-header { background: #14d2dc; color: #000; padding: 6px 12px; cursor: move; display: flex; align-items: center; gap: 10px; user-select: none; border-radius: 6px 6px 0 0; }
-                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; }
+                #${PANEL_ID} .aim-mb-header { background: #14d2dc; color: #000; padding: 6px 12px; cursor: move; display: flex; align-items: center; gap: 10px; user-select: none; border-radius: 6px 6px 0 0; flex-shrink: 0; }
+                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
                 #${PANEL_ID} .aim-mb-header-btn { background: rgba(0,0,0,0.15); border: none; color: #000; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
                 #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(0,0,0,0.3); }
-                #${PANEL_ID} .aim-mb-toolbar { background: #1a1a1a; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+                /* Body is a flex column so toolbar + footer stay pinned and only the table scrolls. */
+                #${PANEL_ID} .aim-mb-body { flex: 1; overflow: hidden; background: #0f1216; display: flex; flex-direction: column; }
+                #${PANEL_ID} .aim-mb-toolbar { background: #1a1a1a; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
                 #${PANEL_ID} .aim-mb-search { flex: 1; min-width: 180px; background: #0f1216; border: 1px solid #444; color: #e6e6e6; padding: 4px 8px; font-size: 12px; border-radius: 3px; outline: none; }
                 #${PANEL_ID} .aim-mb-search:focus { border-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-tbtn { background: #2a2a2a; border: 1px solid #444; color: #e6e6e6; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; }
                 #${PANEL_ID} .aim-mb-tbtn:hover { border-color: #14d2dc; color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-tbtn.active { background: #14d2dc; color: #000; border-color: #14d2dc; }
-                #${PANEL_ID} .aim-mb-body { flex: 1; overflow: auto; background: #0f1216; }
+                #${PANEL_ID} .aim-mb-table-wrap { flex: 1; overflow: auto; background: #0f1216; }
                 #${PANEL_ID} table { width: 100%; border-collapse: collapse; font-size: 11px; }
                 #${PANEL_ID} thead { background: #1a1a1a; position: sticky; top: 0; z-index: 1; }
                 #${PANEL_ID} th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #444; cursor: pointer; user-select: none; white-space: nowrap; font-weight: 600; color: #aaa; }
@@ -529,29 +589,47 @@
                 #${PANEL_ID} .aim-mb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
                 #${PANEL_ID} .aim-mb-dot.active { background: #5fff5f; }
                 #${PANEL_ID} .aim-mb-dot.inactive { background: #555; }
-                #${PANEL_ID} .aim-mb-footer { background: #1a1a1a; padding: 6px 10px; border-top: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+                #${PANEL_ID} .aim-mb-footer { background: #1a1a1a; padding: 6px 10px; border-top: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
                 #${PANEL_ID} .aim-mb-info { color: #aaa; font-size: 11px; flex: 1; }
-                #${PANEL_ID} .aim-mb-resize { position: absolute; bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #14d2dc 50%); border-radius: 0 0 6px 0; opacity: 0.5; }
+                #${PANEL_ID} .aim-mb-resize { position: absolute; bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #14d2dc 50%); border-radius: 0 0 6px 0; opacity: 0.5; touch-action: none; }
                 #${PANEL_ID} .aim-mb-resize:hover { opacity: 1; }
-                #${PANEL_ID} .aim-mb-cols-menu { position: absolute; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; padding: 6px; max-height: 320px; overflow-y: auto; z-index: 100000; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
-                #${PANEL_ID} .aim-mb-cols-menu label { display: block; padding: 3px 8px; font-size: 11px; color: #e6e6e6; cursor: pointer; white-space: nowrap; }
-                #${PANEL_ID} .aim-mb-cols-menu label:hover { background: rgba(20,210,220,0.15); }
-                #${PANEL_ID} .aim-mb-cols-menu input { margin-right: 6px; }
-                #${PANEL_ID} .aim-mb-settings-popover { position: absolute; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; padding: 14px; z-index: 100000; box-shadow: 0 4px 20px rgba(0,0,0,0.7); min-width: 280px; }
-                #${PANEL_ID} .aim-mb-settings-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; color: #e6e6e6; }
-                #${PANEL_ID} .aim-mb-settings-row input[type="number"] { width: 80px; background: #0f1216; border: 1px solid #444; color: #e6e6e6; padding: 3px 6px; font-size: 11px; border-radius: 3px; outline: none; }
-                #${PANEL_ID} .aim-mb-detail-header { background: #1a1a1a; padding: 10px 14px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 12px; }
+                /* Detail view */
+                #${PANEL_ID} .aim-mb-detail-header { background: #1a1a1a; padding: 10px 14px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
                 #${PANEL_ID} .aim-mb-detail-back { background: #2a2a2a; border: 1px solid #444; color: #14d2dc; padding: 4px 12px; cursor: pointer; border-radius: 3px; font-weight: 600; font-size: 12px; }
                 #${PANEL_ID} .aim-mb-detail-back:hover { background: #14d2dc; color: #000; }
                 #${PANEL_ID} .aim-mb-detail-title { flex: 1; font-size: 14px; font-weight: 700; color: #fff; }
                 #${PANEL_ID} .aim-mb-detail-id { color: #888; font-size: 11px; }
-                #${PANEL_ID} .aim-mb-detail-body { padding: 14px; }
+                #${PANEL_ID} .aim-mb-detail-body { padding: 14px; overflow: auto; flex: 1; }
                 #${PANEL_ID} .aim-mb-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
                 #${PANEL_ID} .aim-mb-card-title { font-size: 10px; text-transform: uppercase; color: #14d2dc; letter-spacing: 0.1em; margin-bottom: 8px; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
                 #${PANEL_ID} .aim-mb-stat { background: #0f1216; border-radius: 4px; padding: 8px 10px; }
+                #${PANEL_ID} .aim-mb-stat-clickable { cursor: pointer; transition: background 0.1s; }
+                #${PANEL_ID} .aim-mb-stat-clickable:hover { background: #181c22; outline: 1px solid #14d2dc; }
                 #${PANEL_ID} .aim-mb-stat-label { font-size: 10px; color: #888; text-transform: uppercase; }
                 #${PANEL_ID} .aim-mb-stat-value { font-size: 16px; color: #fff; font-weight: 700; margin-top: 2px; }
+                #${PANEL_ID} .aim-mb-step-nav { color: #5fff5f; font-weight: 700; }
+                #${PANEL_ID} .aim-mb-step-snap { color: #ff9800; font-weight: 700; }
+                #${PANEL_ID} .aim-mb-loc { cursor: pointer; color: #14d2dc; text-decoration: underline; }
+                #${PANEL_ID} .aim-mb-loc:hover { color: #5ff; }
+                /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
+                .aim-mb-cols-menu, .aim-mb-settings-popover { position: fixed; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; z-index: 100001; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
+                .aim-mb-cols-menu { padding: 0; max-height: 360px; overflow: hidden; display: flex; flex-direction: column; }
+                .aim-mb-settings-popover { padding: 0; min-width: 300px; }
+                .aim-mb-menu-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #14d2dc; color: #000; border-radius: 5px 5px 0 0; font-weight: 700; font-size: 12px; }
+                .aim-mb-menu-head .aim-mb-menu-title { flex: 1; }
+                .aim-mb-menu-close { background: transparent; border: none; color: #000; font-size: 14px; cursor: pointer; font-weight: 700; padding: 0 4px; }
+                .aim-mb-menu-close:hover { color: #800; }
+                .aim-mb-menu-body { padding: 6px; overflow-y: auto; flex: 1; }
+                .aim-mb-cols-menu label { display: block; padding: 3px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+                .aim-mb-cols-menu label:hover { background: rgba(20,210,220,0.15); }
+                .aim-mb-cols-menu input { margin-right: 6px; }
+                .aim-mb-cols-menu .aim-mb-tbtn { background: #2a2a2a; border: 1px solid #444; color: #e6e6e6; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; }
+                .aim-mb-cols-menu .aim-mb-tbtn:hover { border-color: #14d2dc; color: #14d2dc; }
+                .aim-mb-settings-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; }
+                .aim-mb-settings-row input[type="number"] { width: 80px; background: #0f1216; border: 1px solid #444; color: #e6e6e6; padding: 3px 6px; font-size: 11px; border-radius: 3px; outline: none; }
+                .aim-mb-settings-row .aim-mb-tbtn { background: #2a2a2a; border: 1px solid #444; color: #e6e6e6; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; }
+                .aim-mb-settings-row .aim-mb-tbtn:hover { border-color: #14d2dc; color: #14d2dc; }
             `;
             document.head.appendChild(style);
         }
@@ -570,7 +648,7 @@
         const header = document.createElement('div');
         header.className = 'aim-mb-header';
         header.innerHTML = `
-            <div class="aim-mb-header-title">📋 Mission Summary — Site <span data-site></span></div>
+            <div class="aim-mb-header-title">📋 Mission Summary — <span data-site></span></div>
             <button class="aim-mb-header-btn" data-refresh title="Re-fetch missions">Refresh</button>
             <button class="aim-mb-header-btn" data-close>✕</button>
         `;
@@ -600,42 +678,61 @@
         document.body.appendChild(panelEl);
     }
 
+    // Pointer-event drag: setPointerCapture guarantees we keep receiving
+    // pointermove + pointerup even if the cursor leaves the handle (the
+    // mouse-event version dropped if the user dragged off the corner).
     function makeDraggable(el, handle) {
-        let startX, startY, startLeft, startTop, dragging = false;
-        handle.addEventListener('mousedown', (e) => {
+        let startX, startY, startLeft, startTop, dragging = false, pointerId = null;
+        handle.addEventListener('pointerdown', (e) => {
             if (e.target.tagName === 'BUTTON') return;
             dragging = true;
+            pointerId = e.pointerId;
             startX = e.clientX; startY = e.clientY;
             const rect = el.getBoundingClientRect();
             startLeft = rect.left; startTop = rect.top;
             el.style.right = 'auto'; // switch from right-anchored to left-anchored
             el.style.left = `${startLeft}px`;
             el.style.top = `${startTop}px`;
+            try { handle.setPointerCapture(pointerId); } catch (er) {}
             e.preventDefault();
         });
-        window.addEventListener('mousemove', (e) => {
-            if (!dragging) return;
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging || e.pointerId !== pointerId) return;
             el.style.left = `${startLeft + e.clientX - startX}px`;
             el.style.top = `${startTop + e.clientY - startY}px`;
         });
-        window.addEventListener('mouseup', () => { dragging = false; });
+        const stop = (e) => {
+            if (e && e.pointerId !== pointerId) return;
+            dragging = false;
+            try { handle.releasePointerCapture(pointerId); } catch (er) {}
+        };
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
     }
 
     function makeResizable(el, handle) {
-        let startX, startY, startW, startH, resizing = false;
-        handle.addEventListener('mousedown', (e) => {
+        let startX, startY, startW, startH, resizing = false, pointerId = null;
+        handle.addEventListener('pointerdown', (e) => {
             resizing = true;
+            pointerId = e.pointerId;
             startX = e.clientX; startY = e.clientY;
             const rect = el.getBoundingClientRect();
             startW = rect.width; startH = rect.height;
+            try { handle.setPointerCapture(pointerId); } catch (er) {}
             e.preventDefault();
         });
-        window.addEventListener('mousemove', (e) => {
-            if (!resizing) return;
+        handle.addEventListener('pointermove', (e) => {
+            if (!resizing || e.pointerId !== pointerId) return;
             el.style.width = `${Math.max(500, startW + e.clientX - startX)}px`;
             el.style.height = `${Math.max(300, startH + e.clientY - startY)}px`;
         });
-        window.addEventListener('mouseup', () => { resizing = false; });
+        const stop = (e) => {
+            if (e && e.pointerId !== pointerId) return;
+            resizing = false;
+            try { handle.releasePointerCapture(pointerId); } catch (er) {}
+        };
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
     }
 
     // ========================================================
@@ -646,9 +743,18 @@
         if (body) body.innerHTML = html;
     }
 
-    function renderLoadingState() {
+    function updateTitle() {
+        if (!panelEl) return;
+        const span = panelEl.querySelector('[data-site]');
+        if (!span) return;
+        const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
-        if (panelEl) panelEl.querySelector('[data-site]').textContent = sid || '?';
+        span.textContent = name || (sid ? `Site ${sid}` : '?');
+    }
+
+    function renderLoadingState() {
+        updateTitle();
+        const sid = getCurrentSiteID();
         setBodyHtml(`<div style="padding:40px;text-align:center;color:#888;">Loading missions for site ${sid}…</div>`);
     }
 
@@ -664,7 +770,7 @@
         if (!sid) return;
         if (!panelState) initPanelState();
         panelState.drillId = null;
-        panelEl.querySelector('[data-site]').textContent = sid;
+        updateTitle();
 
         const allRows = buildAllRows(sid);
         const rows = filterAndSort(allRows);
@@ -681,7 +787,7 @@
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
             </div>
-            <div style="overflow:auto;flex:1;background:#0f1216;" id="aim-mb-table-wrap">
+            <div class="aim-mb-table-wrap" id="aim-mb-table-wrap">
                 <table>
                     <thead>
                         <tr>
@@ -738,16 +844,23 @@
     }
 
     function wireTableEvents(rows, visibleCols) {
-        // Search
+        // Search — DO NOT auto-focus. v0.2 stole focus from the settings
+        // popover after every keystroke, which broke that input. The user
+        // can click into the field themselves.
         const search = panelEl.querySelector('.aim-mb-search');
         if (search) {
             search.addEventListener('input', (e) => {
+                const cursor = e.target.selectionStart;
                 panelState.search = e.target.value;
                 renderTableView();
+                // Restore focus + cursor IF we held focus when input fired —
+                // we definitely did (input event implies focus), so just re-grab.
+                const newSearch = panelEl.querySelector('.aim-mb-search');
+                if (newSearch) {
+                    newSearch.focus();
+                    try { newSearch.setSelectionRange(cursor, cursor); } catch (er) {}
+                }
             });
-            // Keep focus + cursor position
-            search.focus();
-            search.setSelectionRange(panelState.search.length, panelState.search.length);
         }
         // Unit toggle
         panelEl.querySelectorAll('[data-unit]').forEach(b => {
@@ -759,7 +872,7 @@
         });
         // Columns menu
         const colsBtn = panelEl.querySelector('[data-cols]');
-        if (colsBtn) colsBtn.onclick = (e) => openColumnsMenu(colsBtn);
+        if (colsBtn) colsBtn.onclick = () => openColumnsMenu(colsBtn);
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
@@ -825,17 +938,23 @@
         const menu = document.createElement('div');
         menu.className = 'aim-mb-cols-menu';
         const visible = new Set(getVisibleColumnIds());
-        menu.innerHTML = COLUMNS.map(c => `
-            <label><input type="checkbox" data-col-toggle="${c.id}" ${visible.has(c.id) ? 'checked' : ''} /> ${escapeHtml(c.label)}</label>
-        `).join('') + `
-            <hr style="border:none;border-top:1px solid #444;margin:4px 0;" />
-            <label style="color:#14d2dc;font-weight:600"><button class="aim-mb-tbtn" data-cols-reset style="width:100%">Reset to defaults</button></label>
+        menu.innerHTML = `
+            <div class="aim-mb-menu-head">
+                <div class="aim-mb-menu-title">Columns</div>
+                <button class="aim-mb-menu-close" data-close-menu title="Close">✕</button>
+            </div>
+            <div class="aim-mb-menu-body">
+                ${COLUMNS.map(c => `
+                    <label><input type="checkbox" data-col-toggle="${c.id}" ${visible.has(c.id) ? 'checked' : ''} /> ${escapeHtml(c.label)}</label>
+                `).join('')}
+                <hr style="border:none;border-top:1px solid #444;margin:6px 0;" />
+                <button class="aim-mb-tbtn" data-cols-reset style="width:100%">Reset to defaults</button>
+            </div>
         `;
-        const rect = anchor.getBoundingClientRect();
-        menu.style.left = `${rect.left}px`;
-        menu.style.top = `${rect.bottom + 4}px`;
-        panelEl.appendChild(menu);
+        positionFloatingMenu(menu, anchor);
+        document.body.appendChild(menu);
 
+        menu.querySelector('[data-close-menu]').onclick = () => menu.remove();
         menu.querySelectorAll('[data-col-toggle]').forEach(cb => {
             cb.onclick = (e) => {
                 e.stopPropagation();
@@ -847,19 +966,24 @@
                 const next = COLUMNS.map(c => c.id).filter(id => cur.has(id));
                 setVisibleColumnIds(next);
                 renderTableView();
-                openColumnsMenu(anchor); // re-anchor
+                // Menu was appended to document.body so it survives the
+                // re-render — no need to re-open.
             };
         });
         menu.querySelector('[data-cols-reset]').onclick = () => {
             const next = COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
             setVisibleColumnIds(next);
             renderTableView();
-            openColumnsMenu(anchor);
+            // Refresh checkbox states in-place
+            const visNow = new Set(next);
+            menu.querySelectorAll('[data-col-toggle]').forEach(cb => {
+                cb.checked = visNow.has(cb.dataset.colToggle);
+            });
         };
         // Outside click closes
         setTimeout(() => {
             const onDoc = (e) => {
-                if (!menu.contains(e.target) && e.target !== anchor) {
+                if (!menu.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) {
                     menu.remove();
                     document.removeEventListener('mousedown', onDoc, true);
                 }
@@ -878,24 +1002,28 @@
         const pop = document.createElement('div');
         pop.className = 'aim-mb-settings-popover';
         pop.innerHTML = `
-            <div style="font-size:12px;font-weight:700;color:#14d2dc;margin-bottom:10px;">Battery → Flights thresholds</div>
-            <div style="font-size:10px;color:#888;margin-bottom:10px;">Adjust per-flight battery percentages. Drones land around 30% so 100% raw usage ≈ 2 flights.</div>
-            ${labels.map((lbl, i) => `
-                <div class="aim-mb-settings-row">
-                    <span style="flex:1">${lbl}</span>
-                    <input type="number" data-thresh="${i}" value="${t[i]}" step="10" />
-                    <span>%</span>
+            <div class="aim-mb-menu-head">
+                <div class="aim-mb-menu-title">Battery → Flights thresholds</div>
+                <button class="aim-mb-menu-close" data-close-menu title="Close">✕</button>
+            </div>
+            <div class="aim-mb-menu-body" style="padding:12px;">
+                <div style="font-size:10px;color:#888;margin-bottom:10px;">Adjust per-flight battery percentages. Drones land around 30 % so 100 % raw usage ≈ 2 flights.</div>
+                ${labels.map((lbl, i) => `
+                    <div class="aim-mb-settings-row">
+                        <span style="flex:1">${lbl}</span>
+                        <input type="number" data-thresh="${i}" value="${t[i]}" step="10" />
+                        <span>%</span>
+                    </div>
+                `).join('')}
+                <div class="aim-mb-settings-row" style="margin-top:10px;">
+                    <button class="aim-mb-tbtn" data-thresh-reset style="flex:1">Reset to defaults</button>
                 </div>
-            `).join('')}
-            <div class="aim-mb-settings-row" style="margin-top:10px;">
-                <button class="aim-mb-tbtn" data-thresh-reset style="flex:1">Reset to defaults</button>
             </div>
         `;
-        const rect = anchor.getBoundingClientRect();
-        pop.style.left = `${Math.max(8, rect.left - 200)}px`;
-        pop.style.top = `${rect.bottom + 4}px`;
-        panelEl.appendChild(pop);
+        positionFloatingMenu(pop, anchor, { preferLeft: true });
+        document.body.appendChild(pop);
 
+        pop.querySelector('[data-close-menu]').onclick = () => pop.remove();
         pop.querySelectorAll('[data-thresh]').forEach(inp => {
             inp.oninput = () => {
                 const i = Number(inp.dataset.thresh);
@@ -904,20 +1032,23 @@
                     panelState.thresholds[i] = v;
                     gmSet(CACHE_KEY_FLIGHT_THRESHOLDS, panelState.thresholds);
                     renderTableView();
-                    // Re-anchor since renderTableView re-creates panel innerHTML
-                    // (but pop was appended to panelEl which still exists)
+                    // Popover lives on document.body so it survives.
                 }
             };
         });
         pop.querySelector('[data-thresh-reset]').onclick = () => {
             panelState.thresholds = DEFAULT_FLIGHT_THRESHOLDS.slice();
             gmSet(CACHE_KEY_FLIGHT_THRESHOLDS, panelState.thresholds);
-            pop.remove();
             renderTableView();
+            // Refresh input values in-place
+            pop.querySelectorAll('[data-thresh]').forEach(inp => {
+                const i = Number(inp.dataset.thresh);
+                inp.value = panelState.thresholds[i];
+            });
         };
         setTimeout(() => {
             const onDoc = (e) => {
-                if (!pop.contains(e.target) && e.target !== anchor) {
+                if (!pop.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) {
                     pop.remove();
                     document.removeEventListener('mousedown', onDoc, true);
                 }
@@ -926,9 +1057,25 @@
         }, 0);
     }
 
+    // Position a floating menu using fixed coords from the anchor's bounding rect.
+    // Clamps to viewport so the menu never lands off-screen.
+    function positionFloatingMenu(menu, anchor, opts) {
+        const rect = anchor.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const desiredW = 280;
+        let left = (opts && opts.preferLeft) ? (rect.right - desiredW) : rect.left;
+        let top = rect.bottom + 4;
+        if (left + desiredW > vw - 8) left = Math.max(8, vw - desiredW - 8);
+        if (left < 8) left = 8;
+        // Defer max-height calc until after attachment if needed; cap top.
+        if (top + 100 > vh - 8) top = Math.max(8, vh - 200);
+        menu.style.left = `${left}px`;
+        menu.style.top = `${top}px`;
+    }
+
     function closeOpenMenus() {
-        if (!panelEl) return;
-        panelEl.querySelectorAll('.aim-mb-cols-menu, .aim-mb-settings-popover').forEach(m => m.remove());
+        document.querySelectorAll('.aim-mb-cols-menu, .aim-mb-settings-popover').forEach(m => m.remove());
     }
 
     // ========================================================
@@ -970,41 +1117,53 @@
         const t = panelState.thresholds;
         const realSteps = row.realSteps;
 
+        // Build dynamic per-type counts so we surface ALL distinct types
+        // (not just snapshot / navigate / wait). Uses display name so
+        // cameraSelect → "Thermal", gemMode → "GEM" in the breakdown.
+        const typeCounts = {};
+        realSteps.forEach(s => {
+            const t = displayStepType(s);
+            typeCounts[t] = (typeCounts[t] || 0) + 1;
+        });
+        const typeStatCards = Object.entries(typeCounts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, v]) => stat(k, v, String(v)))
+            .join('');
+
         const html = `
             <div class="aim-mb-detail-header">
                 <button class="aim-mb-detail-back" data-back>← Back</button>
                 <div class="aim-mb-detail-title">${escapeHtml(row.name)}</div>
+                <button class="aim-mb-tbtn ${unit === 'imperial' ? 'active' : ''}" data-unit-d="imperial">mi</button>
+                <button class="aim-mb-tbtn ${unit === 'metric' ? 'active' : ''}" data-unit-d="metric">km</button>
                 <div class="aim-mb-detail-id">ID ${row.id}${row.active ? '' : ' · <span style="color:#888">Inactive</span>'}</div>
             </div>
             <div class="aim-mb-detail-body">
                 <div class="aim-mb-card">
                     <div class="aim-mb-card-title">Mission Stats</div>
                     <div class="aim-mb-stats-grid">
-                        ${stat('Steps', row.steps)}
-                        ${stat('Flight Time', fmtTime(row.flightTimeS))}
-                        ${stat('Distance', fmtDistance(row.flightDistanceM, unit))}
-                        ${stat('Battery %', fmtPct(row.batteryConsumption))}
-                        ${stat('Est. Flights', estimateFlights(row.batteryConsumption, t))}
-                        ${stat('Total Consumption %', fmtPct(row.totalConsumption))}
+                        ${stat('Steps', row.steps, String(row.steps))}
+                        ${stat('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
+                        ${stat('Distance', fmtDistance(row.flightDistanceM, unit), fmtDistance(row.flightDistanceM, unit))}
+                        ${stat('Battery %', fmtPct(row.batteryConsumption), fmtPct(row.batteryConsumption))}
+                        ${stat('Est. Flights', estimateFlights(row.batteryConsumption, t), String(estimateFlights(row.batteryConsumption, t)))}
+                        ${stat('Total Consumption %', fmtPct(row.totalConsumption), fmtPct(row.totalConsumption))}
                     </div>
                 </div>
                 <div class="aim-mb-card">
                     <div class="aim-mb-card-title">Flight Phase Breakdown</div>
                     <div class="aim-mb-stats-grid">
-                        ${stat('Takeoff', `${fmtTime(row.takeoffTimeS)} · ${fmtPct(row.takeoffConsumption)}`)}
-                        ${stat('Navigate', `${fmtTime(row.navTimeS)} · ${fmtPct(row.navConsumption)}`)}
-                        ${stat('Wait', `${fmtTime(row.waitTimeS)} · ${fmtPct(row.waitConsumption)}`)}
-                        ${stat('Extra', `${fmtTime(row.extraTimeS)} · ${fmtPct(row.extraConsumption)}`)}
-                        ${stat('Landing', `${fmtTime(row.landingTimeS)} · ${fmtPct(row.landingConsumption)}`)}
+                        ${stat('Takeoff', `${fmtTime(row.takeoffTimeS)} · ${fmtPct(row.takeoffConsumption)}`, `${fmtTime(row.takeoffTimeS)} / ${fmtPct(row.takeoffConsumption)}`)}
+                        ${stat('Navigate', `${fmtTime(row.navTimeS)} · ${fmtPct(row.navConsumption)}`, `${fmtTime(row.navTimeS)} / ${fmtPct(row.navConsumption)}`)}
+                        ${stat('Wait', `${fmtTime(row.waitTimeS)} · ${fmtPct(row.waitConsumption)}`, `${fmtTime(row.waitTimeS)} / ${fmtPct(row.waitConsumption)}`)}
+                        ${stat('Extra', `${fmtTime(row.extraTimeS)} · ${fmtPct(row.extraConsumption)}`, `${fmtTime(row.extraTimeS)} / ${fmtPct(row.extraConsumption)}`)}
+                        ${stat('Landing', `${fmtTime(row.landingTimeS)} · ${fmtPct(row.landingConsumption)}`, `${fmtTime(row.landingTimeS)} / ${fmtPct(row.landingConsumption)}`)}
                     </div>
                 </div>
                 <div class="aim-mb-card">
                     <div class="aim-mb-card-title">Step Counts (excluding takeoff + return)</div>
                     <div class="aim-mb-stats-grid">
-                        ${stat('Snapshots', row.snapshots)}
-                        ${stat('Navigates', row.navigates)}
-                        ${stat('Waits', row.waits)}
-                        ${stat('Other', Math.max(0, row.steps - row.snapshots - row.navigates - row.waits))}
+                        ${typeStatCards || '<div style="color:#888;font-size:11px;">No real steps.</div>'}
                     </div>
                 </div>
                 <div class="aim-mb-card">
@@ -1023,21 +1182,77 @@
             </div>
         `;
         setBodyHtml(html);
+        wireDetailEvents(missionId);
+    }
+
+    function wireDetailEvents(missionId) {
         panelEl.querySelector('[data-back]').onclick = () => {
             renderTableView();
         };
+        // Unit toggle on detail
+        panelEl.querySelectorAll('[data-unit-d]').forEach(b => {
+            b.onclick = () => {
+                panelState.distanceUnit = b.dataset.unitD;
+                gmSet(CACHE_KEY_DISTANCE_UNIT, panelState.distanceUnit);
+                renderDetailView(missionId);
+            };
+        });
+        // Click-to-copy on stat cards
+        panelEl.querySelectorAll('.aim-mb-stat-clickable').forEach(el => {
+            el.onclick = () => {
+                const v = el.dataset.copy;
+                if (v == null || v === 'null' || v === 'undefined') return;
+                copyToClipboard(v);
+                showToast(`Copied: ${v}`, '#5fff5f');
+            };
+        });
+        // Location cells — left-click opens Google Maps, right-click copies coords
+        panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
+            el.onclick = (e) => {
+                e.preventDefault();
+                const lat = el.dataset.lat;
+                const lng = el.dataset.lng;
+                if (lat && lng) {
+                    try { window.open(`https://www.google.com/maps?q=${lat},${lng}`, '_blank'); }
+                    catch (er) { showToast('Failed to open Google Maps', '#ff5252'); }
+                }
+            };
+            el.oncontextmenu = (e) => {
+                e.preventDefault();
+                const lat = el.dataset.lat;
+                const lng = el.dataset.lng;
+                if (lat && lng) {
+                    const coords = `${lat}, ${lng}`;
+                    copyToClipboard(coords);
+                    showToast(`Copied: ${coords}`, '#5fff5f');
+                }
+            };
+        });
     }
 
-    function stat(label, value) {
-        return `<div class="aim-mb-stat"><div class="aim-mb-stat-label">${escapeHtml(label)}</div><div class="aim-mb-stat-value">${escapeHtml(String(value))}</div></div>`;
+    function stat(label, value, copyVal) {
+        const hasCopy = copyVal != null && copyVal !== 'null' && copyVal !== 'undefined' && copyVal !== '—';
+        const cls = hasCopy ? 'aim-mb-stat aim-mb-stat-clickable' : 'aim-mb-stat';
+        const copyAttr = hasCopy ? `data-copy="${escapeHtml(String(copyVal))}"` : '';
+        const title = hasCopy ? ' title="Click to copy"' : '';
+        return `<div class="${cls}" ${copyAttr}${title}><div class="aim-mb-stat-label">${escapeHtml(label)}</div><div class="aim-mb-stat-value">${escapeHtml(String(value))}</div></div>`;
     }
 
     function renderStepRow(s, idx) {
-        const type = s.type_name || '?';
-        const val = s.value1 != null ? `${s.value1}${s.value1_name ? ' ' + s.value1_name : ''}` : '';
-        const loc = s.location && typeof s.location === 'object' && s.location.lat != null
-            ? `${Number(s.location.lat).toFixed(5)}, ${Number(s.location.lng).toFixed(5)}` : '';
-        return `<tr><td>${idx}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(val)}</td><td style="font-size:10px;color:#888;">${escapeHtml(loc)}</td></tr>`;
+        const type = displayStepType(s);
+        const val = displayStepValue(s);
+        const rawType = s && s.type_name;
+        let rowClass = '';
+        if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
+        else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
+        // Location cell — clickable link to Google Maps
+        let locCell = '';
+        if (s && s.location && typeof s.location === 'object' && s.location.lat != null) {
+            const lat = Number(s.location.lat);
+            const lng = Number(s.location.lng);
+            locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
+        }
+        return `<tr${rowClass}><td>${idx}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(val)}</td><td style="font-size:10px;">${locCell}</td></tr>`;
     }
 
     // ========================================================
