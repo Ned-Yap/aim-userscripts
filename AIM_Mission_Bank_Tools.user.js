@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.16';
+    const SCRIPT_VERSION = '0.17';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1965,14 +1965,16 @@ ${placemarks}
     }
 
     // Open a specific instruction in Percepto's mission editor.
-    // Finds the instruction by its draggable ID, scrolls to it, clicks
-    // the hamburger (three-dots) menu, then clicks "Edit".
+    // Finds the instruction by its draggable ID, scrolls to it,
+    // simulates hover to reveal the three-dots menu, hovers the dots
+    // to open the Ant dropdown, then clicks "Edit".
+    //
+    // The dots + dropdown are hover-triggered (not click), so we must
+    // dispatch mouseenter/mouseover/pointermove events to make them
+    // appear before we can interact with them.
     function openInstructionEditor(instructionId, missionId) {
-        // If we're not on the mission editor page, navigate first
-        const sid = getCurrentSiteID();
         const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
         if (link) link.click();
-        // Poll for the instruction to appear in the DOM (React renders async)
         let attempts = 0;
         const interval = setInterval(() => {
             attempts++;
@@ -1981,18 +1983,37 @@ ${placemarks}
             if (!draggable) return;
             clearInterval(interval);
             draggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Step 1: hover the instruction item to reveal the three-dots
             setTimeout(() => {
-                const hamburger = draggable.querySelector('[data-testid="btn-instruction-menu"]');
-                if (!hamburger) { showToast('Instruction found but no menu button', '#ff9800'); return; }
-                hamburger.click();
+                const item = draggable.querySelector('.mission-instruction-item') || draggable;
+                simulateHover(item);
+                // Step 2: wait for dots to appear, then hover them
                 setTimeout(() => {
-                    const editItem = document.querySelector('[data-menu-id$="-edit"]')
-                        || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
-                    if (editItem) editItem.click();
-                    else showToast('Edit menu item not found', '#ff9800');
-                }, 300);
+                    const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
+                    if (!dots) { showToast('Three-dots menu not found', '#ff9800'); return; }
+                    simulateHover(dots);
+                    // Step 3: wait for dropdown, then click Edit
+                    setTimeout(() => {
+                        const editItem = document.querySelector('[data-menu-id$="-edit"]')
+                            || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
+                        if (editItem) editItem.click();
+                        else showToast('Edit menu item not found — try clicking the dots manually', '#ff9800');
+                    }, 400);
+                }, 400);
             }, 400);
         }, 200);
+    }
+
+    function simulateHover(el) {
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+        el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
+        el.dispatchEvent(new PointerEvent('pointermove', opts));
+        el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
+        el.dispatchEvent(new MouseEvent('mouseover', opts));
+        el.dispatchEvent(new MouseEvent('mousemove', opts));
     }
 
     function escapeXml(s) {
