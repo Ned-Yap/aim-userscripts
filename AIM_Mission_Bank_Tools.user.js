@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.15';
+    const SCRIPT_VERSION = '0.16';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1065,6 +1065,10 @@
                 #${PANEL_ID} .aim-mb-step-snap { color: #ff9800; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-loc { cursor: pointer; color: #14d2dc; text-decoration: underline; }
                 #${PANEL_ID} .aim-mb-loc:hover { color: #5ff; }
+                #${PANEL_ID} .aim-mb-step-num { cursor: pointer; color: #14d2dc; text-decoration: underline; font-weight: 700; }
+                #${PANEL_ID} .aim-mb-step-num:hover { color: #5ff; }
+                #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
+                #${PANEL_ID} .aim-mb-step-edit:hover { opacity: 1; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
                 .aim-mb-cols-menu, .aim-mb-settings-popover { position: fixed; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; z-index: 100001; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
                 .aim-mb-cols-menu { padding: 0; max-height: 360px; overflow: hidden; display: flex; flex-direction: column; }
@@ -1702,7 +1706,7 @@
                     <div style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
+                                <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th><th style="width:32px;"></th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
@@ -1777,6 +1781,25 @@
                 if (v == null || v === 'null' || v === 'undefined') return;
                 copyToClipboard(v);
                 showToast(`Copied: ${v}`, '#5fff5f');
+            };
+        });
+        // Step number click → center map on GPS coords
+        panelEl.querySelectorAll('.aim-mb-step-num').forEach(el => {
+            el.onclick = () => {
+                const lat = Number(el.dataset.centerLat);
+                const lng = Number(el.dataset.centerLng);
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    const ok = centerMapOn(lat, lng);
+                    if (ok) showToast(`Map centered on step`, '#14d2dc');
+                    else showToast('Map not available', '#ff9800');
+                }
+            };
+        });
+        // ✏️ icon → open this instruction in Percepto's editor
+        panelEl.querySelectorAll('.aim-mb-step-edit').forEach(el => {
+            el.onclick = () => {
+                const instrId = el.dataset.editInstr;
+                if (instrId) openInstructionEditor(instrId, missionId);
             };
         });
         // Altitude click-to-copy: raw whole number only (no comma, no ft, no ALT)
@@ -1919,6 +1942,59 @@ ${placemarks}
         setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     }
 
+    // Center the Leaflet map on a lat/lng. The map lives in the same
+    // iframe document. Uses the __aim_map__ property set by Map Styler's
+    // prototype patch, or walks the container's properties as fallback.
+    function centerMapOn(lat, lng) {
+        try {
+            const container = document.querySelector('.leaflet-container');
+            if (!container) return false;
+            let map = container.__aim_map__ || null;
+            if (!map) {
+                for (const key of Object.keys(container)) {
+                    const v = container[key];
+                    if (v && typeof v === 'object' && typeof v.setView === 'function' && typeof v.getZoom === 'function') {
+                        map = v; break;
+                    }
+                }
+            }
+            if (!map) return false;
+            map.setView([lat, lng], Math.max(map.getZoom(), 17));
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // Open a specific instruction in Percepto's mission editor.
+    // Finds the instruction by its draggable ID, scrolls to it, clicks
+    // the hamburger (three-dots) menu, then clicks "Edit".
+    function openInstructionEditor(instructionId, missionId) {
+        // If we're not on the mission editor page, navigate first
+        const sid = getCurrentSiteID();
+        const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
+        if (link) link.click();
+        // Poll for the instruction to appear in the DOM (React renders async)
+        let attempts = 0;
+        const interval = setInterval(() => {
+            attempts++;
+            if (attempts > 25) { clearInterval(interval); showToast('Could not find instruction in editor', '#ff9800'); return; }
+            const draggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
+            if (!draggable) return;
+            clearInterval(interval);
+            draggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => {
+                const hamburger = draggable.querySelector('[data-testid="btn-instruction-menu"]');
+                if (!hamburger) { showToast('Instruction found but no menu button', '#ff9800'); return; }
+                hamburger.click();
+                setTimeout(() => {
+                    const editItem = document.querySelector('[data-menu-id$="-edit"]')
+                        || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
+                    if (editItem) editItem.click();
+                    else showToast('Edit menu item not found', '#ff9800');
+                }, 300);
+            }, 400);
+        }, 200);
+    }
+
     function escapeXml(s) {
         return String(s).replace(/[&<>"']/g, c => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
@@ -1940,6 +2016,16 @@ ${placemarks}
         let rowClass = '';
         if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
         else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
+        // Step number cell — click centers the map on this step's GPS
+        const hasGps = s && s.location && typeof s.location === 'object' && s.location.lat != null;
+        let stepCell;
+        if (hasGps) {
+            const lat = Number(s.location.lat);
+            const lng = Number(s.location.lng);
+            stepCell = `<td><span class="aim-mb-step-num" data-center-lat="${lat}" data-center-lng="${lng}" title="Click to center map on this step">${idx}</span></td>`;
+        } else {
+            stepCell = `<td>${idx}</td>`;
+        }
         // Altitude value: click-to-copy raw whole number (no comma, no unit)
         let valCell;
         if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
@@ -1951,12 +2037,15 @@ ${placemarks}
         }
         // Location cell — clickable link to Google Maps
         let locCell = '';
-        if (s && s.location && typeof s.location === 'object' && s.location.lat != null) {
+        if (hasGps) {
             const lat = Number(s.location.lat);
             const lng = Number(s.location.lng);
             locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
         }
-        return `<tr${rowClass}><td>${idx}</td><td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+        // Edit icon — opens this instruction in Percepto's editor
+        const instrId = s && s.id;
+        const editIcon = instrId ? `<td style="text-align:center;"><span class="aim-mb-step-edit" data-edit-instr="${instrId}" title="Open this step in the mission editor">✏️</span></td>` : '<td></td>';
+        return `<tr${rowClass}>${stepCell}<td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td>${editIcon}</tr>`;
     }
 
     // ========================================================
