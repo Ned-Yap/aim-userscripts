@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.19
+// @version      0.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.19';
+    const SCRIPT_VERSION = '0.20';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1065,8 +1065,8 @@
                 #${PANEL_ID} .aim-mb-step-snap { color: #ff9800; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-loc { cursor: pointer; color: #14d2dc; text-decoration: underline; }
                 #${PANEL_ID} .aim-mb-loc:hover { color: #5ff; }
-                #${PANEL_ID} .aim-mb-step-num { cursor: pointer; color: #14d2dc; text-decoration: underline; font-weight: 700; }
-                #${PANEL_ID} .aim-mb-step-num:hover { color: #5ff; }
+                #${PANEL_ID} .aim-mb-step-focus { cursor: pointer; font-size: 12px; opacity: 0.6; }
+                #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-edit:hover { opacity: 1; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
@@ -1706,7 +1706,7 @@
                     <div style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th><th style="width:32px;"></th></tr>
+                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
@@ -1783,8 +1783,8 @@
                 showToast(`Copied: ${v}`, '#5fff5f');
             };
         });
-        // Step number click → center map on GPS coords
-        panelEl.querySelectorAll('.aim-mb-step-num').forEach(el => {
+        // 🔭 binoculars → center map on GPS coords
+        panelEl.querySelectorAll('.aim-mb-step-focus').forEach(el => {
             el.onclick = () => {
                 const lat = Number(el.dataset.centerLat);
                 const lng = Number(el.dataset.centerLng);
@@ -2061,16 +2061,19 @@ ${placemarks}
         let rowClass = '';
         if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
         else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
-        // Step number cell — click centers the map on this step's GPS
         const hasGps = s && s.location && typeof s.location === 'object' && s.location.lat != null;
-        let stepCell;
+        // Binoculars — center map on this step's GPS
+        let focusCell;
         if (hasGps) {
             const lat = Number(s.location.lat);
             const lng = Number(s.location.lng);
-            stepCell = `<td><span class="aim-mb-step-num" data-center-lat="${lat}" data-center-lng="${lng}" title="Click to center map on this step">${idx}</span></td>`;
+            focusCell = `<td style="text-align:center;"><span class="aim-mb-step-focus" data-center-lat="${lat}" data-center-lng="${lng}" title="Center map on this step">🔭</span></td>`;
         } else {
-            stepCell = `<td>${idx}</td>`;
+            focusCell = '<td></td>';
         }
+        // Edit — open this instruction in Percepto's editor
+        const instrId = s && s.id;
+        const editCell = instrId ? `<td style="text-align:center;"><span class="aim-mb-step-edit" data-edit-instr="${instrId}" title="Open this step in the mission editor">✏️</span></td>` : '<td></td>';
         // Altitude value: click-to-copy raw whole number (no comma, no unit)
         let valCell;
         if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
@@ -2087,10 +2090,7 @@ ${placemarks}
             const lng = Number(s.location.lng);
             locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
         }
-        // Edit icon — opens this instruction in Percepto's editor
-        const instrId = s && s.id;
-        const editIcon = instrId ? `<td style="text-align:center;"><span class="aim-mb-step-edit" data-edit-instr="${instrId}" title="Open this step in the mission editor">✏️</span></td>` : '<td></td>';
-        return `<tr${rowClass}>${stepCell}<td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td>${editIcon}</tr>`;
+        return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td></tr>`;
     }
 
     // ========================================================
