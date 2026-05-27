@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1733,31 +1733,19 @@
             copyToClipboard(titleEl.dataset.detailName);
             showToast(`Copied: ${titleEl.dataset.detailName}`, '#5fff5f');
         };
-        // Open in AIM editor — navigates to the mission editor URL.
-        // Direct hash assignment is blocked by the iframe sandbox, so
-        // we create a link with target="_top" and click it.
+        // Open in AIM editor — find the actual mission link in Percepto's
+        // sidebar and click it. This uses Percepto's own React router so
+        // it works regardless of iframe sandbox restrictions.
         const editBtn = panelEl.querySelector('[data-open-editor]');
         if (editBtn) editBtn.onclick = () => {
-            const sid = getCurrentSiteID();
             const mid = editBtn.dataset.openEditor;
-            if (!sid || !mid) return;
-            const href = `#/site/${sid}/control-panel/mission-bank/${mid}`;
-            try {
-                // Try 1: click a link with target="_top"
-                const a = document.createElement('a');
-                a.href = (location.origin || '') + '/' + href;
-                a.target = '_top';
-                a.style.display = 'none';
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-            } catch (e1) {
-                try {
-                    // Try 2: unsafeWindow (Tampermonkey grants access)
-                    unsafeWindow.top.location.hash = href;
-                } catch (e2) {
-                    showToast('Failed to navigate to editor', '#ff5252');
-                }
+            if (!mid) return;
+            const link = document.querySelector(`a[href*="/mission-bank/${mid}"]`);
+            if (link) {
+                link.click();
+                closePanel();
+            } else {
+                showToast('Mission link not found in sidebar — try scrolling to it first', '#ff9800');
             }
         };
         // Unit toggle on detail
