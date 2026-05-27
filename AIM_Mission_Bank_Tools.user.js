@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -390,8 +390,45 @@
         return t;
     }
 
+    // Key used for the Step Counts card. Splits Thermal/GEM into On/Off
+    // variants so the user sees them separately, then sorts by a fixed
+    // importance order with unknown types appended alphabetically.
+    const STEP_COUNT_ORDER = [
+        'navigate', 'snapshot', 'Thermal On', 'GEM On', 'wait',
+        'GEM Off', 'Thermal Off',
+    ];
+    function stepCountKey(s) {
+        if (!s) return '?';
+        const t = s.type_name;
+        if (t === 'cameraSelect') {
+            const on = s.value1 === true || s.value1 === 1 || s.value1 === '1';
+            return on ? 'Thermal On' : 'Thermal Off';
+        }
+        if (t === 'gemMode') {
+            const on = s.value1 === true || s.value1 === 1 || s.value1 === '1';
+            return on ? 'GEM On' : 'GEM Off';
+        }
+        return displayStepType(s);
+    }
+
+    function buildOrderedStepCounts(realSteps) {
+        const counts = {};
+        (realSteps || []).forEach(s => {
+            const k = stepCountKey(s);
+            counts[k] = (counts[k] || 0) + 1;
+        });
+        const ordered = [];
+        STEP_COUNT_ORDER.forEach(k => {
+            if (counts[k] != null) { ordered.push([k, counts[k]]); delete counts[k]; }
+        });
+        Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))
+            .forEach(e => ordered.push(e));
+        return ordered;
+    }
+
     // Display-friendly step value. Bool-ish/0-1 types render as On/Off.
-    function displayStepValue(s) {
+    // Accepts optional `unit` for meter→feet conversion on altitude values.
+    function displayStepValue(s, unit) {
         if (!s) return '';
         const t = s.type_name;
         const v = s.value1;
@@ -409,6 +446,17 @@
             return v != null ? String(v) : '';
         }
         if (v == null) return '';
+        // Unit-aware conversion: if value1_name is "m" (meters) and unit
+        // is imperial, show in feet. This covers navigate/snapshot altitude
+        // values and any future step type that reports in meters.
+        if (s.value1_name === 'm' && typeof v === 'number') {
+            const u = unit || getDistanceUnit();
+            if (u === 'imperial') {
+                const ft = v * 3.28084;
+                return `${ft.toFixed(2)} ft`;
+            }
+            return `${v} m`;
+        }
         return `${v}${s.value1_name ? ' ' + s.value1_name : ''}`;
     }
 
@@ -641,23 +689,17 @@
         } else if (row._error) {
             bodyHtml = `<div style="padding:18px;text-align:center;color:#ff5252;font-size:11px;">Failed to load: ${escapeHtml(row._error)}</div>`;
         } else {
-            // Build per-step-type counts dynamically (same logic as detail view)
-            const typeCounts = {};
-            (row.realSteps || []).forEach(s => {
-                const t = displayStepType(s);
-                typeCounts[t] = (typeCounts[t] || 0) + 1;
-            });
-            const typeCardsHtml = Object.entries(typeCounts)
-                .sort((a, b) => b[1] - a[1])
+            const orderedCounts = buildOrderedStepCounts(row.realSteps);
+            const typeCardsHtml = orderedCounts
                 .map(([k, v]) => statCompact(k, v, String(v)))
                 .join('') || '<div style="color:#888;font-size:10px;">No real steps.</div>';
             bodyHtml = `
                 <div class="aim-mb-rc-card">
                     <div class="aim-mb-rc-card-title">Mission Stats</div>
                     <div class="aim-mb-rc-grid">
-                        ${statCompact('Steps', row.steps, String(row.steps))}
-                        ${statCompact('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
                         ${statCompact('Distance', fmtDistance(row.flightDistanceM, unit), fmtDistance(row.flightDistanceM, unit))}
+                        ${statCompact('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
+                        ${statCompact('Steps', row.steps, String(row.steps))}
                         ${statCompact('Battery %', fmtPct(row.batteryConsumption), fmtPct(row.batteryConsumption))}
                         ${statCompact('Est. Flights', estimateFlights(row.batteryConsumption, thresholds), String(estimateFlights(row.batteryConsumption, thresholds)))}
                         ${statCompact('Total Cons %', fmtPct(row.totalConsumption), fmtPct(row.totalConsumption))}
@@ -678,7 +720,6 @@
                     <div class="aim-mb-rc-grid">${typeCardsHtml}</div>
                 </div>
                 ${row.description ? `<div class="aim-mb-rc-meta">Description: ${escapeHtml(row.description)}</div>` : ''}
-                ${row.robotTypes ? `<div class="aim-mb-rc-meta">Robot types: ${escapeHtml(row.robotTypes)}</div>` : ''}
             `;
         }
         const activeBadge = row.active === false
@@ -689,6 +730,7 @@
         pop.innerHTML = `
             <div class="aim-mb-rc-head">
                 <div class="aim-mb-rc-title">${escapeHtml(row.name || 'Mission')}${activeBadge}</div>
+                <button class="aim-mb-rc-copy-name" data-rc-copy-name="${escapeHtml(row.name || '')}" title="Copy mission name">📋</button>
                 <div class="aim-mb-rc-id">ID ${row.id}</div>
                 <button class="aim-mb-rc-close" data-rc-close title="Close">✕</button>
             </div>
@@ -729,6 +771,12 @@
         // Close X
         const closeBtn = pop.querySelector('[data-rc-close]');
         if (closeBtn) closeBtn.onclick = closeRightClickPopup;
+        // Copy name
+        const copyNameBtn = pop.querySelector('[data-rc-copy-name]');
+        if (copyNameBtn) copyNameBtn.onclick = () => {
+            const name = copyNameBtn.dataset.rcCopyName;
+            if (name) { copyToClipboard(name); showToast(`Copied: ${name}`, '#5fff5f'); }
+        };
         // "Open in SUM" — opens panel + drills into the mission
         const openBtn = pop.querySelector('[data-rc-open-sum]');
         if (openBtn) openBtn.onclick = () => {
@@ -826,6 +874,8 @@
             #${RCLICK_POPUP_ID} .aim-mb-rc-head { background: #14d2dc; color: #000; padding: 6px 10px; display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; border-radius: 5px 5px 0 0; }
             #${RCLICK_POPUP_ID} .aim-mb-rc-title { flex: 1; font-weight: 700; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             #${RCLICK_POPUP_ID} .aim-mb-rc-id { font-size: 10px; color: rgba(0,0,0,0.7); font-weight: 600; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-copy-name { background: rgba(0,0,0,0.15); border: none; color: #000; font-size: 11px; cursor: pointer; padding: 1px 5px; border-radius: 3px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-copy-name:hover { background: rgba(0,0,0,0.3); }
             #${RCLICK_POPUP_ID} .aim-mb-rc-close { background: transparent; border: none; color: #000; font-size: 14px; cursor: pointer; font-weight: 700; padding: 0 4px; }
             #${RCLICK_POPUP_ID} .aim-mb-rc-close:hover { color: #800; }
             #${RCLICK_POPUP_ID} .aim-mb-rc-body { padding: 10px; }
@@ -1450,16 +1500,11 @@
         const t = panelState.thresholds;
         const realSteps = row.realSteps;
 
-        // Build dynamic per-type counts so we surface ALL distinct types
-        // (not just snapshot / navigate / wait). Uses display name so
-        // cameraSelect → "Thermal", gemMode → "GEM" in the breakdown.
-        const typeCounts = {};
-        realSteps.forEach(s => {
-            const t = displayStepType(s);
-            typeCounts[t] = (typeCounts[t] || 0) + 1;
-        });
-        const typeStatCards = Object.entries(typeCounts)
-            .sort((a, b) => b[1] - a[1])
+        // Build step counts with On/Off split for Thermal/GEM, ordered by
+        // importance (navigate → snapshot → Thermal On → GEM On → wait →
+        // GEM Off → Thermal Off → unknowns alphabetical).
+        const orderedCounts = buildOrderedStepCounts(realSteps);
+        const typeStatCards = orderedCounts
             .map(([k, v]) => stat(k, v, String(v)))
             .join('');
 
@@ -1475,9 +1520,9 @@
                 <div class="aim-mb-card">
                     <div class="aim-mb-card-title">Mission Stats</div>
                     <div class="aim-mb-stats-grid">
-                        ${stat('Steps', row.steps, String(row.steps))}
-                        ${stat('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
                         ${stat('Distance', fmtDistance(row.flightDistanceM, unit), fmtDistance(row.flightDistanceM, unit))}
+                        ${stat('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
+                        ${stat('Steps', row.steps, String(row.steps))}
                         ${stat('Battery %', fmtPct(row.batteryConsumption), fmtPct(row.batteryConsumption))}
                         ${stat('Est. Flights', estimateFlights(row.batteryConsumption, t), String(estimateFlights(row.batteryConsumption, t)))}
                         ${stat('Total Consumption %', fmtPct(row.totalConsumption), fmtPct(row.totalConsumption))}
@@ -1506,7 +1551,7 @@
                             <tr><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
                         </thead>
                         <tbody>
-                            ${realSteps.map((s, i) => renderStepRow(s, i + 1)).join('')}
+                            ${realSteps.map((s, i) => renderStepRow(s, i + 1, unit)).join('')}
                         </tbody>
                     </table>
                     ${row.description ? `<div style="margin-top:10px;color:#aaa;font-size:11px;">Description: ${escapeHtml(row.description)}</div>` : ''}
@@ -1581,9 +1626,9 @@
         return `<div class="${cls}" ${copyAttr}${title}><div class="aim-mb-stat-label">${escapeHtml(label)}</div><div class="aim-mb-stat-value">${escapeHtml(String(value))}</div></div>`;
     }
 
-    function renderStepRow(s, idx) {
+    function renderStepRow(s, idx, unit) {
         const type = displayStepType(s);
-        const val = displayStepValue(s);
+        const val = displayStepValue(s, unit);
         const rawType = s && s.type_name;
         let rowClass = '';
         if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
