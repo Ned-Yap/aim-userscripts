@@ -449,15 +449,15 @@
             return v != null ? String(v) : '';
         }
         if (v == null) return '';
-        // Navigate/snapshot values are MSL altitude in meters. Convert
-        // to feet when imperial, round to whole number, comma-format.
+        // Navigate/snapshot values are altitude in meters. Convert to
+        // feet when imperial, round to whole number, comma-format.
         if (s.value1_name === 'm' && typeof v === 'number') {
             const u = unit || getDistanceUnit();
             if (u === 'imperial') {
                 const ft = Math.round(v * 3.28084);
-                return `${ft.toLocaleString()} ft MSL`;
+                return `${ft.toLocaleString()} ft ALT`;
             }
-            return `${Math.round(v).toLocaleString()} m MSL`;
+            return `${Math.round(v).toLocaleString()} m ALT`;
         }
         return `${v}${s.value1_name ? ' ' + s.value1_name : ''}`;
     }
