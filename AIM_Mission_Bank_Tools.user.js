@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -15,8 +15,17 @@
 // @run-at       document-start
 // ==/UserScript==
 
-// AIM Mission Bank Tools — v0.4
+// AIM Mission Bank Tools — v0.5
 // Feature: Mission Summary panel (#48 in features.csv).
+//
+// v0.5 changes (SUM placement polish):
+//   - SUM no longer crowds the same row as "MISSIONS" title + "+ New
+//     Mission". A dedicated `aim-mb-toolbar-row` div is injected as a
+//     sibling immediately AFTER `.missions-list__header`. SUM lives in
+//     there, and future MBT buttons can join the same row (flex/gap
+//     layout, left-aligned).
+//   - Header-rebuild detection now keys off the toolbar row, not the
+//     header itself.
 //
 // v0.4 changes (SUM-placement fix + sandbox window.open fix):
 //   - Floating fallback removed entirely. v0.3 dropped a floating button
@@ -84,7 +93,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -457,6 +466,8 @@
     // and the "New mission" button inside it is `.missions-list__new-button`.
     // We inject our SUM button as a sibling so it inherits the same
     // Ant Design styling for visual consistency.
+    const TOOLBAR_ROW_ID = 'aim-mb-toolbar-row';
+
     function injectSumButton(doc) {
         if (!masterEnabled) return;
         if (!isOnMissionBank()) return;
@@ -464,21 +475,41 @@
         // Wait for React to mount the real header. Previously we dropped
         // a floating fallback here and never replaced it.
         if (!header) return;
+        // Find or build the toolbar row that lives directly under the
+        // Percepto header. SUM and future MBT buttons all go in here so
+        // they aren't crowded against the title + New Mission button.
+        let row = doc.getElementById(TOOLBAR_ROW_ID);
+        if (row && !header.parentNode.contains(row)) {
+            // React rebuilt the header — drop the orphan row, recreate.
+            row.remove();
+            row = null;
+        }
+        if (!row) {
+            row = doc.createElement('div');
+            row.id = TOOLBAR_ROW_ID;
+            Object.assign(row.style, {
+                display: 'flex', alignItems: 'center', gap: '8px',
+                padding: '0 16px 8px 16px',
+                // Sit flush against the header; transparent so it
+                // inherits whatever background Percepto uses.
+                background: 'transparent',
+            });
+            header.parentNode.insertBefore(row, header.nextSibling);
+        }
         const existing = doc.getElementById(SUM_BTN_ID);
-        if (existing && header.contains(existing)) return; // in place
-        if (existing) existing.remove(); // header rebuilt — re-inject fresh
-        injectButtonIntoHeader(doc, header);
+        if (existing && row.contains(existing)) return; // already placed
+        if (existing) existing.remove();
+        injectButtonIntoRow(doc, row, header);
     }
 
-    function injectButtonIntoHeader(doc, header) {
+    function injectButtonIntoRow(doc, row, header) {
+        // Reuse the className from the existing "New mission" button so
+        // SUM picks up Percepto's Ant theme (size, color, hover state).
         const newBtn = header.querySelector('.missions-list__new-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        // Reuse the className from the existing "New mission" button so
-        // SUM picks up Percepto's Ant theme (size, color, hover state).
         btn.className = newBtn ? newBtn.className : 'ant-btn ant-btn-primary';
-        btn.style.marginLeft = '8px';
         btn.innerHTML = '<span>SUM</span>';
         btn.title = 'Open mission summary (AIM Mission Bank Tools)';
         btn.onclick = (e) => {
@@ -486,11 +517,7 @@
             e.stopPropagation();
             openPanel();
         };
-        if (newBtn && newBtn.parentNode) {
-            newBtn.parentNode.insertBefore(btn, newBtn.nextSibling);
-        } else {
-            header.appendChild(btn);
-        }
+        row.appendChild(btn);
     }
 
     function runSumInjection() {
@@ -504,8 +531,8 @@
 
     function hideSumButton() {
         try {
-            const all = document.querySelectorAll(`#${SUM_BTN_ID}`);
-            all.forEach(el => el.remove());
+            document.querySelectorAll(`#${SUM_BTN_ID}`).forEach(el => el.remove());
+            document.querySelectorAll(`#${TOOLBAR_ROW_ID}`).forEach(el => el.remove());
         } catch (e) {}
     }
 
