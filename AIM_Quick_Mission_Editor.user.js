@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Quick Mission Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js
 // @description  Bulk-reorder mission instructions via React fiber walk. Ctrl+Click handles to select, Enter to open the move dialog.
@@ -44,7 +44,8 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-quick-mission-editor';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
+    const LARGE_MOVE_THRESHOLD = 20; // moves of this many or more get a confirm() prompt
     const TAG = '[AIM MB EDITOR]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const IS_TOP = window === window.top;
@@ -171,6 +172,21 @@
             return key ? el[key] : null;
         }
 
+        // v0.2 — defensive fiber walk with multiple candidate paths.
+        // The original v19.5 / v0.1 hard-coded one location
+        // (memoizedProps.value.reorderInstructions). If Percepto ever
+        // refactors their context provider so the function moves to a
+        // sibling property, we used to silently return null and the
+        // queue would abort with "reorderInstructions not found".
+        // Now we try several plausible paths in order and log a clear
+        // diagnostic on failure so future-us can see exactly how far
+        // we walked and what we did/didn't find.
+        const REORDER_FN_CANDIDATES = [
+            n => n?.memoizedProps?.value?.reorderInstructions,
+            n => n?.memoizedProps?.reorderInstructions,
+            n => n?.stateNode?.props?.reorderInstructions,
+            n => n?.stateNode?.reorderInstructions,
+        ];
         function findReorderFn() {
             const draggable = document.querySelector('[data-rfd-draggable-id]');
             if (!draggable) return null;
@@ -178,12 +194,14 @@
             if (!fiber) return null;
             let node = fiber, depth = 0;
             while (node && depth < 80) {
-                if (node.memoizedProps?.value &&
-                    typeof node.memoizedProps.value.reorderInstructions === 'function') {
-                    return node.memoizedProps.value.reorderInstructions;
+                for (const path of REORDER_FN_CANDIDATES) {
+                    let fn;
+                    try { fn = path(node); } catch (e) {}
+                    if (typeof fn === 'function') return fn;
                 }
                 node = node.return; depth++;
             }
+            console.warn(`${TAG} reorderInstructions not found after walking ${depth} fiber levels. Percepto may have refactored their context — extend REORDER_FN_CANDIDATES with the new path.`);
             return null;
         }
 
@@ -494,7 +512,36 @@
         });
         const bolt = document.createElement('div');
         bolt.innerHTML = `<svg width="12" height="18" viewBox="0 0 12 20" fill="none"><path d="M7 0L0 11H5.5L4.5 20L12 8.5H6.5L7 0Z" fill="#00bcd4"/></svg>`;
-        Object.assign(bolt.style, { display: 'flex', alignItems: 'center' });
+        Object.assign(bolt.style, { display: 'flex', alignItems: 'center', cursor: 'pointer' });
+        launcherLabel.style.cursor = 'pointer';
+        // v0.2 — launcher click opens the modal directly (alternative
+        // to Enter). Discoverable for users who don't know about the
+        // keyboard shortcut. Only the bolt + label are clickable —
+        // the info button keeps its own click behavior.
+        function openModalFromLauncher() {
+            if (!masterEnabled || isBusy) return;
+            if (isTypingTarget(document.activeElement)) return;
+            const total = getAllDraggables().length;
+            if (total === 0) {
+                showToast('No mission instructions found on this page.', '#888', 2500);
+                return;
+            }
+            const pending = selectedGroups.map(g => ({ ids: [...g.ids], label: g.label }));
+            selectedGroups = []; clearHighlights(); refreshBubbleBar();
+            showPositionInput(
+                pending, total,
+                (finalIds, pos) => { applyHighlights(finalIds, finalIds[0]); processQueue(finalIds, pos); },
+                (savedGroups) => {
+                    selectedGroups = savedGroups;
+                    applyHighlights(flatIds(), null);
+                    refreshBubbleBar();
+                    const n = flatIds().length;
+                    if (n > 0) setHUD(`${n} instruction${n > 1 ? 's' : ''} selected`, 'Press Enter to begin', '#00bcd4');
+                }
+            );
+        }
+        bolt.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
+        launcherLabel.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
         const launcherLabel = document.createElement('div');
         Object.assign(launcherLabel.style, { fontSize: '11px', fontWeight: '700', color: '#fff', letterSpacing: '0.07em', textTransform: 'uppercase', whiteSpace: 'nowrap' });
         launcherLabel.textContent = 'Quick Mission Editor';
@@ -837,8 +884,33 @@
                     setTimeout(() => { posInput.style.borderColor = '#444'; }, 800);
                     posInput.focus(); return;
                 }
+                // v0.2 — validate selection at confirm time. Between
+                // modal-open and now the page may have re-rendered or the
+                // user may have navigated then come back. Any draggable IDs
+                // that no longer resolve to a live element are stale; tell
+                // the user to reselect instead of silently dropping them
+                // mid-queue.
+                const allIds = pendingGroups.flatMap(g => g.ids);
+                const liveSet = new Set(getAllDraggables().map(el => el.getAttribute('data-rfd-draggable-id')));
+                const staleIds = allIds.filter(id => !liveSet.has(id));
+                if (staleIds.length > 0) {
+                    rangeError.textContent = `${staleIds.length} selection${staleIds.length === 1 ? '' : 's'} no longer exist — reselect.`;
+                    modalBubbleWrap.style.borderColor = '#ff5252';
+                    setTimeout(() => {
+                        modalBubbleWrap.style.borderColor = '#2a2a2a';
+                        rangeError.textContent = '';
+                    }, 3500);
+                    _origLog(`${TAG} validate-at-confirm: ${staleIds.length}/${allIds.length} IDs no longer in DOM`);
+                    return;
+                }
+                // v0.2 — large-move warning. Misclick on Move with 197
+                // selected is destructive and slow. Cheap to ask once.
+                if (allIds.length >= LARGE_MOVE_THRESHOLD) {
+                    const ok = window.confirm(`About to move ${allIds.length} instructions to position ${val}. This will run sequentially (~${Math.ceil(allIds.length * 0.25)}s) and is hard to undo.\n\nProceed?`);
+                    if (!ok) return;
+                }
                 overlay.remove();
-                onConfirm(pendingGroups.flatMap(g => g.ids), val);
+                onConfirm(allIds, val);
             }
 
             function cancel() {
@@ -853,7 +925,23 @@
         }
 
         // ── Queue processor ──────────────────────────────────────────────
+        // v0.2 cancel flag — set true by hashchange listener if user
+        // navigates mid-queue. Loop checks at top of each iteration and
+        // exits cleanly so we don't apply remaining moves against the
+        // wrong mission editor.
+        let queueAborted = false;
         async function processQueue(ids, insertAfterPos) {
+            // v0.2: cache reorderFn once at queue start instead of walking
+            // the fiber tree per iteration. Big perf win on long queues
+            // AND short-circuits early if the function can't be found
+            // (no point asking the user to wait through 200 attempts).
+            const reorderFn = findReorderFn();
+            if (!reorderFn) {
+                showToast('⚠️ reorderInstructions not found — aborting before start', '#ff5252', 4500);
+                _origLog(`${TAG} pre-flight check failed: findReorderFn returned null. Nothing executed.`);
+                return;
+            }
+
             // Snapshot the current order so we have a manual recovery record
             // if the queue corrupts state mid-loop. Coworker yells at you →
             // open DevTools → read window.__aqme_lastSnapshot → manually
@@ -862,6 +950,7 @@
             window.__aqme_lastSnapshot = snapshot;
             _origLog(`${TAG} pre-move snapshot saved (${snapshot.length} items) to window.__aqme_lastSnapshot`);
 
+            queueAborted = false;
             isBusy = true;
             selectedGroups = []; refreshBubbleBar();
             const total = ids.length;
@@ -870,6 +959,13 @@
             const MAX_CONSECUTIVE_ERRORS = 3;
 
             for (let i = 0; i < ids.length; i++) {
+                // v0.2: bail if site nav happened mid-queue (or any future
+                // explicit abort path sets the flag).
+                if (queueAborted) {
+                    _origLog(`${TAG} queue aborted at ${i}/${total} (queueAborted flag set)`);
+                    abortQueue('site nav or external abort');
+                    return;
+                }
                 const id = ids[i];
                 applyHighlights(ids.slice(i), id);
                 const dragEl = document.querySelector(`[data-rfd-draggable-id="${id}"]`);
@@ -887,13 +983,6 @@
 
                 const targetIdx = fromIndex < placementIndex ? placementIndex - 1 : placementIndex;
                 _origLog(`${TAG} reorderInstructions("${name}", ${fromIndex} → ${targetIdx})`);
-
-                const reorderFn = findReorderFn();
-                if (!reorderFn) {
-                    showToast('⚠️ reorderInstructions not found — aborting', '#ff5252', 4000);
-                    abortQueue('no reorderFn');
-                    return;
-                }
 
                 const reorderPromise = waitForReorder(id, targetIdx, 3000);
                 try {
@@ -1015,6 +1104,16 @@
             selectedGroups = []; clearHighlights(); removeDropMarker(); refreshBubbleBar();
             hud.style.display = 'none';
             showToast('Cancelled', '#888', 1500);
+        });
+
+        // v0.2 — site nav (hashchange) cancels any in-flight processQueue.
+        // Without this, remaining moves would apply to a different mission's
+        // instructions on the new page — silent corruption.
+        window.addEventListener('hashchange', () => {
+            if (isBusy) {
+                _origLog(`${TAG} hashchange detected mid-queue — flagging abort`);
+                queueAborted = true;
+            }
         });
 
         _origLog(`${TAG} v${SCRIPT_VERSION} loaded`);
