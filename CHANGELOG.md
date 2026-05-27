@@ -6,7 +6,110 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-26
+
+- **AIM Quick Mission Editor v0.2** — reliability + UX pass after v0.1.
+  - **Cache `reorderFn` once at queue start** — was walking the React fiber tree for every item. Pre-flight check now aborts before snapshot/cleanup if the function can't be found.
+  - **Defensive fiber walk** — 4 candidate paths tried in order; clean `console.warn` with depth on full-walk failure. Future-proofs against a Percepto context-provider refactor.
+  - **Validate selection at confirm time** — stale draggable IDs → modal stays open with `"N selections no longer exist — reselect"` error instead of silent mid-queue drops.
+  - **Confirm-large-moves** — moves ≥20 items pop a `confirm()` with count + rough time estimate. Misclick saved.
+  - **`hashchange` cancels in-flight queue** — navigating to another mission mid-move now aborts cleanly with toast instead of applying remaining moves to the wrong mission.
+  - **Launcher click opens modal** — clicking the bolt ⚡ or `QUICK MISSION EDITOR` label opens the move dialog. Alternative to Enter, more discoverable.
+
+- **AIM Quick Mission Editor v0.1** — **NEW. First Mission Bank tool.** Port of a coworker's ReactFiber Mission Editor v19.5 with full toolkit integration + reliability hardening.
+  - **What it does**: bulk-reorder mission instructions on the mission editor page. Ctrl+Click drag handles to select instructions; consecutive picks auto-merge into ranges. Enter opens a modal with bubble selections + range input (`153-197` format) + target-position input + Move ⚡ button. Queue processor moves items one at a time with progress HUD, scroll-to, green-flash confirmation per move.
+  - **Core trick (preserved from coworker)**: walks React's fiber tree to find Percepto's own `reorderInstructions(from, to)` function on its context provider, then calls it directly. Bypasses `react-beautiful-dnd` synthetic-drag entirely.
+  - **MutationObserver as PRIMARY completion signal** — observes the actual DOM reorder of the moved ID. Console.log hijack kept as fallback. Protects against a 200-item move silently degrading to 10 minutes if Percepto ever drops the `"Reordering instructions:"` log line.
+  - **Abort after 3 consecutive failures** (not-found / exception / timeout) — prevents "burn through 197 items firing red toasts" mode if state corrupts.
+  - **Pre-move snapshot** at `window.__aqme_lastSnapshot` — array of pre-move draggable IDs for manual recovery if something goes sideways.
+  - **Ant Design-aware input guard** on Enter + Esc handlers — `.ant-input` / `.ant-select` / `role="textbox"`.
+  - **IS_TOP gate** so Enter / Esc don't fire twice across top + iframe contexts.
+
+- **AIM Control Panel v1.23** — activate Mission Bank Macros panel section.
+  - Was a comment-only placeholder in v1.22 `SECTION_PRIORITY`. Now active so registered scripts with `group:'Mission Bank Macros'` render on `/control-panel/mission-bank` URLs. First member: Quick Mission Editor.
+
+- **AIM Performance Shield v1.10** — log suppressor regex rewrite to catch single-arg log forms.
+  - v1.8/v1.9 patterns required multi-arg `console.log` calls (e.g. `console.log("Drone", 5, "already exists in OGI")`). Real Percepto logs are mostly single-arg strings. Patterns now use regex with `^\s*` (leading-whitespace tolerant) on `args[0]` for prefix matches AND a `joinArgs(a)` regex for multi-arg patterns like `"Drone N already exists in OGI state"`.
+  - Three more patterns added from real Mission Bank logs: `Initializing library`, `ws.init called with ip:`, `createNewSocket connecting`.
+
+- **AIM Performance Shield v1.9** — fix sandboxed-console bug from v1.8.
+  - v1.8 wrapped `console.log` directly. Perf Shield has `@grant GM_setValue` etc. → runs in Tampermonkey's **sandboxed context**. The sandbox `console` is a per-script copy that Percepto's logs never go through, so the v1.8 wrap intercepted nothing.
+  - Fix: wrap `unsafeWindow.console` (the page console). Wrap now sits outside Inspector's wrap (since Perf Shield loads after Inspector per dashboard #) and catches Percepto traffic. Classic Tampermonkey sandbox gotcha — documented in memory for future.
+
+- **AIM Performance Shield v1.8** — **NEW: "Suppress noisy Percepto debug logs" toggle (default ON).**
+  - **Why**: Percepto floods `console.log` with ~10 patterns of non-actionable state-change spam (RAZTEST, `WeatherStore:_calcweather`, STATE CHANGED, `Drone N already exists in OGI`, Amplitude EOI, `'Possibly unhandled rejection: {}'`, etc.). When DevTools is open, browser pays format + render cost for every line — major Mission Bank perf drag.
+  - **What**: new "Console" panel section with one toggle (default ON). When ON, matched lines are silently dropped from `console.log/info/warn/debug`. Per-pattern counters at `window.__aim_perf_log_counts` for diagnostics.
+  - **Safety rails**: never filters lines starting with `[AIM ` (our own diagnostics) or args containing `Error` instances (real exceptions).
+  - **Result reported by user**: Mission Bank load time went from 20+s (sometimes unusable) to "SUPER FAST" once v1.9 + v1.10 fixed the wrap location and broadened the patterns.
+
+- **AIM Map Styler v34.40** — **auto-kick safety net for the "stuck after refresh" bug.**
+  - Long-standing intermittent bug: after refresh, KMLs load + script ACTIVATES but tile layers and overlays don't render. User had to press Shift+K manually to recover (documented in `project_stuck_after_refresh.md` memory).
+  - **New**: after each `🟢 ACTIVATED`, a one-shot 4-second timer checks the documented stuck symptoms — `getLeafletMap()` null, empty `.leaflet-tile-pane`, or KML features loaded but no `path[data-buffer-kind^="kml-"]` overlays in DOM. If stuck → silently auto-fires the same Kick the user would manually trigger.
+  - Latched at one auto-kick per page load to prevent loops. Page reload resets the latch. Manual Shift+K still works as fallback if the auto-kick doesn't recover.
+  - Kick recovery sequence extracted into shared `performKick(reason)` so manual + auto paths use identical code. Log includes the reason string so post-mortems can distinguish manual vs auto trigger.
+
+- **AIM Map Styler v34.39** — fix TDZ crash from v34.38 cosmetic edit.
+  - v34.38 changed the init log from a hardcoded `'34.19'` literal to `SCRIPT_VERSION`. But `SCRIPT_VERSION` was declared 16 lines later → Temporal Dead Zone violation → Map Styler crashed on every load with `Uncaught (in promise) ReferenceError: Cannot access 'SCRIPT_VERSION' before initialization`.
+  - Net effect of the v34.38 bug: Map Styler init threw, never activated, never rendered. Mission Bank felt fast as a side effect (no Map Styler doing its work) — masquerading as the Perf Shield log suppressor working perfectly.
+  - Fix: hoisted `SCRIPT_VERSION` to top of IIFE next to other init-phase constants. Third documented TDZ incident in this codebase; memory file `feedback_perf_shield_tdz_pattern.md` now flags "any edit to the first 50 lines of an IIFE" as a TDZ-check trigger.
+
+- **AIM Map Styler v34.38** + **AIM Inspector v1.8** — cosmetic version string sync (Map Styler v34.38 introduced the TDZ bug, v34.39 fixed it).
+  - Map Styler had hardcoded `'34.19'` in the init log template — every load reported v34.19 regardless of actual version. Inspector's inner `VERSION = '1.6'` didn't match `@version 1.7` in the header. Both fixed to interpolate `SCRIPT_VERSION` and stay in sync going forward.
+
+---
+
+## 2026-05-22
+
+- **AIM Map Styler v34.37** — fix Split-then-refresh revert via cache-bust on raw URL.
+  - User reported the Split-multi-segment-lines tool's commit landed on GitHub correctly but a page refresh appeared to revert the split. Diagnosis: `fetchKMLForSite` pulls from `raw.githubusercontent.com` which serves `Cache-Control: max-age=300` (5-min CDN cache). After Split → local features updated correctly → user refresh → fetch returned the pre-split CDN-cached file → overwrote local features → looked like revert.
+  - Fix: append `?_=${Date.now()}` to the raw URL so the CDN treats every fetch as unique. Local GM cache layer above still provides instant first-render. Same hazard family as v34.34's commit-bug, different code path.
+
+- **AIM Mission Bank Tools v0.1** — **NEW skeleton script** (no functionality yet).
+  - Installable now so coworkers auto-update to future Mission Bank features without re-installing manually. Registers nothing today — does nothing beyond a `[AIM MB TOOLS] init` log line.
+  - Inline comment block walks through exactly what to uncomment when first real feature ships (REGISTER call + `'group:Mission Bank Macros': 50` entry in Control Panel `SECTION_PRIORITY`).
+  - README + Pages install guide updated with install row #13.
+
+- **AIM Asset Inspector v3.11** + **AIM Map Styler v34.36** — ignore synthetic contextmenu events.
+  - Bug: dropping an Absolute Altitude or Ruler pin near an entity (or near a KML line in edit mode) popped the Asset Inspector / KML hide menu unexpectedly. Root cause: Altitude / Ruler use the documented "Pin & Clean" pattern that dispatches a synthetic `contextmenu` event via `dispatchEvent(new MouseEvent('contextmenu'))` to clean up Leaflet's stray vertex. Asset Inspector + Map Styler caught these synthetic events as if the user right-clicked.
+  - Fix in both scripts: `if (!e.isTrusted) return;` early-return at the top of the contextmenu handler. `isTrusted` is browser-set: `true` only for real user input, `false` for `dispatchEvent`-fired events. Surgical fix; Leaflet's own contextmenu handler still receives the synthetic event because event capture isn't affected by our early return.
+
+- **AIM Control Panel v1.22** + **four site-setup scripts** (New Entity Macro v1.8, Bulk Altitude Updater v4.12, Bulk Validator v1.4, Bulk Mission Adder v1.13) — **page-aware panel filtering.**
+  - **REGISTER schema extended with optional `scope` field**: `'site-setup'`, `'mission-bank'`, `'admin-merge'` (or undefined → always visible). Control Panel reads `window.top.location` to compute current URL scope and filters rendered groups + HOTKEY_FIRED routing accordingly. On `hashchange` it recomputes scope + re-renders if changed.
+  - **Three URL classes recognized**: Site Setup (`/control-panel/site-setup`), Mission Bank (`/control-panel/mission-bank` + deep children), Admin merge_available_apps (`/admin/percepto/availableapp/merge_available_apps/stepN/`).
+  - **Net behavior on Site Setup URL**: panel shows "Site Setup Macros" group with New Entity Macro / Bulk Altitude Updater / Bulk Validator. On Mission Bank URL, that group is hidden and the hotkeys silently no-op. Bulk Mission Adder scoped to `admin-merge` so it never appears in the panel anywhere (admin page has no map → panel UI doesn't render there either). Universal hotkeys (Altitude, Ruler, Clear All) work everywhere.
+
+---
+
 ## 2026-05-21
+
+- **AIM Map Styler v34.35** — **KML editing Phase E4: draw new lines on the map and commit to GitHub.** Completes the editing bundle.
+  - New "Add new line (draw on map)" button per category in the Pending commits section. Click → cursor becomes crosshair → each map click drops a vertex (dashed green preview) → floating toolbar shows running vertex count with Save / Undo / Cancel buttons → Save opens a name-input modal (Enter saves, Esc cancels) → line stages as a pending-add (solid green visual) and feeds the existing Commit pipeline.
+  - Esc cancels drawing; `hashchange` silently discards in-progress draw.
+  - Right-click pending-add line (with edit mode on) → menu offers "🗑 Discard this new line".
+  - **Visual key now complete across all commit ops**: 🟢 solid green = pending add, 🟢 dashed green = in-progress draw, 🟡 yellow solid = pending modify, 🔴 red dashed = pending delete, ⚪ gray dashed = local hide, category color = normal.
+  - Commit message format: `[AIM site <id>] <type>: N deletes · M modifications · K new lines` (only includes parts that apply).
+
+- **AIM Map Styler v34.34** — fix post-commit refetch returning stale CDN cache.
+  - Diagnosed during v34.33 testing: after a commit + edit-again + commit, the second commit's local render reverted to the first commit's position. Root cause: post-commit refresh called `fetchKMLForSite(force=true)` which pulls via `raw.githubusercontent.com` (5-min CDN cache). The second refetch returned the previous commit's content from cache, overwriting our correct in-memory state.
+  - Fix: new `applyCommittedXmlToLocalState(siteID, type, xmlText)` helper. After every successful PUT, parse the exact XML bytes we just sent (authoritative — GitHub accepted them) and stuff straight into `kmlFeatures` + GM cache. No network round-trip, no CDN risk.
+  - Applied to all three commit paths (commit-ops, hide-commit, split). Fallback to forced refetch preserved inside the helper for the impossible "we can't parse our own XML" case.
+
+- **AIM Map Styler v34.33** — **KML editing Phase E3: vertex edit with in-map drag handles.**
+  - Right-click any line in edit mode → new "✏️ Edit vertices" menu option (yellow). Clicking drops a cyan circular drag handle on every vertex of that line + a floating Save / Discard toolbar.
+  - Drag handles to reshape — SVG path follows in real time (via `effectiveCoordsForFeature` resolving live edit → saved modify-op → original file coords in priority order).
+  - Save → stages a `modify` commit-op (yellow solid visual until committed). Discard → exits cleanly, no save.
+  - Right-click a line with a saved modify → menu offers "✏️ Edit vertices again" + "↩ Revert vertex edits".
+  - Site change silently discards in-progress edit so handles don't follow to the next mission.
+  - Save with float-tolerance: `<1e-9 deg` delta treated as unchanged (no phantom commit from drag-end float drift).
+
+- **AIM Map Styler v34.32** — **KML editing Phase E2: mark and commit line deletions to GitHub.** Foundation for E3/E4 layered on top of the same plumbing.
+  - Right-click any line in edit mode → new "🗑 Mark for deletion (commits to GitHub)" menu option (red). Marked lines render with red, thicker, dashed strikethrough — distinct from gray local-hide ghost so the difference is obvious at a glance. Marked-for-commit lines **always** render even if locally hidden (never commit something the user can't see).
+  - New "Pending commits to GitHub" panel section per category with Commit / Discard pending buttons.
+  - **Separate commit-ops storage** (`KML_COMMIT_OPS_PREFIX`) from local hides — hide stays local-only-forever (per-user view filter), delete is the only path that commits canonically.
+  - Storage schema: `{ ops: {pmIdx: {op:'delete'|'modify',coords?}}, added: [{name,coords}] }` — laid foundation in v34.32 so v34.33 (modify) and v34.35 (add) slotted in without re-architecture.
+  - Single batched commit per click: `[AIM site <id>] <type>: N deletes`. Delete ops sorted descending so removing one doesn't shift remaining delete indices.
+  - After successful commit: clears commit-ops AND local hides for that type (since indices shifted, stored pmIdx refs would be stale).
+  - Split-multi-segment-lines function now also refuses if commit-ops pending (parallel to the existing local-hides refusal — same index-shift hazard).
 
 - **AIM Asset Inspector v3.10** — three small Stats popup tweaks.
   - **Validation labels reworded** — `✓ Valid` / `✗ Invalid` → `✓ Validated` / `✗ Unvalidated`. Matches Percepto's terminology and the way the team actually uses the flag (per user: "Validated = pilot has flown this entity and confirmed it as safe; Unvalidated = area to fly with caution").
