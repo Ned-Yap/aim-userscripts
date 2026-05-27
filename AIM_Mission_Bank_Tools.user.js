@@ -1733,16 +1733,29 @@
             copyToClipboard(titleEl.dataset.detailName);
             showToast(`Copied: ${titleEl.dataset.detailName}`, '#5fff5f');
         };
-        // Open in AIM editor — navigates to the mission editor URL
+        // Open in AIM editor — navigates to the mission editor URL.
+        // Direct hash assignment is blocked by the iframe sandbox, so
+        // we create a link with target="_top" and click it.
         const editBtn = panelEl.querySelector('[data-open-editor]');
         if (editBtn) editBtn.onclick = () => {
             const sid = getCurrentSiteID();
             const mid = editBtn.dataset.openEditor;
-            if (sid && mid) {
+            if (!sid || !mid) return;
+            const href = `#/site/${sid}/control-panel/mission-bank/${mid}`;
+            try {
+                // Try 1: click a link with target="_top"
+                const a = document.createElement('a');
+                a.href = (location.origin || '') + '/' + href;
+                a.target = '_top';
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            } catch (e1) {
                 try {
-                    const top = window.top || window;
-                    top.location.hash = `#/site/${sid}/control-panel/mission-bank/${mid}`;
-                } catch (e) {
+                    // Try 2: unsafeWindow (Tampermonkey grants access)
+                    unsafeWindow.top.location.hash = href;
+                } catch (e2) {
                     showToast('Failed to navigate to editor', '#ff5252');
                 }
             }
