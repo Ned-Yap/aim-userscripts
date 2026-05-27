@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -325,14 +325,13 @@
             // Raw instruction list for drill-down
             instructions: inst,
             realSteps: real,
-            // Step-type counts (used in table columns + drill-down card)
-            snapshots: countByType(real, 'snapshot'),
-            navigates: countByType(real, 'navigate'),
-            waits: countByType(real, 'wait'),
-            thermalOns: real.filter(s => s.type_name === 'cameraSelect' && (s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
-            thermalOffs: real.filter(s => s.type_name === 'cameraSelect' && !(s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
-            gemOns: real.filter(s => s.type_name === 'gemMode' && (s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
-            gemOffs: real.filter(s => s.type_name === 'gemMode' && !(s.value1 === true || s.value1 === 1 || s.value1 === '1')).length,
+            // Per-step-type counts — dynamically keyed so ANY step type
+            // Percepto uses (including future ones) appears automatically.
+            stepTypeCounts: (() => {
+                const c = {};
+                real.forEach(s => { const k = stepCountKey(s); c[k] = (c[k] || 0) + 1; });
+                return c;
+            })(),
         };
     }
 
@@ -471,25 +470,18 @@
     //   id, label, key, kind ('text'|'num'|'time'|'distance'|'pct'|'dot'),
     //   defaultVisible, csvExclude, csvKey, csvFmt (override CSV string)
     // }
-    const COLUMNS = [
-        // Default visible — user-specified order (v0.8)
+    // Static columns — step-type counts are dynamic (discovered from data).
+    // Dynamic step-type columns are inserted after 'steps' by refreshDynamicColumns.
+    const STATIC_COLUMNS = [
         { id: 'active', label: 'Active', key: 'active', kind: 'dot', defaultVisible: true, csvExclude: true },
         { id: 'name', label: 'Mission Name', key: 'name', kind: 'text', defaultVisible: true, primary: true },
         { id: 'flightDistance', label: 'Flight Distance', key: 'flightDistanceM', kind: 'distance', defaultVisible: true },
         { id: 'flightTime', label: 'Flight Time', key: 'flightTimeS', kind: 'time', defaultVisible: true },
         { id: 'steps', label: 'Steps', key: 'steps', kind: 'num', defaultVisible: true },
-        { id: 'navigates', label: 'Navigates', key: 'navigates', kind: 'num', defaultVisible: true },
-        { id: 'snapshots', label: 'Snapshots', key: 'snapshots', kind: 'num', defaultVisible: true },
+        // ← dynamic step-type columns inserted here
         { id: 'batteryConsumption', label: 'Battery %', key: 'batteryConsumption', kind: 'pct', defaultVisible: true },
         { id: 'estFlights', label: 'Est. Flights', key: '__estFlights', kind: 'num', defaultVisible: true, derived: true },
         { id: 'totalConsumption', label: 'Total Consumption %', key: 'totalConsumption', kind: 'pct', defaultVisible: true },
-        // Step-type counts — toggle-able via Columns menu
-        { id: 'thermalOns', label: 'Thermal On', key: 'thermalOns', kind: 'num', defaultVisible: false },
-        { id: 'gemOns', label: 'GEM On', key: 'gemOns', kind: 'num', defaultVisible: false },
-        { id: 'waits', label: 'Waits', key: 'waits', kind: 'num', defaultVisible: false },
-        { id: 'thermalOffs', label: 'Thermal Off', key: 'thermalOffs', kind: 'num', defaultVisible: false },
-        { id: 'gemOffs', label: 'GEM Off', key: 'gemOffs', kind: 'num', defaultVisible: false },
-        // Other toggle-able columns
         { id: 'siteName', label: 'Site Name', key: 'siteName', kind: 'text', defaultVisible: false },
         { id: 'navTime', label: 'Nav Time', key: 'navTimeS', kind: 'time', defaultVisible: false },
         { id: 'navConsumption', label: 'Nav Consumption %', key: 'navConsumption', kind: 'pct', defaultVisible: false },
@@ -505,13 +497,72 @@
         { id: 'robotTypes', label: 'Robot Types', key: 'robotTypes', kind: 'text', defaultVisible: false },
         { id: 'id', label: 'ID', key: 'id', kind: 'num', defaultVisible: false },
     ];
-    const COL_BY_ID = Object.fromEntries(COLUMNS.map(c => [c.id, c]));
+
+    // Dynamic step-type columns. COLUMNS + COL_BY_ID are rebuilt by
+    // refreshDynamicColumns() after missions load for a site. All
+    // existing code references COLUMNS/COL_BY_ID and keeps working.
+    const DEFAULT_VISIBLE_STEP_TYPES = new Set(['navigate', 'snapshot']);
+
+    // Migration: v0.8 used hardcoded column IDs for step types.
+    // Map them to the new stype:<key> IDs so stored prefs carry over.
+    const COLUMN_ID_MIGRATION = {
+        'navigates': 'stype:navigate',
+        'snapshots': 'stype:snapshot',
+        'waits': 'stype:wait',
+        'thermalOns': 'stype:Thermal On',
+        'thermalOffs': 'stype:Thermal Off',
+        'gemOns': 'stype:GEM On',
+        'gemOffs': 'stype:GEM Off',
+    };
+
+    let COLUMNS = STATIC_COLUMNS.slice();
+    let COL_BY_ID = Object.fromEntries(COLUMNS.map(c => [c.id, c]));
+
+    function discoverStepTypes(siteID) {
+        const bucket = missionsBySite[siteID];
+        if (!bucket) return [];
+        const allTypes = new Set();
+        bucket.missions.forEach(m => {
+            const real = realSteps(m.instructions || []);
+            real.forEach(s => allTypes.add(stepCountKey(s)));
+        });
+        // Sort using the fixed importance order; unknowns alphabetical at end.
+        const arr = Array.from(allTypes);
+        const idx = (k) => { const i = STEP_COUNT_ORDER.indexOf(k); return i >= 0 ? i : STEP_COUNT_ORDER.length; };
+        arr.sort((a, b) => {
+            const ia = idx(a), ib = idx(b);
+            if (ia !== ib) return ia - ib;
+            return a.localeCompare(b);
+        });
+        return arr;
+    }
+
+    function refreshDynamicColumns(siteID) {
+        const types = discoverStepTypes(siteID);
+        const dynamic = types.map(t => ({
+            id: `stype:${t}`,
+            label: t,
+            stepTypeKey: t,
+            kind: 'num',
+            defaultVisible: DEFAULT_VISIBLE_STEP_TYPES.has(t),
+            dynamic: true,
+        }));
+        // Rebuild COLUMNS: static with dynamic inserted after 'steps'
+        const result = [];
+        STATIC_COLUMNS.forEach(c => {
+            result.push(c);
+            if (c.id === 'steps') result.push(...dynamic);
+        });
+        COLUMNS = result;
+        COL_BY_ID = Object.fromEntries(COLUMNS.map(c => [c.id, c]));
+    }
 
     function getVisibleColumnIds() {
         const stored = gmGet(CACHE_KEY_VISIBLE_COLS, null);
         if (Array.isArray(stored) && stored.length > 0) {
-            // Filter against current schema in case columns were renamed/removed
-            return stored.filter(id => COL_BY_ID[id]);
+            // Migrate v0.8 hardcoded step-type IDs → stype:… IDs
+            const migrated = stored.map(id => COLUMN_ID_MIGRATION[id] || id);
+            return migrated.filter(id => COL_BY_ID[id]);
         }
         return COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
     }
@@ -523,6 +574,9 @@
     function formatCellValue(row, col, unit, thresholds) {
         if (col.id === 'estFlights') {
             return fmtNum(estimateFlights(row.batteryConsumption, thresholds));
+        }
+        if (col.dynamic && col.stepTypeKey) {
+            return fmtNum((row.stepTypeCounts || {})[col.stepTypeKey] || 0);
         }
         const v = row[col.key];
         switch (col.kind) {
@@ -538,6 +592,7 @@
 
     function getSortValue(row, col, thresholds) {
         if (col.id === 'estFlights') return estimateFlights(row.batteryConsumption, thresholds) || 0;
+        if (col.dynamic && col.stepTypeKey) return (row.stepTypeCounts || {})[col.stepTypeKey] || 0;
         const v = row[col.key];
         if (col.kind === 'text' || col.kind === 'dot') return (v || '').toString().toLowerCase();
         return Number(v) || 0;
@@ -981,7 +1036,9 @@
                 #${PANEL_ID} th.sorted { color: #14d2dc; }
                 #${PANEL_ID} td { padding: 5px 8px; border-bottom: 1px solid #1f1f1f; }
                 #${PANEL_ID} tbody tr { cursor: pointer; }
-                #${PANEL_ID} tbody tr:hover { background: #1a1a1a; }
+                #${PANEL_ID} tbody tr:nth-child(odd) { background: #0f1216; }
+                #${PANEL_ID} tbody tr:nth-child(even) { background: #151a20; }
+                #${PANEL_ID} tbody tr:hover { background: #1e2228; }
                 #${PANEL_ID} tbody tr.selected { background: rgba(20,210,220,0.15); }
                 #${PANEL_ID} .aim-mb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
                 #${PANEL_ID} .aim-mb-dot.active { background: #5fff5f; }
@@ -1173,6 +1230,9 @@
         if (!panelState) initPanelState();
         panelState.drillId = null;
         updateTitle();
+        // Rebuild dynamic step-type columns from the loaded missions so
+        // ANY step type Percepto uses shows up automatically.
+        refreshDynamicColumns(sid);
 
         const allRows = buildAllRows(sid);
         const rows = filterAndSort(allRows);
