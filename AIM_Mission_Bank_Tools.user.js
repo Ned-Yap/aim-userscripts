@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -15,8 +15,25 @@
 // @run-at       document-start
 // ==/UserScript==
 
-// AIM Mission Bank Tools — v0.3
+// AIM Mission Bank Tools — v0.4
 // Feature: Mission Summary panel (#48 in features.csv).
+//
+// v0.4 changes (SUM-placement fix + sandbox window.open fix):
+//   - Floating fallback removed entirely. v0.3 dropped a floating button
+//     on the first interval tick (before React had mounted
+//     `.missions-list__header`), then never replaced it because the
+//     "already injected" early-return short-circuited future ticks.
+//     Now we wait for the real header to exist and inject there only.
+//   - TOP-context injection fully gated: the hashchange handler used
+//     to fire runSumInjection in TOP too, which produced a second
+//     floating button. runSumInjection now early-returns unless we're
+//     in IFRAME.
+//   - Detail-view Google Maps links open via window.top.open(...) so
+//     the sandboxed iframe doesn't block the popup (the iframe lacks
+//     allow-popups; the top frame doesn't).
+//   - Header-rebuilt resilience: each tick checks `header.contains(btn)`
+//     so a React re-render that wipes our button gets re-injected
+//     instead of being permanently lost.
 //
 // v0.3 changes (real-world testing pass):
 //   - SUM injection: correct selector `.missions-list__header`, inserted
@@ -67,7 +84,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -443,16 +460,14 @@
     function injectSumButton(doc) {
         if (!masterEnabled) return;
         if (!isOnMissionBank()) return;
-        if (doc.getElementById(SUM_BTN_ID)) {
-            doc.getElementById(SUM_BTN_ID).style.display = '';
-            return;
-        }
         const header = doc.querySelector('.missions-list__header');
-        if (header) {
-            injectButtonIntoHeader(doc, header);
-        } else if (doc.body) {
-            injectFloatingButton(doc);
-        }
+        // Wait for React to mount the real header. Previously we dropped
+        // a floating fallback here and never replaced it.
+        if (!header) return;
+        const existing = doc.getElementById(SUM_BTN_ID);
+        if (existing && header.contains(existing)) return; // in place
+        if (existing) existing.remove(); // header rebuilt — re-inject fresh
+        injectButtonIntoHeader(doc, header);
     }
 
     function injectButtonIntoHeader(doc, header) {
@@ -478,32 +493,12 @@
         }
     }
 
-    function injectFloatingButton(doc) {
-        const btn = doc.createElement('button');
-        btn.id = SUM_BTN_ID;
-        btn.type = 'button';
-        Object.assign(btn.style, {
-            position: 'fixed', top: '70px', right: '20px', zIndex: '99996',
-            background: '#1890ff', color: '#fff', border: 'none', borderRadius: '4px',
-            padding: '6px 14px', fontSize: '11px', fontWeight: 'bold',
-            cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
-            fontFamily: "'Lato','Segoe UI',sans-serif",
-        });
-        btn.innerHTML = 'SUM';
-        btn.title = 'Open mission summary (AIM Mission Bank Tools) — fallback floating placement';
-        btn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            openPanel();
-        };
-        doc.body.appendChild(btn);
-    }
-
     function runSumInjection() {
         if (!masterEnabled) return;
-        // Inject only into THIS context's document. The script is @match'd
-        // into both top and iframe, so each context handles its own DOM.
-        // Recursive iframe walk (v0.2) produced duplicate buttons.
+        // IFRAME-only. Script is @match'd into both contexts; TOP has no
+        // Mission Bank UI, so any TOP injection only produces a stray
+        // floating button at the top-right of the viewport.
+        if (CONTEXT !== 'IFRAME') return;
         try { injectSumButton(document); } catch (e) {}
     }
 
@@ -1206,15 +1201,25 @@
                 showToast(`Copied: ${v}`, '#5fff5f');
             };
         });
-        // Location cells — left-click opens Google Maps, right-click copies coords
+        // Location cells — left-click opens Google Maps, right-click copies coords.
+        // Percepto's iframe is sandboxed WITHOUT allow-popups, so window.open
+        // from the iframe is blocked. We hop up to window.top which is not
+        // sandboxed (and is same-origin, so the call is allowed).
         panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
             el.onclick = (e) => {
                 e.preventDefault();
                 const lat = el.dataset.lat;
                 const lng = el.dataset.lng;
-                if (lat && lng) {
-                    try { window.open(`https://www.google.com/maps?q=${lat},${lng}`, '_blank'); }
-                    catch (er) { showToast('Failed to open Google Maps', '#ff5252'); }
+                if (!lat || !lng) return;
+                const url = `https://www.google.com/maps?q=${lat},${lng}`;
+                let opened = null;
+                try { opened = (window.top || window).open(url, '_blank'); }
+                catch (er) { opened = null; }
+                if (!opened) {
+                    // Popup blocked even from top — fall back to clipboard so
+                    // the user can paste the URL manually.
+                    copyToClipboard(url);
+                    showToast(`Popup blocked. Copied URL: ${url}`, '#ff9800');
                 }
             };
             el.oncontextmenu = (e) => {
