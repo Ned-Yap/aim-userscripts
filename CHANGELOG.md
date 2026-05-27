@@ -6,6 +6,30 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-27
+
+- **AIM Mission Bank Tools v0.5** — SUM placement polish.
+  - Dedicated `aim-mb-toolbar-row` div injected as a sibling immediately after `.missions-list__header`. SUM lives there now instead of crowding the same row as the "MISSIONS" title + "+ New Mission" button. Future MBT buttons join the same flex/gap row (`Stats`, `Inspect`, etc.).
+  - `hideSumButton` tears down the row when master toggle goes off. React-rebuild guard keys off the row instead of the button alone.
+
+- **AIM Mission Bank Tools v0.4** — fix double SUM + sandboxed Google Maps popup.
+  - **Double SUM cause**: v0.3 dropped a floating fallback on the first 2-second interval tick (before React mounted `.missions-list__header`), then the "already injected" early-return prevented future ticks from moving it to the real header. The TOP-frame `hashchange` handler also called `runSumInjection` in TOP, dropping a second floating button.
+  - **Fix**: removed `injectFloatingButton` entirely. `injectSumButton` now waits for `.missions-list__header` to exist before injecting, and re-injects if React rebuilds the header without our button. `runSumInjection` early-returns unless `CONTEXT === 'IFRAME'`.
+  - **Google Maps blocked**: Percepto's iframe sandbox lacks `allow-popups`, so detail-view location links produced "Blocked opening '<URL>'" in the console. Now opens via `(window.top || window).open()` since the top frame is same-origin + not sandboxed. Falls back to clipboard-copy with a warning toast if even that fails.
+
+- **AIM Mission Bank Tools v0.3** — real-world testing pass after v0.2 ship.
+  - **SUM injection** uses the correct `.missions-list__header` selector (per user DevTools picker) and inserts next to `.missions-list__new-button`, reusing its className for native Ant Design styling. Recursive iframe walk removed.
+  - **Drag + resize** switched to pointer events with `setPointerCapture` so cursor leaving the handle no longer drops the gesture.
+  - **Columns + Settings menus** appended to `document.body` with `position:fixed` so they aren't clipped by the panel, don't jump on re-anchor, and survive table re-renders. Both gained explicit close (✕) buttons.
+  - **Panel body** restructured as flex column — toolbar + footer pinned, only the table scrolls. Search no longer steals focus from settings inputs on every keystroke.
+  - **Title** shows actual site name (`.ant-select-selection-item` `title` attribute) instead of `Site <id>`.
+  - **Step type renames** in detail: `cameraSelect` → "Thermal", `gemMode` → "GEM", boolean/0-1 values render as "On"/"Off".
+  - **Step Counts card** auto-builds from all distinct step types instead of the fixed snapshot/navigate/wait/other quad.
+  - **Instructions table**: navigate rows bold neon green (`#5fff5f`), snapshot rows bold orange (`#ff9800`).
+  - **Location cells** are clickable Google Maps links (left-click opens, right-click copies coords) — popup blocking fixed in v0.4.
+  - **Detail view** gains its own mi/km unit toggle; numeric stat cards are click-to-copy with hover outline.
+  - **`fmtPct`** adds a space before % per user spec.
+
 ## 2026-05-26
 
 - **AIM Mission Bank Tools v0.2** — **NEW: Mission Summary panel.** Replaces the v0.1 skeleton with the first real Mission Bank feature.
