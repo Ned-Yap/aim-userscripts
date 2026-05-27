@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.17';
+    const SCRIPT_VERSION = '0.18';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1983,37 +1983,47 @@ ${placemarks}
             if (!draggable) return;
             clearInterval(interval);
             draggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            // Step 1: hover the instruction item to reveal the three-dots
-            setTimeout(() => {
-                const item = draggable.querySelector('.mission-instruction-item') || draggable;
-                simulateHover(item);
-                // Step 2: wait for dots to appear, then hover them
-                setTimeout(() => {
-                    const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
-                    if (!dots) { showToast('Three-dots menu not found', '#ff9800'); return; }
-                    simulateHover(dots);
-                    // Step 3: wait for dropdown, then click Edit
-                    setTimeout(() => {
-                        const editItem = document.querySelector('[data-menu-id$="-edit"]')
-                            || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
-                        if (editItem) editItem.click();
-                        else showToast('Edit menu item not found — try clicking the dots manually', '#ff9800');
-                    }, 400);
-                }, 400);
-            }, 400);
+            setTimeout(() => forceOpenInstructionEdit(draggable), 500);
         }, 200);
     }
 
-    function simulateHover(el) {
-        const rect = el.getBoundingClientRect();
+    // CSS :hover can't be triggered programmatically — the three-dots
+    // menu is hidden until the user hovers. We force it visible via
+    // inline style overrides, click it, wait for the Ant dropdown,
+    // click Edit, then clean up our style hacks.
+    function forceOpenInstructionEdit(draggable) {
+        // Force the options container + dots visible
+        const optionsContainer = draggable.querySelector('.mission-instruction-item__options');
+        const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
+        if (!dots) { showToast('Three-dots menu not found', '#ff9800'); return; }
+        const savedStyles = [];
+        [optionsContainer, dots, dots.parentElement].forEach(el => {
+            if (!el) return;
+            savedStyles.push({ el, prev: el.getAttribute('style') || '' });
+            el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;';
+        });
+        // Simulate hover on the dots to trigger Ant's dropdown
+        const rect = dots.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
-        const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
-        el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, bubbles: false }));
-        el.dispatchEvent(new PointerEvent('pointermove', opts));
-        el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
-        el.dispatchEvent(new MouseEvent('mouseover', opts));
-        el.dispatchEvent(new MouseEvent('mousemove', opts));
+        const evOpts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+        dots.dispatchEvent(new MouseEvent('mouseenter', { ...evOpts, bubbles: false }));
+        dots.dispatchEvent(new MouseEvent('mouseover', evOpts));
+        dots.dispatchEvent(new PointerEvent('pointerenter', { ...evOpts, bubbles: false }));
+        // Also try clicking — some Ant dropdowns respond to click too
+        dots.dispatchEvent(new MouseEvent('click', evOpts));
+        // Wait for dropdown, click Edit
+        setTimeout(() => {
+            const editItem = document.querySelector('[data-menu-id$="-edit"]')
+                || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
+            if (editItem) {
+                editItem.click();
+            } else {
+                showToast('Edit dropdown did not appear — try hovering the dots manually', '#ff9800');
+            }
+            // Restore original styles
+            savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
+        }, 500);
     }
 
     function escapeXml(s) {
