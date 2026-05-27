@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.39
+// @version      34.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.39';
+    const SCRIPT_VERSION = '34.40';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3798,6 +3798,97 @@
 
     let mapPaneWaitTimer = null;
 
+    // v34.40 — auto-kick safety net for the "stuck after refresh" bug
+    // documented in project-stuck-after-refresh memory. After ACTIVATED,
+    // schedule a one-shot check; if Leaflet tile layers haven't rendered
+    // by the time it fires, auto-fire the Kick that the user would
+    // otherwise have to trigger via Shift+K. One auto-kick per page load
+    // to prevent infinite loops if the kick itself doesn't recover.
+    let stuckCheckTimer = null;
+    let autoKickFiredThisLoad = false;
+    const STUCK_CHECK_DELAY_MS = 4000;
+
+    function detectStuckRender() {
+        if (!isActive) return false;
+        // Map ref still null after activation → very likely stuck
+        const map = getLeafletMap();
+        if (!map) return true;
+        // Leaflet tile pane should have at least one layer by now
+        const tilePane = document.querySelector('.leaflet-tile-pane');
+        if (!tilePane) return true;
+        const layers = tilePane.querySelectorAll('.leaflet-layer');
+        if (layers.length === 0) return true;
+        // Bonus signal: if we have KML features loaded for this site AND
+        // the relevant category is configured to render, we should see
+        // at least one of our SVG paths. Absence = render loop broken.
+        const sid = getCurrentSiteID();
+        if (sid) {
+            const expectingRender = KML_TYPES.some(t => {
+                const feats = kmlFeatures[kmlKey(sid, t)];
+                if (!feats || feats.length === 0) return false;
+                return toggleState[`${t}.show`] !== false
+                    && toggleState[`${t}.outline`] !== false;
+            });
+            if (expectingRender) {
+                const overlays = document.querySelectorAll('path[data-buffer-kind^="kml-"]');
+                if (overlays.length === 0) return true;
+            }
+        }
+        return false;
+    }
+
+    function scheduleStuckCheckAfterActivation() {
+        // Only one auto-kick per page load. If user manually Shift+K's
+        // after we've fired, that's fine — but we don't keep trying.
+        if (autoKickFiredThisLoad) return;
+        if (stuckCheckTimer) { clearTimeout(stuckCheckTimer); stuckCheckTimer = null; }
+        stuckCheckTimer = setTimeout(() => {
+            stuckCheckTimer = null;
+            if (!isActive || autoKickFiredThisLoad) return;
+            if (!detectStuckRender()) return;
+            autoKickFiredThisLoad = true;
+            console.warn(`${TAG} 🦵 auto-kick — stuck render detected ${STUCK_CHECK_DELAY_MS}ms post-activation (no tile layers / no overlays despite features loaded)`);
+            performKick('auto: stuck render detected');
+        }, STUCK_CHECK_DELAY_MS);
+    }
+
+    // Shared Kick implementation — used by Shift+K hotkey AND by the
+    // v34.40 auto-kick safety net. Extracted from the old inline hotkey
+    // handler so both paths use the exact same recovery sequence.
+    function performKick(reason) {
+        const wasActive = isActive || toggleState.master !== false;
+        console.log(`${TAG} 🦵 Kick — forcing re-init (wasActive=${wasActive}, reason: ${reason})`);
+        setActiveState(false);
+        leafletMapRef = null;
+        observerTarget = null;
+        warmupRunsRemaining = 10;
+        if (!wasActive) return;
+        setTimeout(() => {
+            console.log(`${TAG} 🦵 Kick — re-activating + nudging Leaflet to capture map ref`);
+            setActiveState(true);
+            // Dispatch resize so Leaflet's _onResize fires invalidateSize
+            // on every existing map → our patched method captures the map ref.
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+            // After the capture, force tile layers to redraw. v34.18 testing
+            // showed map ref captures fine but ortho tiles don't render
+            // until user manually zooms — Leaflet's tile pipeline needs an
+            // explicit redraw() to re-fetch/re-render.
+            setTimeout(() => {
+                const map = getLeafletMap();
+                if (!map || typeof map.eachLayer !== 'function') return;
+                try { map.invalidateSize(); } catch (e) {}
+                let redrawn = 0;
+                map.eachLayer(layer => {
+                    if (layer && typeof layer.redraw === 'function' && layer._url) {
+                        try { layer.redraw(); redrawn++; } catch (e) {}
+                    }
+                });
+                console.log(`${TAG} 🦵 Kick — forced redraw on ${redrawn} tile layer(s)`);
+                runUpdate();
+            }, 200);
+        }, 100);
+    }
+
     function setActiveState(newState) {
         if (isActive === newState) return;
         isActive = newState;
@@ -3816,6 +3907,7 @@
             if (mapPaneWaitTimer) { clearTimeout(mapPaneWaitTimer); mapPaneWaitTimer = null; }
             if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
             if (observer) { observer.disconnect(); observer = null; }
+            if (stuckCheckTimer) { clearTimeout(stuckCheckTimer); stuckCheckTimer = null; }
             observerTarget = null;
             cleanup();
         }
@@ -3851,6 +3943,11 @@
         mapPaneWaitTimer = null;
         if (observer) observer.disconnect();
         console.log(`${TAG} 🟢 ACTIVATED (map-pane found on attempt ${attempt + 1})`);
+        // v34.40: arm the stuck-render auto-kick safety net (one-shot per
+        // page load). Detects the "stuck after refresh" symptom — tile
+        // layers/overlays not rendering despite activation — and silently
+        // recovers via a single auto-Kick. See detectStuckRender() above.
+        scheduleStuckCheckAfterActivation();
         observerTarget = container;
         observer = new MutationObserver(debouncedUpdate);
         observer.observe(container, observerConfig);
@@ -4150,59 +4247,19 @@
                     // SET_TOGGLE handler is idempotent.
                 } else if (msg.hotkeyId === 'kick-styler') {
                     // Recovery hotkey for the "stuck after refresh" state.
-                    //
-                    // v34.17 cleared our cached state + re-activated. But
-                    // diagnosed 2026-05-20: in stuck state the Leaflet map
-                    // instance is unreachable from the DOM (held in a WeakMap
-                    // or closure) and our `initialize` patch can't capture
-                    // already-created maps. So Kick was finding nothing and
-                    // apply-functions silently no-op'd.
-                    //
-                    // v34.18 expanded patchLeafletMap to hook MULTIPLE prototype
-                    // methods (getPane, addLayer, invalidateSize, etc.). Now
-                    // any map operation captures `this` and stashes it on the
-                    // container. To trigger one synthetically, Kick dispatches
-                    // a window resize — Leaflet's built-in resize handler calls
-                    // `invalidateSize` on every map, which our patched method
-                    // intercepts to set `__aim_map__`.
-                    const wasActive = isActive || toggleState.master !== false;
-                    console.log(`${TAG} 🦵 Kick — forcing re-init (wasActive=${wasActive})`);
-                    setActiveState(false);
-                    leafletMapRef = null;
-                    observerTarget = null;
-                    warmupRunsRemaining = 10;
-                    if (wasActive) {
-                        setTimeout(() => {
-                            console.log(`${TAG} 🦵 Kick — re-activating + nudging Leaflet to capture map ref`);
-                            setActiveState(true);
-                            // Dispatch resize so Leaflet's _onResize fires
-                            // invalidateSize on every existing map → our
-                            // patched method captures the map reference.
-                            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-                            // After the capture, force tile layers to redraw.
-                            // Without this, v34.18 testing showed: the map ref
-                            // captures fine but ortho tiles don't render until
-                            // the user manually zooms — Leaflet's tile pipeline
-                            // is cached and needs an explicit `redraw()` to
-                            // re-fetch/re-render. invalidateSize alone doesn't
-                            // force this.
-                            setTimeout(() => {
-                                const map = getLeafletMap();
-                                if (!map || typeof map.eachLayer !== 'function') return;
-                                try { map.invalidateSize(); } catch (e) {}
-                                let redrawn = 0;
-                                map.eachLayer(layer => {
-                                    if (layer && typeof layer.redraw === 'function' && layer._url) {
-                                        try { layer.redraw(); redrawn++; } catch (e) {}
-                                    }
-                                });
-                                console.log(`${TAG} 🦵 Kick — forced redraw on ${redrawn} tile layer(s)`);
-                                // One more runUpdate so our overlays render
-                                // against the now-captured + refreshed map.
-                                runUpdate();
-                            }, 200);
-                        }, 100);
-                    }
+                    // Background:
+                    // - v34.17 cleared cached state + re-activated. In stuck
+                    //   state the Leaflet map instance is unreachable from the
+                    //   DOM (held in a WeakMap/closure) and our `initialize`
+                    //   patch can't capture already-created maps.
+                    // - v34.18 expanded patchLeafletMap to hook MULTIPLE
+                    //   prototype methods (getPane, addLayer, invalidateSize…)
+                    //   so any map operation captures `this` onto the container.
+                    //   Kick dispatches a synthetic window resize → Leaflet's
+                    //   _onResize calls invalidateSize → our patch captures.
+                    // - v34.40 extracted the recovery sequence into performKick()
+                    //   so the new auto-kick safety net can use the same code path.
+                    performKick('manual via Shift+K');
                 }
             }
         };
