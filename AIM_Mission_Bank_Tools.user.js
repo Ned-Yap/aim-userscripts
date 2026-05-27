@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -15,8 +15,25 @@
 // @run-at       document-start
 // ==/UserScript==
 
-// AIM Mission Bank Tools — v0.5
-// Feature: Mission Summary panel (#48 in features.csv).
+// AIM Mission Bank Tools — v0.6
+// Features:
+//   - Mission Summary panel (SUM button)            — features.csv #48
+//   - Right-click mission inspector                  — features.csv #50
+//
+// v0.6 changes (NEW: right-click mission inspector):
+//   - Plain right-click on any mission row in Percepto's `.missions-list`
+//     sidebar opens a floating popup with mission stats, flight-phase
+//     breakdown, and step-type counts. "Open in SUM" jumps to the
+//     drill-down view inside the Summary panel for the full step list.
+//   - Shift+right-click bypasses MBT entirely so coworkers can still use
+//     Chrome's native menu ("Open Link in New Tab", "Copy Link", etc.).
+//   - Event delegation on the iframe document so React rebuilds of
+//     `ul.missions-list__items` don't kill the handler.
+//   - Mission ID parsed from the `<a href>` (`/mission-bank/<id>` regex);
+//     data reuses the existing missionsBySite cache and fetches if cold.
+//   - Popup is draggable (pointer events with setPointerCapture), has a
+//     close X, click-to-copy stat cards, and stays clamped inside the
+//     viewport even on near-edge clicks.
 //
 // v0.5 changes (SUM placement polish):
 //   - SUM no longer crowds the same row as "MISSIONS" title + "+ New
@@ -93,12 +110,16 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const SUM_BTN_ID = 'aim-mb-sum-btn';
     const PANEL_ID = 'aim-mb-panel';
+    const RCLICK_POPUP_ID = 'aim-mb-rclick-popup';
+    const MISSION_ROW_SELECTOR = 'li.missions-list__item';
+    const MISSION_LINK_SELECTOR = 'a[data-testid="edit-mission-link"]';
+    const MISSION_HREF_RE = /\/mission-bank\/(\d+)(?:\/|$|\?)/;
     const CACHE_KEY_VISIBLE_COLS = 'aim-mb-visible-cols';
     const CACHE_KEY_DISTANCE_UNIT = 'aim-mb-distance-unit'; // 'imperial' | 'metric'
     const CACHE_KEY_FLIGHT_THRESHOLDS = 'aim-mb-flight-thresholds';
@@ -139,6 +160,7 @@
                     if (!masterEnabled) {
                         hideSumButton();
                         closePanel();
+                        closeRightClickPopup();
                     } else {
                         runSumInjection();
                     }
@@ -534,6 +556,295 @@
             document.querySelectorAll(`#${SUM_BTN_ID}`).forEach(el => el.remove());
             document.querySelectorAll(`#${TOOLBAR_ROW_ID}`).forEach(el => el.remove());
         } catch (e) {}
+    }
+
+    // ========================================================
+    // Right-click mission inspector (v0.6)
+    // ========================================================
+    // One delegated listener on the iframe document. Survives React
+    // rebuilds of `ul.missions-list__items`. Plain right-click on a
+    // mission row opens our popup; Shift+right-click falls through to
+    // Chrome's native menu so coworkers can still "Open in New Tab".
+    let rclickHandlerInstalled = false;
+
+    function installRightClickHandler() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (rclickHandlerInstalled) return;
+        rclickHandlerInstalled = true;
+        document.addEventListener('contextmenu', onRightClick, true);
+        console.log(`${TAG} right-click mission inspector armed`);
+    }
+
+    function onRightClick(e) {
+        if (!masterEnabled) return;
+        if (e.shiftKey) return; // bypass — user wants Chrome's native menu
+        if (!isOnMissionBank()) return;
+        const row = e.target.closest && e.target.closest(MISSION_ROW_SELECTOR);
+        if (!row) return;
+        const link = row.querySelector(MISSION_LINK_SELECTOR) || row.querySelector('a[href]');
+        if (!link) return;
+        const href = link.getAttribute('href') || '';
+        const m = href.match(MISSION_HREF_RE);
+        if (!m) return;
+        const missionId = Number(m[1]);
+        e.preventDefault();
+        e.stopPropagation();
+        openRightClickPopup(missionId, link.textContent.trim(), e.clientX, e.clientY);
+    }
+
+    function openRightClickPopup(missionId, fallbackName, x, y) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        // Render shell immediately so the popup feels snappy; data fills
+        // in when fetch (if any) returns.
+        renderRightClickPopup({ id: missionId, name: fallbackName, _loading: true }, x, y);
+        const bucket = missionsBySite[siteID];
+        if (bucket) {
+            const m = bucket.missions.find(mm => mm.id === missionId);
+            if (m) {
+                renderRightClickPopup(buildMissionRow(m), x, y);
+                return;
+            }
+        }
+        // Cold cache — fetch then re-render. Subsequent right-clicks
+        // hit the cache and skip the network entirely.
+        fetchMissions(siteID,
+            (arr) => {
+                const m = arr.find(mm => mm.id === missionId);
+                if (!m) {
+                    renderRightClickPopup({ id: missionId, name: fallbackName, _notFound: true }, x, y);
+                } else {
+                    renderRightClickPopup(buildMissionRow(m), x, y);
+                }
+            },
+            (err) => renderRightClickPopup({ id: missionId, name: fallbackName, _error: err }, x, y)
+        );
+    }
+
+    function closeRightClickPopup() {
+        const el = document.getElementById(RCLICK_POPUP_ID);
+        if (el) el.remove();
+    }
+
+    function renderRightClickPopup(row, x, y) {
+        ensureRightClickPopupStyles();
+        closeRightClickPopup();
+        const pop = document.createElement('div');
+        pop.id = RCLICK_POPUP_ID;
+        const thresholds = getFlightThresholds();
+        const unit = getDistanceUnit();
+        let bodyHtml = '';
+        if (row._loading) {
+            bodyHtml = `<div style="padding:18px;text-align:center;color:#888;font-size:11px;">Loading mission ${row.id}…</div>`;
+        } else if (row._notFound) {
+            bodyHtml = `<div style="padding:18px;text-align:center;color:#ff5252;font-size:11px;">Mission ${row.id} not found on this site.</div>`;
+        } else if (row._error) {
+            bodyHtml = `<div style="padding:18px;text-align:center;color:#ff5252;font-size:11px;">Failed to load: ${escapeHtml(row._error)}</div>`;
+        } else {
+            // Build per-step-type counts dynamically (same logic as detail view)
+            const typeCounts = {};
+            (row.realSteps || []).forEach(s => {
+                const t = displayStepType(s);
+                typeCounts[t] = (typeCounts[t] || 0) + 1;
+            });
+            const typeCardsHtml = Object.entries(typeCounts)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => statCompact(k, v, String(v)))
+                .join('') || '<div style="color:#888;font-size:10px;">No real steps.</div>';
+            bodyHtml = `
+                <div class="aim-mb-rc-card">
+                    <div class="aim-mb-rc-card-title">Mission Stats</div>
+                    <div class="aim-mb-rc-grid">
+                        ${statCompact('Steps', row.steps, String(row.steps))}
+                        ${statCompact('Flight Time', fmtTime(row.flightTimeS), fmtTime(row.flightTimeS))}
+                        ${statCompact('Distance', fmtDistance(row.flightDistanceM, unit), fmtDistance(row.flightDistanceM, unit))}
+                        ${statCompact('Battery %', fmtPct(row.batteryConsumption), fmtPct(row.batteryConsumption))}
+                        ${statCompact('Est. Flights', estimateFlights(row.batteryConsumption, thresholds), String(estimateFlights(row.batteryConsumption, thresholds)))}
+                        ${statCompact('Total Cons %', fmtPct(row.totalConsumption), fmtPct(row.totalConsumption))}
+                    </div>
+                </div>
+                <div class="aim-mb-rc-card">
+                    <div class="aim-mb-rc-card-title">Flight Phase Breakdown</div>
+                    <div class="aim-mb-rc-grid">
+                        ${statCompact('Takeoff', `${fmtTime(row.takeoffTimeS)} · ${fmtPct(row.takeoffConsumption)}`)}
+                        ${statCompact('Navigate', `${fmtTime(row.navTimeS)} · ${fmtPct(row.navConsumption)}`)}
+                        ${statCompact('Wait', `${fmtTime(row.waitTimeS)} · ${fmtPct(row.waitConsumption)}`)}
+                        ${statCompact('Extra', `${fmtTime(row.extraTimeS)} · ${fmtPct(row.extraConsumption)}`)}
+                        ${statCompact('Landing', `${fmtTime(row.landingTimeS)} · ${fmtPct(row.landingConsumption)}`)}
+                    </div>
+                </div>
+                <div class="aim-mb-rc-card">
+                    <div class="aim-mb-rc-card-title">Step Counts (excl. takeoff + return)</div>
+                    <div class="aim-mb-rc-grid">${typeCardsHtml}</div>
+                </div>
+                ${row.description ? `<div class="aim-mb-rc-meta">Description: ${escapeHtml(row.description)}</div>` : ''}
+                ${row.robotTypes ? `<div class="aim-mb-rc-meta">Robot types: ${escapeHtml(row.robotTypes)}</div>` : ''}
+            `;
+        }
+        const activeBadge = row.active === false
+            ? `<span style="color:#888;font-size:10px;margin-left:8px;">Inactive</span>`
+            : (row.active === true
+                ? `<span class="aim-mb-dot active" style="margin-left:8px;" title="Active"></span>`
+                : '');
+        pop.innerHTML = `
+            <div class="aim-mb-rc-head">
+                <div class="aim-mb-rc-title">${escapeHtml(row.name || 'Mission')}${activeBadge}</div>
+                <div class="aim-mb-rc-id">ID ${row.id}</div>
+                <button class="aim-mb-rc-close" data-rc-close title="Close">✕</button>
+            </div>
+            <div class="aim-mb-rc-body">${bodyHtml}</div>
+            <div class="aim-mb-rc-footer">
+                <button class="aim-mb-tbtn" data-rc-open-sum>Open in SUM →</button>
+            </div>
+        `;
+        document.body.appendChild(pop);
+        positionRightClickPopup(pop, x, y);
+        wireRightClickPopupEvents(pop, row.id);
+    }
+
+    function statCompact(label, value, copyVal) {
+        const hasCopy = copyVal != null && copyVal !== 'null' && copyVal !== 'undefined' && copyVal !== '—';
+        const cls = hasCopy ? 'aim-mb-rc-stat aim-mb-rc-stat-clickable' : 'aim-mb-rc-stat';
+        const copyAttr = hasCopy ? `data-rc-copy="${escapeHtml(String(copyVal))}"` : '';
+        const title = hasCopy ? ' title="Click to copy"' : '';
+        return `<div class="${cls}" ${copyAttr}${title}><div class="aim-mb-rc-stat-label">${escapeHtml(label)}</div><div class="aim-mb-rc-stat-value">${escapeHtml(String(value))}</div></div>`;
+    }
+
+    function positionRightClickPopup(pop, x, y) {
+        // Clamp to viewport with an 8px margin
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const rect = pop.getBoundingClientRect();
+        let left = x + 6;
+        let top = y + 6;
+        if (left + rect.width > vw - 8) left = Math.max(8, vw - rect.width - 8);
+        if (top + rect.height > vh - 8) top = Math.max(8, vh - rect.height - 8);
+        if (left < 8) left = 8;
+        if (top < 8) top = 8;
+        pop.style.left = `${left}px`;
+        pop.style.top = `${top}px`;
+    }
+
+    function wireRightClickPopupEvents(pop, missionId) {
+        // Close X
+        const closeBtn = pop.querySelector('[data-rc-close]');
+        if (closeBtn) closeBtn.onclick = closeRightClickPopup;
+        // "Open in SUM" — opens panel + drills into the mission
+        const openBtn = pop.querySelector('[data-rc-open-sum]');
+        if (openBtn) openBtn.onclick = () => {
+            closeRightClickPopup();
+            openPanelAndDrill(missionId);
+        };
+        // Click-to-copy stat cards
+        pop.querySelectorAll('[data-rc-copy]').forEach(el => {
+            el.onclick = () => {
+                const v = el.dataset.rcCopy;
+                if (!v) return;
+                copyToClipboard(v);
+                showToast(`Copied: ${v}`, '#5fff5f');
+            };
+        });
+        // Draggable by header
+        const head = pop.querySelector('.aim-mb-rc-head');
+        if (head) makeRClickPopupDraggable(pop, head);
+        // Outside click closes (mousedown so it fires before next contextmenu)
+        setTimeout(() => {
+            const onDoc = (e) => {
+                if (!pop.contains(e.target)) {
+                    pop.remove();
+                    document.removeEventListener('mousedown', onDoc, true);
+                }
+            };
+            document.addEventListener('mousedown', onDoc, true);
+        }, 0);
+        // Esc closes
+        const onKey = (e) => {
+            if (e.key === 'Escape') {
+                pop.remove();
+                document.removeEventListener('keydown', onKey, true);
+            }
+        };
+        document.addEventListener('keydown', onKey, true);
+    }
+
+    function makeRClickPopupDraggable(el, handle) {
+        let startX, startY, startLeft, startTop, dragging = false, pid = null;
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.target.tagName === 'BUTTON') return;
+            dragging = true; pid = e.pointerId;
+            startX = e.clientX; startY = e.clientY;
+            const rect = el.getBoundingClientRect();
+            startLeft = rect.left; startTop = rect.top;
+            try { handle.setPointerCapture(pid); } catch (er) {}
+            e.preventDefault();
+        });
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging || e.pointerId !== pid) return;
+            el.style.left = `${startLeft + e.clientX - startX}px`;
+            el.style.top = `${startTop + e.clientY - startY}px`;
+        });
+        const stop = (e) => {
+            if (e && e.pointerId !== pid) return;
+            dragging = false;
+            try { handle.releasePointerCapture(pid); } catch (er) {}
+        };
+        handle.addEventListener('pointerup', stop);
+        handle.addEventListener('pointercancel', stop);
+    }
+
+    // Open SUM panel and immediately jump to the drill-down view for a
+    // specific mission. If data is cold the panel shows its own loading
+    // state then renders the drill-down once missions arrive.
+    function openPanelAndDrill(missionId) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        if (!panelState) initPanelState();
+        if (!panelEl) buildPanelChrome();
+        panelEl.style.display = 'flex';
+        const bucket = missionsBySite[siteID];
+        const goDrill = () => {
+            // Confirm the mission exists in the loaded set; if not,
+            // fall back to the table view.
+            const rows = buildAllRows(siteID);
+            if (rows.find(r => r.id === missionId)) renderDetailView(missionId);
+            else renderTableView();
+        };
+        if (!bucket) {
+            renderLoadingState();
+            fetchMissions(siteID, goDrill, (err) => renderErrorState(err));
+        } else {
+            goDrill();
+        }
+    }
+
+    function ensureRightClickPopupStyles() {
+        if (document.getElementById('aim-mb-rclick-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'aim-mb-rclick-styles';
+        style.textContent = `
+            #${RCLICK_POPUP_ID} { position: fixed; min-width: 320px; max-width: 420px; max-height: 80vh; overflow: auto; background: #0f1216; color: #e6e6e6; border: 1px solid #14d2dc; border-radius: 6px; box-shadow: 0 8px 28px rgba(0,0,0,0.7); z-index: 100002; font-family: 'Lato','Segoe UI',sans-serif; font-size: 11px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-head { background: #14d2dc; color: #000; padding: 6px 10px; display: flex; align-items: center; gap: 8px; cursor: move; user-select: none; border-radius: 5px 5px 0 0; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-title { flex: 1; font-weight: 700; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-id { font-size: 10px; color: rgba(0,0,0,0.7); font-weight: 600; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-close { background: transparent; border: none; color: #000; font-size: 14px; cursor: pointer; font-weight: 700; padding: 0 4px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-close:hover { color: #800; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-body { padding: 10px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-card-title { font-size: 9px; text-transform: uppercase; color: #14d2dc; letter-spacing: 0.1em; margin-bottom: 6px; font-weight: 700; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-stat { background: #0f1216; border-radius: 3px; padding: 5px 7px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-stat-clickable { cursor: pointer; transition: background 0.1s; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-stat-clickable:hover { background: #181c22; outline: 1px solid #14d2dc; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-stat-label { font-size: 9px; color: #888; text-transform: uppercase; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-stat-value { font-size: 12px; color: #fff; font-weight: 700; margin-top: 1px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-meta { color: #aaa; font-size: 10px; padding: 6px 10px; }
+            #${RCLICK_POPUP_ID} .aim-mb-rc-footer { padding: 8px 10px; border-top: 1px solid #2a2a2a; display: flex; justify-content: flex-end; }
+            #${RCLICK_POPUP_ID} .aim-mb-tbtn { background: #2a2a2a; border: 1px solid #444; color: #e6e6e6; padding: 4px 12px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; }
+            #${RCLICK_POPUP_ID} .aim-mb-tbtn:hover { border-color: #14d2dc; color: #14d2dc; }
+            #${RCLICK_POPUP_ID} .aim-mb-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+            #${RCLICK_POPUP_ID} .aim-mb-dot.active { background: #5fff5f; }
+        `;
+        document.head.appendChild(style);
     }
 
     // ========================================================
@@ -1373,6 +1684,9 @@
             setInterval(runSumInjection, 2000);
             // Also try once now in case DOM is already ready
             setTimeout(runSumInjection, 1000);
+            // Install the right-click mission inspector once (delegated
+            // listener on document; survives React rebuilds).
+            installRightClickHandler();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
