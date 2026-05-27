@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1624,7 +1624,7 @@
         const row = rows.find(r => r.id === missionId);
         if (!row) { renderTableView(); return; }
         panelState.drillId = missionId;
-        if (!panelState.detailFilter) panelState.detailFilter = 'all';
+        if (!panelState.detailFilter) panelState.detailFilter = new Set();
 
         const unit = panelState.distanceUnit;
         const t = panelState.thresholds;
@@ -1638,25 +1638,28 @@
             if (!seen.has(t)) { seen.add(t); stepTypes.push(t); }
         });
 
-        // Apply type filter (preserves original step numbering)
-        const filter = panelState.detailFilter;
-        const filteredSteps = filter === 'all' ? allSteps : allSteps.filter(s => displayStepType(s) === filter);
+        // Apply type filter — empty set = all visible (no filter active)
+        const activeFilters = panelState.detailFilter;
+        const showAll = activeFilters.size === 0;
+        const filteredSteps = showAll ? allSteps : allSteps.filter(s => activeFilters.has(displayStepType(s)));
 
         const orderedCounts = buildOrderedStepCounts(allSteps);
         const typeStatCards = orderedCounts
             .map(([k, v]) => stat(k, v, String(v)))
             .join('');
 
-        // Filter chips
-        const filterChips = [`<button class="aim-mb-tbtn${filter === 'all' ? ' active' : ''}" data-step-filter="all">All</button>`]
+        // Filter chips — multi-select: click toggles each type on/off.
+        // "All" clears any active filters (empty set = show everything).
+        const filterChips = [`<button class="aim-mb-tbtn${showAll ? ' active' : ''}" data-step-filter="__all">All</button>`]
             .concat(stepTypes.map(t =>
-                `<button class="aim-mb-tbtn${filter === t ? ' active' : ''}" data-step-filter="${escapeHtml(t)}">${escapeHtml(t)}</button>`
+                `<button class="aim-mb-tbtn${activeFilters.has(t) ? ' active' : ''}" data-step-filter="${escapeHtml(t)}">${escapeHtml(t)}</button>`
             )).join('');
 
         const html = `
             <div class="aim-mb-detail-header">
                 <button class="aim-mb-detail-back" data-back>← Back</button>
                 <div class="aim-mb-detail-title" data-detail-name="${escapeHtml(row.name)}" title="Click to copy name" style="cursor:pointer;">${escapeHtml(row.name)} 📋</div>
+                <button class="aim-mb-tbtn" data-open-editor="${row.id}" title="Open this mission in AIM editor">Edit ✏️</button>
                 <button class="aim-mb-tbtn ${unit === 'imperial' ? 'active' : ''}" data-unit-d="imperial">mi</button>
                 <button class="aim-mb-tbtn ${unit === 'metric' ? 'active' : ''}" data-unit-d="metric">km</button>
                 <div class="aim-mb-detail-id">ID ${row.id}${row.active ? '' : ' · <span style="color:#888">Inactive</span>'}</div>
@@ -1721,7 +1724,7 @@
     function wireDetailEvents(missionId, row, filteredSteps, allSteps) {
         const unit = panelState.distanceUnit;
         panelEl.querySelector('[data-back]').onclick = () => {
-            panelState.detailFilter = 'all';
+            panelState.detailFilter = new Set();
             renderTableView();
         };
         // Copy mission name
@@ -1729,6 +1732,20 @@
         if (titleEl) titleEl.onclick = () => {
             copyToClipboard(titleEl.dataset.detailName);
             showToast(`Copied: ${titleEl.dataset.detailName}`, '#5fff5f');
+        };
+        // Open in AIM editor — navigates to the mission editor URL
+        const editBtn = panelEl.querySelector('[data-open-editor]');
+        if (editBtn) editBtn.onclick = () => {
+            const sid = getCurrentSiteID();
+            const mid = editBtn.dataset.openEditor;
+            if (sid && mid) {
+                try {
+                    const top = window.top || window;
+                    top.location.hash = `#/site/${sid}/control-panel/mission-bank/${mid}`;
+                } catch (e) {
+                    showToast('Failed to navigate to editor', '#ff5252');
+                }
+            }
         };
         // Unit toggle on detail
         panelEl.querySelectorAll('[data-unit-d]').forEach(b => {
@@ -1738,10 +1755,18 @@
                 renderDetailView(missionId);
             };
         });
-        // Step-type filter chips
+        // Step-type filter chips — multi-select toggle. "__all" clears filters.
         panelEl.querySelectorAll('[data-step-filter]').forEach(b => {
             b.onclick = () => {
-                panelState.detailFilter = b.dataset.stepFilter;
+                const key = b.dataset.stepFilter;
+                if (key === '__all') {
+                    panelState.detailFilter = new Set();
+                } else {
+                    const f = panelState.detailFilter;
+                    if (f.has(key)) f.delete(key);
+                    else f.add(key);
+                    // If all types are now selected, same as "all" — clear the set
+                }
                 renderDetailView(missionId);
             };
         });
@@ -1821,15 +1846,20 @@
             showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800');
             return;
         }
+        // KML colors are aabbggrr (reversed from hex RGB).
+        // Navigate = #5fff5f → green → KML ff5fff5f
+        // Snapshot = #ff9800 → orange → KML ff0098ff
         const placemarks = gpsSteps.map((s, i) => {
             const idx = allSteps.indexOf(s) + 1;
             const type = displayStepType(s);
             const altM = (s.value1 != null && s.value1_name === 'm') ? Number(s.value1) : 0;
             const lat = Number(s.location.lat);
             const lng = Number(s.location.lng);
+            const styleId = s.type_name === 'navigate' ? 'nav' : 'snap';
             return `    <Placemark>
       <name>Step ${idx} — ${escapeXml(type)}</name>
       <description>Altitude: ${Math.round(altM)} m (${Math.round(altM * 3.28084).toLocaleString()} ft)</description>
+      <styleUrl>#style-${styleId}</styleUrl>
       <Point>
         <altitudeMode>absolute</altitudeMode>
         <coordinates>${lng},${lat},${altM}</coordinates>
@@ -1841,6 +1871,14 @@
   <Document>
     <name>${escapeXml(row.name)} — GPS Steps</name>
     <description>Navigate + Snapshot steps with 3D altitude pins. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <Style id="style-nav">
+      <IconStyle><color>ff5fff5f</color><scale>1.1</scale></IconStyle>
+      <LabelStyle><color>ff5fff5f</color></LabelStyle>
+    </Style>
+    <Style id="style-snap">
+      <IconStyle><color>ff0098ff</color><scale>1.1</scale></IconStyle>
+      <LabelStyle><color>ff0098ff</color></LabelStyle>
+    </Style>
 ${placemarks}
   </Document>
 </kml>`;
