@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.9';
+    const SCRIPT_VERSION = '0.10';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -449,16 +449,15 @@
             return v != null ? String(v) : '';
         }
         if (v == null) return '';
-        // Unit-aware conversion: if value1_name is "m" (meters) and unit
-        // is imperial, show in feet. This covers navigate/snapshot altitude
-        // values and any future step type that reports in meters.
+        // Navigate/snapshot values are MSL altitude in meters. Convert
+        // to feet when imperial, round to whole number, comma-format.
         if (s.value1_name === 'm' && typeof v === 'number') {
             const u = unit || getDistanceUnit();
             if (u === 'imperial') {
-                const ft = v * 3.28084;
-                return `${ft.toFixed(2)} ft`;
+                const ft = Math.round(v * 3.28084);
+                return `${ft.toLocaleString()} ft MSL`;
             }
-            return `${v} m`;
+            return `${Math.round(v).toLocaleString()} m MSL`;
         }
         return `${v}${s.value1_name ? ' ' + s.value1_name : ''}`;
     }
