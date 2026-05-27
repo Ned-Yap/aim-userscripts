@@ -8,6 +8,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-27
 
+- **AIM Mission Bank Tools v0.6** — **NEW: right-click mission inspector.** (features.csv #50)
+  - Plain right-click on any mission row in Percepto's `.missions-list` sidebar opens a floating popup with mission stats, flight-phase breakdown, and dynamic step-type counts.
+  - **Shift+right-click bypasses MBT** so coworkers can still use Chrome's native menu (Open Link in New Tab, Copy Link Address, etc).
+  - **"Open in SUM →"** button drops you directly into the mission's detail view inside the Summary panel for the full step list.
+  - Delegated `contextmenu` listener on the iframe document so React rebuilds of `ul.missions-list__items` don't kill the handler. Mission ID parsed from the `<a href="#/.../mission-bank/<id>">` via regex. Data reuses the existing missionsBySite cache and fetches if cold — first right-click on a fresh load primes the cache for everything else.
+  - Popup: draggable header (pointer events + setPointerCapture), close X, Esc/outside-click close, click-to-copy stat cards, viewport-clamped positioning so near-edge right-clicks don't escape.
+
 - **AIM Mission Bank Tools v0.5** — SUM placement polish.
   - Dedicated `aim-mb-toolbar-row` div injected as a sibling immediately after `.missions-list__header`. SUM lives there now instead of crowding the same row as the "MISSIONS" title + "+ New Mission" button. Future MBT buttons join the same flex/gap row (`Stats`, `Inspect`, etc.).
   - `hideSumButton` tears down the row when master toggle goes off. React-rebuild guard keys off the row instead of the button alone.
