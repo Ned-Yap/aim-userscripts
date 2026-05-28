@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.24
+// @version      0.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.24';
+    const SCRIPT_VERSION = '0.25';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -148,6 +148,13 @@
     // Shape: { [missionId]: { [instructionId]: { value: number, unit: 'imperial'|'metric' } } }
     const pendingAltitudes = {};
     let committingChanges = false;
+
+    // Committed-but-not-yet-refetched altitudes. After a successful
+    // queue commit, we update Percepto's per-step state but our
+    // missionsBySite cache (from /available_app/) is still stale.
+    // We track the new values here so the drill-down can show
+    // "OLD ALT (new: NEW)" until the user hits Refresh.
+    const committedAltitudes = {};
 
     // ========================================================
     // Control Panel integration
@@ -1079,6 +1086,7 @@
                 #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-alt-pending:hover { background: #ffb84d; }
+                #${PANEL_ID} .aim-mb-alt-committed { color: #5fff5f; font-weight: 700; margin-left: 4px; }
                 #${PANEL_ID} .aim-mb-alt-input { width: 80px; background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 2px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 #${PANEL_ID} .aim-mb-pending-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,152,0,0.15); border: 1px solid #ff9800; border-radius: 4px; margin-bottom: 8px; color: #ffb84d; font-size: 11px; font-weight: 600; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
@@ -1133,6 +1141,9 @@
             const sid = getCurrentSiteID();
             if (!sid) return;
             delete missionsBySite[sid];
+            // Clear committed-but-not-refetched markers — server now has truth
+            const mids = missionsBySite[sid] ? missionsBySite[sid].missions.map(m => m.id) : Object.keys(committedAltitudes);
+            mids.forEach(mid => clearCommittedFor(mid));
             renderLoadingState();
             fetchMissions(sid, () => renderTableView(), (err) => renderErrorState(err));
         };
@@ -2261,6 +2272,14 @@ ${placemarks}
     function countPending(missionId) {
         return pendingAltitudes[missionId] ? Object.keys(pendingAltitudes[missionId]).length : 0;
     }
+    function markCommitted(missionId, instructionId, value, unit) {
+        if (!committedAltitudes[missionId]) committedAltitudes[missionId] = {};
+        committedAltitudes[missionId][instructionId] = { value, unit };
+    }
+    function getCommitted(missionId, instructionId) {
+        return committedAltitudes[missionId] && committedAltitudes[missionId][instructionId];
+    }
+    function clearCommittedFor(missionId) { delete committedAltitudes[missionId]; }
 
     // Commit all pending altitude changes for a mission. For each:
     // open step editor → wait for dialog → find altitude input by
@@ -2291,8 +2310,10 @@ ${placemarks}
                 showToast(`Failed at step ${idx + 1}/${entries.length}: ${err || 'unknown'}`, '#ff5252');
                 return;
             }
+            // Record the committed value so the drill-down can show
+            // "old (new: X)" until the user refreshes the cache.
+            markCommitted(missionId, Number(instructionId), change.value, change.unit);
             showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
-            // Small pause between steps to let Percepto's UI settle
             setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 400);
         });
     }
@@ -2405,9 +2426,15 @@ ${placemarks}
             const rawNum = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
             const missionId = panelState && panelState.drillId;
             const pending = missionId ? getPendingChange(missionId, s.id) : null;
+            const committed = missionId ? getCommitted(missionId, s.id) : null;
             if (pending) {
                 const pendingDisplay = u === 'imperial' ? `${Math.round(pending.value).toLocaleString()} ft ALT` : `${Math.round(pending.value).toLocaleString()} m ALT`;
                 valCell = `<td><span class="aim-mb-alt-pending" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Pending change — was ${rawNum}, will be ${Math.round(pending.value)}. Click to re-edit.">${escapeHtml(pendingDisplay)} ⏳</span></td>`;
+            } else if (committed) {
+                // Locally-committed but cache still has old value.
+                // Show "OLD ALT (new: NEW ft)" until Refresh refetches.
+                const unitLabel = committed.unit === 'imperial' ? 'ft' : 'm';
+                valCell = `<td><span class="aim-mb-alt-editable" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Was ${rawNum}, committed ${Math.round(committed.value)} ${unitLabel}. Refresh to reload from server.">${escapeHtml(val)} <span class="aim-mb-alt-committed">(new: ${Math.round(committed.value).toLocaleString()} ${unitLabel})</span></span></td>`;
             } else {
                 valCell = `<td><span class="aim-mb-alt-editable" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Click to edit altitude. Right-click to copy raw value.">${escapeHtml(val)}</span></td>`;
             }
