@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2171,15 +2171,18 @@ ${placemarks}
     // inline style overrides, click it, wait for the Ant dropdown,
     // click Edit, then clean up our style hacks.
     function forceOpenInstructionEdit(draggable) {
+        const instrId = draggable.getAttribute('data-rfd-draggable-id');
+        console.log(`${TAG} [edit] starting for instruction ${instrId}`);
         // 1. Aggressively dismiss any leftover Ant dropdowns from prior
-        //    iterations — they're the root cause of queue corruption
-        //    (querySelector picks the FIRST -edit it finds, so a stuck
-        //    dropdown for step 2 grabs the click meant for step 10).
+        //    iterations — they're the root cause of queue corruption.
         dismissStuckAntDropdowns();
-
         const optionsContainer = draggable.querySelector('.mission-instruction-item__options');
         const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
-        if (!dots) { showToast('Three-dots menu not found', '#ff9800'); return; }
+        if (!dots) {
+            console.warn(`${TAG} [edit] FAIL: dots element not found for instruction ${instrId}`);
+            showToast('Three-dots menu not found', '#ff9800');
+            return;
+        }
         const savedStyles = [];
         [optionsContainer, dots, dots.parentElement].forEach(el => {
             if (!el) return;
@@ -2187,41 +2190,53 @@ ${placemarks}
             el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;';
         });
 
-        // 2. Snapshot existing .ant-dropdown elements BEFORE triggering
-        //    the hover so we can identify the NEW one that appears.
+        // 2. Snapshot existing .ant-dropdown elements BEFORE triggering hover
         const dropdownsBefore = new Set(document.querySelectorAll('.ant-dropdown'));
+        console.log(`${TAG} [edit] ${instrId}: ${dropdownsBefore.size} pre-existing dropdowns`);
 
-        // 3. Call the React onMouseEnter handler to open this step's dropdown.
+        // 3. Call the React onMouseEnter handler. Walk up the tree
+        //    looking for the first ancestor with a React onMouseEnter,
+        //    onMouseOver, or onClick prop. Log which one we used.
         let triggered = false;
+        let triggerLevel = -1;
+        let triggerHandlerName = null;
         let el = dots;
         for (let depth = 0; depth < 8 && el; depth++) {
             const propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
             if (propsKey) {
                 const props = el[propsKey];
-                const handler = props.onMouseEnter || props.onMouseOver || props.onClick;
-                if (handler) {
+                const handlerName = props.onMouseEnter ? 'onMouseEnter' : (props.onMouseOver ? 'onMouseOver' : (props.onClick ? 'onClick' : null));
+                if (handlerName) {
+                    const handler = props[handlerName];
                     const fakeEvent = {
-                        type: 'mouseenter', target: el, currentTarget: el,
+                        type: handlerName.replace('on', '').toLowerCase(), target: el, currentTarget: el,
                         preventDefault() {}, stopPropagation() {},
                         nativeEvent: new MouseEvent('mouseenter'),
                     };
-                    try { handler(fakeEvent); triggered = true; } catch (e) {}
+                    try {
+                        handler(fakeEvent);
+                        triggered = true; triggerLevel = depth; triggerHandlerName = handlerName;
+                    } catch (e) { console.warn(`${TAG} [edit] ${instrId}: handler ${handlerName} threw:`, e); }
                     if (triggered) break;
                 }
             }
             el = el.parentElement;
         }
         if (!triggered) {
+            console.warn(`${TAG} [edit] ${instrId}: no React handler found in 8 levels, falling back to DOM click`);
             dots.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        } else {
+            console.log(`${TAG} [edit] ${instrId}: triggered ${triggerHandlerName} at depth ${triggerLevel}`);
         }
 
-        // 4. Poll for the NEW dropdown (one that wasn't in the snapshot),
-        //    click ITS Edit item — not just any -edit element on the page.
+        // 4. Poll for the NEW dropdown
         let pollAttempts = 0;
         const editPoll = setInterval(() => {
             pollAttempts++;
-            if (pollAttempts > 15) {
+            if (pollAttempts > 20) {
                 clearInterval(editPoll);
+                const after = document.querySelectorAll('.ant-dropdown');
+                console.warn(`${TAG} [edit] ${instrId}: TIMEOUT waiting for new dropdown. Before=${dropdownsBefore.size}, After=${after.length}, visible=${Array.from(after).filter(d => !d.classList.contains('ant-dropdown-hidden')).length}`);
                 showToast('Edit dropdown did not appear', '#ff9800');
                 savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
                 return;
@@ -2238,9 +2253,8 @@ ${placemarks}
                 || Array.from(newDropdown.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
             if (!editItem) return;
             clearInterval(editPoll);
+            console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
-            // Restore styles + dismiss the dropdown we just used so it
-            // doesn't linger and confuse future iterations.
             savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
             setTimeout(() => dismissStuckAntDropdowns(), 100);
         }, 100);
@@ -2404,17 +2418,18 @@ ${placemarks}
         // Belt + suspenders: dismiss stuck dropdowns before each iteration
         dismissStuckAntDropdowns();
         const [instructionId, change] = entries[idx];
+        console.log(`${TAG} [queue] ====== step ${idx + 1}/${entries.length}: instruction ${instructionId} → ${change.value} ${change.unit} ======`);
         commitOneChange(missionId, instructionId, change, (ok, err) => {
             if (!ok) {
                 committingChanges = false;
+                console.error(`${TAG} [queue] FAILED at step ${idx + 1}/${entries.length}: ${err}`);
                 showToast(`Failed at step ${idx + 1}/${entries.length}: ${err || 'unknown'}`, '#ff5252');
                 return;
             }
-            // Record the committed value so the drill-down can show
-            // "old (new: X)" until the user refreshes the cache.
+            console.log(`${TAG} [queue] step ${idx + 1}/${entries.length} success`);
             markCommitted(missionId, Number(instructionId), change.value, change.unit);
             showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
-            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 400);
+            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 600);
         });
     }
 
