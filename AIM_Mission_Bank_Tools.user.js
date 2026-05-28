@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1086,7 +1086,7 @@
                 #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-alt-pending:hover { background: #ffb84d; }
-                #${PANEL_ID} .aim-mb-alt-committed { color: #5fff5f; font-weight: 700; margin-left: 4px; }
+                #${PANEL_ID} .aim-mb-alt-committed { color: #ffeb3b; font-weight: 700; margin-left: 4px; }
                 #${PANEL_ID} .aim-mb-alt-input { width: 80px; background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 2px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 #${PANEL_ID} .aim-mb-pending-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,152,0,0.15); border: 1px solid #ff9800; border-radius: 4px; margin-bottom: 8px; color: #ffb84d; font-size: 11px; font-weight: 600; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
@@ -1645,13 +1645,20 @@
     // ========================================================
     // Detail view (master-detail swap)
     // ========================================================
-    function renderDetailView(missionId) {
+    function renderDetailView(missionId, opts) {
         const sid = getCurrentSiteID();
         const rows = buildAllRows(sid);
         const row = rows.find(r => r.id === missionId);
         if (!row) { renderTableView(); return; }
         panelState.drillId = missionId;
         if (!panelState.detailFilter) panelState.detailFilter = new Set();
+
+        // Preserve scroll positions across re-renders so inline edits
+        // don't snap the user back to the top of the drill-down.
+        const prevBody = panelEl && panelEl.querySelector('.aim-mb-detail-body');
+        const prevInstr = panelEl && panelEl.querySelector('.aim-mb-detail-instr-scroll');
+        const savedBodyScroll = prevBody ? prevBody.scrollTop : 0;
+        const savedInstrScroll = prevInstr ? prevInstr.scrollTop : 0;
 
         const unit = panelState.distanceUnit;
         const t = panelState.thresholds;
@@ -1735,7 +1742,7 @@
                             <button class="aim-mb-tbtn" data-discard-pending>Discard</button>
                         </div>`;
                     })()}
-                    <div style="overflow:auto;max-height:400px;">
+                    <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
                                 <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
@@ -1754,7 +1761,30 @@
             </div>
         `;
         setBodyHtml(html);
+        // Restore scroll positions
+        const newBody = panelEl.querySelector('.aim-mb-detail-body');
+        if (newBody) newBody.scrollTop = savedBodyScroll;
+        const newInstr = panelEl.querySelector('.aim-mb-detail-instr-scroll');
+        if (newInstr) newInstr.scrollTop = savedInstrScroll;
         wireDetailEvents(missionId, row, filteredSteps, allSteps);
+        // Optionally auto-focus the next editable altitude after a queue commit
+        if (opts && opts.focusNextAfter != null) {
+            focusNextAltEditable(missionId, opts.focusNextAfter);
+        }
+    }
+
+    function focusNextAltEditable(missionId, currentInstrId) {
+        const cells = panelEl.querySelectorAll('[data-alt-edit]');
+        let foundCurrent = false;
+        for (const cell of cells) {
+            const id = Number(cell.dataset.instrId);
+            if (foundCurrent) {
+                cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setTimeout(() => startInlineAltEdit(cell, missionId), 100);
+                return;
+            }
+            if (id === currentInstrId) foundCurrent = true;
+        }
     }
 
     function wireDetailEvents(missionId, row, filteredSteps, allSteps) {
@@ -1904,34 +1934,63 @@
         const startVal = pending ? Math.round(pending.value) : origAlt;
         const unit = panelState.distanceUnit;
         const unitLabel = unit === 'imperial' ? 'ft' : 'm';
-        // Replace span with input
+        // Use text input so formulas like "2974+15" are accepted
         const input = document.createElement('input');
-        input.type = 'number';
+        input.type = 'text';
         input.className = 'aim-mb-alt-input';
         input.value = startVal;
-        input.step = '1';
-        const parent = cellSpan.parentElement;
+        input.title = 'Type a number, or a formula like 2974+15 or (2974+15)*2';
         cellSpan.replaceWith(input);
         input.focus();
         input.select();
+        let advanceAfter = false;
         const commit = () => {
-            const v = Number(input.value);
-            if (isNaN(v) || v === origAlt) {
-                // No change → discard any pending if it matches original
-                if (v === origAlt) discardPendingChange(missionId, instrId);
+            const v = parseFormulaValue(input.value);
+            if (isNaN(v)) {
+                showToast('Invalid value or formula', '#ff5252');
                 renderDetailView(missionId);
                 return;
             }
-            queueAltitudeChange(missionId, instrId, v, unit);
-            showToast(`Queued: step ${instrId} → ${v} ${unitLabel}`, '#ff9800');
-            renderDetailView(missionId);
+            const rounded = Math.round(v);
+            if (rounded === origAlt) {
+                discardPendingChange(missionId, instrId);
+                renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+                return;
+            }
+            queueAltitudeChange(missionId, instrId, rounded, unit);
+            showToast(`Queued: step ${instrId} → ${rounded} ${unitLabel}`, '#ff9800');
+            renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
         };
-        const cancel = () => renderDetailView(missionId);
         input.onblur = commit;
         input.onkeydown = (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-            else if (e.key === 'Escape') { e.preventDefault(); input.onblur = null; cancel(); }
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                advanceAfter = true;
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                input.onblur = null;
+                renderDetailView(missionId);
+            }
         };
+    }
+
+    // Parse a number OR a math formula (e.g. "2974+15", "(2974+15)*2").
+    // Strips any non-math chars before eval — only digits, dot, +, -, *,
+    // /, parens, spaces are allowed.
+    function parseFormulaValue(s) {
+        if (s == null) return NaN;
+        const trimmed = String(s).trim();
+        if (!trimmed) return NaN;
+        if (/[+\-*/()]/.test(trimmed)) {
+            const clean = trimmed.replace(/[^0-9.+\-*/()\s]/g, '');
+            if (!clean) return NaN;
+            try {
+                const result = Function(`"use strict"; return (${clean})`)();
+                return Number(result);
+            } catch (e) { return NaN; }
+        }
+        return Number(trimmed);
     }
 
     function exportDetailToSheets(filteredSteps, allSteps, unit, missionName) {
