@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2175,6 +2175,70 @@ ${placemarks}
         return null;
     }
 
+    // Set the altitude in the open edit dialog. Handles two layouts:
+    //   - Navigate: has two radios ("Based on FFZ min alt" + "Custom
+    //     altitude"). We click the Custom radio first, then set the value.
+    //   - Snapshot: direct altitude input, no radio gating.
+    // Calls done(ok: boolean) when finished.
+    function setAltitudeInEditDialog(value, done) {
+        // Find the "Drone altitude" / "Altitude" input group
+        const labels = document.querySelectorAll('.edit-instruction__input-label');
+        let group = null;
+        for (const lbl of labels) {
+            if (/drone\s*altitude/i.test(lbl.textContent || '')) {
+                group = lbl.closest('.edit-instruction__input-group'); break;
+            }
+        }
+        if (!group) {
+            for (const lbl of labels) {
+                const t = (lbl.textContent || '').trim().toLowerCase();
+                if (t === 'altitude' || t === 'height') {
+                    group = lbl.closest('.edit-instruction__input-group'); break;
+                }
+            }
+        }
+        if (!group) { done(false); return; }
+        // If radios exist, click the "Custom altitude" one
+        const radios = group.querySelectorAll('input[type="radio"]');
+        if (radios.length >= 2) {
+            let customRadio = null;
+            for (const r of radios) {
+                const lbl = r.closest('label');
+                if (lbl && /custom/i.test(lbl.textContent || '')) { customRadio = r; break; }
+            }
+            if (!customRadio) customRadio = radios[1]; // fallback to 2nd radio
+            clickReactControl(customRadio);
+            // Wait for React to enable the input, then set value
+            setTimeout(() => setAltValue(group, value, done), 250);
+        } else {
+            setAltValue(group, value, done);
+        }
+    }
+
+    function setAltValue(group, value, done) {
+        const numInput = group.querySelector('input.ant-input-number-input');
+        if (!numInput) { done(false); return; }
+        setReactInputValue(numInput, value);
+        done(true);
+    }
+
+    // Click a React-controlled input (radio/checkbox) by calling its
+    // onChange handler directly. Falls back to clicking the label.
+    function clickReactControl(el) {
+        const propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
+        if (propsKey) {
+            const props = el[propsKey];
+            if (typeof props.onChange === 'function') {
+                try { props.onChange({ target: { checked: true, value: el.value }, preventDefault(){}, stopPropagation(){} }); return; } catch (e) {}
+            }
+            if (typeof props.onClick === 'function') {
+                try { props.onClick({ preventDefault(){}, stopPropagation(){} }); return; } catch (e) {}
+            }
+        }
+        const lbl = el.closest('label');
+        if (lbl) lbl.click(); else el.click();
+    }
+
     // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
@@ -2251,30 +2315,33 @@ ${placemarks}
                 draggable.scrollIntoView({ behavior: 'instant', block: 'center' });
                 setTimeout(() => {
                     forceOpenInstructionEdit(draggable);
-                    // Wait for edit dialog + altitude input
+                    // Wait for edit dialog form to render (any label present)
                     let dlgAttempts = 0;
                     const dlgInterval = setInterval(() => {
                         dlgAttempts++;
                         if (dlgAttempts > 25) { clearInterval(dlgInterval); done(false, 'edit dialog never opened'); return; }
-                        const altInput = findEditDialogInputByLabel('Drone altitude', 'Altitude', 'Height');
-                        if (!altInput) return;
+                        const form = document.querySelector('.edit-instruction__form');
+                        const anyLabel = form && form.querySelector('.edit-instruction__input-label');
+                        if (!anyLabel) return;
                         clearInterval(dlgInterval);
-                        setReactInputValue(altInput, change.value);
-                        setTimeout(() => {
-                            const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
-                            if (!saveBtn) { done(false, 'save button not found'); return; }
-                            saveBtn.click();
-                            // Wait for dialog to close
-                            let saveAttempts = 0;
-                            const saveInterval = setInterval(() => {
-                                saveAttempts++;
-                                if (saveAttempts > 25) { clearInterval(saveInterval); done(false, 'save did not complete'); return; }
-                                if (!document.querySelector('.edit-instruction')) {
-                                    clearInterval(saveInterval);
-                                    done(true);
-                                }
-                            }, 200);
-                        }, 200);
+                        // Set altitude (handles Navigate radios + Snapshot direct)
+                        setAltitudeInEditDialog(change.value, (ok) => {
+                            if (!ok) { done(false, 'altitude input not found'); return; }
+                            setTimeout(() => {
+                                const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+                                if (!saveBtn) { done(false, 'save button not found'); return; }
+                                saveBtn.click();
+                                let saveAttempts = 0;
+                                const saveInterval = setInterval(() => {
+                                    saveAttempts++;
+                                    if (saveAttempts > 25) { clearInterval(saveInterval); done(false, 'save did not complete'); return; }
+                                    if (!document.querySelector('.edit-instruction')) {
+                                        clearInterval(saveInterval);
+                                        done(true);
+                                    }
+                                }, 200);
+                            }, 250);
+                        });
                     }, 200);
                 }, 400);
             }, 200);
