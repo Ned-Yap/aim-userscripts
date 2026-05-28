@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.36
+// @version      0.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.36';
+    const SCRIPT_VERSION = '0.37';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2175,90 +2175,31 @@ ${placemarks}
         const style = document.createElement('style');
         style.id = 'aim-mb-edit-styles';
         style.textContent = `
-            /* Force-show the native dots when WE need them (during a
-               programmatic edit click) — used for v0.36's Edit/Delete
-               injected-button flow. */
-            .aim-mb-force-dots .mission-instruction-item__options,
-            .aim-mb-force-dots .mission-instruction-item__options > div,
-            .aim-mb-force-dots [data-testid="btn-instruction-menu"] {
+            /* Always show the native three-dots menu (no hover required).
+               Avoids JS DOM injection into React-managed elements (which
+               causes "Failed to execute removeChild" reconciliation
+               crashes during navigation). User clicks the visible dots
+               → native dropdown opens → click Edit or Delete. */
+            .mission-instruction-item__options,
+            .mission-instruction-item__options > div,
+            [data-testid="btn-instruction-menu"] {
                 display: block !important;
                 visibility: visible !important;
                 opacity: 1 !important;
                 pointer-events: auto !important;
             }
-            /* HIDE the native three-dots entirely — users will use our
-               injected Edit/Delete buttons instead. Always-visible,
-               no hover required, no Ant dropdown state to corrupt. */
-            .mission-instruction-item__options {
-                display: none !important;
-            }
-            /* Our injected action buttons container */
-            .aim-mb-instr-actions {
-                display: flex;
-                gap: 4px;
-                margin-left: auto;
-                align-items: center;
-            }
-            .aim-mb-instr-actions button {
-                background: transparent;
-                border: 1px solid #555;
-                color: #ddd;
-                font-size: 10px;
-                padding: 2px 6px;
-                cursor: pointer;
-                border-radius: 3px;
-                font-family: inherit;
-                line-height: 1;
-                font-weight: 600;
-                text-transform: uppercase;
-                letter-spacing: 0.04em;
-            }
-            .aim-mb-instr-actions button:hover {
-                border-color: #14d2dc;
-                color: #14d2dc;
-            }
-            .aim-mb-instr-actions button.aim-mb-instr-delete:hover {
-                border-color: #ff5252;
-                color: #ff5252;
+            /* Class still used by our programmatic edit flow for symmetry
+               with prior versions; the always-visible rules already cover it. */
+            .aim-mb-force-dots .mission-instruction-item__options,
+            .aim-mb-force-dots [data-testid="btn-instruction-menu"] {
+                display: block !important;
             }
         `;
         document.head.appendChild(style);
     }
 
-    // Inject Edit + Delete buttons into every instruction item that
-    // doesn't have them yet. Periodic scan handles React re-renders.
-    // Each button click routes through the existing forceOpenInstruction
-    // pipeline → opens Ant dropdown → clicks Edit or Delete → closes.
-    function injectInstructionActionButtons() {
-        if (CONTEXT !== 'IFRAME') return;
-        if (!masterEnabled) return;
-        const items = document.querySelectorAll('.mission-instruction-item__header');
-        items.forEach(header => {
-            if (header.querySelector('.aim-mb-instr-actions')) return;
-            const draggable = header.closest('[data-rfd-draggable-id]');
-            if (!draggable) return;
-            const actions = document.createElement('div');
-            actions.className = 'aim-mb-instr-actions';
-            actions.innerHTML = `
-                <button class="aim-mb-instr-edit" type="button" title="Edit this step">Edit</button>
-                <button class="aim-mb-instr-delete" type="button" title="Delete this step">Del</button>
-            `;
-            header.appendChild(actions);
-            actions.querySelector('.aim-mb-instr-edit').onclick = (e) => {
-                e.stopPropagation();
-                forceOpenInstructionEdit(draggable);
-            };
-            actions.querySelector('.aim-mb-instr-delete').onclick = (e) => {
-                e.stopPropagation();
-                if (!confirm('Delete this step?')) return;
-                forceOpenInstructionAction(draggable, 'delete');
-            };
-        });
-    }
-
-    // Generalized variant of forceOpenInstructionEdit that clicks
-    // a specified menu action (e.g. 'edit' or 'delete') instead of
-    // hard-coding Edit. Used by the Delete button.
+    // (Stub kept so commitOneChange's existing reference still works,
+    // but no longer injects DOM into the React tree.)
     function forceOpenInstructionAction(draggable, actionKey) {
         const instrId = draggable.getAttribute('data-rfd-draggable-id');
         dismissStuckAntDropdowns();
@@ -2980,10 +2921,6 @@ ${placemarks}
             setInterval(runSumInjection, 2000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
-            // Inject Edit/Delete buttons per instruction (and re-inject
-            // after React re-renders the mission editor's instruction list)
-            setInterval(injectInstructionActionButtons, 1500);
-            setTimeout(injectInstructionActionButtons, 1500);
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
