@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.48
+// @version      0.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.48';
+    const SCRIPT_VERSION = '0.49';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -274,7 +274,21 @@
         return elevationCache;
     }
 
+    // Debounced cache write — GM_setValue is synchronous and serializes
+    // the whole object each call. During a 96-point bulk fetch this
+    // could fire 96 times. Coalesce into one write 1s after the last
+    // completion. flushElevationCache() forces immediate save if needed.
+    let elevSaveTimer = null;
     function saveElevationCache() {
+        if (!elevationCache) return;
+        if (elevSaveTimer) clearTimeout(elevSaveTimer);
+        elevSaveTimer = setTimeout(() => {
+            elevSaveTimer = null;
+            try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
+        }, 1000);
+    }
+    function flushElevationCache() {
+        if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
         if (!elevationCache) return;
         try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
     }
@@ -1443,22 +1457,27 @@
     }
 
     function wireTableEvents(rows, visibleCols) {
-        // Search — DO NOT auto-focus. v0.2 stole focus from the settings
-        // popover after every keystroke, which broke that input. The user
-        // can click into the field themselves.
+        // Search — DEBOUNCED 250ms. Full table re-render on every
+        // keystroke was the main mid-session perf hit (98 missions × 13
+        // cols × per-row event re-wire). After debounce + re-render,
+        // we re-grab the search input and restore focus + cursor pos.
         const search = panelEl.querySelector('.aim-mb-search');
         if (search) {
+            let searchDebounce = null;
             search.addEventListener('input', (e) => {
                 const cursor = e.target.selectionStart;
-                panelState.search = e.target.value;
-                renderTableView();
-                // Restore focus + cursor IF we held focus when input fired —
-                // we definitely did (input event implies focus), so just re-grab.
-                const newSearch = panelEl.querySelector('.aim-mb-search');
-                if (newSearch) {
-                    newSearch.focus();
-                    try { newSearch.setSelectionRange(cursor, cursor); } catch (er) {}
-                }
+                const newVal = e.target.value;
+                if (searchDebounce) clearTimeout(searchDebounce);
+                searchDebounce = setTimeout(() => {
+                    searchDebounce = null;
+                    panelState.search = newVal;
+                    renderTableView();
+                    const newSearch = panelEl.querySelector('.aim-mb-search');
+                    if (newSearch) {
+                        newSearch.focus();
+                        try { newSearch.setSelectionRange(cursor, cursor); } catch (er) {}
+                    }
+                }, 250);
             });
         }
         // Unit toggle
@@ -3280,7 +3299,10 @@ ${placemarks}
         }
         // IFRAME-only — the Mission Bank UI lives in the React iframe
         if (CONTEXT === 'IFRAME') {
-            setInterval(runSumInjection, 2000);
+            // Bumped 2s → 4s; SUM only needs replacing on URL nav,
+            // not constant polling. Cheap enough to keep but no need
+            // to fire 30 times a minute.
+            setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
         }
@@ -3292,6 +3314,8 @@ ${placemarks}
                 runSumInjection();
             });
         } catch (e) {}
+        // Flush any pending elevation cache writes on tab close.
+        window.addEventListener('beforeunload', () => flushElevationCache());
         console.log(`${TAG} ready`);
     }
 
