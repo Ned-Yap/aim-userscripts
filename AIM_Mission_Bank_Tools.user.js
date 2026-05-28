@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.47
+// @version      0.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,11 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.47';
+    const SCRIPT_VERSION = '0.48';
+    // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
+    // verbose [edit], [queue], [fiber] logs. Off by default for speed.
+    const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
+    const dlog = (...args) => { if (DEBUG()) console.log(...args); };
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -801,7 +805,7 @@
         if (rclickHandlerInstalled) return;
         rclickHandlerInstalled = true;
         document.addEventListener('contextmenu', onRightClick, true);
-        console.log(`${TAG} right-click mission inspector armed`);
+        dlog(`${TAG} right-click mission inspector armed`);
     }
 
     function onRightClick(e) {
@@ -1930,9 +1934,10 @@
     }
 
     // Trigger bulk elevation fetch for any uncached step GPS coords.
-    // Avoids re-fetching; debounces re-renders so we don't thrash the
-    // DOM on every individual cell completion.
-    let elevRerenderTimer = null;
+    // ONE re-render at the very end (not per partial completion) —
+    // intermediate renders thrash the DOM and lag the whole page.
+    // Progress is shown via inline text update in the card title.
+    let elevFetchActive = null; // {missionId, total, done} or null
     function kickOffElevationFetch(missionId, allSteps) {
         const points = [];
         const seen = new Set();
@@ -1944,24 +1949,39 @@
             seen.add(key);
             const cache = loadElevationCache();
             if (cache[key] != null) return; // already cached
+            // Skip if another iteration already requested this point
+            if (elevInFlight[key]) return;
             points.push({ lat, lng, id: key });
         });
         if (points.length === 0) return;
         console.log(`${TAG} fetching ${points.length} elevations`);
-        const scheduleRerender = () => {
-            if (elevRerenderTimer) return;
-            elevRerenderTimer = setTimeout(() => {
-                elevRerenderTimer = null;
-                // Only re-render if still on the same drill-down
-                if (panelState && panelState.drillId === missionId) {
-                    renderDetailView(missionId);
-                }
-            }, 400);
-        };
+        elevFetchActive = { missionId, total: points.length, done: 0 };
+        updateElevProgressLabel();
         bulkFetchElevations(points, (done, total) => {
-            // Re-render periodically so partial progress is visible
-            if (done % 5 === 0 || done === total) scheduleRerender();
-        }).then(() => scheduleRerender());
+            if (elevFetchActive) { elevFetchActive.done = done; updateElevProgressLabel(); }
+        }).then(() => {
+            elevFetchActive = null;
+            // ONE re-render after everything completes
+            if (panelState && panelState.drillId === missionId) {
+                renderDetailView(missionId);
+            }
+        });
+    }
+
+    // Tiny DOM update — just the card title text. No full re-render.
+    function updateElevProgressLabel() {
+        if (!panelEl) return;
+        const labels = panelEl.querySelectorAll('.aim-mb-card-title');
+        for (const lbl of labels) {
+            if (/Instructions/i.test(lbl.textContent || '')) {
+                if (elevFetchActive) {
+                    lbl.textContent = `Instructions — fetching elevations ${elevFetchActive.done}/${elevFetchActive.total}…`;
+                } else {
+                    lbl.textContent = 'Instructions';
+                }
+                return;
+            }
+        }
     }
 
     function focusNextAltEditable(missionId, currentInstrId) {
@@ -2376,7 +2396,7 @@ ${placemarks}
         // sidebar-link click entirely and go straight to the edit.
         const existingDraggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
         if (existingDraggable) {
-            console.log(`${TAG} [edit] already in mission editor — skipping navigation`);
+            dlog(`${TAG} [edit] already in mission editor — skipping navigation`);
             showToast('Opening step editor…', '#14d2dc');
             existingDraggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
             setTimeout(() => {
@@ -2405,7 +2425,7 @@ ${placemarks}
             setTimeout(() => {
                 const fiberOk = triggerInstructionAction(draggable, 'edit');
                 if (!fiberOk) {
-                    console.log(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
+                    dlog(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
                     forceOpenInstructionEdit(draggable);
                 }
             }, 500);
@@ -2527,7 +2547,7 @@ ${placemarks}
         if (!dots) { console.warn(`${TAG} [fiber] no dots element for instruction ${instrId}`); return false; }
         const cfg = findInstructionMenuConfig(dots);
         if (!cfg) { console.warn(`${TAG} [fiber] no menu config in fiber tree for instruction ${instrId}`); return false; }
-        console.log(`${TAG} [fiber] ${instrId}: found ${cfg.kind} at depth ${cfg.depth}`);
+        dlog(`${TAG} [fiber] ${instrId}: found ${cfg.kind} at depth ${cfg.depth}`);
         try {
             if (cfg.kind === 'menuOnClick') {
                 cfg.handler({ key: actionKey, keyPath: [actionKey], domEvent: { stopPropagation(){}, preventDefault(){} } });
@@ -2555,7 +2575,7 @@ ${placemarks}
 
     function forceOpenInstructionEdit(draggable) {
         const instrId = draggable.getAttribute('data-rfd-draggable-id');
-        console.log(`${TAG} [edit] starting for instruction ${instrId}`);
+        dlog(`${TAG} [edit] starting for instruction ${instrId}`);
         dismissStuckAntDropdowns();
         const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
         if (!dots) {
@@ -2573,7 +2593,7 @@ ${placemarks}
         // "correct" dropdown by finding one whose Edit item is NEW
         // (i.e. didn't exist before our hover, or replaces an old one).
         const editsBefore = new Set(Array.from(document.querySelectorAll('[data-menu-id$="-edit"]')));
-        console.log(`${TAG} [edit] ${instrId}: ${editsBefore.size} pre-existing Edit menu items`);
+        dlog(`${TAG} [edit] ${instrId}: ${editsBefore.size} pre-existing Edit menu items`);
 
         // 3. Call the React onMouseEnter handler. CRITICAL: save the
         //    exact element we called the handler on, so we can call
@@ -2610,7 +2630,7 @@ ${placemarks}
             console.warn(`${TAG} [edit] ${instrId}: no React handler found in 8 levels, falling back to DOM click`);
             dots.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
         } else {
-            console.log(`${TAG} [edit] ${instrId}: triggered ${triggerHandlerName} at depth ${triggerLevel}`);
+            dlog(`${TAG} [edit] ${instrId}: triggered ${triggerHandlerName} at depth ${triggerLevel}`);
         }
 
         // 4. Poll for an Edit menu item that's (a) inside a non-hidden
@@ -2652,7 +2672,7 @@ ${placemarks}
             }
             if (!editItem) return;
             clearInterval(editPoll);
-            console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
+            dlog(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
             draggable.classList.remove('aim-mb-force-dots');
             // Cleanup — call onMouseLeave on the SAME element we used
@@ -2674,7 +2694,7 @@ ${placemarks}
                                     nativeEvent: new MouseEvent('mouseleave'),
                                 });
                                 leaveFired = true;
-                                console.log(`${TAG} [edit] ${instrId}: called onMouseLeave on triggerEl (depth ${triggerLevel})`);
+                                dlog(`${TAG} [edit] ${instrId}: called onMouseLeave on triggerEl (depth ${triggerLevel})`);
                             } catch (e) { console.warn(`${TAG} [edit] ${instrId}: onMouseLeave threw:`, e); }
                         } else if (typeof props.onMouseOut === 'function') {
                             try { props.onMouseOut({ target: triggerEl, preventDefault(){}, stopPropagation(){} }); leaveFired = true; } catch (e) {}
@@ -2745,7 +2765,7 @@ ${placemarks}
                     try { props.onPointerLeave({ type: 'pointerleave', target: dots, currentTarget: dots, preventDefault(){}, stopPropagation(){}, nativeEvent: new PointerEvent('pointerleave') }); } catch (e) {}
                 }
             }
-            console.log(`${TAG} [edit] hover state cleared for instruction ${instructionId}`);
+            dlog(`${TAG} [edit] hover state cleared for instruction ${instructionId}`);
         }, 100);
     }
 
@@ -2833,7 +2853,7 @@ ${placemarks}
                 if (!isNaN(num) && Math.abs(num - target) <= 1) {
                     inputViaValue = inp;
                     group = inp.closest('.edit-instruction__input-group') || inp.closest('div');
-                    console.log(`${TAG} [edit] altitude matched by VALUE (${num} ≈ ${target})`);
+                    dlog(`${TAG} [edit] altitude matched by VALUE (${num} ≈ ${target})`);
                     break;
                 }
             }
@@ -2845,7 +2865,7 @@ ${placemarks}
                 const t = (lbl.textContent || '').trim();
                 if (/altitude/i.test(t) || /^height\b/i.test(t)) {
                     group = lbl.closest('.edit-instruction__input-group');
-                    if (group) { console.log(`${TAG} [edit] altitude matched by LABEL "${t}"`); break; }
+                    if (group) { dlog(`${TAG} [edit] altitude matched by LABEL "${t}"`); break; }
                 }
             }
         }
@@ -2867,7 +2887,7 @@ ${placemarks}
                 if (lbl && /custom/i.test(lbl.textContent || '')) { customRadio = r; break; }
             }
             if (!customRadio) customRadio = radios[1];
-            console.log(`${TAG} [edit] clicking Custom-altitude radio`);
+            dlog(`${TAG} [edit] clicking Custom-altitude radio`);
             clickReactControl(customRadio);
             setTimeout(() => setAltValue(group, value, done, inputViaValue), 250);
         } else {
@@ -2958,7 +2978,7 @@ ${placemarks}
         dismissStuckAntDropdowns();
         clearAllForceDots();
         const [instructionId, change] = entries[idx];
-        console.log(`${TAG} [queue] ====== step ${idx + 1}/${entries.length}: instruction ${instructionId} → ${change.value} ${change.unit} ======`);
+        dlog(`${TAG} [queue] ====== step ${idx + 1}/${entries.length}: instruction ${instructionId} → ${change.value} ${change.unit} ======`);
         commitOneChange(missionId, instructionId, change, (ok, err) => {
             if (!ok) {
                 committingChanges = false;
@@ -2966,7 +2986,7 @@ ${placemarks}
                 showToast(`Failed at step ${idx + 1}/${entries.length}: ${err || 'unknown'}`, '#ff5252');
                 return;
             }
-            console.log(`${TAG} [queue] step ${idx + 1}/${entries.length} success`);
+            dlog(`${TAG} [queue] step ${idx + 1}/${entries.length} success`);
             markCommitted(missionId, Number(instructionId), change.value, change.unit);
             // Clear Ant's lingering hover state on the just-edited step.
             // Runs AFTER save returns us to the instruction list, when
@@ -3009,7 +3029,7 @@ ${placemarks}
                     const fiberOk = triggerInstructionAction(draggable, 'edit');
                     if (!fiberOk) {
                         // FALLBACK: open dropdown the old way
-                        console.log(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
+                        dlog(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
                         forceOpenInstructionEdit(draggable);
                     }
                     // Wait for edit dialog form to render (any label present)
