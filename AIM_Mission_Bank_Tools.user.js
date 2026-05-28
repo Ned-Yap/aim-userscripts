@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.38
+// @version      0.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.38';
+    const SCRIPT_VERSION = '0.39';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2171,117 +2171,11 @@ ${placemarks}
     // inline style overrides, click it, wait for the Ant dropdown,
     // click Edit, then clean up our style hacks.
     function injectGlobalEditStyles() {
-        if (document.getElementById('aim-mb-edit-styles')) return;
-        const style = document.createElement('style');
-        style.id = 'aim-mb-edit-styles';
-        style.textContent = `
-            /* Always show the native three-dots menu (no hover required).
-               Pure CSS — no JS injection into React tree. */
-            .mission-instruction-item__options,
-            .mission-instruction-item__options > div,
-            [data-testid="btn-instruction-menu"] {
-                display: block !important;
-                visibility: visible !important;
-                opacity: 1 !important;
-                pointer-events: auto !important;
-            }
-            .aim-mb-force-dots .mission-instruction-item__options,
-            .aim-mb-force-dots [data-testid="btn-instruction-menu"] {
-                display: block !important;
-            }
-            /* Our floating action popup — replaces Ant's hover dropdown.
-               Body-attached so it never disrupts Percepto's React tree. */
-            .aim-mb-instr-popup {
-                position: fixed;
-                z-index: 100003;
-                background: #2a2a2a;
-                border: 1px solid #14d2dc;
-                border-radius: 4px;
-                display: flex;
-                flex-direction: column;
-                min-width: 80px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.6);
-                font-family: 'Lato','Segoe UI',sans-serif;
-                overflow: hidden;
-            }
-            .aim-mb-instr-popup button {
-                background: transparent;
-                border: none;
-                color: #fff;
-                padding: 6px 12px;
-                cursor: pointer;
-                font-size: 12px;
-                text-align: left;
-                font-family: inherit;
-                border-bottom: 1px solid #1a1a1a;
-            }
-            .aim-mb-instr-popup button:last-child { border-bottom: none; }
-            .aim-mb-instr-popup button:hover {
-                background: #14d2dc;
-                color: #000;
-            }
-            .aim-mb-instr-popup button.aim-mb-popup-delete:hover {
-                background: #ff5252;
-                color: #fff;
-            }
-        `;
-        document.head.appendChild(style);
-    }
-
-    // Intercept clicks on the always-visible three-dots and show OUR
-    // own popup with Edit/Delete buttons. Bypasses Ant's hover dropdown
-    // entirely, sidestepping the state-corruption problem on edited
-    // steps. Popup lives on document.body — no React tree contamination.
-    function installDotsClickInterceptor() {
-        if (CONTEXT !== 'IFRAME') return;
-        document.addEventListener('click', (e) => {
-            const dots = e.target.closest('[data-testid="btn-instruction-menu"]');
-            if (!dots) return;
-            const draggable = dots.closest('[data-rfd-draggable-id]');
-            if (!draggable) return;
-            e.preventDefault();
-            e.stopPropagation();
-            showInstructionActionPopup(dots, draggable);
-        }, true); // capture so we run before Ant's own handler
-        console.log(`${TAG} dots click interceptor armed`);
-    }
-
-    function showInstructionActionPopup(dots, draggable) {
-        document.querySelectorAll('.aim-mb-instr-popup').forEach(el => el.remove());
-        const rect = dots.getBoundingClientRect();
-        const popup = document.createElement('div');
-        popup.className = 'aim-mb-instr-popup';
-        const vw = window.innerWidth;
-        const desiredW = 100;
-        let left = rect.right + 4;
-        if (left + desiredW > vw - 8) left = Math.max(8, rect.left - desiredW - 4);
-        popup.style.left = `${left}px`;
-        popup.style.top = `${rect.top}px`;
-        popup.innerHTML = `
-            <button class="aim-mb-popup-edit" type="button">✏️  Edit</button>
-            <button class="aim-mb-popup-delete" type="button">🗑️  Delete</button>
-        `;
-        document.body.appendChild(popup);
-        popup.querySelector('.aim-mb-popup-edit').onclick = (ev) => {
-            ev.stopPropagation();
-            popup.remove();
-            forceOpenInstructionEdit(draggable);
-        };
-        popup.querySelector('.aim-mb-popup-delete').onclick = (ev) => {
-            ev.stopPropagation();
-            popup.remove();
-            if (!confirm('Delete this step?')) return;
-            forceOpenInstructionAction(draggable, 'delete');
-        };
-        setTimeout(() => {
-            const close = (ev) => {
-                if (!popup.contains(ev.target)) {
-                    popup.remove();
-                    document.removeEventListener('mousedown', close, true);
-                }
-            };
-            document.addEventListener('mousedown', close, true);
-        }, 0);
+        // No-op in v0.39. Native dots stay hover-revealed (Percepto
+        // default). We never touch Ant's dropdown anymore — Edit/Delete
+        // are triggered via React fiber walk, which doesn't disturb the
+        // hover state at all. Manual hover for Edit/Delete works
+        // normally after a commit.
     }
 
     // (Stub kept so commitOneChange's existing reference still works,
@@ -2344,6 +2238,73 @@ ${placemarks}
         document.querySelectorAll('.aim-mb-force-dots').forEach(el => {
             el.classList.remove('aim-mb-force-dots');
         });
+    }
+
+    // Walk the React fiber tree from the dots element to find the Ant
+    // Dropdown's menu config. Returns the menu's onClick handler or
+    // the items array — whichever is present.
+    function findInstructionMenuConfig(dotsEl) {
+        const fiberKey = Object.keys(dotsEl).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (!fiberKey) return null;
+        let fiber = dotsEl[fiberKey];
+        let depth = 0;
+        while (fiber && depth < 30) {
+            const props = fiber.memoizedProps || (fiber.stateNode && fiber.stateNode.props);
+            if (props) {
+                // Ant Dropdown v5: { menu: { items, onClick } }
+                if (props.menu && typeof props.menu === 'object') {
+                    if (typeof props.menu.onClick === 'function') {
+                        return { kind: 'menuOnClick', handler: props.menu.onClick, depth };
+                    }
+                    if (Array.isArray(props.menu.items)) {
+                        return { kind: 'items', items: props.menu.items, depth };
+                    }
+                }
+                // Ant Dropdown v4: { overlay: Menu, onClick }
+                if (typeof props.onSelect === 'function') {
+                    return { kind: 'onSelect', handler: props.onSelect, depth };
+                }
+            }
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
+    // Trigger an action ('edit' or 'delete') on a specific instruction
+    // by walking the React fiber tree from its dots element and calling
+    // the menu handler directly. NEVER opens the Ant dropdown UI, so
+    // Ant's hover state is never touched — manual hover keeps working.
+    function triggerInstructionAction(draggable, actionKey) {
+        const instrId = draggable.getAttribute('data-rfd-draggable-id');
+        const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
+        if (!dots) { console.warn(`${TAG} [fiber] no dots element for instruction ${instrId}`); return false; }
+        const cfg = findInstructionMenuConfig(dots);
+        if (!cfg) { console.warn(`${TAG} [fiber] no menu config in fiber tree for instruction ${instrId}`); return false; }
+        console.log(`${TAG} [fiber] ${instrId}: found ${cfg.kind} at depth ${cfg.depth}`);
+        try {
+            if (cfg.kind === 'menuOnClick') {
+                cfg.handler({ key: actionKey, keyPath: [actionKey], domEvent: { stopPropagation(){}, preventDefault(){} } });
+                return true;
+            }
+            if (cfg.kind === 'onSelect') {
+                cfg.handler({ key: actionKey, keyPath: [actionKey] });
+                return true;
+            }
+            if (cfg.kind === 'items') {
+                const item = cfg.items.find(i => i && i.key === actionKey);
+                if (item && typeof item.onClick === 'function') {
+                    item.onClick({ key: actionKey, domEvent: { stopPropagation(){}, preventDefault(){} } });
+                    return true;
+                }
+                console.warn(`${TAG} [fiber] ${instrId}: no '${actionKey}' item; available keys:`, cfg.items.map(i => i && i.key));
+                return false;
+            }
+        } catch (e) {
+            console.warn(`${TAG} [fiber] ${instrId}: handler threw:`, e);
+            return false;
+        }
+        return false;
     }
 
     function forceOpenInstructionEdit(draggable) {
@@ -2797,7 +2758,14 @@ ${placemarks}
                 clearInterval(findInterval);
                 draggable.scrollIntoView({ behavior: 'instant', block: 'center' });
                 setTimeout(() => {
-                    forceOpenInstructionEdit(draggable);
+                    // PRIMARY: fiber walk to trigger Edit directly,
+                    // bypassing Ant dropdown (no hover state touched).
+                    const fiberOk = triggerInstructionAction(draggable, 'edit');
+                    if (!fiberOk) {
+                        // FALLBACK: open dropdown the old way
+                        console.log(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
+                        forceOpenInstructionEdit(draggable);
+                    }
                     // Wait for edit dialog form to render (any label present)
                     let dlgAttempts = 0;
                     const dlgInterval = setInterval(() => {
@@ -3007,7 +2975,6 @@ ${placemarks}
             setInterval(runSumInjection, 2000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
-            installDotsClickInterceptor();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
