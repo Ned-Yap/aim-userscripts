@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.39
+// @version      0.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.39';
+    const SCRIPT_VERSION = '0.40';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -248,6 +248,94 @@
     // ========================================================
     // Data — fetch + derive per-mission stats
     // ========================================================
+    // ========================================================
+    // DEM elevation (Percepto's own /location_altitude/ endpoint)
+    // ========================================================
+    // Returns {altitude: meters} for a single lat/lng. Cookie-auth.
+    // Cached aggressively in GM storage — same GPS appears in many
+    // missions across many sessions, so the cache fills up fast and
+    // bulk fetches become nearly instant on repeat use.
+    const CACHE_KEY_ELEVATIONS = 'aim-mb-elev-cache';
+    const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
+    const ELEV_CONCURRENCY = 4;   // max parallel fetches
+    let elevationCache = null;    // lazy-loaded from GM storage
+    let elevQueue = [];           // pending fetch tasks
+    let elevActive = 0;           // currently in-flight fetches
+
+    function loadElevationCache() {
+        if (elevationCache) return elevationCache;
+        try { elevationCache = gmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        catch (e) { elevationCache = {}; }
+        return elevationCache;
+    }
+
+    function saveElevationCache() {
+        if (!elevationCache) return;
+        try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
+    }
+
+    function elevCacheKey(lat, lng) {
+        return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
+    }
+
+    function getElevationFromCache(lat, lng) {
+        const cache = loadElevationCache();
+        return cache[elevCacheKey(lat, lng)];
+    }
+
+    // Fetch a single elevation. Returns Promise<meters | null>.
+    // Hits cache first; otherwise queues a fetch through the concurrency
+    // throttle. Cache is written through.
+    function fetchElevation(lat, lng) {
+        const key = elevCacheKey(lat, lng);
+        const cache = loadElevationCache();
+        if (cache[key] != null) return Promise.resolve(cache[key]);
+        return new Promise(resolve => {
+            elevQueue.push({ lat, lng, key, resolve });
+            pumpElevQueue();
+        });
+    }
+
+    function pumpElevQueue() {
+        while (elevActive < ELEV_CONCURRENCY && elevQueue.length > 0) {
+            const task = elevQueue.shift();
+            elevActive++;
+            const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat: task.lat, lng: task.lng }))}`;
+            fetch(url, { credentials: 'include' })
+                .then(r => r.ok ? r.json() : null)
+                .then(data => {
+                    const meters = data && typeof data.altitude === 'number' ? data.altitude : null;
+                    if (meters != null) {
+                        const cache = loadElevationCache();
+                        cache[task.key] = meters;
+                        saveElevationCache();
+                    }
+                    task.resolve(meters);
+                })
+                .catch(() => task.resolve(null))
+                .finally(() => { elevActive--; pumpElevQueue(); });
+        }
+    }
+
+    // Bulk-fetch elevations for many points with progress callbacks.
+    // points: [{lat, lng, id?}] — id is yours, returned in the result map.
+    // Returns Promise<{[id|index]: meters | null}>.
+    function bulkFetchElevations(points, onProgress) {
+        if (!points || points.length === 0) return Promise.resolve({});
+        let done = 0;
+        const total = points.length;
+        const result = {};
+        const promises = points.map((p, i) => {
+            const key = p.id != null ? p.id : i;
+            return fetchElevation(p.lat, p.lng).then(meters => {
+                result[key] = meters;
+                done++;
+                if (onProgress) onProgress(done, total);
+            });
+        });
+        return Promise.all(promises).then(() => result);
+    }
+
     function fetchMissions(siteID, onDone, onErr) {
         if (!siteID) { onErr && onErr('No site loaded'); return; }
         const url = `/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`;
@@ -1082,6 +1170,13 @@
                 #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-edit:hover { opacity: 1; }
+                #${PANEL_ID} .aim-mb-elev { cursor: pointer; color: #aaa; }
+                #${PANEL_ID} .aim-mb-elev:hover { color: #14d2dc; text-decoration: underline; }
+                #${PANEL_ID} .aim-mb-elev-loading, #${PANEL_ID} .aim-mb-agl-loading { color: #555; font-style: italic; }
+                #${PANEL_ID} .aim-mb-agl { cursor: pointer; font-weight: 700; }
+                #${PANEL_ID} .aim-mb-agl-low { color: #ff5252; }
+                #${PANEL_ID} .aim-mb-agl-ok { color: #5fff5f; }
+                #${PANEL_ID} .aim-mb-agl-high { color: #3399ff; }
                 #${PANEL_ID} .aim-mb-alt-editable { cursor: pointer; border-bottom: 1px dotted #555; }
                 #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
@@ -1710,6 +1805,41 @@
                         ${stat('Total Consumption %', fmtPct(row.totalConsumption), fmtPct(row.totalConsumption))}
                     </div>
                 </div>
+                ${(() => {
+                    // AGL aggregate stats — only show when we have ≥1 step with both
+                    // a cached elevation and a meters-altitude.
+                    const agls = [];
+                    allSteps.forEach(s => {
+                        if (!s || !s.location || s.location.lat == null) return;
+                        if (s.value1_name !== 'm' || typeof s.value1 !== 'number') return;
+                        const elevM = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
+                        if (elevM == null) return;
+                        agls.push({ aglM: s.value1 - elevM, elevM });
+                    });
+                    if (agls.length === 0) return '';
+                    const aglValues = agls.map(a => a.aglM);
+                    const elevValues = agls.map(a => a.elevM);
+                    const minAGL = Math.min(...aglValues);
+                    const maxAGL = Math.max(...aglValues);
+                    const avgAGL = aglValues.reduce((s, v) => s + v, 0) / aglValues.length;
+                    const minElev = Math.min(...elevValues);
+                    const maxElev = Math.max(...elevValues);
+                    const conv = (m) => unit === 'imperial' ? Math.round(m * 3.28084) : Math.round(m);
+                    const ul = unit === 'imperial' ? 'ft' : 'm';
+                    const fmtN = n => `${conv(n).toLocaleString()} ${ul}`;
+                    const fmtRaw = n => String(conv(n));
+                    return `<div class="aim-mb-card">
+                        <div class="aim-mb-card-title">Terrain / AGL (${agls.length} of ${allSteps.filter(s=>s&&s.location&&s.location.lat!=null).length} sampled)</div>
+                        <div class="aim-mb-stats-grid">
+                            ${stat('Min AGL', fmtN(minAGL), fmtRaw(minAGL))}
+                            ${stat('Avg AGL', fmtN(avgAGL), fmtRaw(avgAGL))}
+                            ${stat('Max AGL', fmtN(maxAGL), fmtRaw(maxAGL))}
+                            ${stat('Min Ground Elv', fmtN(minElev), fmtRaw(minElev))}
+                            ${stat('Max Ground Elv', fmtN(maxElev), fmtRaw(maxElev))}
+                            ${stat('Ground Range', fmtN(maxElev - minElev), fmtRaw(maxElev - minElev))}
+                        </div>
+                    </div>`;
+                })()}
                 <div class="aim-mb-card">
                     <div class="aim-mb-card-title">Flight Phase Breakdown</div>
                     <div class="aim-mb-stats-grid">
@@ -1745,7 +1875,7 @@
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Value</th><th>Location</th></tr>
+                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elev</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
@@ -1767,10 +1897,49 @@
         const newInstr = panelEl.querySelector('.aim-mb-detail-instr-scroll');
         if (newInstr) newInstr.scrollTop = savedInstrScroll;
         wireDetailEvents(missionId, row, filteredSteps, allSteps);
+        // Kick off bulk elevation fetch for steps with GPS that aren't
+        // already cached. On completion (or as cells trickle in) we
+        // re-render the detail view so the new values appear.
+        kickOffElevationFetch(missionId, allSteps);
         // Optionally auto-focus the next editable altitude after a queue commit
         if (opts && opts.focusNextAfter != null) {
             focusNextAltEditable(missionId, opts.focusNextAfter);
         }
+    }
+
+    // Trigger bulk elevation fetch for any uncached step GPS coords.
+    // Avoids re-fetching; debounces re-renders so we don't thrash the
+    // DOM on every individual cell completion.
+    let elevRerenderTimer = null;
+    function kickOffElevationFetch(missionId, allSteps) {
+        const points = [];
+        const seen = new Set();
+        allSteps.forEach(s => {
+            if (!s || !s.location || s.location.lat == null) return;
+            const lat = Number(s.location.lat), lng = Number(s.location.lng);
+            const key = elevCacheKey(lat, lng);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const cache = loadElevationCache();
+            if (cache[key] != null) return; // already cached
+            points.push({ lat, lng, id: key });
+        });
+        if (points.length === 0) return;
+        console.log(`${TAG} fetching ${points.length} elevations`);
+        const scheduleRerender = () => {
+            if (elevRerenderTimer) return;
+            elevRerenderTimer = setTimeout(() => {
+                elevRerenderTimer = null;
+                // Only re-render if still on the same drill-down
+                if (panelState && panelState.drillId === missionId) {
+                    renderDetailView(missionId);
+                }
+            }, 400);
+        };
+        bulkFetchElevations(points, (done, total) => {
+            // Re-render periodically so partial progress is visible
+            if (done % 5 === 0 || done === total) scheduleRerender();
+        }).then(() => scheduleRerender());
     }
 
     function focusNextAltEditable(missionId, currentInstrId) {
@@ -1890,6 +2059,20 @@
             el.onclick = () => {
                 copyToClipboard(el.dataset.altRaw);
                 showToast(`Copied: ${el.dataset.altRaw}`, '#5fff5f');
+            };
+        });
+        // Elevation click-to-copy: raw whole number, no comma, no unit
+        panelEl.querySelectorAll('[data-elev-raw]').forEach(el => {
+            el.onclick = () => {
+                copyToClipboard(el.dataset.elevRaw);
+                showToast(`Copied: ${el.dataset.elevRaw}`, '#5fff5f');
+            };
+        });
+        // AGL Δ click-to-copy: raw whole number
+        panelEl.querySelectorAll('[data-agl-raw]').forEach(el => {
+            el.onclick = () => {
+                copyToClipboard(el.dataset.aglRaw);
+                showToast(`Copied: ${el.dataset.aglRaw}`, '#5fff5f');
             };
         });
         // Location cells — left-click opens Google Maps, right-click copies coords
@@ -2881,7 +3064,34 @@ ${placemarks}
             const lng = Number(s.location.lng);
             locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
         }
-        return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${valCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+        // Elevation + AGL cells — populated by elevation cache (or "…" while fetching)
+        const u = unit || getDistanceUnit();
+        let elevCell = '<td></td>';
+        let aglCell = '<td></td>';
+        if (hasGps) {
+            const lat = Number(s.location.lat);
+            const lng = Number(s.location.lng);
+            const elevM = getElevationFromCache(lat, lng);
+            if (elevM != null) {
+                const elevDisplay = u === 'imperial' ? Math.round(elevM * 3.28084) : Math.round(elevM);
+                const elevUnit = u === 'imperial' ? 'ft' : 'm';
+                elevCell = `<td><span class="aim-mb-elev" data-elev-raw="${elevDisplay}" title="Click to copy raw elevation">${elevDisplay.toLocaleString()} ${elevUnit} Elv</span></td>`;
+                // AGL only meaningful if step has altitude (value1_name === 'm')
+                if (s.value1_name === 'm' && typeof s.value1 === 'number') {
+                    const aglM = s.value1 - elevM;
+                    const aglDisplay = u === 'imperial' ? Math.round(aglM * 3.28084) : Math.round(aglM);
+                    let aglClass = 'aim-mb-agl-ok';
+                    const aglFt = u === 'imperial' ? aglDisplay : Math.round(aglM * 3.28084);
+                    if (aglFt < 90) aglClass = 'aim-mb-agl-low';
+                    else if (aglFt > 170) aglClass = 'aim-mb-agl-high';
+                    aglCell = `<td><span class="aim-mb-agl ${aglClass}" data-agl-raw="${aglDisplay}" title="AGL = altitude − ground elevation. Thresholds: <90 ft low (red), >170 ft high (blue). Click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
+                }
+            } else {
+                elevCell = `<td><span class="aim-mb-elev-loading" data-elev-loading="${lat},${lng}">…</span></td>`;
+                aglCell = `<td><span class="aim-mb-agl-loading">…</span></td>`;
+            }
+        }
+        return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
     }
 
     // ========================================================
