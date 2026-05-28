@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.21';
+    const SCRIPT_VERSION = '0.22';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1973,7 +1973,30 @@ ${placemarks}
     // dispatch mouseenter/mouseover/pointermove events to make them
     // appear before we can interact with them.
     function openInstructionEditor(instructionId, missionId) {
-        // Navigate to the mission editor if not already there
+        // If an edit dialog is already open, save it first
+        const existingEdit = document.querySelector('.edit-instruction');
+        if (existingEdit) {
+            const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+            if (saveBtn) {
+                showToast('Saving current step…', '#14d2dc');
+                saveBtn.click();
+                // Wait for the edit dialog to close, then open the new step
+                let waitAttempts = 0;
+                const waitInterval = setInterval(() => {
+                    waitAttempts++;
+                    if (waitAttempts > 20) { clearInterval(waitInterval); navigateAndOpenStep(instructionId, missionId); return; }
+                    if (!document.querySelector('.edit-instruction')) {
+                        clearInterval(waitInterval);
+                        setTimeout(() => navigateAndOpenStep(instructionId, missionId), 300);
+                    }
+                }, 200);
+                return;
+            }
+        }
+        navigateAndOpenStep(instructionId, missionId);
+    }
+
+    function navigateAndOpenStep(instructionId, missionId) {
         const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
         if (link) {
             showToast('Opening step editor…', '#14d2dc');
