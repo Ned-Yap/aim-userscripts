@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -142,6 +142,12 @@
     // Panel state — fresh each open
     let panelEl = null;
     let panelState = null; // { sortKey, sortDir, search, selectedIds, distanceUnit, drillId, tableScrollY }
+
+    // Pending altitude changes — persist across panel close/reopen so
+    // user can queue edits, navigate around, and commit later.
+    // Shape: { [missionId]: { [instructionId]: { value: number, unit: 'imperial'|'metric' } } }
+    const pendingAltitudes = {};
+    let committingChanges = false;
 
     // ========================================================
     // Control Panel integration
@@ -1069,6 +1075,12 @@
                 #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-edit:hover { opacity: 1; }
+                #${PANEL_ID} .aim-mb-alt-editable { cursor: pointer; border-bottom: 1px dotted #555; }
+                #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
+                #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
+                #${PANEL_ID} .aim-mb-alt-pending:hover { background: #ffb84d; }
+                #${PANEL_ID} .aim-mb-alt-input { width: 80px; background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 2px 6px; font-size: 11px; border-radius: 3px; outline: none; }
+                #${PANEL_ID} .aim-mb-pending-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,152,0,0.15); border: 1px solid #ff9800; border-radius: 4px; margin-bottom: 8px; color: #ffb84d; font-size: 11px; font-weight: 600; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
                 .aim-mb-cols-menu, .aim-mb-settings-popover { position: fixed; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; z-index: 100001; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
                 .aim-mb-cols-menu { padding: 0; max-height: 360px; overflow: hidden; display: flex; flex-direction: column; }
@@ -1703,6 +1715,15 @@
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
                         <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
                     </div>
+                    ${(() => {
+                        const n = countPending(missionId);
+                        if (n === 0) return '';
+                        return `<div class="aim-mb-pending-banner">
+                            <span><strong>${n}</strong> altitude change${n === 1 ? '' : 's'} pending</span>
+                            <button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n}</button>
+                            <button class="aim-mb-tbtn" data-discard-pending>Discard</button>
+                        </div>`;
+                    })()}
                     <div style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
@@ -1802,6 +1823,27 @@
                 if (instrId) openInstructionEditor(instrId, missionId);
             };
         });
+        // Inline altitude edit — click cell → input → Enter/blur to queue
+        panelEl.querySelectorAll('[data-alt-edit]').forEach(el => {
+            el.onclick = (e) => {
+                e.stopPropagation();
+                startInlineAltEdit(el, missionId);
+            };
+        });
+        // Commit pending changes
+        const commitBtn = panelEl.querySelector('[data-commit-pending]');
+        if (commitBtn) commitBtn.onclick = () => {
+            const n = countPending(missionId);
+            if (n > 5 && !confirm(`Commit ${n} altitude changes? This will open each step in the editor and save it — takes ~2 seconds per step.`)) return;
+            commitPendingChanges(missionId);
+        };
+        // Discard pending changes
+        const discardBtn = panelEl.querySelector('[data-discard-pending]');
+        if (discardBtn) discardBtn.onclick = () => {
+            if (!confirm(`Discard ${countPending(missionId)} pending altitude changes?`)) return;
+            discardAllPendingFor(missionId);
+            renderDetailView(missionId);
+        };
         // Altitude click-to-copy: raw whole number only (no comma, no ft, no ALT)
         panelEl.querySelectorAll('[data-alt-raw]').forEach(el => {
             el.onclick = () => {
@@ -1842,6 +1884,43 @@
         // Export KML
         const kmlBtn = panelEl.querySelector('[data-detail-export="kml"]');
         if (kmlBtn) kmlBtn.onclick = () => exportDetailToKML(row, allSteps, unit);
+    }
+
+    function startInlineAltEdit(cellSpan, missionId) {
+        const instrId = Number(cellSpan.dataset.instrId);
+        const origAlt = Number(cellSpan.dataset.origAlt);
+        const pending = getPendingChange(missionId, instrId);
+        const startVal = pending ? Math.round(pending.value) : origAlt;
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        // Replace span with input
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'aim-mb-alt-input';
+        input.value = startVal;
+        input.step = '1';
+        const parent = cellSpan.parentElement;
+        cellSpan.replaceWith(input);
+        input.focus();
+        input.select();
+        const commit = () => {
+            const v = Number(input.value);
+            if (isNaN(v) || v === origAlt) {
+                // No change → discard any pending if it matches original
+                if (v === origAlt) discardPendingChange(missionId, instrId);
+                renderDetailView(missionId);
+                return;
+            }
+            queueAltitudeChange(missionId, instrId, v, unit);
+            showToast(`Queued: step ${instrId} → ${v} ${unitLabel}`, '#ff9800');
+            renderDetailView(missionId);
+        };
+        const cancel = () => renderDetailView(missionId);
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+            else if (e.key === 'Escape') { e.preventDefault(); input.onblur = null; cancel(); }
+        };
     }
 
     function exportDetailToSheets(filteredSteps, allSteps, unit, missionName) {
@@ -2070,6 +2149,153 @@ ${placemarks}
         }, 500);
     }
 
+    // React-aware value setter for Ant InputNumber. Native value
+    // assignment doesn't trigger React's controlled-input update —
+    // we have to use the underlying HTMLInputElement setter and
+    // dispatch input + change events.
+    function setReactInputValue(input, value) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, String(value));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function findEditDialogInputByLabel(...labelTexts) {
+        const labels = document.querySelectorAll('.edit-instruction__input-label');
+        for (const label of labels) {
+            const txt = (label.textContent || '').trim().toLowerCase();
+            for (const want of labelTexts) {
+                if (txt === want.toLowerCase()) {
+                    const group = label.closest('.edit-instruction__input-group')
+                        || label.parentElement;
+                    return group ? group.querySelector('input.ant-input-number-input') : null;
+                }
+            }
+        }
+        return null;
+    }
+
+    // ========================================================
+    // Pending altitude changes — queue + commit
+    // ========================================================
+    function queueAltitudeChange(missionId, instructionId, value, unit) {
+        if (!pendingAltitudes[missionId]) pendingAltitudes[missionId] = {};
+        pendingAltitudes[missionId][instructionId] = { value, unit };
+    }
+    function discardPendingChange(missionId, instructionId) {
+        if (pendingAltitudes[missionId]) {
+            delete pendingAltitudes[missionId][instructionId];
+            if (Object.keys(pendingAltitudes[missionId]).length === 0) delete pendingAltitudes[missionId];
+        }
+    }
+    function discardAllPendingFor(missionId) {
+        delete pendingAltitudes[missionId];
+    }
+    function getPendingChange(missionId, instructionId) {
+        return pendingAltitudes[missionId] && pendingAltitudes[missionId][instructionId];
+    }
+    function countPending(missionId) {
+        return pendingAltitudes[missionId] ? Object.keys(pendingAltitudes[missionId]).length : 0;
+    }
+
+    // Commit all pending altitude changes for a mission. For each:
+    // open step editor → wait for dialog → find altitude input by
+    // label → set value via React setter → click Save → wait for
+    // dialog to close → next.
+    function commitPendingChanges(missionId) {
+        if (committingChanges) { showToast('Already committing — please wait', '#ff9800'); return; }
+        const changes = pendingAltitudes[missionId];
+        if (!changes || Object.keys(changes).length === 0) return;
+        const entries = Object.entries(changes);
+        committingChanges = true;
+        showToast(`Committing 0/${entries.length}…`, '#14d2dc');
+        runCommitQueue(missionId, entries, 0);
+    }
+
+    function runCommitQueue(missionId, entries, idx) {
+        if (idx >= entries.length) {
+            committingChanges = false;
+            discardAllPendingFor(missionId);
+            showToast(`Committed ${entries.length} altitude change${entries.length === 1 ? '' : 's'}`, '#5fff5f');
+            if (panelState && panelState.drillId === missionId) renderDetailView(missionId);
+            return;
+        }
+        const [instructionId, change] = entries[idx];
+        commitOneChange(missionId, instructionId, change, (ok, err) => {
+            if (!ok) {
+                committingChanges = false;
+                showToast(`Failed at step ${idx + 1}/${entries.length}: ${err || 'unknown'}`, '#ff5252');
+                return;
+            }
+            showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
+            // Small pause between steps to let Percepto's UI settle
+            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 400);
+        });
+    }
+
+    function commitOneChange(missionId, instructionId, change, done) {
+        // First close any existing edit dialog by saving it
+        const existingEdit = document.querySelector('.edit-instruction');
+        const beginStep = () => {
+            // Navigate to mission editor (no-op if already there)
+            const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
+            if (link) link.click();
+            // Poll for draggable to appear
+            let attempts = 0;
+            const findInterval = setInterval(() => {
+                attempts++;
+                if (attempts > 30) { clearInterval(findInterval); done(false, 'instruction not found'); return; }
+                const draggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
+                if (!draggable) return;
+                clearInterval(findInterval);
+                draggable.scrollIntoView({ behavior: 'instant', block: 'center' });
+                setTimeout(() => {
+                    forceOpenInstructionEdit(draggable);
+                    // Wait for edit dialog + altitude input
+                    let dlgAttempts = 0;
+                    const dlgInterval = setInterval(() => {
+                        dlgAttempts++;
+                        if (dlgAttempts > 25) { clearInterval(dlgInterval); done(false, 'edit dialog never opened'); return; }
+                        const altInput = findEditDialogInputByLabel('Drone altitude', 'Altitude', 'Height');
+                        if (!altInput) return;
+                        clearInterval(dlgInterval);
+                        setReactInputValue(altInput, change.value);
+                        setTimeout(() => {
+                            const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+                            if (!saveBtn) { done(false, 'save button not found'); return; }
+                            saveBtn.click();
+                            // Wait for dialog to close
+                            let saveAttempts = 0;
+                            const saveInterval = setInterval(() => {
+                                saveAttempts++;
+                                if (saveAttempts > 25) { clearInterval(saveInterval); done(false, 'save did not complete'); return; }
+                                if (!document.querySelector('.edit-instruction')) {
+                                    clearInterval(saveInterval);
+                                    done(true);
+                                }
+                            }, 200);
+                        }, 200);
+                    }, 200);
+                }, 400);
+            }, 200);
+        };
+        if (existingEdit) {
+            // Close existing dialog first
+            const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+            if (saveBtn) saveBtn.click();
+            let waitAttempts = 0;
+            const waitInterval = setInterval(() => {
+                waitAttempts++;
+                if (waitAttempts > 25 || !document.querySelector('.edit-instruction')) {
+                    clearInterval(waitInterval);
+                    setTimeout(beginStep, 200);
+                }
+            }, 200);
+        } else {
+            beginStep();
+        }
+    }
+
     function escapeXml(s) {
         return String(s).replace(/[&<>"']/g, c => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;'
@@ -2104,12 +2330,20 @@ ${placemarks}
         // Edit — open this instruction in Percepto's editor
         const instrId = s && s.id;
         const editCell = instrId ? `<td style="text-align:center;"><span class="aim-mb-step-edit" data-edit-instr="${instrId}" title="Open this step in the mission editor">✏️</span></td>` : '<td></td>';
-        // Altitude value: click-to-copy raw whole number (no comma, no unit)
+        // Altitude value: inline-editable when value1_name === 'm'.
+        // Click → input → Enter/blur to queue change.
         let valCell;
         if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
             const u = unit || getDistanceUnit();
             const rawNum = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
-            valCell = `<td><span data-alt-raw="${rawNum}" style="cursor:pointer;" title="Click to copy raw altitude">${escapeHtml(val)}</span></td>`;
+            const missionId = panelState && panelState.drillId;
+            const pending = missionId ? getPendingChange(missionId, s.id) : null;
+            if (pending) {
+                const pendingDisplay = u === 'imperial' ? `${Math.round(pending.value).toLocaleString()} ft ALT` : `${Math.round(pending.value).toLocaleString()} m ALT`;
+                valCell = `<td><span class="aim-mb-alt-pending" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Pending change — was ${rawNum}, will be ${Math.round(pending.value)}. Click to re-edit.">${escapeHtml(pendingDisplay)} ⏳</span></td>`;
+            } else {
+                valCell = `<td><span class="aim-mb-alt-editable" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Click to edit altitude. Right-click to copy raw value.">${escapeHtml(val)}</span></td>`;
+            }
         } else {
             valCell = `<td>${escapeHtml(val)}</td>`;
         }
