@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.46
+// @version      0.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.46';
+    const SCRIPT_VERSION = '0.47';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2370,25 +2370,29 @@ ${placemarks}
     }
 
     function navigateAndOpenStep(instructionId, missionId) {
-        // Are we already in this mission's editor? (URL hash will
-        // contain /mission-bank/<missionId>.) If so, skip the sidebar-
-        // link click — the sidebar list isn't rendered when the editor
-        // is open, so the link lookup fails and we'd false-alarm
-        // "Mission not found in sidebar".
-        const top = (() => { try { return window.top; } catch (e) { return window; } })();
-        const hash = (top && top.location && top.location.hash) || location.hash || '';
-        const alreadyHere = hash.includes(`/mission-bank/${missionId}`);
-        if (alreadyHere) {
+        // Most reliable detection: does the instruction's draggable
+        // element exist in the live DOM right now? If yes, the user
+        // is already viewing this mission's instructions — skip the
+        // sidebar-link click entirely and go straight to the edit.
+        const existingDraggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
+        if (existingDraggable) {
+            console.log(`${TAG} [edit] already in mission editor — skipping navigation`);
             showToast('Opening step editor…', '#14d2dc');
+            existingDraggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => {
+                const fiberOk = triggerInstructionAction(existingDraggable, 'edit');
+                if (!fiberOk) forceOpenInstructionEdit(existingDraggable);
+            }, 200);
+            return;
+        }
+        // Not in editor → navigate via sidebar link
+        const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
+        if (link) {
+            showToast('Opening step editor…', '#14d2dc');
+            link.click();
         } else {
-            const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
-            if (link) {
-                showToast('Opening step editor…', '#14d2dc');
-                link.click();
-            } else {
-                showToast('Mission not found in sidebar', '#ff5252');
-                return;
-            }
+            showToast('Mission not found in sidebar', '#ff5252');
+            return;
         }
         let attempts = 0;
         const interval = setInterval(() => {
