@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.26
+// @version      0.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2171,6 +2171,12 @@ ${placemarks}
     // inline style overrides, click it, wait for the Ant dropdown,
     // click Edit, then clean up our style hacks.
     function forceOpenInstructionEdit(draggable) {
+        // 1. Aggressively dismiss any leftover Ant dropdowns from prior
+        //    iterations — they're the root cause of queue corruption
+        //    (querySelector picks the FIRST -edit it finds, so a stuck
+        //    dropdown for step 2 grabs the click meant for step 10).
+        dismissStuckAntDropdowns();
+
         const optionsContainer = draggable.querySelector('.mission-instruction-item__options');
         const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
         if (!dots) { showToast('Three-dots menu not found', '#ff9800'); return; }
@@ -2180,10 +2186,12 @@ ${placemarks}
             savedStyles.push({ el, prev: el.getAttribute('style') || '' });
             el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;';
         });
-        // Ant Dropdown uses React's synthetic event system. DOM events
-        // don't trigger it. Walk up from the dots SVG to find the
-        // element whose React props have onMouseEnter (the rc-trigger
-        // wrapper), and call the handler directly.
+
+        // 2. Snapshot existing .ant-dropdown elements BEFORE triggering
+        //    the hover so we can identify the NEW one that appears.
+        const dropdownsBefore = new Set(document.querySelectorAll('.ant-dropdown'));
+
+        // 3. Call the React onMouseEnter handler to open this step's dropdown.
         let triggered = false;
         let el = dots;
         for (let depth = 0; depth < 8 && el; depth++) {
@@ -2204,19 +2212,49 @@ ${placemarks}
             el = el.parentElement;
         }
         if (!triggered) {
-            // Last resort: dispatch real DOM click on dots
             dots.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
         }
-        setTimeout(() => {
-            const editItem = document.querySelector('[data-menu-id$="-edit"]')
-                || Array.from(document.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
-            if (editItem) {
-                editItem.click();
-            } else {
-                showToast('Edit dropdown did not appear — try hovering the dots manually', '#ff9800');
+
+        // 4. Poll for the NEW dropdown (one that wasn't in the snapshot),
+        //    click ITS Edit item — not just any -edit element on the page.
+        let pollAttempts = 0;
+        const editPoll = setInterval(() => {
+            pollAttempts++;
+            if (pollAttempts > 15) {
+                clearInterval(editPoll);
+                showToast('Edit dropdown did not appear', '#ff9800');
+                savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
+                return;
             }
+            const current = document.querySelectorAll('.ant-dropdown');
+            let newDropdown = null;
+            for (const d of current) {
+                if (!dropdownsBefore.has(d) && !d.classList.contains('ant-dropdown-hidden')) {
+                    newDropdown = d; break;
+                }
+            }
+            if (!newDropdown) return;
+            const editItem = newDropdown.querySelector('[data-menu-id$="-edit"]')
+                || Array.from(newDropdown.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
+            if (!editItem) return;
+            clearInterval(editPoll);
+            editItem.click();
+            // Restore styles + dismiss the dropdown we just used so it
+            // doesn't linger and confuse future iterations.
             savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
-        }, 500);
+            setTimeout(() => dismissStuckAntDropdowns(), 100);
+        }, 100);
+    }
+
+    // Aggressively remove any visible Ant dropdowns. They're rendered
+    // as detached portals under <body>; removing them is safe because
+    // Ant re-creates them on next trigger.
+    function dismissStuckAntDropdowns() {
+        document.querySelectorAll('.ant-dropdown').forEach(d => {
+            if (!d.classList.contains('ant-dropdown-hidden')) {
+                d.remove();
+            }
+        });
     }
 
     // React-aware value setter for Ant InputNumber. Native value
@@ -2358,10 +2396,13 @@ ${placemarks}
         if (idx >= entries.length) {
             committingChanges = false;
             discardAllPendingFor(missionId);
+            dismissStuckAntDropdowns();
             showToast(`Committed ${entries.length} altitude change${entries.length === 1 ? '' : 's'}`, '#5fff5f');
             if (panelState && panelState.drillId === missionId) renderDetailView(missionId);
             return;
         }
+        // Belt + suspenders: dismiss stuck dropdowns before each iteration
+        dismissStuckAntDropdowns();
         const [instructionId, change] = entries[idx];
         commitOneChange(missionId, instructionId, change, (ok, err) => {
             if (!ok) {
