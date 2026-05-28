@@ -8,6 +8,8 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-28
 
+- **AIM Map Styler v34.41** — full idempotency on the SET_TOGGLE handler. Single `if (newVal === prev) return;` guard at the top short-circuits ALL special-case logic for duplicate broadcasts (which arrive 2-4× per real toggle change because Control Panel runs in both TOP+IFRAME and re-broadcasts on every script REGISTER). Stops asset-lock CSS thrashing, redundant `setActiveState` calls, redundant edit-mode auto-on echoes, etc. Companion fix to Perf Shield v1.11 — together they cut the toggle-flicker cascade.
+
 - **AIM Performance Shield v1.11** — full idempotency on all SET_TOGGLE handlers. Every toggle path (hide-satellite, ortho-lowres, ortho-lowres-zoom, suppress-debug-logs, plus all group toggles: block-intercom, block-weather, session-replay) now early-returns when the incoming value matches current state. Stops the toggle-flicker cascade where echoed SET_TOGGLE broadcasts (from Control Panel running in both TOP + IFRAME contexts) were each doing full work — write to GM, apply CSS, broadcast PERF_TOGGLE to Map Styler, trigger ortho recompute. Same change pattern is the model for future Map Styler / other-script stability passes.
 
 - **AIM Mission Bank Tools v0.40 → v0.50** — DEM elevation feature + a sweep of perf hardening on top of the v0.39 architecture.
