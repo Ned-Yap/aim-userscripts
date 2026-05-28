@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.34
+// @version      0.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.34';
+    const SCRIPT_VERSION = '0.35';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2346,6 +2346,57 @@ ${placemarks}
         }, 100);
     }
 
+    // Dispatch native pointer + mouse leave events on a fresh element
+    // in the live DOM. React's event delegation picks these up and
+    // updates Ant's internal "trigger is hovered" state. Must be
+    // called when the element is actually visible (e.g. on the
+    // instruction list view, not the edit view).
+    function dispatchPointerAndMouseLeave(el) {
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window, pointerType: 'mouse' };
+        try {
+            el.dispatchEvent(new PointerEvent('pointerout', opts));
+            el.dispatchEvent(new PointerEvent('pointerleave', { ...opts, bubbles: false }));
+            el.dispatchEvent(new MouseEvent('mouseout', opts));
+            el.dispatchEvent(new MouseEvent('mouseleave', { ...opts, bubbles: false }));
+        } catch (e) {}
+    }
+
+    // After save returns us to the instruction list, find the just-
+    // edited step's dots in the FRESH live DOM and dispatch leave
+    // events so Ant clears its hover-tracking state. This is the
+    // piece that was missing — cleanup against stale references
+    // (during edit view) couldn't reach the live React component.
+    function clearHoverStateForInstruction(instructionId) {
+        // Wait briefly for the instruction list to be back in the DOM
+        let attempts = 0;
+        const interval = setInterval(() => {
+            attempts++;
+            if (attempts > 15) { clearInterval(interval); return; }
+            const draggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
+            if (!draggable) return;
+            const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
+            if (!dots) return;
+            clearInterval(interval);
+            dispatchPointerAndMouseLeave(dots);
+            // Also call the React onMouseLeave on the live element
+            const propsKey = Object.keys(dots).find(k => k.startsWith('__reactProps$'));
+            if (propsKey) {
+                const props = dots[propsKey];
+                if (typeof props.onMouseLeave === 'function') {
+                    try { props.onMouseLeave({ type: 'mouseleave', target: dots, currentTarget: dots, preventDefault(){}, stopPropagation(){}, nativeEvent: new MouseEvent('mouseleave') }); } catch (e) {}
+                }
+                if (typeof props.onPointerLeave === 'function') {
+                    try { props.onPointerLeave({ type: 'pointerleave', target: dots, currentTarget: dots, preventDefault(){}, stopPropagation(){}, nativeEvent: new PointerEvent('pointerleave') }); } catch (e) {}
+                }
+            }
+            console.log(`${TAG} [edit] hover state cleared for instruction ${instructionId}`);
+        }, 100);
+    }
+
     // Politely tell Ant to close this trigger's dropdown by dispatching
     // the React onMouseLeave handler. This lets Ant clean up its own
     // state machine, preserving the user's ability to manually open
@@ -2565,6 +2616,10 @@ ${placemarks}
             }
             console.log(`${TAG} [queue] step ${idx + 1}/${entries.length} success`);
             markCommitted(missionId, Number(instructionId), change.value, change.unit);
+            // Clear Ant's lingering hover state on the just-edited step.
+            // Runs AFTER save returns us to the instruction list, when
+            // the dots element is back in the live DOM.
+            clearHoverStateForInstruction(instructionId);
             showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
             setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 600);
         });
