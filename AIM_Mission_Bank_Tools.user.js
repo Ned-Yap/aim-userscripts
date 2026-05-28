@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.33
+// @version      0.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.33';
+    const SCRIPT_VERSION = '0.34';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2223,12 +2223,15 @@ ${placemarks}
         const editsBefore = new Set(Array.from(document.querySelectorAll('[data-menu-id$="-edit"]')));
         console.log(`${TAG} [edit] ${instrId}: ${editsBefore.size} pre-existing Edit menu items`);
 
-        // 3. Call the React onMouseEnter handler. Walk up the tree
-        //    looking for the first ancestor with a React onMouseEnter,
-        //    onMouseOver, or onClick prop. Log which one we used.
+        // 3. Call the React onMouseEnter handler. CRITICAL: save the
+        //    exact element we called the handler on, so we can call
+        //    the paired onMouseLeave on the SAME element later. Without
+        //    this pairing, Ant's "trigger is hovered" state never clears
+        //    and manual hover stays broken until page refresh.
         let triggered = false;
         let triggerLevel = -1;
         let triggerHandlerName = null;
+        let triggerEl = null; // ← exact element used for enter
         let el = dots;
         for (let depth = 0; depth < 8 && el; depth++) {
             const propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
@@ -2244,7 +2247,7 @@ ${placemarks}
                     };
                     try {
                         handler(fakeEvent);
-                        triggered = true; triggerLevel = depth; triggerHandlerName = handlerName;
+                        triggered = true; triggerLevel = depth; triggerHandlerName = handlerName; triggerEl = el;
                     } catch (e) { console.warn(`${TAG} [edit] ${instrId}: handler ${handlerName} threw:`, e); }
                     if (triggered) break;
                 }
@@ -2300,23 +2303,44 @@ ${placemarks}
             console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
             draggable.classList.remove('aim-mb-force-dots');
-            // Layered cleanup — Ant tracks "this trigger is open" in
-            // its component state. Triggering enter via React handler
-            // didn't pair with a real mouseleave, so the state lingers
-            // and blocks future user hovers. Try every angle to clear it.
+            // Cleanup — call onMouseLeave on the SAME element we used
+            // for onMouseEnter. This is the pairing Ant needs to clear
+            // its internal "trigger is hovered" state. Without it,
+            // manual hover stays broken until page refresh.
             setTimeout(() => {
-                // (a) Native mouseleave + mouseout on dots
+                let leaveFired = false;
+                // (a) PRIMARY: React onMouseLeave on the same triggerEl
+                if (triggerEl) {
+                    const propsKey = Object.keys(triggerEl).find(k => k.startsWith('__reactProps$'));
+                    if (propsKey) {
+                        const props = triggerEl[propsKey];
+                        if (typeof props.onMouseLeave === 'function') {
+                            try {
+                                props.onMouseLeave({
+                                    type: 'mouseleave', target: triggerEl, currentTarget: triggerEl,
+                                    preventDefault(){}, stopPropagation(){},
+                                    nativeEvent: new MouseEvent('mouseleave'),
+                                });
+                                leaveFired = true;
+                                console.log(`${TAG} [edit] ${instrId}: called onMouseLeave on triggerEl (depth ${triggerLevel})`);
+                            } catch (e) { console.warn(`${TAG} [edit] ${instrId}: onMouseLeave threw:`, e); }
+                        } else if (typeof props.onMouseOut === 'function') {
+                            try { props.onMouseOut({ target: triggerEl, preventDefault(){}, stopPropagation(){} }); leaveFired = true; } catch (e) {}
+                        }
+                    }
+                }
+                // (b) Native mouseleave on triggerEl as backup
                 try {
-                    dots.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false, view: window }));
-                    dots.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, view: window }));
+                    (triggerEl || dots).dispatchEvent(new MouseEvent('mouseleave', { bubbles: false, view: window }));
+                    (triggerEl || dots).dispatchEvent(new MouseEvent('mouseout', { bubbles: true, view: window }));
                 } catch (e) {}
-                // (b) React onMouseLeave handler on the trigger ancestor
-                closeAntDropdownFor(dots);
-                // (c) Click-outside on body to dismiss any open Ant overlay
+                // (c) If we didn't fire leave on triggerEl, walk up
+                if (!leaveFired) closeAntDropdownFor(dots);
+                // (d) Click-outside as a fallback dismiss
                 try {
                     document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
                 } catch (e) {}
-                // (d) Last resort: remove any visible dropdowns from DOM
+                // (e) Last resort: remove any visible dropdowns
                 setTimeout(() => dismissStuckAntDropdowns(), 150);
             }, 100);
         }, 100);
