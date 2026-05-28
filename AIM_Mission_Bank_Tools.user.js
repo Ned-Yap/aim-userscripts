@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2297,29 +2297,31 @@ ${placemarks}
         return null;
     }
 
-    // Set the altitude in the open edit dialog. Handles two layouts:
-    //   - Navigate: has two radios ("Based on FFZ min alt" + "Custom
-    //     altitude"). We click the Custom radio first, then set the value.
-    //   - Snapshot: direct altitude input, no radio gating.
+    // Set the altitude in the open edit dialog. Handles three layouts:
+    //   - Navigate: "Drone altitude" with two radios ("Based on FFZ min
+    //     alt" + "Custom altitude"). Click Custom radio first.
+    //   - Snapshot: "Target altitude (ft)" — direct input, no radio.
+    //   - Generic fallback: any label containing the word "altitude" or
+    //     just "Height".
     // Calls done(ok: boolean) when finished.
     function setAltitudeInEditDialog(value, done) {
-        // Find the "Drone altitude" / "Altitude" input group
         const labels = document.querySelectorAll('.edit-instruction__input-label');
         let group = null;
+        // Match any label whose text contains "altitude" (covers
+        // "Drone altitude", "Target altitude (ft)", "Altitude", etc.)
+        // or "Height" as a fallback.
         for (const lbl of labels) {
-            if (/drone\s*altitude/i.test(lbl.textContent || '')) {
-                group = lbl.closest('.edit-instruction__input-group'); break;
+            const t = (lbl.textContent || '').trim();
+            if (/altitude/i.test(t) || /^height\b/i.test(t)) {
+                group = lbl.closest('.edit-instruction__input-group');
+                if (group) break;
             }
         }
         if (!group) {
-            for (const lbl of labels) {
-                const t = (lbl.textContent || '').trim().toLowerCase();
-                if (t === 'altitude' || t === 'height') {
-                    group = lbl.closest('.edit-instruction__input-group'); break;
-                }
-            }
+            console.warn(`${TAG} [edit] setAltitudeInEditDialog: no altitude label found. Available labels:`,
+                Array.from(labels).map(l => (l.textContent || '').trim()));
+            done(false); return;
         }
-        if (!group) { done(false); return; }
         // If radios exist, click the "Custom altitude" one
         const radios = group.querySelectorAll('input[type="radio"]');
         if (radios.length >= 2) {
