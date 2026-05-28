@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.32';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2280,13 +2280,25 @@ ${placemarks}
             clearInterval(editPoll);
             console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
-            // Remove the force-show class — restores native :hover behavior
             draggable.classList.remove('aim-mb-force-dots');
-            // Polite close so Ant resets its state machine, then DOM
-            // cleanup as a fallback in case the dropdown lingers.
+            // Layered cleanup — Ant tracks "this trigger is open" in
+            // its component state. Triggering enter via React handler
+            // didn't pair with a real mouseleave, so the state lingers
+            // and blocks future user hovers. Try every angle to clear it.
             setTimeout(() => {
+                // (a) Native mouseleave + mouseout on dots
+                try {
+                    dots.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false, view: window }));
+                    dots.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, view: window }));
+                } catch (e) {}
+                // (b) React onMouseLeave handler on the trigger ancestor
                 closeAntDropdownFor(dots);
-                setTimeout(() => dismissStuckAntDropdowns(), 100);
+                // (c) Click-outside on body to dismiss any open Ant overlay
+                try {
+                    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                } catch (e) {}
+                // (d) Last resort: remove any visible dropdowns from DOM
+                setTimeout(() => dismissStuckAntDropdowns(), 150);
             }, 100);
         }, 100);
     }
