@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.11
+// @version      3.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.11';
+    const SCRIPT_VERSION = '3.12';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -126,6 +126,157 @@
             .finally(() => {
                 fetchingSites.delete(siteID);
             });
+    }
+
+    // ============================================================
+    // DEM ground elevation — piggybacks Percepto's own endpoint.
+    // Same pattern as MBT v0.40+; see feedback-percepto-location-
+    // altitude-endpoint memory for the discovery story.
+    // ============================================================
+    const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
+    const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
+    const ELEV_CONCURRENCY = 4;
+    let elevationCache = null;
+    let elevQueue = [];
+    let elevActive = 0;
+    const elevInFlight = {};
+
+    function elevGmGet(key, def) {
+        try { if (typeof GM_getValue === 'function') return GM_getValue(key, def); } catch (e) {}
+        return def;
+    }
+    function elevGmSet(key, val) {
+        try { if (typeof GM_setValue === 'function') GM_setValue(key, val); } catch (e) {}
+    }
+    function loadElevationCache() {
+        if (elevationCache) return elevationCache;
+        try { elevationCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        catch (e) { elevationCache = {}; }
+        return elevationCache;
+    }
+    // Debounced cache write — synchronous GM_setValue of growing cache
+    // serialized 200+ times per bulk fetch would block the main thread.
+    let elevSaveTimer = null;
+    function saveElevationCache() {
+        if (!elevationCache) return;
+        if (elevSaveTimer) clearTimeout(elevSaveTimer);
+        elevSaveTimer = setTimeout(() => {
+            elevSaveTimer = null;
+            elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache);
+        }, 1000);
+    }
+    function flushElevationCache() {
+        if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
+        if (!elevationCache) return;
+        elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache);
+    }
+    function elevCacheKey(lat, lng) {
+        return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
+    }
+    function getElevationFromCache(lat, lng) {
+        return loadElevationCache()[elevCacheKey(lat, lng)];
+    }
+    function fetchElevation(lat, lng) {
+        const key = elevCacheKey(lat, lng);
+        const cache = loadElevationCache();
+        if (cache[key] != null) return Promise.resolve(cache[key]);
+        if (elevInFlight[key]) return elevInFlight[key];
+        const p = new Promise(resolve => {
+            elevQueue.push({ lat, lng, key, resolve });
+            pumpElevQueue();
+        }).then(meters => { delete elevInFlight[key]; return meters; });
+        elevInFlight[key] = p;
+        return p;
+    }
+    function pumpElevQueue() {
+        while (elevActive < ELEV_CONCURRENCY && elevQueue.length > 0) {
+            const task = elevQueue.shift();
+            elevActive++;
+            const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat: task.lat, lng: task.lng }))}`;
+            fetch(url, { credentials: 'include' })
+                .then(r => r.ok ? r.json() : null)
+                .then(data => {
+                    const meters = data && typeof data.altitude === 'number' ? data.altitude : null;
+                    if (meters != null) {
+                        loadElevationCache()[task.key] = meters;
+                        saveElevationCache();
+                    }
+                    task.resolve(meters);
+                })
+                .catch(() => task.resolve(null))
+                .finally(() => { elevActive--; pumpElevQueue(); });
+        }
+    }
+    function bulkFetchElevations(points, onProgress) {
+        if (!points || points.length === 0) return Promise.resolve();
+        let done = 0;
+        return Promise.all(points.map(p =>
+            fetchElevation(p.lat, p.lng).finally(() => {
+                done++;
+                if (onProgress) onProgress(done, points.length);
+            })
+        ));
+    }
+
+    // Best-effort centroid for any entity type. Returns {lat, lng} or null.
+    // Assets/Markers: first coord. Polygons (FFZ/NFZ): average of coords.
+    // Flight Paths (arcs): midpoint of first arc.
+    function getEntityCentroid(e) {
+        if (!e) return null;
+        // Assets, Markers
+        if (Array.isArray(e.coords) && e.coords.length > 0) {
+            const cs = e.coords.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+            if (cs.length === 0) return null;
+            const lat = cs.reduce((s, c) => s + c.lat, 0) / cs.length;
+            const lng = cs.reduce((s, c) => s + c.lng, 0) / cs.length;
+            return { lat, lng };
+        }
+        // Flight paths
+        if (Array.isArray(e.arcs) && e.arcs.length > 0) {
+            const a = e.arcs[0];
+            if (a && a.point_a && a.point_b
+                && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
+                return {
+                    lat: (a.point_a.lat + a.point_b.lat) / 2,
+                    lng: (a.point_a.lng + a.point_b.lng) / 2,
+                };
+            }
+        }
+        return null;
+    }
+
+    window.addEventListener('beforeunload', () => flushElevationCache());
+
+    // Bulk DEM fetch for the SUM panel — dedup by cache key (multiple
+    // entities at same lat/lng share one request). One re-render at end.
+    let demFetchInFlight = false;
+    function kickOffDemFetch(siteID, rows) {
+        if (demFetchInFlight) return;
+        const points = [];
+        const seen = new Set();
+        rows.forEach(r => {
+            const c = r._centroid;
+            if (!c) return;
+            const key = elevCacheKey(c.lat, c.lng);
+            if (seen.has(key)) return;
+            seen.add(key);
+            const cache = loadElevationCache();
+            if (cache[key] != null) return;
+            if (elevInFlight[key]) return;
+            points.push({ lat: c.lat, lng: c.lng });
+        });
+        if (points.length === 0) {
+            // Cache already covers everything — call hook anyway in case
+            // the rows were built before cache returned (race protection).
+            if (window.__aim_ai_onDemReady) window.__aim_ai_onDemReady();
+            return;
+        }
+        demFetchInFlight = true;
+        console.log(`${TAG} fetching ${points.length} DEM elevations for site ${siteID}`);
+        bulkFetchElevations(points).then(() => {
+            demFetchInFlight = false;
+            if (window.__aim_ai_onDemReady) window.__aim_ai_onDemReady();
+        });
     }
 
     // ============================================================
@@ -749,7 +900,7 @@
     const SUM_PANEL_ID = 'aim-sum-panel';
     // Default visible columns — user can toggle via "Columns ▾" menu.
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
-    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'elev', 'altMin', 'altMax', 'validated'];
+    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'elev', 'demElev', 'aglDelta', 'altMin', 'altMax', 'validated'];
     let sumPanelState = {
         search: '',
         typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
@@ -879,6 +1030,13 @@
                 elevM: null,
                 altMinM: null,
                 altMaxM: null,
+                // DEM ground elevation at entity centroid (populated
+                // async from /location_altitude/ — null until cache hit).
+                demElevM: (() => {
+                    const c = getEntityCentroid(e);
+                    return c ? getElevationFromCache(c.lat, c.lng) : null;
+                })(),
+                _centroid: getEntityCentroid(e), // cached for bulk fetch
                 // validated is null for types where Percepto hides the
                 // toggle (Assets, Markers) — we treat those as N/A so the
                 // Validated/Unvalidated filters don't accidentally hide
@@ -953,6 +1111,20 @@
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
         const allRows = buildSummaryRows(siteID);
+        // Hook for the async DEM fetch to refresh demElevM values on
+        // existing rows + redraw once the bulk load completes. Captured
+        // by closure here, called by kickOffDemFetch (defined outside
+        // this function). One window-scoped reference is enough since
+        // only one SUM panel can be open at a time.
+        window.__aim_ai_onDemReady = () => {
+            allRows.forEach(r => {
+                if (r._centroid && r.demElevM == null) {
+                    r.demElevM = getElevationFromCache(r._centroid.lat, r._centroid.lng);
+                }
+            });
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+        };
+        kickOffDemFetch(siteID, allRows);
 
         const panel = document.createElement('div');
         panel.id = SUM_PANEL_ID;
@@ -1156,7 +1328,9 @@
                 { key: 'typeShort', label: 'Type' },
                 { key: 'name',      label: 'Name' },
                 { key: 'subtype',   label: 'Subtype' },
-                { key: 'elev',      label: 'Elevation' },
+                { key: 'elev',      label: 'Asset Elev' },
+                { key: 'demElev',   label: 'DEM Elev (ground)' },
+                { key: 'aglDelta',  label: 'Δ (Min Alt − DEM)' },
                 { key: 'altMin',    label: 'Min Alt' },
                 { key: 'altMax',    label: 'Max Alt' },
                 { key: 'validated', label: 'Valid' },
@@ -1286,6 +1460,11 @@
         document.body.appendChild(panel);
 
         // --- Table draw helper (called on filter/sort changes) ---
+        // Also exposed on window so kickOffDemFetch's completion callback
+        // can trigger a redraw after async DEM elevations populate.
+        window.__aim_ai_redrawTable = function redrawTableExposed() {
+            redrawTable();
+        };
         function redrawTable() {
             const rows = filterAndSortRows(allRows, sumPanelState);
             tableWrap.innerHTML = '';
@@ -1305,7 +1484,9 @@
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 230, num: false, dataKey: 'name' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
-                { key: 'elev',      label: `Elev (${unitLbl})`,   w: 80,  num: true,  dataKey: 'elevM',   fmt: fmtAlt },
+                { key: 'elev',      label: `Asset Elev (${unitLbl})`, w: 90, num: true, dataKey: 'elevM',    fmt: fmtAlt },
+                { key: 'demElev',   label: `DEM Elev (${unitLbl})`,   w: 90, num: true, dataKey: 'demElevM', fmt: fmtAlt },
+                { key: 'aglDelta',  label: `Δ Min−DEM (${unitLbl})`,  w: 100, num: true, dataKey: '_aglDeltaM', fmt: fmtAlt },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMinM', fmt: fmtAlt },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMaxM', fmt: fmtAlt },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
@@ -1426,6 +1607,27 @@
                     } else if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
                         td.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
                         td.textContent = col.fmt(r[col.dataKey]);
+                    } else if (col.key === 'demElev') {
+                        // Light purple to match MBT's elevation column convention.
+                        // Click copies raw whole-number (no comma, no unit) — match
+                        // MBT's ELV click-to-copy behavior.
+                        td.style.cssText = 'padding:5px 8px;color:#c4b5fd;text-align:right;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer';
+                        td.textContent = col.fmt(r.demElevM);
+                    } else if (col.key === 'aglDelta') {
+                        // Δ Min Alt − DEM Elev = clearance above ground for FFZ/FP/NFZ.
+                        // Only meaningful when both values exist (FFZ/FP/NFZ types).
+                        // Color: red if <90 ft (low clearance), green 90-170, blue >170.
+                        const d = (r.altMinM != null && r.demElevM != null) ? (r.altMinM - r.demElevM) : null;
+                        r._aglDeltaM = d; // store for sort + export
+                        let color = '#bbb';
+                        if (d != null) {
+                            const ft = d * 3.28084;
+                            if (ft < 90) color = '#ff5252';
+                            else if (ft > 170) color = '#3399ff';
+                            else color = '#5fff5f';
+                        }
+                        td.style.cssText = `padding:5px 8px;color:${color};text-align:right;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        td.textContent = col.fmt(d);
                     } else if (col.key === 'validated') {
                         // null → N/A (Assets/Markers — Percepto hides the toggle for these).
                         // true → green ✓, false → red ✗ for FFZ/FP/NFZ.
@@ -1465,6 +1667,16 @@
                     if (col.key === 'subtype') return r.subtype || '';
                     if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
                         const v = r[col.dataKey];
+                        if (v == null) return '';
+                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
+                    }
+                    if (col.key === 'demElev') {
+                        const v = r.demElevM;
+                        if (v == null) return '';
+                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
+                    }
+                    if (col.key === 'aglDelta') {
+                        const v = (r.altMinM != null && r.demElevM != null) ? (r.altMinM - r.demElevM) : null;
                         if (v == null) return '';
                         return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
                     }
