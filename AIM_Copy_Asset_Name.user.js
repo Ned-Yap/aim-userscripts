@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.12
+// @version      3.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.12';
+    const SCRIPT_VERSION = '3.13';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -243,6 +243,42 @@
             }
         }
         return null;
+    }
+
+    // Midpoint of an arc (used as DEM sampling point per segment).
+    function getArcMidpoint(arc) {
+        if (!arc || !arc.point_a || !arc.point_b) return null;
+        if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return null;
+        return {
+            lat: (arc.point_a.lat + arc.point_b.lat) / 2,
+            lng: (arc.point_a.lng + arc.point_b.lng) / 2,
+        };
+    }
+
+    // Fetch DEM for the midpoints of every segment in the given FP entities.
+    // Triggers redrawTable when the batch completes so expanded sub-tables
+    // pick up the new elevations. Idempotent — already-cached + in-flight
+    // points get skipped.
+    function kickOffSegmentDemFetch(fpEntities) {
+        const points = [];
+        const seen = new Set();
+        fpEntities.forEach(fp => {
+            if (!Array.isArray(fp.arcs)) return;
+            fp.arcs.forEach(arc => {
+                const m = getArcMidpoint(arc);
+                if (!m) return;
+                const key = elevCacheKey(m.lat, m.lng);
+                if (seen.has(key)) return;
+                seen.add(key);
+                if (loadElevationCache()[key] != null) return;
+                if (elevInFlight[key]) return;
+                points.push(m);
+            });
+        });
+        if (points.length === 0) return;
+        bulkFetchElevations(points).then(() => {
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+        });
     }
 
     window.addEventListener('beforeunload', () => flushElevationCache());
@@ -919,6 +955,9 @@
         w: 720, h: null,           // last drag size (null = use default max-height)
         selectedIds: new Set(),    // multi-select state — survives panel reopen
         visibleCols: new Set(ALL_COL_KEYS),
+        // FP rows the user expanded to see per-segment data. Survives
+        // re-renders within a session; cleared on panel close.
+        expandedFpIds: new Set(),
     };
 
     function injectSumButton(doc) {
@@ -986,6 +1025,8 @@
     function closeSummaryPanel() {
         const el = document.getElementById(SUM_PANEL_ID);
         if (el) el.remove();
+        // Expanded FP rows are an ephemeral UI state — start fresh next open.
+        sumPanelState.expandedFpIds.clear();
     }
 
     function openSummaryPanel() {
@@ -1106,6 +1147,116 @@
             return dir * cmp(a, b, state.sortKey);
         });
         return out;
+    }
+
+    // Renders the per-segment table for an expanded FP row. Pulls
+    // arcs directly from the entity (source of truth in the JSON),
+    // computes DEM midpoint elevation + AGL clearance per segment.
+    // Same color rules as the parent row (red <90 ft / green 90-170
+    // / blue >170). Approval-required flags get a yellow pill.
+    function buildSegmentSubTable(fpEntity) {
+        const arcs = Array.isArray(fpEntity.arcs) ? fpEntity.arcs : [];
+        const useFt = !!sumPanelState.unitsFt;
+        const fmt = (m, decimals) => {
+            if (m == null) return '—';
+            return useFt ? (m * 3.28084).toFixed(decimals != null ? decimals : 0)
+                         : m.toFixed(decimals != null ? decimals : 1);
+        };
+        const unit = useFt ? 'ft' : 'm';
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'font-size:11px;color:#cfd6dc';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'color:#7adfe6;font-weight:600;margin-bottom:4px;letter-spacing:0.3px';
+        header.textContent = `Segments (${arcs.length})`;
+        wrap.appendChild(header);
+
+        if (arcs.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'color:#888;font-style:italic';
+            empty.textContent = 'No arcs in this flight path.';
+            wrap.appendChild(empty);
+            return wrap;
+        }
+
+        const tbl = document.createElement('table');
+        tbl.style.cssText = 'border-collapse:collapse;width:auto;min-width:560px';
+        const headRow = document.createElement('tr');
+        const headers = [
+            { label: '#',        w: 28,  align: 'right' },
+            { label: 'ID',       w: 70,  align: 'right' },
+            { label: `Dist (${unit})`,     w: 70,  align: 'right' },
+            { label: `Min Alt (${unit})`,  w: 80,  align: 'right' },
+            { label: `Max Alt (${unit})`,  w: 80,  align: 'right' },
+            { label: `Emerg (${unit})`,    w: 70,  align: 'right' },
+            { label: `Ground (${unit})`,   w: 80,  align: 'right' },
+            { label: `Δ Min−Gnd (${unit})`, w: 90,  align: 'right' },
+            { label: 'Approval',  w: 70,  align: 'center' },
+        ];
+        headers.forEach(h => {
+            const th = document.createElement('th');
+            th.textContent = h.label;
+            th.style.cssText = `padding:4px 8px;text-align:${h.align};color:#9ab1bd;font-weight:600;font-size:10px;border-bottom:1px solid rgba(122,223,230,0.25);text-transform:uppercase;letter-spacing:0.4px;min-width:${h.w}px;white-space:nowrap`;
+            headRow.appendChild(th);
+        });
+        tbl.appendChild(headRow);
+
+        arcs.forEach((arc, i) => {
+            const tr = document.createElement('tr');
+            tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.04)';
+            tr.onmouseenter = () => { tr.style.background = 'rgba(122,223,230,0.06)'; };
+            tr.onmouseleave = () => { tr.style.background = 'transparent'; };
+
+            const mid = getArcMidpoint(arc);
+            const demM = mid ? getElevationFromCache(mid.lat, mid.lng) : null;
+            const minA = typeof arc.min_alt === 'number' ? arc.min_alt : null;
+            const maxA = typeof arc.max_alt === 'number' ? arc.max_alt : null;
+            const emA  = typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null;
+            const dist = typeof arc.distance === 'number' ? arc.distance : null;
+            const deltaM = (minA != null && demM != null) ? (minA - demM) : null;
+
+            // Color for the clearance delta — same rules as parent row.
+            let deltaColor = '#888';
+            if (deltaM != null) {
+                const ft = deltaM * 3.28084;
+                if (ft < 90) deltaColor = '#ff5252';
+                else if (ft > 170) deltaColor = '#3399ff';
+                else deltaColor = '#5fff5f';
+            }
+
+            const cells = [
+                { txt: String(i + 1),                   style: 'color:#aaa;text-align:right' },
+                { txt: arc.id != null ? String(arc.id) : '—', style: 'color:#7a8a92;text-align:right;font-variant-numeric:tabular-nums' },
+                { txt: fmt(dist, useFt ? 0 : 1),        style: 'color:#bbb;text-align:right;font-variant-numeric:tabular-nums' },
+                { txt: fmt(minA),                        style: 'color:#e6e6e6;text-align:right;font-variant-numeric:tabular-nums' },
+                { txt: fmt(maxA),                        style: 'color:#e6e6e6;text-align:right;font-variant-numeric:tabular-nums' },
+                { txt: fmt(emA),                         style: 'color:#bbb;text-align:right;font-variant-numeric:tabular-nums' },
+                { txt: fmt(demM),                        style: 'color:#c4b5fd;text-align:right;font-weight:600;font-variant-numeric:tabular-nums' },
+                { txt: fmt(deltaM),                      style: `color:${deltaColor};text-align:right;font-weight:700;font-variant-numeric:tabular-nums` },
+            ];
+            cells.forEach(c => {
+                const td = document.createElement('td');
+                td.style.cssText = `padding:3px 8px;${c.style}`;
+                td.textContent = c.txt;
+                tr.appendChild(td);
+            });
+            // Approval-required pill — yellow when true, dash when not.
+            const tdApp = document.createElement('td');
+            tdApp.style.cssText = 'padding:3px 8px;text-align:center';
+            if (arc.wait_until_approved === true) {
+                const pill = document.createElement('span');
+                pill.textContent = 'YES';
+                pill.style.cssText = 'display:inline-block;background:rgba(255,213,79,0.18);color:#ffd54f;font-weight:700;font-size:10px;padding:1px 6px;border-radius:3px;letter-spacing:0.4px';
+                tdApp.appendChild(pill);
+            } else {
+                tdApp.textContent = '—';
+                tdApp.style.color = '#666';
+            }
+            tr.appendChild(tdApp);
+            tbl.appendChild(tr);
+        });
+        wrap.appendChild(tbl);
+        return wrap;
     }
 
     function renderSummaryPanel(siteID) {
@@ -1597,7 +1748,31 @@
                     td.onclick = onRowClick;
                     if (col.key === 'typeShort') {
                         td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
-                        td.textContent = r.typeShort;
+                        // Flight paths get a chevron prefix that toggles a
+                        // per-segment expansion sub-row. Other types just
+                        // show the type code. The chevron lives inside the
+                        // Type cell to avoid shifting all other columns.
+                        if (r.type === 15 && Array.isArray(r.entity.arcs) && r.entity.arcs.length > 0) {
+                            const isOpen = sumPanelState.expandedFpIds.has(r.entity.id);
+                            const chev = document.createElement('span');
+                            chev.textContent = isOpen ? '▼ ' : '▶ ';
+                            chev.style.cssText = 'display:inline-block;color:#7adfe6;font-size:9px;margin-right:2px;cursor:pointer;user-select:none';
+                            chev.title = isOpen ? 'Collapse segments' : 'Expand segments';
+                            chev.onclick = (ev) => {
+                                ev.stopPropagation();
+                                if (sumPanelState.expandedFpIds.has(r.entity.id)) {
+                                    sumPanelState.expandedFpIds.delete(r.entity.id);
+                                } else {
+                                    sumPanelState.expandedFpIds.add(r.entity.id);
+                                    kickOffSegmentDemFetch([r.entity]);
+                                }
+                                redrawTable();
+                            };
+                            td.appendChild(chev);
+                            td.appendChild(document.createTextNode(r.typeShort));
+                        } else {
+                            td.textContent = r.typeShort;
+                        }
                     } else if (col.key === 'name') {
                         td.style.cssText = 'padding:5px 8px;color:#e6e6e6;cursor:pointer';
                         td.textContent = r.name || '(unnamed)';
@@ -1640,6 +1815,21 @@
                     tr.appendChild(td);
                 });
                 tbody.appendChild(tr);
+
+                // Per-segment expansion row for FPs the user has clicked
+                // the chevron on. One <tr> with a single <td colspan=...>
+                // hosting a nested sub-table. Hover/click on the sub-table
+                // does NOT trigger row navigation (own stopPropagation).
+                if (r.type === 15 && sumPanelState.expandedFpIds.has(r.entity.id)) {
+                    const subTr = document.createElement('tr');
+                    const subTd = document.createElement('td');
+                    subTd.colSpan = cols.length + 1; // +1 for the select checkbox column
+                    subTd.style.cssText = 'padding:8px 14px 12px 38px;background:rgba(28,160,222,0.06);border-bottom:1px solid rgba(255,255,255,0.05)';
+                    subTd.onclick = (ev) => ev.stopPropagation();
+                    subTd.appendChild(buildSegmentSubTable(r.entity));
+                    subTr.appendChild(subTd);
+                    tbody.appendChild(subTr);
+                }
             });
             table.appendChild(tbody);
             tableWrap.appendChild(table);
