@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-29
+
+- **AIM Asset Inspector v3.12** — **NEW: DEM ground elevation + Min−DEM clearance delta columns** in the SUM panel entity table. Ports the MBT v0.40-v0.50 pattern: same Percepto `/location_altitude/` endpoint, same cache + dedup + bulk fetch + one-render-at-end. New "DEM Elev (ground)" column (light purple) shows terrain elevation at each entity centroid (centroid derivation handles assets/markers/polygons/flight-path arcs). New "Δ (Min Alt − DEM)" column shows flight-clearance for FFZ/FP/NFZ — color coded RED <90 ft / GREEN 90-170 / BLUE >170 (matches navigate AGL thresholds). Existing "Elev" relabeled "Asset Elev" for clarity vs the new ground value. Both new columns toggleable + CSV/TSV exportable.
+
 ## 2026-05-28
 
 - **AIM Map Styler v34.41** — full idempotency on the SET_TOGGLE handler. Single `if (newVal === prev) return;` guard at the top short-circuits ALL special-case logic for duplicate broadcasts (which arrive 2-4× per real toggle change because Control Panel runs in both TOP+IFRAME and re-broadcasts on every script REGISTER). Stops asset-lock CSS thrashing, redundant `setActiveState` calls, redundant edit-mode auto-on echoes, etc. Companion fix to Perf Shield v1.11 — together they cut the toggle-flicker cascade.
