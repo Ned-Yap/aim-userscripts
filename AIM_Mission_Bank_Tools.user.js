@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.45
+// @version      0.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.45';
+    const SCRIPT_VERSION = '0.46';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -261,6 +261,7 @@
     let elevationCache = null;    // lazy-loaded from GM storage
     let elevQueue = [];           // pending fetch tasks
     let elevActive = 0;           // currently in-flight fetches
+    const elevInFlight = {};      // key → Promise (so duplicate requests for same point share one fetch)
 
     function loadElevationCache() {
         if (elevationCache) return elevationCache;
@@ -284,16 +285,26 @@
     }
 
     // Fetch a single elevation. Returns Promise<meters | null>.
-    // Hits cache first; otherwise queues a fetch through the concurrency
-    // throttle. Cache is written through.
+    // 3-tier resolution:
+    //   1. Cache hit → resolve immediately
+    //   2. In-flight request for same key → return SHARED promise (this
+    //      is the critical dedup — without it, re-renders that fire
+    //      while a batch is mid-flight create duplicate HTTP requests)
+    //   3. Miss → push to queue, throttled through pumpElevQueue
     function fetchElevation(lat, lng) {
         const key = elevCacheKey(lat, lng);
         const cache = loadElevationCache();
         if (cache[key] != null) return Promise.resolve(cache[key]);
-        return new Promise(resolve => {
+        if (elevInFlight[key]) return elevInFlight[key];
+        const p = new Promise(resolve => {
             elevQueue.push({ lat, lng, key, resolve });
             pumpElevQueue();
+        }).then(meters => {
+            delete elevInFlight[key];
+            return meters;
         });
+        elevInFlight[key] = p;
+        return p;
     }
 
     function pumpElevQueue() {
@@ -2083,19 +2094,27 @@
                 showToast(`Copied: ${el.dataset.altRaw}`, '#5fff5f');
             };
         });
-        // Elevation click-to-copy: raw whole number, no comma, no unit
+        // Elevation click-to-copy: raw whole number, no comma, no unit.
+        // Both left-click and right-click copy (consistent with altitude
+        // right-click). preventDefault stops the browser context menu.
         panelEl.querySelectorAll('[data-elev-raw]').forEach(el => {
-            el.onclick = () => {
+            const copy = (e) => {
+                if (e) { e.preventDefault(); e.stopPropagation(); }
                 copyToClipboard(el.dataset.elevRaw);
                 showToast(`Copied: ${el.dataset.elevRaw}`, '#5fff5f');
             };
+            el.onclick = copy;
+            el.oncontextmenu = copy;
         });
-        // AGL Δ click-to-copy: raw whole number
+        // AGL Δ click-to-copy: raw whole number (left + right both copy)
         panelEl.querySelectorAll('[data-agl-raw]').forEach(el => {
-            el.onclick = () => {
+            const copy = (e) => {
+                if (e) { e.preventDefault(); e.stopPropagation(); }
                 copyToClipboard(el.dataset.aglRaw);
                 showToast(`Copied: ${el.dataset.aglRaw}`, '#5fff5f');
             };
+            el.onclick = copy;
+            el.oncontextmenu = copy;
         });
         // Location cells — left-click opens Google Maps, right-click copies coords
         panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
