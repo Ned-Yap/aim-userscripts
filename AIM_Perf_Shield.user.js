@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -242,7 +242,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.10';
+    const SCRIPT_VERSION = '1.11';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -440,60 +440,54 @@
                 const rawVal = msg.value !== undefined ? msg.value : msg.enabled;
                 const newVal = !!rawVal;
                 if (msg.toggleId === 'hide-satellite') {
-                    if (newVal !== hideSatellite) {
-                        hideSatellite = newVal;
-                        try { GM_setValue(STORAGE_KEY_HIDE_SAT, newVal); } catch (e) {}
-                        console.log(`${TAG} hide-satellite ${newVal ? 'ON' : 'OFF'}`);
-                    }
+                    if (newVal === hideSatellite) return; // IDEMPOTENT no-op
+                    hideSatellite = newVal;
+                    try { GM_setValue(STORAGE_KEY_HIDE_SAT, newVal); } catch (e) {}
+                    console.log(`${TAG} hide-satellite ${newVal ? 'ON' : 'OFF'}`);
                     broadcastPerfSettings();
                     return;
                 }
                 if (msg.toggleId === 'ortho-lowres') {
-                    if (newVal !== orthoLowRes) {
-                        orthoLowRes = newVal;
-                        try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES, newVal); } catch (e) {}
-                        console.log(`${TAG} ortho-lowres ${newVal ? 'ON' : 'OFF'}`);
-                    }
+                    if (newVal === orthoLowRes) return; // IDEMPOTENT no-op
+                    orthoLowRes = newVal;
+                    try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES, newVal); } catch (e) {}
+                    console.log(`${TAG} ortho-lowres ${newVal ? 'ON' : 'OFF'}`);
                     broadcastPerfSettings();
                     return;
                 }
                 if (msg.toggleId === 'ortho-lowres-zoom') {
                     const n = Number(rawVal);
-                    if (!isNaN(n) && n !== orthoLowResZoom) {
-                        orthoLowResZoom = n;
-                        try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, n); } catch (e) {}
-                        console.log(`${TAG} ortho-lowres cap zoom = ${n}`);
-                    }
+                    if (isNaN(n) || n === orthoLowResZoom) return; // IDEMPOTENT no-op
+                    orthoLowResZoom = n;
+                    try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, n); } catch (e) {}
+                    console.log(`${TAG} ortho-lowres cap zoom = ${n}`);
                     broadcastPerfSettings();
                     return;
                 }
                 if (msg.toggleId === 'suppress-debug-logs') {
-                    if (newVal !== suppressDebugLogs) {
-                        suppressDebugLogs = newVal;
-                        try { GM_setValue(STORAGE_KEY_SUPPRESS_LOGS, newVal); } catch (e) {}
-                        // Use the original console (bypass our own filter) so
-                        // this status message ALWAYS prints regardless of state.
-                        console.log(`${TAG} log suppressor ${newVal ? 'ON' : 'OFF'}`);
-                    }
+                    if (newVal === suppressDebugLogs) return; // IDEMPOTENT no-op
+                    suppressDebugLogs = newVal;
+                    try { GM_setValue(STORAGE_KEY_SUPPRESS_LOGS, newVal); } catch (e) {}
+                    console.log(`${TAG} log suppressor ${newVal ? 'ON' : 'OFF'}`);
                     return;
                 }
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
+                // IDEMPOTENT no-op for group toggles too — was a major
+                // source of redundant work (every echoed SET_TOGGLE
+                // wrote GM, applied chat CSS, etc).
+                if (newVal === blockEnabled[groupId]) return;
                 blockEnabled[groupId] = newVal;
                 try { GM_setValue(group.storageKey, newVal); } catch (e) {}
-                // Chat block also needs the CSS hide applied/removed instantly
-                // — script-blocking alone can't undo an already-rendered bubble.
                 if (groupId === 'block-intercom') {
                     try { applyChatBlockCss(newVal); } catch (e) {}
                 }
-                if (newVal !== lastNotified[groupId]) {
-                    lastNotified[groupId] = newVal;
-                    const reloadHint = groupId === 'session-replay'
-                        ? ' — reload the page for the change to take effect (in-flight recorder code keeps running until reload).'
-                        : ' — takes effect on the next matching network call.';
-                    console.log(`${TAG} ${groupId} ${newVal ? 'ENABLED' : 'DISABLED'}${reloadHint}`);
-                }
+                lastNotified[groupId] = newVal;
+                const reloadHint = groupId === 'session-replay'
+                    ? ' — reload the page for the change to take effect (in-flight recorder code keeps running until reload).'
+                    : ' — takes effect on the next matching network call.';
+                console.log(`${TAG} ${groupId} ${newVal ? 'ENABLED' : 'DISABLED'}${reloadHint}`);
             }
         };
         // Replay state to any scripts already listening (e.g. Map Styler).
