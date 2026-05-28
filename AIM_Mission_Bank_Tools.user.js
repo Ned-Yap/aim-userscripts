@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.37
+// @version      0.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.37';
+    const SCRIPT_VERSION = '0.38';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2176,10 +2176,7 @@ ${placemarks}
         style.id = 'aim-mb-edit-styles';
         style.textContent = `
             /* Always show the native three-dots menu (no hover required).
-               Avoids JS DOM injection into React-managed elements (which
-               causes "Failed to execute removeChild" reconciliation
-               crashes during navigation). User clicks the visible dots
-               → native dropdown opens → click Edit or Delete. */
+               Pure CSS — no JS injection into React tree. */
             .mission-instruction-item__options,
             .mission-instruction-item__options > div,
             [data-testid="btn-instruction-menu"] {
@@ -2188,14 +2185,103 @@ ${placemarks}
                 opacity: 1 !important;
                 pointer-events: auto !important;
             }
-            /* Class still used by our programmatic edit flow for symmetry
-               with prior versions; the always-visible rules already cover it. */
             .aim-mb-force-dots .mission-instruction-item__options,
             .aim-mb-force-dots [data-testid="btn-instruction-menu"] {
                 display: block !important;
             }
+            /* Our floating action popup — replaces Ant's hover dropdown.
+               Body-attached so it never disrupts Percepto's React tree. */
+            .aim-mb-instr-popup {
+                position: fixed;
+                z-index: 100003;
+                background: #2a2a2a;
+                border: 1px solid #14d2dc;
+                border-radius: 4px;
+                display: flex;
+                flex-direction: column;
+                min-width: 80px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+                font-family: 'Lato','Segoe UI',sans-serif;
+                overflow: hidden;
+            }
+            .aim-mb-instr-popup button {
+                background: transparent;
+                border: none;
+                color: #fff;
+                padding: 6px 12px;
+                cursor: pointer;
+                font-size: 12px;
+                text-align: left;
+                font-family: inherit;
+                border-bottom: 1px solid #1a1a1a;
+            }
+            .aim-mb-instr-popup button:last-child { border-bottom: none; }
+            .aim-mb-instr-popup button:hover {
+                background: #14d2dc;
+                color: #000;
+            }
+            .aim-mb-instr-popup button.aim-mb-popup-delete:hover {
+                background: #ff5252;
+                color: #fff;
+            }
         `;
         document.head.appendChild(style);
+    }
+
+    // Intercept clicks on the always-visible three-dots and show OUR
+    // own popup with Edit/Delete buttons. Bypasses Ant's hover dropdown
+    // entirely, sidestepping the state-corruption problem on edited
+    // steps. Popup lives on document.body — no React tree contamination.
+    function installDotsClickInterceptor() {
+        if (CONTEXT !== 'IFRAME') return;
+        document.addEventListener('click', (e) => {
+            const dots = e.target.closest('[data-testid="btn-instruction-menu"]');
+            if (!dots) return;
+            const draggable = dots.closest('[data-rfd-draggable-id]');
+            if (!draggable) return;
+            e.preventDefault();
+            e.stopPropagation();
+            showInstructionActionPopup(dots, draggable);
+        }, true); // capture so we run before Ant's own handler
+        console.log(`${TAG} dots click interceptor armed`);
+    }
+
+    function showInstructionActionPopup(dots, draggable) {
+        document.querySelectorAll('.aim-mb-instr-popup').forEach(el => el.remove());
+        const rect = dots.getBoundingClientRect();
+        const popup = document.createElement('div');
+        popup.className = 'aim-mb-instr-popup';
+        const vw = window.innerWidth;
+        const desiredW = 100;
+        let left = rect.right + 4;
+        if (left + desiredW > vw - 8) left = Math.max(8, rect.left - desiredW - 4);
+        popup.style.left = `${left}px`;
+        popup.style.top = `${rect.top}px`;
+        popup.innerHTML = `
+            <button class="aim-mb-popup-edit" type="button">✏️  Edit</button>
+            <button class="aim-mb-popup-delete" type="button">🗑️  Delete</button>
+        `;
+        document.body.appendChild(popup);
+        popup.querySelector('.aim-mb-popup-edit').onclick = (ev) => {
+            ev.stopPropagation();
+            popup.remove();
+            forceOpenInstructionEdit(draggable);
+        };
+        popup.querySelector('.aim-mb-popup-delete').onclick = (ev) => {
+            ev.stopPropagation();
+            popup.remove();
+            if (!confirm('Delete this step?')) return;
+            forceOpenInstructionAction(draggable, 'delete');
+        };
+        setTimeout(() => {
+            const close = (ev) => {
+                if (!popup.contains(ev.target)) {
+                    popup.remove();
+                    document.removeEventListener('mousedown', close, true);
+                }
+            };
+            document.addEventListener('mousedown', close, true);
+        }, 0);
     }
 
     // (Stub kept so commitOneChange's existing reference still works,
@@ -2921,6 +3007,7 @@ ${placemarks}
             setInterval(runSumInjection, 2000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
+            installDotsClickInterceptor();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
