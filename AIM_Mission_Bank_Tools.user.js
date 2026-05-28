@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.42
+// @version      0.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.42';
+    const SCRIPT_VERSION = '0.43';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1170,8 +1170,8 @@
                 #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-edit:hover { opacity: 1; }
-                #${PANEL_ID} .aim-mb-elev { cursor: pointer; color: #aaa; }
-                #${PANEL_ID} .aim-mb-elev:hover { color: #14d2dc; text-decoration: underline; }
+                #${PANEL_ID} .aim-mb-elev { cursor: pointer; color: #c4b5fd; font-weight: 600; }
+                #${PANEL_ID} .aim-mb-elev:hover { color: #ddd6fe; text-decoration: underline; }
                 #${PANEL_ID} .aim-mb-elev-loading, #${PANEL_ID} .aim-mb-agl-loading { color: #555; font-style: italic; }
                 #${PANEL_ID} .aim-mb-agl { cursor: pointer; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-agl-low { color: #ff5252; }
@@ -1885,7 +1885,7 @@
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elev</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
+                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
