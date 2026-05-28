@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.32
+// @version      0.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.32';
+    const SCRIPT_VERSION = '0.33';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2215,9 +2215,13 @@ ${placemarks}
         // we just removeClass on cleanup).
         draggable.classList.add('aim-mb-force-dots');
 
-        // 2. Snapshot existing .ant-dropdown elements BEFORE triggering hover
-        const dropdownsBefore = new Set(document.querySelectorAll('.ant-dropdown'));
-        console.log(`${TAG} [edit] ${instrId}: ${dropdownsBefore.size} pre-existing dropdowns`);
+        // Snapshot the dropdown menu Edit items BEFORE triggering hover.
+        // Ant reuses a singleton portal — same .ant-dropdown element gets
+        // its menu content swapped per trigger. So we identify the
+        // "correct" dropdown by finding one whose Edit item is NEW
+        // (i.e. didn't exist before our hover, or replaces an old one).
+        const editsBefore = new Set(Array.from(document.querySelectorAll('[data-menu-id$="-edit"]')));
+        console.log(`${TAG} [edit] ${instrId}: ${editsBefore.size} pre-existing Edit menu items`);
 
         // 3. Call the React onMouseEnter handler. Walk up the tree
         //    looking for the first ancestor with a React onMouseEnter,
@@ -2254,28 +2258,43 @@ ${placemarks}
             console.log(`${TAG} [edit] ${instrId}: triggered ${triggerHandlerName} at depth ${triggerLevel}`);
         }
 
-        // 4. Poll for the NEW dropdown
+        // 4. Poll for an Edit menu item that's (a) inside a non-hidden
+        //    .ant-dropdown, AND (b) wasn't in our pre-trigger snapshot.
+        //    This handles Ant's singleton portal reuse: when Ant swaps
+        //    the menu content for a new trigger, the OLD Edit DOM node
+        //    is detached and a NEW one appears. So "new since snapshot"
+        //    correctly identifies the dropdown for THIS trigger.
         let pollAttempts = 0;
         const editPoll = setInterval(() => {
             pollAttempts++;
             if (pollAttempts > 20) {
                 clearInterval(editPoll);
-                const after = document.querySelectorAll('.ant-dropdown');
-                console.warn(`${TAG} [edit] ${instrId}: TIMEOUT waiting for new dropdown. Before=${dropdownsBefore.size}, After=${after.length}, visible=${Array.from(after).filter(d => !d.classList.contains('ant-dropdown-hidden')).length}`);
+                const dropdowns = document.querySelectorAll('.ant-dropdown');
+                const editsNow = document.querySelectorAll('[data-menu-id$="-edit"]');
+                console.warn(`${TAG} [edit] ${instrId}: TIMEOUT. Dropdowns=${dropdowns.length}, visible=${Array.from(dropdowns).filter(d => !d.classList.contains('ant-dropdown-hidden')).length}, editsBefore=${editsBefore.size}, editsNow=${editsNow.length}`);
                 showToast('Edit dropdown did not appear', '#ff9800');
                 draggable.classList.remove('aim-mb-force-dots');
                 return;
             }
-            const current = document.querySelectorAll('.ant-dropdown');
-            let newDropdown = null;
-            for (const d of current) {
-                if (!dropdownsBefore.has(d) && !d.classList.contains('ant-dropdown-hidden')) {
-                    newDropdown = d; break;
+            // Look for an Edit item that's new (post-hover) AND inside
+            // a visible (non-hidden) dropdown.
+            const candidates = document.querySelectorAll('[data-menu-id$="-edit"]');
+            let editItem = null;
+            for (const item of candidates) {
+                if (editsBefore.has(item)) continue; // not new
+                const dropdown = item.closest('.ant-dropdown');
+                if (dropdown && dropdown.classList.contains('ant-dropdown-hidden')) continue;
+                editItem = item; break;
+            }
+            // Fallback: text-based search inside any visible dropdown
+            if (!editItem) {
+                const visibleDropdowns = Array.from(document.querySelectorAll('.ant-dropdown'))
+                    .filter(d => !d.classList.contains('ant-dropdown-hidden'));
+                for (const d of visibleDropdowns) {
+                    const byText = Array.from(d.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
+                    if (byText && !editsBefore.has(byText)) { editItem = byText; break; }
                 }
             }
-            if (!newDropdown) return;
-            const editItem = newDropdown.querySelector('[data-menu-id$="-edit"]')
-                || Array.from(newDropdown.querySelectorAll('.ant-dropdown-menu-item')).find(el => /^\s*Edit\s*$/.test(el.textContent));
             if (!editItem) return;
             clearInterval(editPoll);
             console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
