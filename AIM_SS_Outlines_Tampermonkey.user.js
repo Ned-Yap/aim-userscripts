@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.40
+// @version      34.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.40';
+    const SCRIPT_VERSION = '34.41';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4116,6 +4116,15 @@
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 const newVal = msg.value !== undefined ? msg.value : msg.enabled;
                 const prev = toggleState[msg.toggleId];
+                // IDEMPOTENT no-op for duplicate broadcasts. Control Panel
+                // runs in both TOP and IFRAME, and re-broadcasts every
+                // toggle's value to a script on each REGISTER — so each
+                // SET_TOGGLE typically arrives 2-4×. Without this guard,
+                // every duplicate ran the special-case logic below (e.g.
+                // applyAssetLockClass), wrote toggleState, and could
+                // cascade through Map Styler ↔ Perf Shield broadcasts.
+                // See [[feedback-set-toggle-handlers-must-be-idempotent]].
+                if (newVal === prev) return;
                 toggleState[msg.toggleId] = newVal;
                 // E1 auto-on coupling: when edit-mode for a KML type flips
                 // ON, auto-flip show-hidden ON too so the user can see what
