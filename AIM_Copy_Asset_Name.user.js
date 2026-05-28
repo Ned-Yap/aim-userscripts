@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.13
+// @version      3.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.13';
+    const SCRIPT_VERSION = '3.14';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -253,32 +253,6 @@
             lat: (arc.point_a.lat + arc.point_b.lat) / 2,
             lng: (arc.point_a.lng + arc.point_b.lng) / 2,
         };
-    }
-
-    // Fetch DEM for the midpoints of every segment in the given FP entities.
-    // Triggers redrawTable when the batch completes so expanded sub-tables
-    // pick up the new elevations. Idempotent — already-cached + in-flight
-    // points get skipped.
-    function kickOffSegmentDemFetch(fpEntities) {
-        const points = [];
-        const seen = new Set();
-        fpEntities.forEach(fp => {
-            if (!Array.isArray(fp.arcs)) return;
-            fp.arcs.forEach(arc => {
-                const m = getArcMidpoint(arc);
-                if (!m) return;
-                const key = elevCacheKey(m.lat, m.lng);
-                if (seen.has(key)) return;
-                seen.add(key);
-                if (loadElevationCache()[key] != null) return;
-                if (elevInFlight[key]) return;
-                points.push(m);
-            });
-        });
-        if (points.length === 0) return;
-        bulkFetchElevations(points).then(() => {
-            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
-        });
     }
 
     window.addEventListener('beforeunload', () => flushElevationCache());
@@ -936,7 +910,7 @@
     const SUM_PANEL_ID = 'aim-sum-panel';
     // Default visible columns — user can toggle via "Columns ▾" menu.
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
-    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'elev', 'demElev', 'aglDelta', 'altMin', 'altMax', 'validated'];
+    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
     let sumPanelState = {
         search: '',
         typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
@@ -953,11 +927,8 @@
         sortDir: 1,
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
-        selectedIds: new Set(),    // multi-select state — survives panel reopen
+        selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
         visibleCols: new Set(ALL_COL_KEYS),
-        // FP rows the user expanded to see per-segment data. Survives
-        // re-renders within a session; cleared on panel close.
-        expandedFpIds: new Set(),
     };
 
     function injectSumButton(doc) {
@@ -1025,8 +996,6 @@
     function closeSummaryPanel() {
         const el = document.getElementById(SUM_PANEL_ID);
         if (el) el.remove();
-        // Expanded FP rows are an ephemeral UI state — start fresh next open.
-        sumPanelState.expandedFpIds.clear();
     }
 
     function openSummaryPanel() {
@@ -1055,33 +1024,64 @@
     function buildSummaryRows(siteID) {
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return [];
-        return (bucket.entities || []).map(e => {
+        const out = [];
+        (bucket.entities || []).forEach(e => {
             const reg = typeReg(e.type);
+            // Flight paths (type 15) explode into one row PER arc/segment.
+            // Naming: `${fp.name} - Seg ${i+1}`. Sort + filter + multi-select
+            // operate on segments as first-class rows. Single-arc FPs still
+            // get the "- Seg 1" suffix for consistency. FPs with no arcs
+            // fall back to a single parent-only row so the FP still appears
+            // (rare edge case: corrupt JSON).
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length > 0) {
+                e.arcs.forEach((arc, i) => {
+                    const mid = getArcMidpoint(arc);
+                    const minA = typeof arc.min_alt === 'number' ? arc.min_alt : null;
+                    const maxA = typeof arc.max_alt === 'number' ? arc.max_alt : null;
+                    const elevM = mid ? getElevationFromCache(mid.lat, mid.lng) : null;
+                    out.push({
+                        entity: e,
+                        arc,                                       // segment-specific data
+                        _isSegment: true,
+                        _rowKey: `${e.id}:${arc.id != null ? arc.id : i}`,
+                        type: e.type,
+                        typeShort: reg.short,
+                        typePrio: reg.sortPrio,
+                        name: `${e.name || ''} - Seg ${i + 1}`,
+                        subtype: '',
+                        altMinM: minA,
+                        altMaxM: maxA,
+                        altDeltaM: (minA != null && maxA != null) ? (maxA - minA) : null,
+                        elevationM: elevM,                         // DEM at segment midpoint
+                        aglM: (minA != null && elevM != null) ? (minA - elevM) : null,
+                        _centroid: mid,                            // for bulk DEM fetch
+                        validated: reg.hasValidStatus ? !!e.validated : null,
+                        unshielded: !!e.is_unshielded,
+                        hasNotes: !!(e.description && String(e.description).trim()),
+                    });
+                });
+                return;
+            }
+            // Everything else (Assets, FFZ, NFZ, Markers) = one row per entity.
+            const centroid = getEntityCentroid(e);
             const row = {
                 entity: e,
+                _isSegment: false,
+                _rowKey: String(e.id),
                 type: e.type,
                 typeShort: reg.short,
                 typePrio: reg.sortPrio,
                 name: e.name || '',
                 subtype: '',
-                // Altitudes/elevations stored in METERS (source of truth);
-                // display converts to ft when sumPanelState.unitsFt is on.
-                // Sort uses the meter value directly — relative ordering is
-                // the same in either unit.
-                elevM: null,
                 altMinM: null,
                 altMaxM: null,
-                // DEM ground elevation at entity centroid (populated
-                // async from /location_altitude/ — null until cache hit).
-                demElevM: (() => {
-                    const c = getEntityCentroid(e);
-                    return c ? getElevationFromCache(c.lat, c.lng) : null;
-                })(),
-                _centroid: getEntityCentroid(e), // cached for bulk fetch
-                // validated is null for types where Percepto hides the
-                // toggle (Assets, Markers) — we treat those as N/A so the
-                // Validated/Unvalidated filters don't accidentally hide
-                // every asset on the site.
+                altDeltaM: null,
+                // Unified Elevation column: assets show their CLAIMED elevation
+                // (custom.elevation_asl); everyone else shows the DEM ground
+                // elevation at centroid. Sort + display use a single value.
+                elevationM: null,
+                aglM: null,
+                _centroid: centroid,
                 validated: reg.hasValidStatus ? !!e.validated : null,
                 unshielded: !!e.is_unshielded,
                 hasNotes: !!(e.description && String(e.description).trim()),
@@ -1089,26 +1089,28 @@
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
                 if (typeof e.custom.elevation_asl === 'number') {
-                    row.elevM = e.custom.elevation_asl;
+                    row.elevationM = e.custom.elevation_asl;
                 }
-            }
-            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
-                let minA = Infinity, maxA = -Infinity;
-                for (const a of e.arcs) {
-                    if (typeof a.min_alt === 'number' && a.min_alt < minA) minA = a.min_alt;
-                    if (typeof a.max_alt === 'number' && a.max_alt > maxA) maxA = a.max_alt;
-                }
-                if (isFinite(minA)) row.altMinM = minA;
-                if (isFinite(maxA)) row.altMaxM = maxA;
             }
             // NFZ (4) and FFZ (16) both store altitude range in restrictions.
             if ((e.type === 4 || e.type === 16) && e.restrictions && typeof e.restrictions === 'object') {
                 if (typeof e.restrictions.minAlt === 'number') row.altMinM = e.restrictions.minAlt;
                 if (typeof e.restrictions.maxAlt === 'number') row.altMaxM = e.restrictions.maxAlt;
+                if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
-            return row;
+            // For non-asset rows, elevation comes from DEM (assets already
+            // populated above from their claimed elevation_asl).
+            if (e.type !== 3 && centroid) {
+                const dem = getElevationFromCache(centroid.lat, centroid.lng);
+                if (dem != null) row.elevationM = dem;
+            }
+            if (row.altMinM != null && row.elevationM != null) {
+                row.aglM = row.altMinM - row.elevationM;
+            }
+            out.push(row);
         });
+        return out;
     }
 
     function filterAndSortRows(rows, state) {
@@ -1149,128 +1151,26 @@
         return out;
     }
 
-    // Renders the per-segment table for an expanded FP row. Pulls
-    // arcs directly from the entity (source of truth in the JSON),
-    // computes DEM midpoint elevation + AGL clearance per segment.
-    // Same color rules as the parent row (red <90 ft / green 90-170
-    // / blue >170). Approval-required flags get a yellow pill.
-    function buildSegmentSubTable(fpEntity) {
-        const arcs = Array.isArray(fpEntity.arcs) ? fpEntity.arcs : [];
-        const useFt = !!sumPanelState.unitsFt;
-        const fmt = (m, decimals) => {
-            if (m == null) return '—';
-            return useFt ? (m * 3.28084).toFixed(decimals != null ? decimals : 0)
-                         : m.toFixed(decimals != null ? decimals : 1);
-        };
-        const unit = useFt ? 'ft' : 'm';
-        const wrap = document.createElement('div');
-        wrap.style.cssText = 'font-size:11px;color:#cfd6dc';
-
-        const header = document.createElement('div');
-        header.style.cssText = 'color:#7adfe6;font-weight:600;margin-bottom:4px;letter-spacing:0.3px';
-        header.textContent = `Segments (${arcs.length})`;
-        wrap.appendChild(header);
-
-        if (arcs.length === 0) {
-            const empty = document.createElement('div');
-            empty.style.cssText = 'color:#888;font-style:italic';
-            empty.textContent = 'No arcs in this flight path.';
-            wrap.appendChild(empty);
-            return wrap;
-        }
-
-        const tbl = document.createElement('table');
-        tbl.style.cssText = 'border-collapse:collapse;width:auto;min-width:560px';
-        const headRow = document.createElement('tr');
-        const headers = [
-            { label: '#',        w: 28,  align: 'right' },
-            { label: 'ID',       w: 70,  align: 'right' },
-            { label: `Dist (${unit})`,     w: 70,  align: 'right' },
-            { label: `Min Alt (${unit})`,  w: 80,  align: 'right' },
-            { label: `Max Alt (${unit})`,  w: 80,  align: 'right' },
-            { label: `Emerg (${unit})`,    w: 70,  align: 'right' },
-            { label: `Ground (${unit})`,   w: 80,  align: 'right' },
-            { label: `Δ Min−Gnd (${unit})`, w: 90,  align: 'right' },
-            { label: 'Approval',  w: 70,  align: 'center' },
-        ];
-        headers.forEach(h => {
-            const th = document.createElement('th');
-            th.textContent = h.label;
-            th.style.cssText = `padding:4px 8px;text-align:${h.align};color:#9ab1bd;font-weight:600;font-size:10px;border-bottom:1px solid rgba(122,223,230,0.25);text-transform:uppercase;letter-spacing:0.4px;min-width:${h.w}px;white-space:nowrap`;
-            headRow.appendChild(th);
-        });
-        tbl.appendChild(headRow);
-
-        arcs.forEach((arc, i) => {
-            const tr = document.createElement('tr');
-            tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.04)';
-            tr.onmouseenter = () => { tr.style.background = 'rgba(122,223,230,0.06)'; };
-            tr.onmouseleave = () => { tr.style.background = 'transparent'; };
-
-            const mid = getArcMidpoint(arc);
-            const demM = mid ? getElevationFromCache(mid.lat, mid.lng) : null;
-            const minA = typeof arc.min_alt === 'number' ? arc.min_alt : null;
-            const maxA = typeof arc.max_alt === 'number' ? arc.max_alt : null;
-            const emA  = typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null;
-            const dist = typeof arc.distance === 'number' ? arc.distance : null;
-            const deltaM = (minA != null && demM != null) ? (minA - demM) : null;
-
-            // Color for the clearance delta — same rules as parent row.
-            let deltaColor = '#888';
-            if (deltaM != null) {
-                const ft = deltaM * 3.28084;
-                if (ft < 90) deltaColor = '#ff5252';
-                else if (ft > 170) deltaColor = '#3399ff';
-                else deltaColor = '#5fff5f';
-            }
-
-            const cells = [
-                { txt: String(i + 1),                   style: 'color:#aaa;text-align:right' },
-                { txt: arc.id != null ? String(arc.id) : '—', style: 'color:#7a8a92;text-align:right;font-variant-numeric:tabular-nums' },
-                { txt: fmt(dist, useFt ? 0 : 1),        style: 'color:#bbb;text-align:right;font-variant-numeric:tabular-nums' },
-                { txt: fmt(minA),                        style: 'color:#e6e6e6;text-align:right;font-variant-numeric:tabular-nums' },
-                { txt: fmt(maxA),                        style: 'color:#e6e6e6;text-align:right;font-variant-numeric:tabular-nums' },
-                { txt: fmt(emA),                         style: 'color:#bbb;text-align:right;font-variant-numeric:tabular-nums' },
-                { txt: fmt(demM),                        style: 'color:#c4b5fd;text-align:right;font-weight:600;font-variant-numeric:tabular-nums' },
-                { txt: fmt(deltaM),                      style: `color:${deltaColor};text-align:right;font-weight:700;font-variant-numeric:tabular-nums` },
-            ];
-            cells.forEach(c => {
-                const td = document.createElement('td');
-                td.style.cssText = `padding:3px 8px;${c.style}`;
-                td.textContent = c.txt;
-                tr.appendChild(td);
-            });
-            // Approval-required pill — yellow when true, dash when not.
-            const tdApp = document.createElement('td');
-            tdApp.style.cssText = 'padding:3px 8px;text-align:center';
-            if (arc.wait_until_approved === true) {
-                const pill = document.createElement('span');
-                pill.textContent = 'YES';
-                pill.style.cssText = 'display:inline-block;background:rgba(255,213,79,0.18);color:#ffd54f;font-weight:700;font-size:10px;padding:1px 6px;border-radius:3px;letter-spacing:0.4px';
-                tdApp.appendChild(pill);
-            } else {
-                tdApp.textContent = '—';
-                tdApp.style.color = '#666';
-            }
-            tr.appendChild(tdApp);
-            tbl.appendChild(tr);
-        });
-        wrap.appendChild(tbl);
-        return wrap;
-    }
-
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
         const allRows = buildSummaryRows(siteID);
-        // Hook for the async DEM fetch to refresh demElevM values on
+        // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
         // this function). One window-scoped reference is enough since
         // only one SUM panel can be open at a time.
         window.__aim_ai_onDemReady = () => {
             allRows.forEach(r => {
-                if (r._centroid && r.demElevM == null) {
-                    r.demElevM = getElevationFromCache(r._centroid.lat, r._centroid.lng);
+                if (!r._centroid) return;
+                // Asset rows already have elevationM set from their CLAIMED
+                // elevation_asl (not DEM) — don't overwrite. Everyone else
+                // takes DEM from the now-populated cache.
+                if (r.type === 3) return;
+                if (r.elevationM != null) return;
+                const dem = getElevationFromCache(r._centroid.lat, r._centroid.lng);
+                if (dem != null) {
+                    r.elevationM = dem;
+                    if (r.altMinM != null) r.aglM = r.altMinM - dem;
                 }
             });
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
@@ -1479,11 +1379,11 @@
                 { key: 'typeShort', label: 'Type' },
                 { key: 'name',      label: 'Name' },
                 { key: 'subtype',   label: 'Subtype' },
-                { key: 'elev',      label: 'Asset Elev' },
-                { key: 'demElev',   label: 'DEM Elev (ground)' },
-                { key: 'aglDelta',  label: 'Δ (Min Alt − DEM)' },
                 { key: 'altMin',    label: 'Min Alt' },
                 { key: 'altMax',    label: 'Max Alt' },
+                { key: 'altDelta',  label: 'Δ Alt (Max − Min)' },
+                { key: 'elevation', label: 'Elevation' },
+                { key: 'agl',       label: 'AGL (Min Alt − Elev)' },
                 { key: 'validated', label: 'Valid' },
             ];
             colDefs.forEach(({ key, label }) => {
@@ -1631,15 +1531,27 @@
                 if (m == null) return '—';
                 return sumPanelState.unitsFt ? (m * 3.28084).toFixed(0) : m.toFixed(1);
             };
+            // MBT-style elevation formatter — comma-grouped whole feet (or
+            // meters with one decimal). Right-click on cell copies the raw
+            // unformatted number per `fmtRaw`.
+            const fmtElev = (m) => {
+                if (m == null) return '—';
+                const v = sumPanelState.unitsFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+                return v.toLocaleString('en-US', { maximumFractionDigits: 1 });
+            };
+            const fmtRaw = (m) => {
+                if (m == null) return '';
+                return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
+            };
             const allColDefs = [
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
-                { key: 'name',      label: 'Name',           w: 230, num: false, dataKey: 'name' },
+                { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
-                { key: 'elev',      label: `Asset Elev (${unitLbl})`, w: 90, num: true, dataKey: 'elevM',    fmt: fmtAlt },
-                { key: 'demElev',   label: `DEM Elev (${unitLbl})`,   w: 90, num: true, dataKey: 'demElevM', fmt: fmtAlt },
-                { key: 'aglDelta',  label: `Δ Min−DEM (${unitLbl})`,  w: 100, num: true, dataKey: '_aglDeltaM', fmt: fmtAlt },
-                { key: 'altMin',    label: `Min Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMinM', fmt: fmtAlt },
-                { key: 'altMax',    label: `Max Alt (${unitLbl})`, w: 80, num: true,  dataKey: 'altMaxM', fmt: fmtAlt },
+                { key: 'altMin',    label: `Min Alt (${unitLbl})`, w: 80, num: true, dataKey: 'altMinM',   fmt: fmtAlt },
+                { key: 'altMax',    label: `Max Alt (${unitLbl})`, w: 80, num: true, dataKey: 'altMaxM',   fmt: fmtAlt },
+                { key: 'altDelta',  label: `Δ Alt (${unitLbl})`,   w: 70, num: true, dataKey: 'altDeltaM', fmt: fmtAlt },
+                { key: 'elevation', label: `Elevation (${unitLbl})`, w: 100, num: true, dataKey: 'elevationM', fmt: fmtElev, raw: fmtRaw },
+                { key: 'agl',       label: `AGL (${unitLbl})`,     w: 80, num: true, dataKey: 'aglM',      fmt: fmtAlt },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
             ];
             const cols = allColDefs.filter(c => sumPanelState.visibleCols.has(c.key));
@@ -1656,7 +1568,7 @@
             selAll.type = 'checkbox';
             selAll.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
             // Indeterminate when partial selection
-            const rowIds = rows.map(r => r.entity.id);
+            const rowIds = rows.map(r => r._rowKey);
             const selCount = rowIds.filter(id => sumPanelState.selectedIds.has(id)).length;
             selAll.checked = selCount > 0 && selCount === rows.length;
             selAll.indeterminate = selCount > 0 && selCount < rows.length;
@@ -1713,12 +1625,12 @@
                 tdSel.style.cssText = 'width:32px;padding:5px 6px;text-align:center';
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
-                cb.checked = sumPanelState.selectedIds.has(r.entity.id);
+                cb.checked = sumPanelState.selectedIds.has(r._rowKey);
                 cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
                 cb.onclick = (ev) => ev.stopPropagation();
                 cb.onchange = () => {
-                    if (cb.checked) sumPanelState.selectedIds.add(r.entity.id);
-                    else sumPanelState.selectedIds.delete(r.entity.id);
+                    if (cb.checked) sumPanelState.selectedIds.add(r._rowKey);
+                    else sumPanelState.selectedIds.delete(r._rowKey);
                     // Update header select-all state without full redraw
                     const newSel = rowIds.filter(id => sumPanelState.selectedIds.has(id)).length;
                     selAll.checked = newSel > 0 && newSel === rows.length;
@@ -1728,11 +1640,17 @@
                 tdSel.appendChild(cb);
                 tr.appendChild(tdSel);
 
-                // Body cell click → row action (pan + open inspector). Each
-                // td handles its own click so the checkbox td above can
-                // stopPropagation to avoid triggering this.
+                // Body cell click → row action. For segment rows, pan/zoom
+                // to the segment specifically (bounds-fit on point_a + b);
+                // for entity rows, pan to centroid + open inspector. The
+                // inspector still uses the parent FP entity for segment
+                // rows — segment-specific data is already in the cells.
                 const onRowClick = () => {
-                    panToEntity(r.entity);
+                    if (r._isSegment && r.arc) {
+                        panToSegment(r.arc);
+                    } else {
+                        panToEntity(r.entity);
+                    }
                     const px = sumPanelState.x != null ? sumPanelState.x + (sumPanelState.w || 720) + 10 : 60;
                     const py = sumPanelState.y != null ? sumPanelState.y + 40 : 100;
                     showInspectorPopup(
@@ -1748,52 +1666,37 @@
                     td.onclick = onRowClick;
                     if (col.key === 'typeShort') {
                         td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
-                        // Flight paths get a chevron prefix that toggles a
-                        // per-segment expansion sub-row. Other types just
-                        // show the type code. The chevron lives inside the
-                        // Type cell to avoid shifting all other columns.
-                        if (r.type === 15 && Array.isArray(r.entity.arcs) && r.entity.arcs.length > 0) {
-                            const isOpen = sumPanelState.expandedFpIds.has(r.entity.id);
-                            const chev = document.createElement('span');
-                            chev.textContent = isOpen ? '▼ ' : '▶ ';
-                            chev.style.cssText = 'display:inline-block;color:#7adfe6;font-size:9px;margin-right:2px;cursor:pointer;user-select:none';
-                            chev.title = isOpen ? 'Collapse segments' : 'Expand segments';
-                            chev.onclick = (ev) => {
-                                ev.stopPropagation();
-                                if (sumPanelState.expandedFpIds.has(r.entity.id)) {
-                                    sumPanelState.expandedFpIds.delete(r.entity.id);
-                                } else {
-                                    sumPanelState.expandedFpIds.add(r.entity.id);
-                                    kickOffSegmentDemFetch([r.entity]);
-                                }
-                                redrawTable();
-                            };
-                            td.appendChild(chev);
-                            td.appendChild(document.createTextNode(r.typeShort));
-                        } else {
-                            td.textContent = r.typeShort;
-                        }
+                        td.textContent = r.typeShort;
                     } else if (col.key === 'name') {
-                        td.style.cssText = 'padding:5px 8px;color:#e6e6e6;cursor:pointer';
+                        // Segment names get the parent FP color tinted
+                        // slightly dimmer so the eye groups them visually.
+                        const nameColor = r._isSegment ? '#a8c8d2' : '#e6e6e6';
+                        td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer`;
                         td.textContent = r.name || '(unnamed)';
                     } else if (col.key === 'subtype') {
                         td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
                         td.textContent = r.subtype || '—';
-                    } else if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
+                    } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
                         td.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
                         td.textContent = col.fmt(r[col.dataKey]);
-                    } else if (col.key === 'demElev') {
-                        // Light purple to match MBT's elevation column convention.
-                        // Click copies raw whole-number (no comma, no unit) — match
-                        // MBT's ELV click-to-copy behavior.
+                    } else if (col.key === 'elevation') {
+                        // MBT-style: light purple, bold, comma-grouped.
+                        // Right-click copies the raw unformatted number
+                        // (no commas, no units) for paste into formulas.
                         td.style.cssText = 'padding:5px 8px;color:#c4b5fd;text-align:right;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;cursor:pointer';
-                        td.textContent = col.fmt(r.demElevM);
-                    } else if (col.key === 'aglDelta') {
-                        // Δ Min Alt − DEM Elev = clearance above ground for FFZ/FP/NFZ.
-                        // Only meaningful when both values exist (FFZ/FP/NFZ types).
-                        // Color: red if <90 ft (low clearance), green 90-170, blue >170.
-                        const d = (r.altMinM != null && r.demElevM != null) ? (r.altMinM - r.demElevM) : null;
-                        r._aglDeltaM = d; // store for sort + export
+                        td.textContent = col.fmt(r.elevationM);
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            if (r.elevationM == null) return;
+                            const raw = col.raw(r.elevationM);
+                            copyToClipboard(raw, `Copied ${raw}`);
+                        };
+                        td.title = 'Click: pan/inspect · Right-click: copy raw number';
+                    } else if (col.key === 'agl') {
+                        // AGL = Min Alt − Elevation. Color rules match MBT
+                        // navigate AGL: red <90 ft / green 90-170 / blue >170.
+                        const d = r.aglM;
                         let color = '#bbb';
                         if (d != null) {
                             const ft = d * 3.28084;
@@ -1815,21 +1718,6 @@
                     tr.appendChild(td);
                 });
                 tbody.appendChild(tr);
-
-                // Per-segment expansion row for FPs the user has clicked
-                // the chevron on. One <tr> with a single <td colspan=...>
-                // hosting a nested sub-table. Hover/click on the sub-table
-                // does NOT trigger row navigation (own stopPropagation).
-                if (r.type === 15 && sumPanelState.expandedFpIds.has(r.entity.id)) {
-                    const subTr = document.createElement('tr');
-                    const subTd = document.createElement('td');
-                    subTd.colSpan = cols.length + 1; // +1 for the select checkbox column
-                    subTd.style.cssText = 'padding:8px 14px 12px 38px;background:rgba(28,160,222,0.06);border-bottom:1px solid rgba(255,255,255,0.05)';
-                    subTd.onclick = (ev) => ev.stopPropagation();
-                    subTd.appendChild(buildSegmentSubTable(r.entity));
-                    subTr.appendChild(subTd);
-                    tbody.appendChild(subTr);
-                }
             });
             table.appendChild(tbody);
             tableWrap.appendChild(table);
@@ -1840,7 +1728,7 @@
             // are checked; otherwise the current filter+sort snapshot.
             const exportRows = () => {
                 if (sumPanelState.selectedIds.size > 0) {
-                    return rows.filter(r => sumPanelState.selectedIds.has(r.entity.id));
+                    return rows.filter(r => sumPanelState.selectedIds.has(r._rowKey));
                 }
                 return rows;
             };
@@ -1851,24 +1739,17 @@
             // them off, so they don't want them in exports either).
             const tabular = () => {
                 const header = cols.map(c => c.label);
+                const num = (m) => {
+                    if (m == null) return '';
+                    return sumPanelState.unitsFt ? Math.round(m * 3.28084).toString() : m.toFixed(1);
+                };
                 const data = exportRows().map(r => cols.map(col => {
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'subtype') return r.subtype || '';
-                    if (col.key === 'elev' || col.key === 'altMin' || col.key === 'altMax') {
-                        const v = r[col.dataKey];
-                        if (v == null) return '';
-                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
-                    }
-                    if (col.key === 'demElev') {
-                        const v = r.demElevM;
-                        if (v == null) return '';
-                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
-                    }
-                    if (col.key === 'aglDelta') {
-                        const v = (r.altMinM != null && r.demElevM != null) ? (r.altMinM - r.demElevM) : null;
-                        if (v == null) return '';
-                        return sumPanelState.unitsFt ? (v * 3.28084).toFixed(0) : v.toFixed(1);
+                    if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
+                        || col.key === 'elevation' || col.key === 'agl') {
+                        return num(r[col.dataKey]);
                     }
                     if (col.key === 'validated') {
                         if (r.validated === true) return 'yes';
@@ -1897,7 +1778,16 @@
                 copyToClipboard(lines.join('\n'), `Copied for Sheets (${tab.length - 1} row${tab.length - 1 === 1 ? '' : 's'})`);
             };
             jsonBtn.onclick = () => {
-                const fullEntities = exportRows().map(r => r.entity);
+                // FP segment rows share their parent entity — dedup by id
+                // so the JSON output is one entry per real entity, not one
+                // per row (otherwise an FP with 20 segments serializes 20×).
+                const seen = new Set();
+                const fullEntities = [];
+                exportRows().forEach(r => {
+                    if (!r.entity || seen.has(r.entity.id)) return;
+                    seen.add(r.entity.id);
+                    fullEntities.push(r.entity);
+                });
                 copyToClipboard(JSON.stringify(fullEntities, null, 2), `Copied JSON (${fullEntities.length} entit${fullEntities.length === 1 ? 'y' : 'ies'})`);
             };
         }
@@ -1935,6 +1825,26 @@
         }
         try { map.setView([lat, lng], Math.max(18, map.getZoom())); }
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
+    }
+
+    // Fit the map to a single FP arc — uses both endpoints as the bounds
+    // so the user sees the whole segment, not just its midpoint. Falls
+    // back to a centered setView if Leaflet's fitBounds throws.
+    function panToSegment(arc) {
+        const map = getLeafletMap();
+        if (!map || !arc || !arc.point_a || !arc.point_b) return;
+        try {
+            const bounds = [
+                [arc.point_a.lat, arc.point_a.lng],
+                [arc.point_b.lat, arc.point_b.lng],
+            ];
+            map.fitBounds(bounds, { padding: [60, 60], maxZoom: 20 });
+        } catch (e) {
+            const lat = (arc.point_a.lat + arc.point_b.lat) / 2;
+            const lng = (arc.point_a.lng + arc.point_b.lng) / 2;
+            try { map.setView([lat, lng], Math.max(19, map.getZoom())); }
+            catch (e2) { console.warn(`${TAG} panToSegment failed:`, e2); }
+        }
     }
 
     // ============================================================
