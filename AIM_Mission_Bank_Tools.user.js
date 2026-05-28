@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.40
+// @version      0.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.40';
+    const SCRIPT_VERSION = '0.41';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1806,34 +1806,44 @@
                     </div>
                 </div>
                 ${(() => {
-                    // AGL aggregate stats — only show when we have ≥1 step with both
-                    // a cached elevation and a meters-altitude.
-                    const agls = [];
+                    // AGL aggregates EXCLUDE snapshots (they intentionally
+                    // sit near ground level — pointing at targets — so they'd
+                    // skew the "lowest flight clearance" stats). Ground
+                    // elevation aggregates INCLUDE all GPS points though.
+                    const aglAggr = []; // navigate + other flying steps
+                    const allElev = [];
                     allSteps.forEach(s => {
                         if (!s || !s.location || s.location.lat == null) return;
-                        if (s.value1_name !== 'm' || typeof s.value1 !== 'number') return;
                         const elevM = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
                         if (elevM == null) return;
-                        agls.push({ aglM: s.value1 - elevM, elevM });
+                        allElev.push(elevM);
+                        if (s.value1_name !== 'm' || typeof s.value1 !== 'number') return;
+                        if (s.type_name === 'snapshot') return; // exclude snapshots from AGL aggregates
+                        aglAggr.push(s.value1 - elevM);
                     });
-                    if (agls.length === 0) return '';
-                    const aglValues = agls.map(a => a.aglM);
-                    const elevValues = agls.map(a => a.elevM);
-                    const minAGL = Math.min(...aglValues);
-                    const maxAGL = Math.max(...aglValues);
-                    const avgAGL = aglValues.reduce((s, v) => s + v, 0) / aglValues.length;
-                    const minElev = Math.min(...elevValues);
-                    const maxElev = Math.max(...elevValues);
+                    if (allElev.length === 0) return '';
                     const conv = (m) => unit === 'imperial' ? Math.round(m * 3.28084) : Math.round(m);
                     const ul = unit === 'imperial' ? 'ft' : 'm';
                     const fmtN = n => `${conv(n).toLocaleString()} ${ul}`;
                     const fmtRaw = n => String(conv(n));
+                    const totalGps = allSteps.filter(s=>s&&s.location&&s.location.lat!=null).length;
+                    const navCount = allSteps.filter(s=>s&&s.location&&s.location.lat!=null && s.type_name!=='snapshot' && s.value1_name==='m' && typeof s.value1==='number').length;
+                    const minElev = Math.min(...allElev);
+                    const maxElev = Math.max(...allElev);
+                    let aglStats = '';
+                    if (aglAggr.length > 0) {
+                        const minA = Math.min(...aglAggr);
+                        const maxA = Math.max(...aglAggr);
+                        const avgA = aglAggr.reduce((s, v) => s + v, 0) / aglAggr.length;
+                        aglStats = `
+                            ${stat('Min AGL (nav)', fmtN(minA), fmtRaw(minA))}
+                            ${stat('Avg AGL (nav)', fmtN(avgA), fmtRaw(avgA))}
+                            ${stat('Max AGL (nav)', fmtN(maxA), fmtRaw(maxA))}`;
+                    }
                     return `<div class="aim-mb-card">
-                        <div class="aim-mb-card-title">Terrain / AGL (${agls.length} of ${allSteps.filter(s=>s&&s.location&&s.location.lat!=null).length} sampled)</div>
+                        <div class="aim-mb-card-title">Terrain / AGL — AGL stats exclude snapshots (${aglAggr.length} nav-type, ${allElev.length}/${totalGps} GPS sampled)</div>
                         <div class="aim-mb-stats-grid">
-                            ${stat('Min AGL', fmtN(minAGL), fmtRaw(minAGL))}
-                            ${stat('Avg AGL', fmtN(avgAGL), fmtRaw(avgAGL))}
-                            ${stat('Max AGL', fmtN(maxAGL), fmtRaw(maxAGL))}
+                            ${aglStats}
                             ${stat('Min Ground Elv', fmtN(minElev), fmtRaw(minElev))}
                             ${stat('Max Ground Elv', fmtN(maxElev), fmtRaw(maxElev))}
                             ${stat('Ground Range', fmtN(maxElev - minElev), fmtRaw(maxElev - minElev))}
@@ -3080,11 +3090,9 @@ ${placemarks}
                 if (s.value1_name === 'm' && typeof s.value1 === 'number') {
                     const aglM = s.value1 - elevM;
                     const aglDisplay = u === 'imperial' ? Math.round(aglM * 3.28084) : Math.round(aglM);
-                    let aglClass = 'aim-mb-agl-ok';
                     const aglFt = u === 'imperial' ? aglDisplay : Math.round(aglM * 3.28084);
-                    if (aglFt < 90) aglClass = 'aim-mb-agl-low';
-                    else if (aglFt > 170) aglClass = 'aim-mb-agl-high';
-                    aglCell = `<td><span class="aim-mb-agl ${aglClass}" data-agl-raw="${aglDisplay}" title="AGL = altitude − ground elevation. Thresholds: <90 ft low (red), >170 ft high (blue). Click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
+                    const { cls, titleSuffix } = aglThresholdsForType(rawType, aglFt);
+                    aglCell = `<td><span class="aim-mb-agl ${cls}" data-agl-raw="${aglDisplay}" title="AGL = altitude − ground elevation. ${titleSuffix} Click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
                 }
             } else {
                 elevCell = `<td><span class="aim-mb-elev-loading" data-elev-loading="${lat},${lng}">…</span></td>`;
@@ -3092,6 +3100,23 @@ ${placemarks}
             }
         }
         return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+    }
+
+    // AGL thresholds differ by step type:
+    //   snapshot: cameras point AT the ground, so near-zero AGL is the
+    //     goal. RED <0 (below ground!), GREEN 0-49 ft, BLUE >=50 ft
+    //   navigate (and others): drone is FLYING, needs clearance.
+    //     RED <90 ft, GREEN 90-170 ft, BLUE >170 ft (matches Python DEM script)
+    function aglThresholdsForType(rawType, aglFt) {
+        if (rawType === 'snapshot') {
+            if (aglFt < 0) return { cls: 'aim-mb-agl-low', titleSuffix: 'Snapshot below ground (<0 ft) — bad target.' };
+            if (aglFt >= 50) return { cls: 'aim-mb-agl-high', titleSuffix: 'Snapshot far from ground (>=50 ft) — may miss target.' };
+            return { cls: 'aim-mb-agl-ok', titleSuffix: 'Snapshot near ground (0-49 ft) — good target.' };
+        }
+        // navigate + other GPS step types: flight clearance thresholds
+        if (aglFt < 90) return { cls: 'aim-mb-agl-low', titleSuffix: 'Too low (<90 ft) — flight clearance violation.' };
+        if (aglFt > 170) return { cls: 'aim-mb-agl-high', titleSuffix: 'Too high (>170 ft).' };
+        return { cls: 'aim-mb-agl-ok', titleSuffix: 'Within clearance (90-170 ft).' };
     }
 
     // ========================================================
