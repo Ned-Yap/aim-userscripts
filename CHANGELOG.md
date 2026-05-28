@@ -6,7 +6,26 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-05-27
+## 2026-05-28
+
+- **AIM Mission Bank Tools v0.7 → v0.39** — major drill-down + batch-edit pass, then a long bugfix odyssey ending in a clean architecture.
+  - **v0.7**: stat-card reorder, click-to-copy raw altitude, step-count split (Thermal/GEM On/Off), unit-aware altitude in instructions table, fixed importance ordering.
+  - **v0.8 / v0.9**: reorderable + persistent column UI (↑↓ arrows + drag of toggles), dynamic step-type columns auto-discovered from loaded missions, zebra-striped rows.
+  - **v0.10 / v0.11**: altitude rounded + comma-formatted + "ALT" suffix; drill-down power tools (copy mission name, Copy → Sheets export, sticky header fix, multi-filter step-type chips, Export KML with 3D altitude pins).
+  - **v0.12 / v0.13**: multi-select filter chips, KML pin colors (navigate green, snapshot orange), "Edit" button on drill-down header that jumps to Percepto's mission editor.
+  - **v0.14 / v0.15**: Edit button reliability — finds the actual sidebar `<a>` link and clicks it (works through the iframe sandbox); panel stays open after navigation.
+  - **v0.16 / v0.17 / v0.18 / v0.19**: per-step 🔭 (center map on GPS) + ✏️ (open this step in editor) icons. Programmatic step-edit opens via React-handler injection on the dots SVG (after multiple iterations on CSS `:hover` workarounds for the hidden dots).
+  - **v0.20**: layout polish — 🔭 + ✏️ moved left of step number; step numbers are plain text now (reordering stays in Quick Mission Editor).
+  - **v0.21 / v0.22**: "Opening step editor…" / "Saving current step…" progress toasts; auto-save the currently-open step before opening another.
+  - **v0.23**: **NEW: inline altitude editor + batch commit.** Click any navigate/snapshot altitude in the drill-down → edit inline → press Enter → cell turns orange (⏳). A "N altitude changes pending" banner appears with [Commit] + [Discard]. Commit processor opens each step's edit dialog → sets the altitude → saves → moves to next. ~2 seconds per step; confirms before bulk commits >5.
+  - **v0.24**: Navigate's altitude radio gating handled — clicks "Custom altitude" radio before setting the value.
+  - **v0.25**: "(new: X ft)" marker shows committed-but-not-refetched values in drill-down (cache is stale until Refresh).
+  - **v0.26**: yellow committed marker (was green), scroll preservation across re-renders, Enter/Tab auto-advance to next editable altitude, **formula input** (type `2974+15` → evaluates to 2989).
+  - **v0.27 / v0.28 / v0.29**: queue corruption fixed via Edit-item snapshot diff (handles Ant's singleton dropdown portal reuse), then snapshot altitude label match ("Target altitude (ft)"), then more diagnostic logging.
+  - **v0.30 / v0.31 / v0.32 / v0.33 / v0.34 / v0.35**: value-anchored altitude matching (find by current value, not label text), class-based dot reveal, paired onMouseLeave/onMouseEnter cleanup, deferred state clearing after navigation — all attempts to fix Ant's hover-state corruption that broke manual hover on edited steps post-commit.
+  - **v0.36**: catastrophic regression — DOM injection of Edit/Delete buttons into React-managed elements caused page-wide reconciliation crash (`Failed to execute 'removeChild' on 'Node'`). Emergency revert.
+  - **v0.37 / v0.38**: alternate attempts (always-visible CSS dots, click-intercept popup with body-attached menu). Better but still triggered the underlying Ant state corruption when used.
+  - **v0.39**: **ROOT CAUSE FIX.** Bypass Ant Dropdown's UI entirely. `triggerInstructionAction(draggable, 'edit')` walks Percepto's React fiber tree from the dots SVG to find the Ant Dropdown component's `menu` prop, then calls `menu.onClick` or `menu.items[edit].onClick` directly. Ant's hover state is never touched, so manual hover continues to work on every step including ones just edited. All v0.37/v0.38 UI grafts removed — native UI fully restored.
 
 - **AIM Mission Bank Tools v0.6** — **NEW: right-click mission inspector.** (features.csv #50)
   - Plain right-click on any mission row in Percepto's `.missions-list` sidebar opens a floating popup with mission stats, flight-phase breakdown, and dynamic step-type counts.
