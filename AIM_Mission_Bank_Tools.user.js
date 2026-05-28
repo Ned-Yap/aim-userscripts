@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -1973,12 +1973,19 @@ ${placemarks}
     // dispatch mouseenter/mouseover/pointermove events to make them
     // appear before we can interact with them.
     function openInstructionEditor(instructionId, missionId) {
+        // Navigate to the mission editor if not already there
         const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
-        if (link) link.click();
+        if (link) {
+            showToast('Opening step editor…', '#14d2dc');
+            link.click();
+        } else {
+            showToast('Mission not found in sidebar', '#ff5252');
+            return;
+        }
         let attempts = 0;
         const interval = setInterval(() => {
             attempts++;
-            if (attempts > 25) { clearInterval(interval); showToast('Could not find instruction in editor', '#ff9800'); return; }
+            if (attempts > 30) { clearInterval(interval); showToast('Could not find instruction in editor — mission may still be loading', '#ff9800'); return; }
             const draggable = document.querySelector(`[data-rfd-draggable-id="${instructionId}"]`);
             if (!draggable) return;
             clearInterval(interval);
