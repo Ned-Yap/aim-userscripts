@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.44
+// @version      0.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.44';
+    const SCRIPT_VERSION = '0.45';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -491,7 +491,8 @@
         if (!t) return '?';
         if (t === 'cameraSelect') return 'Thermal';
         if (t === 'gemMode') return 'GEM';
-        return t;
+        // Capitalize first letter of unknown/default types (navigate → Navigate, etc.)
+        return t.charAt(0).toUpperCase() + t.slice(1);
     }
 
     // Key used for the Step Counts card. Splits Thermal/GEM into On/Off
@@ -2049,6 +2050,17 @@
                 e.stopPropagation();
                 startInlineAltEdit(el, missionId);
             };
+            // Right-click copies the raw altitude (pending value if there
+            // is one, otherwise original). Tooltip already advertises this.
+            el.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const instrId = Number(el.dataset.instrId);
+                const pending = getPendingChange(missionId, instrId);
+                const raw = pending ? String(Math.round(pending.value)) : String(el.dataset.origAlt);
+                copyToClipboard(raw);
+                showToast(`Copied: ${raw}`, '#5fff5f');
+            };
         });
         // Commit pending changes
         const commitBtn = panelEl.querySelector('[data-commit-pending]');
@@ -2339,13 +2351,25 @@ ${placemarks}
     }
 
     function navigateAndOpenStep(instructionId, missionId) {
-        const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
-        if (link) {
+        // Are we already in this mission's editor? (URL hash will
+        // contain /mission-bank/<missionId>.) If so, skip the sidebar-
+        // link click — the sidebar list isn't rendered when the editor
+        // is open, so the link lookup fails and we'd false-alarm
+        // "Mission not found in sidebar".
+        const top = (() => { try { return window.top; } catch (e) { return window; } })();
+        const hash = (top && top.location && top.location.hash) || location.hash || '';
+        const alreadyHere = hash.includes(`/mission-bank/${missionId}`);
+        if (alreadyHere) {
             showToast('Opening step editor…', '#14d2dc');
-            link.click();
         } else {
-            showToast('Mission not found in sidebar', '#ff5252');
-            return;
+            const link = document.querySelector(`a[href*="/mission-bank/${missionId}"]`);
+            if (link) {
+                showToast('Opening step editor…', '#14d2dc');
+                link.click();
+            } else {
+                showToast('Mission not found in sidebar', '#ff5252');
+                return;
+            }
         }
         let attempts = 0;
         const interval = setInterval(() => {
@@ -2355,7 +2379,13 @@ ${placemarks}
             if (!draggable) return;
             clearInterval(interval);
             draggable.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            setTimeout(() => forceOpenInstructionEdit(draggable), 500);
+            setTimeout(() => {
+                const fiberOk = triggerInstructionAction(draggable, 'edit');
+                if (!fiberOk) {
+                    console.log(`${TAG} [edit] fiber-walk failed, falling back to dropdown flow`);
+                    forceOpenInstructionEdit(draggable);
+                }
+            }, 500);
         }, 200);
     }
 
@@ -3085,7 +3115,7 @@ ${placemarks}
             if (elevM != null) {
                 const elevDisplay = u === 'imperial' ? Math.round(elevM * 3.28084) : Math.round(elevM);
                 const elevUnit = u === 'imperial' ? 'ft' : 'm';
-                elevCell = `<td><span class="aim-mb-elev" data-elev-raw="${elevDisplay}" title="Click to copy raw elevation">${elevDisplay.toLocaleString()} ${elevUnit} Elv</span></td>`;
+                elevCell = `<td><span class="aim-mb-elev" data-elev-raw="${elevDisplay}" title="Click to copy raw elevation">${elevDisplay.toLocaleString()} ${elevUnit} ELV</span></td>`;
                 // AGL only meaningful if step has altitude (value1_name === 'm')
                 if (s.value1_name === 'm' && typeof s.value1 === 'number') {
                     const aglM = s.value1 - elevM;
