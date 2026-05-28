@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2256,13 +2256,38 @@ ${placemarks}
             console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
             savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
-            setTimeout(() => dismissStuckAntDropdowns(), 100);
+            // Polite close FIRST so Ant resets its state machine,
+            // then aggressive cleanup as a fallback in case the
+            // dropdown lingers (which would block manual hovers later).
+            setTimeout(() => {
+                closeAntDropdownFor(dots);
+                setTimeout(() => dismissStuckAntDropdowns(), 100);
+            }, 100);
         }, 100);
     }
 
-    // Aggressively remove any visible Ant dropdowns. They're rendered
-    // as detached portals under <body>; removing them is safe because
-    // Ant re-creates them on next trigger.
+    // Politely tell Ant to close this trigger's dropdown by dispatching
+    // the React onMouseLeave handler. This lets Ant clean up its own
+    // state machine, preserving the user's ability to manually open
+    // dropdowns later. Falls back to no-op if no handler is found.
+    function closeAntDropdownFor(triggerEl) {
+        let el = triggerEl;
+        for (let depth = 0; depth < 8 && el; depth++) {
+            const propsKey = Object.keys(el).find(k => k.startsWith('__reactProps$'));
+            if (propsKey) {
+                const props = el[propsKey];
+                const handler = props.onMouseLeave || props.onMouseOut;
+                if (typeof handler === 'function') {
+                    try { handler({ preventDefault(){}, stopPropagation(){} }); return true; } catch (e) {}
+                }
+            }
+            el = el.parentElement;
+        }
+        return false;
+    }
+
+    // Last-resort cleanup: remove any visible Ant dropdown portals.
+    // Use closeAntDropdownFor first to avoid corrupting Ant's state.
     function dismissStuckAntDropdowns() {
         document.querySelectorAll('.ant-dropdown').forEach(d => {
             if (!d.classList.contains('ant-dropdown-hidden')) {
@@ -2297,50 +2322,78 @@ ${placemarks}
         return null;
     }
 
-    // Set the altitude in the open edit dialog. Handles three layouts:
-    //   - Navigate: "Drone altitude" with two radios ("Based on FFZ min
-    //     alt" + "Custom altitude"). Click Custom radio first.
-    //   - Snapshot: "Target altitude (ft)" — direct input, no radio.
-    //   - Generic fallback: any label containing the word "altitude" or
-    //     just "Height".
-    // Calls done(ok: boolean) when finished.
-    function setAltitudeInEditDialog(value, done) {
-        const labels = document.querySelectorAll('.edit-instruction__input-label');
+    // Set the altitude in the open edit dialog. Two-strategy resolution:
+    //
+    //   PRIMARY (value-anchored): scan every ant-input-number-input in
+    //   the dialog; the one whose current aria-valuenow/value matches
+    //   the step's known altitude (in user's display unit) is the
+    //   altitude input. Survives label text changes and form restructure.
+    //
+    //   FALLBACK (label-regex): find an input-group whose label matches
+    //   /altitude/i or /^height\b/i. Brittle to label text changes but
+    //   covers cases where the value is 0 / blank / pre-changed.
+    //
+    // Then radio-gating: regardless of how we found it, if the input
+    // group has ≥2 radios OR the input is disabled, click the second
+    // radio (Custom altitude) first to enable the input.
+    function setAltitudeInEditDialog(value, done, origDisplayValue) {
+        // Strategy 1: value-anchored
         let group = null;
-        // Match any label whose text contains "altitude" (covers
-        // "Drone altitude", "Target altitude (ft)", "Altitude", etc.)
-        // or "Height" as a fallback.
-        for (const lbl of labels) {
-            const t = (lbl.textContent || '').trim();
-            if (/altitude/i.test(t) || /^height\b/i.test(t)) {
-                group = lbl.closest('.edit-instruction__input-group');
-                if (group) break;
+        let inputViaValue = null;
+        if (origDisplayValue != null && !isNaN(origDisplayValue)) {
+            const candidates = document.querySelectorAll('.edit-instruction__form input.ant-input-number-input');
+            const target = Math.round(Number(origDisplayValue));
+            for (const inp of candidates) {
+                const raw = inp.getAttribute('aria-valuenow') || inp.value;
+                const num = Math.round(Number(raw));
+                // Allow 1-unit tolerance for rounding
+                if (!isNaN(num) && Math.abs(num - target) <= 1) {
+                    inputViaValue = inp;
+                    group = inp.closest('.edit-instruction__input-group') || inp.closest('div');
+                    console.log(`${TAG} [edit] altitude matched by VALUE (${num} ≈ ${target})`);
+                    break;
+                }
+            }
+        }
+        // Strategy 2: label-regex fallback
+        if (!group) {
+            const labels = document.querySelectorAll('.edit-instruction__input-label');
+            for (const lbl of labels) {
+                const t = (lbl.textContent || '').trim();
+                if (/altitude/i.test(t) || /^height\b/i.test(t)) {
+                    group = lbl.closest('.edit-instruction__input-group');
+                    if (group) { console.log(`${TAG} [edit] altitude matched by LABEL "${t}"`); break; }
+                }
             }
         }
         if (!group) {
-            console.warn(`${TAG} [edit] setAltitudeInEditDialog: no altitude label found. Available labels:`,
-                Array.from(labels).map(l => (l.textContent || '').trim()));
+            const labels = Array.from(document.querySelectorAll('.edit-instruction__input-label')).map(l => (l.textContent || '').trim());
+            console.warn(`${TAG} [edit] altitude input not found. Labels available:`, labels);
             done(false); return;
         }
-        // If radios exist, click the "Custom altitude" one
+        // Radio gating: click "Custom" if radios are present OR the
+        // candidate input is disabled (defensive — Navigate's altitude
+        // input has `disabled` until Custom is selected).
         const radios = group.querySelectorAll('input[type="radio"]');
-        if (radios.length >= 2) {
+        const targetInput = inputViaValue || group.querySelector('input.ant-input-number-input');
+        const needsRadio = radios.length >= 2 || (targetInput && targetInput.disabled);
+        if (needsRadio && radios.length >= 2) {
             let customRadio = null;
             for (const r of radios) {
                 const lbl = r.closest('label');
                 if (lbl && /custom/i.test(lbl.textContent || '')) { customRadio = r; break; }
             }
-            if (!customRadio) customRadio = radios[1]; // fallback to 2nd radio
+            if (!customRadio) customRadio = radios[1];
+            console.log(`${TAG} [edit] clicking Custom-altitude radio`);
             clickReactControl(customRadio);
-            // Wait for React to enable the input, then set value
-            setTimeout(() => setAltValue(group, value, done), 250);
+            setTimeout(() => setAltValue(group, value, done, inputViaValue), 250);
         } else {
-            setAltValue(group, value, done);
+            setAltValue(group, value, done, inputViaValue);
         }
     }
 
-    function setAltValue(group, value, done) {
-        const numInput = group.querySelector('input.ant-input-number-input');
+    function setAltValue(group, value, done, preferredInput) {
+        const numInput = preferredInput || group.querySelector('input.ant-input-number-input');
         if (!numInput) { done(false); return; }
         setReactInputValue(numInput, value);
         done(true);
@@ -2436,6 +2489,16 @@ ${placemarks}
     }
 
     function commitOneChange(missionId, instructionId, change, done) {
+        // Look up the cached step so we can pass its current display
+        // value to the altitude resolver for value-anchored matching.
+        const sid = getCurrentSiteID();
+        const bucket = missionsBySite[sid];
+        const mission = bucket && bucket.missions.find(m => m.id === missionId);
+        const instr = mission && (mission.instructions || []).find(i => i.id === Number(instructionId));
+        let origDisplay = null;
+        if (instr && instr.value1_name === 'm' && typeof instr.value1 === 'number') {
+            origDisplay = change.unit === 'imperial' ? Math.round(instr.value1 * 3.28084) : Math.round(instr.value1);
+        }
         // First close any existing edit dialog by saving it
         const existingEdit = document.querySelector('.edit-instruction');
         const beginStep = () => {
@@ -2462,7 +2525,10 @@ ${placemarks}
                         const anyLabel = form && form.querySelector('.edit-instruction__input-label');
                         if (!anyLabel) return;
                         clearInterval(dlgInterval);
-                        // Set altitude (handles Navigate radios + Snapshot direct)
+                        // Set altitude (handles Navigate radios + Snapshot direct).
+                        // origDisplay enables value-anchored matching: find
+                        // the input whose current value matches the cached
+                        // altitude — much more robust than label text.
                         setAltitudeInEditDialog(change.value, (ok) => {
                             if (!ok) { done(false, 'altitude input not found'); return; }
                             setTimeout(() => {
@@ -2479,7 +2545,7 @@ ${placemarks}
                                     }
                                 }, 200);
                             }, 250);
-                        });
+                        }, origDisplay);
                     }, 200);
                 }, 400);
             }, 200);
