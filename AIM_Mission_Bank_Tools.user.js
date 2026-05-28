@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.30
+// @version      0.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.30';
+    const SCRIPT_VERSION = '0.31';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -2170,25 +2170,50 @@ ${placemarks}
     // menu is hidden until the user hovers. We force it visible via
     // inline style overrides, click it, wait for the Ant dropdown,
     // click Edit, then clean up our style hacks.
+    // Inject the document-wide CSS rule for force-showing the dots.
+    // Using a class is far safer than inline !important + restore,
+    // because Percepto re-uses instruction DOM nodes (it doesn't
+    // unmount on edit), so inline styles stick around and break
+    // future manual hovers. A class is one removeAttribute away.
+    function injectGlobalEditStyles() {
+        if (document.getElementById('aim-mb-edit-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'aim-mb-edit-styles';
+        style.textContent = `
+            .aim-mb-force-dots .mission-instruction-item__options,
+            .aim-mb-force-dots .mission-instruction-item__options > div,
+            .aim-mb-force-dots [data-testid="btn-instruction-menu"] {
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                pointer-events: auto !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // Safety: scan for any instruction items still wearing the
+    // force-dots class and remove it. Belt-and-suspenders cleanup
+    // we can call after each commit step and at queue end.
+    function clearAllForceDots() {
+        document.querySelectorAll('.aim-mb-force-dots').forEach(el => {
+            el.classList.remove('aim-mb-force-dots');
+        });
+    }
+
     function forceOpenInstructionEdit(draggable) {
         const instrId = draggable.getAttribute('data-rfd-draggable-id');
         console.log(`${TAG} [edit] starting for instruction ${instrId}`);
-        // 1. Aggressively dismiss any leftover Ant dropdowns from prior
-        //    iterations — they're the root cause of queue corruption.
         dismissStuckAntDropdowns();
-        const optionsContainer = draggable.querySelector('.mission-instruction-item__options');
         const dots = draggable.querySelector('[data-testid="btn-instruction-menu"]');
         if (!dots) {
             console.warn(`${TAG} [edit] FAIL: dots element not found for instruction ${instrId}`);
             showToast('Three-dots menu not found', '#ff9800');
             return;
         }
-        const savedStyles = [];
-        [optionsContainer, dots, dots.parentElement].forEach(el => {
-            if (!el) return;
-            savedStyles.push({ el, prev: el.getAttribute('style') || '' });
-            el.style.cssText += ';display:block!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;';
-        });
+        // Apply the force-show class (no inline style, no restore needed —
+        // we just removeClass on cleanup).
+        draggable.classList.add('aim-mb-force-dots');
 
         // 2. Snapshot existing .ant-dropdown elements BEFORE triggering hover
         const dropdownsBefore = new Set(document.querySelectorAll('.ant-dropdown'));
@@ -2238,7 +2263,7 @@ ${placemarks}
                 const after = document.querySelectorAll('.ant-dropdown');
                 console.warn(`${TAG} [edit] ${instrId}: TIMEOUT waiting for new dropdown. Before=${dropdownsBefore.size}, After=${after.length}, visible=${Array.from(after).filter(d => !d.classList.contains('ant-dropdown-hidden')).length}`);
                 showToast('Edit dropdown did not appear', '#ff9800');
-                savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
+                draggable.classList.remove('aim-mb-force-dots');
                 return;
             }
             const current = document.querySelectorAll('.ant-dropdown');
@@ -2255,10 +2280,10 @@ ${placemarks}
             clearInterval(editPoll);
             console.log(`${TAG} [edit] ${instrId}: clicking Edit menu item (poll attempt ${pollAttempts})`);
             editItem.click();
-            savedStyles.forEach(({ el, prev }) => { el.setAttribute('style', prev); });
-            // Polite close FIRST so Ant resets its state machine,
-            // then aggressive cleanup as a fallback in case the
-            // dropdown lingers (which would block manual hovers later).
+            // Remove the force-show class — restores native :hover behavior
+            draggable.classList.remove('aim-mb-force-dots');
+            // Polite close so Ant resets its state machine, then DOM
+            // cleanup as a fallback in case the dropdown lingers.
             setTimeout(() => {
                 closeAntDropdownFor(dots);
                 setTimeout(() => dismissStuckAntDropdowns(), 100);
@@ -2466,12 +2491,14 @@ ${placemarks}
             committingChanges = false;
             discardAllPendingFor(missionId);
             dismissStuckAntDropdowns();
+            clearAllForceDots(); // safety net — restores native :hover everywhere
             showToast(`Committed ${entries.length} altitude change${entries.length === 1 ? '' : 's'}`, '#5fff5f');
             if (panelState && panelState.drillId === missionId) renderDetailView(missionId);
             return;
         }
-        // Belt + suspenders: dismiss stuck dropdowns before each iteration
+        // Belt + suspenders before each iteration
         dismissStuckAntDropdowns();
+        clearAllForceDots();
         const [instructionId, change] = entries[idx];
         console.log(`${TAG} [queue] ====== step ${idx + 1}/${entries.length}: instruction ${instructionId} → ${change.value} ${change.unit} ======`);
         commitOneChange(missionId, instructionId, change, (ok, err) => {
@@ -2714,6 +2741,12 @@ ${placemarks}
         console.log(`${TAG} v${SCRIPT_VERSION} init (${CONTEXT})`);
         setupControlPanel();
         registerWithControlPanel();
+        // Inject the force-show-dots CSS rule into the iframe head.
+        // We use a class instead of inline !important styles so cleanup
+        // is just removing the class — survives Percepto DOM reuse.
+        if (CONTEXT === 'IFRAME') {
+            injectGlobalEditStyles();
+        }
         // IFRAME-only — the Mission Bank UI lives in the React iframe
         if (CONTEXT === 'IFRAME') {
             // Re-inject SUM button periodically (React re-renders the toolbar)
