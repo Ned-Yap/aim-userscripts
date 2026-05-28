@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.41
+// @version      0.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.41';
+    const SCRIPT_VERSION = '0.42';
     const TAG = '[AIM MB TOOLS]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
@@ -3110,8 +3110,8 @@ ${placemarks}
     function aglThresholdsForType(rawType, aglFt) {
         if (rawType === 'snapshot') {
             if (aglFt < 0) return { cls: 'aim-mb-agl-low', titleSuffix: 'Snapshot below ground (<0 ft) — bad target.' };
-            if (aglFt >= 50) return { cls: 'aim-mb-agl-high', titleSuffix: 'Snapshot far from ground (>=50 ft) — may miss target.' };
-            return { cls: 'aim-mb-agl-ok', titleSuffix: 'Snapshot near ground (0-49 ft) — good target.' };
+            if (aglFt >= 40) return { cls: 'aim-mb-agl-high', titleSuffix: 'Snapshot far from ground (>=40 ft) — may miss target.' };
+            return { cls: 'aim-mb-agl-ok', titleSuffix: 'Snapshot near ground (0-39 ft) — good target.' };
         }
         // navigate + other GPS step types: flight clearance thresholds
         if (aglFt < 90) return { cls: 'aim-mb-agl-low', titleSuffix: 'Too low (<90 ft) — flight clearance violation.' };
