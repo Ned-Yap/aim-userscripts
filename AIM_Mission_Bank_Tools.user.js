@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.49
+// @version      0.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.49';
+    const SCRIPT_VERSION = '0.50';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1670,12 +1670,17 @@
         const labels = ['7 flights (>)', '6 flights (>)', '5 flights (>)', '4 flights (>)', '3 flights (>)', '2 flights (≥)'];
         const pop = document.createElement('div');
         pop.className = 'aim-mb-settings-popover';
+        // Compute elevation cache stats
+        const elevCache = loadElevationCache();
+        const elevCount = Object.keys(elevCache).length;
+        const elevSizeKB = Math.round(JSON.stringify(elevCache).length / 1024);
         pop.innerHTML = `
             <div class="aim-mb-menu-head">
-                <div class="aim-mb-menu-title">Battery → Flights thresholds</div>
+                <div class="aim-mb-menu-title">Settings</div>
                 <button class="aim-mb-menu-close" data-close-menu title="Close">✕</button>
             </div>
             <div class="aim-mb-menu-body" style="padding:12px;">
+                <div style="font-size:11px;color:#14d2dc;font-weight:700;margin-bottom:6px;">Battery → Flights thresholds</div>
                 <div style="font-size:10px;color:#888;margin-bottom:10px;">Adjust per-flight battery percentages. Drones land around 30 % so 100 % raw usage ≈ 2 flights.</div>
                 ${labels.map((lbl, i) => `
                     <div class="aim-mb-settings-row">
@@ -1685,7 +1690,13 @@
                     </div>
                 `).join('')}
                 <div class="aim-mb-settings-row" style="margin-top:10px;">
-                    <button class="aim-mb-tbtn" data-thresh-reset style="flex:1">Reset to defaults</button>
+                    <button class="aim-mb-tbtn" data-thresh-reset style="flex:1">Reset thresholds to defaults</button>
+                </div>
+                <hr style="border:none;border-top:1px solid #444;margin:14px 0 10px;" />
+                <div style="font-size:11px;color:#14d2dc;font-weight:700;margin-bottom:6px;">Elevation cache</div>
+                <div style="font-size:10px;color:#888;margin-bottom:8px;">${elevCount.toLocaleString()} points cached · ~${elevSizeKB.toLocaleString()} KB</div>
+                <div class="aim-mb-settings-row">
+                    <button class="aim-mb-tbtn" data-clear-elev-cache style="flex:1">Clear elevation cache</button>
                 </div>
             </div>
         `;
@@ -1714,6 +1725,14 @@
                 const i = Number(inp.dataset.thresh);
                 inp.value = panelState.thresholds[i];
             });
+        };
+        const clearElevBtn = pop.querySelector('[data-clear-elev-cache]');
+        if (clearElevBtn) clearElevBtn.onclick = () => {
+            if (!confirm(`Clear ${Object.keys(loadElevationCache()).length} cached elevation points? Next mission view will re-fetch from Percepto.`)) return;
+            elevationCache = {};
+            flushElevationCache();
+            showToast('Elevation cache cleared', '#5fff5f');
+            pop.remove();
         };
         setTimeout(() => {
             const onDoc = (e) => {
