@@ -8,6 +8,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.19** — **Multi-point elevation sampling** with variable density per shape. Replaces v3.18's single-centroid-per-row sampling with a max-across-samples approach so the displayed Elevation is the **highest ground point the entity overlaps** — conservative for AGL planning.
+  - **FP segments by length:** `<200 ft` = 3 samples (0/50/100%), `200-500 ft` = 5 samples (0/25/50/75/100%), `500-1000 ft` = 7 samples, `≥1000 ft` = 9 samples.
+  - **Polygons (FFZ / NFZ / Asset):** every vertex + edge midpoints + extra subdivisions on edges longer than ~200 ft. Handles L / U / C corridor shapes natively — the perimeter traces the corridor and gets sampled along its entire length.
+  - **Markers:** single point (unchanged).
+  - **Assets:** still display their claimed `custom.elevation_asl`; DEM samples populate the cache as a side effect (no overwrite of the asset's claimed value).
+  - **Display:** Elevation cell tooltip clarifies "Max DEM elevation across sampled points." AGL = Min Alt − this max. Same color rules.
+  - **Performance:** first-load query count goes from ~N entities to roughly 5-10× that. Cache + in-flight dedup are unchanged so repeat visits are still instant. For a 323-entity site expect ~1500-2000 unique points, ~30-45 s on a fresh site. Progress bar accurately tracks all sample points.
 - **AIM Asset Inspector v3.18** — Bulk → Delta + FFZ editing + DEM progress bar + FFZ-first commit ordering hooks.
 
 - **AIM Asset Inspector v3.17** — **Live derived columns + AGL inline edit + Bulk → AGL button.**

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.18
+// @version      3.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.18';
+    const SCRIPT_VERSION = '3.19';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -246,7 +246,8 @@
         return null;
     }
 
-    // Midpoint of an arc (used as DEM sampling point per segment).
+    // Midpoint of an arc — kept for backward-compat callers (the new
+    // multi-point sampling helpers below supersede single-midpoint use).
     function getArcMidpoint(arc) {
         if (!arc || !arc.point_a || !arc.point_b) return null;
         if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return null;
@@ -254,6 +255,96 @@
             lat: (arc.point_a.lat + arc.point_b.lat) / 2,
             lng: (arc.point_a.lng + arc.point_b.lng) / 2,
         };
+    }
+
+    // ============================================================
+    // Multi-point elevation sampling (v3.19)
+    //
+    // Replaces v3.18's single-centroid-per-row sampling. For each row
+    // we sample N points along the segment / inside the polygon, then
+    // take the MAX elevation across samples as the row's ground
+    // elevation. Conservative — catches the highest terrain feature
+    // the entity overlaps so AGL planning has the right safety floor.
+    //
+    // Sample density follows the user's hand-tuned rules:
+    //   FP segments by length:
+    //     < 200 ft → 3 samples  (0% / 50% / 100%)
+    //     200-500  → 5 samples  (0/25/50/75/100%)
+    //     500-1000 → 7 samples
+    //     ≥ 1000   → 9 samples
+    //   Polygons (FFZ / NFZ / Asset): every vertex + edge midpoints,
+    //     plus extra subdivisions on edges longer than ~200 ft so
+    //     long L/U/C corridor shapes get adequate midline coverage.
+    //   Markers: their single point.
+    // ============================================================
+    function segmentSampleCount(distanceM) {
+        const ft = (distanceM || 0) * 3.28084;
+        if (ft < 200) return 3;
+        if (ft < 500) return 5;
+        if (ft < 1000) return 7;
+        return 9;
+    }
+    function sampleAlongSegment(a, b, n) {
+        if (!a || !b || typeof a.lat !== 'number' || typeof b.lat !== 'number') return [];
+        const pts = [];
+        for (let i = 0; i < n; i++) {
+            const t = n === 1 ? 0.5 : i / (n - 1);
+            pts.push({
+                lat: a.lat + (b.lat - a.lat) * t,
+                lng: a.lng + (b.lng - a.lng) * t,
+            });
+        }
+        return pts;
+    }
+    function samplePolygon(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return [];
+        const pts = [];
+        for (let i = 0; i < coords.length; i++) {
+            const a = coords[i];
+            const b = coords[(i + 1) % coords.length];
+            if (!a || typeof a.lat !== 'number') continue;
+            pts.push({ lat: a.lat, lng: a.lng });
+            if (!b || typeof b.lat !== 'number') continue;
+            // Subdivide long edges: 1 extra point per ~200 ft of edge
+            // length. Captures terrain along long thin corridor shapes
+            // (typical FFZ along a power line) without exploding
+            // sample counts on small entities.
+            const edgeFt = approxMeters(a.lat, a.lng, b.lat, b.lng) * 3.28084;
+            const extras = Math.max(1, Math.floor(edgeFt / 200));
+            for (let k = 1; k <= extras; k++) {
+                const t = k / (extras + 1);
+                pts.push({
+                    lat: a.lat + (b.lat - a.lat) * t,
+                    lng: a.lng + (b.lng - a.lng) * t,
+                });
+            }
+        }
+        return pts;
+    }
+    // Returns the list of sample points for a non-segment entity
+    // (FFZ / NFZ / Asset / Marker). Segment rows compute their own
+    // sample list directly from arc data inside buildSummaryRows.
+    function getSamplePointsForEntity(e) {
+        if (!e) return [];
+        if ((e.type === 3 || e.type === 4 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
+            return samplePolygon(e.coords);
+        }
+        if (Array.isArray(e.coords) && e.coords.length > 0) {
+            return [{ lat: e.coords[0].lat, lng: e.coords[0].lng }];
+        }
+        return [];
+    }
+    // Returns the MAX elevation across an array of sample points,
+    // pulling from the cache only. Null if no samples are cached yet.
+    function maxCachedElevation(points) {
+        if (!Array.isArray(points) || points.length === 0) return null;
+        let max = null;
+        for (const p of points) {
+            if (!p || typeof p.lat !== 'number') continue;
+            const v = getElevationFromCache(p.lat, p.lng);
+            if (v != null && (max == null || v > max)) max = v;
+        }
+        return max;
     }
 
     window.addEventListener('beforeunload', () => flushElevationCache());
@@ -266,15 +357,18 @@
         const points = [];
         const seen = new Set();
         rows.forEach(r => {
-            const c = r._centroid;
-            if (!c) return;
-            const key = elevCacheKey(c.lat, c.lng);
-            if (seen.has(key)) return;
-            seen.add(key);
-            const cache = loadElevationCache();
-            if (cache[key] != null) return;
-            if (elevInFlight[key]) return;
-            points.push({ lat: c.lat, lng: c.lng });
+            const sps = r._samplePoints;
+            if (!Array.isArray(sps)) return;
+            sps.forEach(p => {
+                if (!p || typeof p.lat !== 'number') return;
+                const key = elevCacheKey(p.lat, p.lng);
+                if (seen.has(key)) return;
+                seen.add(key);
+                const cache = loadElevationCache();
+                if (cache[key] != null) return;
+                if (elevInFlight[key]) return;
+                points.push({ lat: p.lat, lng: p.lng });
+            });
         });
         if (points.length === 0) {
             // Cache already covers everything — call hook anyway in case
@@ -1230,10 +1324,12 @@
             // (rare edge case: corrupt JSON).
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length > 0) {
                 e.arcs.forEach((arc, i) => {
-                    const mid = getArcMidpoint(arc);
+                    const samples = sampleAlongSegment(
+                        arc.point_a, arc.point_b, segmentSampleCount(arc.distance),
+                    );
+                    const elevM = maxCachedElevation(samples);
                     const minA = typeof arc.min_alt === 'number' ? arc.min_alt : null;
                     const maxA = typeof arc.max_alt === 'number' ? arc.max_alt : null;
-                    const elevM = mid ? getElevationFromCache(mid.lat, mid.lng) : null;
                     out.push({
                         entity: e,
                         arc,                                       // segment-specific data
@@ -1247,9 +1343,9 @@
                         altMinM: minA,
                         altMaxM: maxA,
                         altDeltaM: (minA != null && maxA != null) ? (maxA - minA) : null,
-                        elevationM: elevM,                         // DEM at segment midpoint
+                        elevationM: elevM,                         // MAX DEM across segment samples
                         aglM: (minA != null && elevM != null) ? (minA - elevM) : null,
-                        _centroid: mid,                            // for bulk DEM fetch
+                        _samplePoints: samples,                    // multi-point sampling for bulk DEM fetch
                         validated: reg.hasValidStatus ? !!e.validated : null,
                         unshielded: !!e.is_unshielded,
                         hasNotes: !!(e.description && String(e.description).trim()),
@@ -1258,7 +1354,13 @@
                 return;
             }
             // Everything else (Assets, FFZ, NFZ, Markers) = one row per entity.
-            const centroid = getEntityCentroid(e);
+            // Sample points walk the polygon perimeter (vertex + edge
+            // midpoints + long-edge subdivisions). For markers, just the
+            // single coord. Asset rows still override elevationM with
+            // their claimed elevation_asl below; the DEM samples populate
+            // the cache for future use but don't overwrite the asset's
+            // claimed value.
+            const samples = getSamplePointsForEntity(e);
             const row = {
                 entity: e,
                 _isSegment: false,
@@ -1271,12 +1373,9 @@
                 altMinM: null,
                 altMaxM: null,
                 altDeltaM: null,
-                // Unified Elevation column: assets show their CLAIMED elevation
-                // (custom.elevation_asl); everyone else shows the DEM ground
-                // elevation at centroid. Sort + display use a single value.
                 elevationM: null,
                 aglM: null,
-                _centroid: centroid,
+                _samplePoints: samples,
                 validated: reg.hasValidStatus ? !!e.validated : null,
                 unshielded: !!e.is_unshielded,
                 hasNotes: !!(e.description && String(e.description).trim()),
@@ -1294,11 +1393,12 @@
                 if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
-            // For non-asset rows, elevation comes from DEM (assets already
-            // populated above from their claimed elevation_asl).
-            if (e.type !== 3 && centroid) {
-                const dem = getElevationFromCache(centroid.lat, centroid.lng);
-                if (dem != null) row.elevationM = dem;
+            // For non-asset rows, elevation = MAX DEM across sample
+            // points (asset row already populated above from its
+            // claimed elevation_asl — that takes priority).
+            if (e.type !== 3) {
+                const maxDem = maxCachedElevation(samples);
+                if (maxDem != null) row.elevationM = maxDem;
             }
             if (row.altMinM != null && row.elevationM != null) {
                 row.aglM = row.altMinM - row.elevationM;
@@ -1357,16 +1457,14 @@
         // only one SUM panel can be open at a time.
         window.__aim_ai_onDemReady = () => {
             allRows.forEach(r => {
-                if (!r._centroid) return;
-                // Asset rows already have elevationM set from their CLAIMED
-                // elevation_asl (not DEM) — don't overwrite. Everyone else
-                // takes DEM from the now-populated cache.
-                if (r.type === 3) return;
-                if (r.elevationM != null) return;
-                const dem = getElevationFromCache(r._centroid.lat, r._centroid.lng);
-                if (dem != null) {
-                    r.elevationM = dem;
-                    if (r.altMinM != null) r.aglM = r.altMinM - dem;
+                if (!Array.isArray(r._samplePoints) || r._samplePoints.length === 0) return;
+                // Asset rows: keep their CLAIMED elevation_asl, ignore DEM.
+                if (r.type === 3 && r.entity && r.entity.custom
+                    && typeof r.entity.custom.elevation_asl === 'number') return;
+                const maxE = maxCachedElevation(r._samplePoints);
+                if (maxE != null) {
+                    r.elevationM = maxE;
+                    if (r.altMinM != null) r.aglM = r.altMinM - maxE;
                 }
             });
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
@@ -2545,7 +2643,9 @@
                             const raw = col.raw(r.elevationM);
                             copyToClipboard(raw, `Copied ${raw}`);
                         };
-                        td.title = 'Click: pan/inspect · Right-click: copy raw number';
+                        td.title = r.type === 3
+                            ? 'Asset\'s claimed elevation (custom.elevation_asl). Click: pan · Right-click: copy raw.'
+                            : 'Max DEM elevation across sampled points along the segment/polygon. Click: pan · Right-click: copy raw.';
                     } else if (col.key === 'agl') {
                         // AGL is derived (Min − Elevation). For FP segment
                         // rows it's also INLINE-EDITABLE: editing AGL
