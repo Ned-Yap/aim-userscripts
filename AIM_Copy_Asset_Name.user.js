@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.38
+// @version      3.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -11,6 +11,9 @@
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -27,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.38';
+    const SCRIPT_VERSION = '3.39';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -492,11 +495,228 @@
 
     window.addEventListener('beforeunload', () => flushElevationCache());
 
+    // ============================================================
+    // SHARED ELEVATION DB (v3.39) — GitHub-backed team cache
+    //
+    // Layered cache:
+    //   1. In-memory (elevationCache) — fastest, per session
+    //   2. GM_setValue (persistent, per user/computer)
+    //   3. GitHub repo (shared across team — Ned-Yap/aim-userscripts-data
+    //      under `elevations/<siteID>-elevation.json`)
+    //
+    // Flow:
+    //   - On site open: fetch shared file, merge new entries into local
+    //     cache. Only points NOT in either layer get fetched from
+    //     Percepto's /location_altitude/.
+    //   - After bulk fetch completes with N>0 new points: auto-push
+    //     merged cache back to GitHub so the next teammate to visit
+    //     this site gets them for free.
+    //   - Throttled to one push per site per session.
+    //
+    // Auth via shared PAT broadcast by Control Panel (TOKEN_VALUE
+    // message). Same pattern Map Styler uses for KML commits.
+    // ============================================================
+    const ELEV_REPO = 'Ned-Yap/aim-userscripts-data';
+    const ELEV_REPO_BRANCH = 'main';
+    const ELEV_GITHUB_API = 'https://api.github.com';
+    const ELEV_RAW_BASE = `https://raw.githubusercontent.com/${ELEV_REPO}/${ELEV_REPO_BRANCH}`;
+    const elevPathFor = (siteID) => `elevations/${siteID}-elevation.json`;
+    let elevSharedToken = '';
+    const elevRemoteMerged = new Set();    // sites we've already pulled this session
+    const elevRemoteSha = {};              // sha per site for PUT conflict-aware update
+    const elevPushedThisSession = new Set(); // throttle to 1 push per site per session
+    let elevPushPending = null;            // pending push debounce timer
+
+    // GM_xmlhttpRequest wrapper that returns a Promise. Required for
+    // cross-origin requests to github.com APIs (regular fetch would hit
+    // CORS). Mirrors Map Styler's request pattern.
+    function elevGmRequest(opts) {
+        return new Promise((resolve) => {
+            try {
+                GM_xmlhttpRequest({
+                    ...opts,
+                    onload: (r) => resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, responseText: r.responseText, responseHeaders: r.responseHeaders }),
+                    onerror: () => resolve({ ok: false, status: 0, responseText: '' }),
+                    ontimeout: () => resolve({ ok: false, status: 0, responseText: '' }),
+                });
+            } catch (e) { resolve({ ok: false, status: 0, responseText: '' }); }
+        });
+    }
+
+    // Pull the shared elevation cache for `siteID` from GitHub and
+    // merge non-overlapping entries into the local cache. Idempotent
+    // per site per session — won't re-fetch if already merged.
+    // Returns the count of entries added from remote.
+    async function fetchSharedElevationCache(siteID) {
+        if (!siteID || elevRemoteMerged.has(String(siteID))) return 0;
+        elevRemoteMerged.add(String(siteID));
+        const path = elevPathFor(siteID);
+        // First try raw.githubusercontent.com — no auth needed, faster.
+        // Fall back to Contents API if raw 404s (file may exist on a
+        // branch the raw CDN hasn't cached yet).
+        const rawUrl = `${ELEV_RAW_BASE}/${path}?_t=${Date.now()}`;
+        let body = null;
+        try {
+            const r = await elevGmRequest({ method: 'GET', url: rawUrl, timeout: 8000 });
+            if (r.ok) body = r.responseText;
+        } catch (e) {}
+        if (!body) {
+            // No shared cache yet for this site — that's fine.
+            console.log(`${TAG} no shared elevation cache for site ${siteID} (first user on this site)`);
+            return 0;
+        }
+        let parsed;
+        try { parsed = JSON.parse(body); }
+        catch (e) {
+            console.warn(`${TAG} shared elevation cache for site ${siteID} is malformed:`, e);
+            return 0;
+        }
+        if (!parsed || typeof parsed.entries !== 'object') return 0;
+        const cache = loadElevationCache();
+        let added = 0;
+        Object.keys(parsed.entries).forEach(k => {
+            if (cache[k] == null && typeof parsed.entries[k] === 'number') {
+                cache[k] = parsed.entries[k];
+                added++;
+            }
+        });
+        if (added > 0) {
+            try { elevGmSet(CACHE_KEY_ELEVATIONS, cache); } catch (e) {}
+            console.log(`${TAG} merged shared cache for site ${siteID}: +${added.toLocaleString()} points from teammates (updated ${parsed.updatedAt || '?'})`);
+        } else {
+            console.log(`${TAG} shared cache for site ${siteID} loaded, but local already has all ${Object.keys(parsed.entries).length.toLocaleString()} entries`);
+        }
+        return added;
+    }
+
+    // Look up the GitHub file SHA so a PUT can update it without
+    // 409-conflict. Returns null if file doesn't exist yet (PUT will
+    // create it).
+    async function fetchElevationFileSha(siteID, token) {
+        if (!token) return null;
+        const path = elevPathFor(siteID);
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(path)}?ref=${ELEV_REPO_BRANCH}`;
+        const r = await elevGmRequest({
+            method: 'GET',
+            url,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 8000,
+        });
+        if (!r.ok) return null;
+        try {
+            const j = JSON.parse(r.responseText);
+            return j.sha || null;
+        } catch (e) { return null; }
+    }
+
+    // Push the local cache (filtered to entries for `siteID`'s sample
+    // points if computable; else entire local cache) back to the
+    // shared repo. Throttled to one push per site per session.
+    async function pushSharedElevationCache(siteID, sitePointKeys) {
+        if (!siteID) return;
+        if (elevPushedThisSession.has(String(siteID))) return;
+        const token = elevSharedToken;
+        if (!token) {
+            console.log(`${TAG} no PAT cached — skipping shared cache push for site ${siteID} (open Control Panel + set token to enable)`);
+            return;
+        }
+        // Build the file payload from the LOCAL cache, optionally
+        // filtered to this site's sample-point keys (avoids polluting
+        // one site's file with cache entries from another).
+        const cache = loadElevationCache();
+        const entries = {};
+        if (sitePointKeys && sitePointKeys.size > 0) {
+            sitePointKeys.forEach(k => {
+                if (cache[k] != null) entries[k] = cache[k];
+            });
+        } else {
+            // Fallback — push everything we have. Shouldn't normally
+            // happen since callers pass the site's point keys.
+            Object.assign(entries, cache);
+        }
+        const count = Object.keys(entries).length;
+        if (count === 0) return;
+        const payload = {
+            site: Number(siteID),
+            updatedAt: new Date().toISOString(),
+            entries,
+        };
+        const json = JSON.stringify(payload);
+        const sha = await fetchElevationFileSha(siteID, token);
+        const utf8 = new TextEncoder().encode(json);
+        let bin = '';
+        for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+        const contentB64 = btoa(bin);
+        const body = {
+            message: `[AIM site ${siteID}] elevation cache update (${count.toLocaleString()} points)`,
+            content: contentB64,
+            branch: ELEV_REPO_BRANCH,
+        };
+        if (sha) body.sha = sha;
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(elevPathFor(siteID))}`;
+        const r = await elevGmRequest({
+            method: 'PUT',
+            url,
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+            },
+            data: JSON.stringify(body),
+            timeout: 20000,
+        });
+        if (r.ok) {
+            elevPushedThisSession.add(String(siteID));
+            console.log(`${TAG} ✓ pushed ${count.toLocaleString()} elevation points to shared cache for site ${siteID}`);
+        } else if (r.status === 401 || r.status === 403) {
+            console.warn(`${TAG} ⚠ shared elev push denied (HTTP ${r.status}) — PAT needs contents:write on ${ELEV_REPO}`);
+        } else if (r.status === 409) {
+            console.warn(`${TAG} ⚠ shared elev push conflict (HTTP 409) — another teammate pushed during our run; will retry next session`);
+            elevRemoteMerged.delete(String(siteID)); // allow re-pull next time
+        } else {
+            console.warn(`${TAG} shared elev push failed (HTTP ${r.status}):`, (r.responseText || '').substring(0, 200));
+        }
+    }
+
+    // Debounced trigger — after a bulk fetch completes, wait briefly
+    // then push. Lets multiple completion events (e.g. user toggles
+    // the panel a couple times) coalesce into a single push.
+    function schedulePushSharedCache(siteID, sitePointKeys) {
+        if (elevPushPending) { clearTimeout(elevPushPending); elevPushPending = null; }
+        elevPushPending = setTimeout(() => {
+            elevPushPending = null;
+            pushSharedElevationCache(siteID, sitePointKeys).catch(e =>
+                console.warn(`${TAG} push exception:`, e));
+        }, 3000);
+    }
+
     // Bulk DEM fetch for the SUM panel — dedup by cache key (multiple
     // entities at same lat/lng share one request). One re-render at end.
     let demFetchInFlight = false;
-    function kickOffDemFetch(siteID, rows) {
+    async function kickOffDemFetch(siteID, rows) {
         if (demFetchInFlight) return;
+        // Layered lookup. Cheap first: count what's missing from local
+        // cache. If local already covers everything → skip the GitHub
+        // round-trip entirely (saves a ~500ms hit on cache-hit reloads).
+        // Otherwise → pull shared cache, then re-check, then fetch what's
+        // STILL missing from Percepto. Push back any new entries.
+        const sitePointKeys = new Set();
+        let preCheckNeed = 0;
+        rows.forEach(r => {
+            const sps = r._samplePoints;
+            if (!Array.isArray(sps)) return;
+            sps.forEach(p => {
+                if (!p || typeof p.lat !== 'number') return;
+                const key = elevCacheKey(p.lat, p.lng);
+                if (sitePointKeys.has(key)) return;
+                sitePointKeys.add(key);
+                if (loadElevationCache()[key] == null) preCheckNeed++;
+            });
+        });
+        if (preCheckNeed > 0) {
+            await fetchSharedElevationCache(siteID);
+        }
+        // Re-check after potential merge from shared cache.
         const points = [];
         const seen = new Set();
         let cacheHits = 0;
@@ -514,23 +734,13 @@
                 points.push({ lat: p.lat, lng: p.lng });
             });
         });
-        // Diagnostic: shows whether the persistent cache is doing its
-        // job. If `new` is consistently == `total unique` across page
-        // reloads, the cache isn't persisting or the keys aren't
-        // matching — investigate. Healthy second-load run should
-        // show `new: 0` (or very few, for newly added entities).
         console.log(`${TAG} DEM bulk for site ${siteID}: ${seen.size} unique sample points · ${cacheHits} cache hits · ${points.length} new (need fetch)`);
         if (points.length === 0) {
-            // Cache already covers everything — call hook anyway in case
-            // the rows were built before cache returned (race protection).
             if (window.__aim_ai_onDemReady) window.__aim_ai_onDemReady();
             return;
         }
         demFetchInFlight = true;
         console.log(`${TAG} fetching ${points.length} DEM elevations for site ${siteID}`);
-        // Window-scoped progress hook — renderSummaryPanel installs
-        // __aim_ai_onDemProgress to drive a thin progress bar above
-        // the table. Stays absent when no panel is open (no-op cost).
         if (window.__aim_ai_onDemProgress) window.__aim_ai_onDemProgress(0, points.length);
         bulkFetchElevations(points, (done, total) => {
             if (window.__aim_ai_onDemProgress) window.__aim_ai_onDemProgress(done, total);
@@ -538,6 +748,10 @@
             demFetchInFlight = false;
             if (window.__aim_ai_onDemProgress) window.__aim_ai_onDemProgress(points.length, points.length, true);
             if (window.__aim_ai_onDemReady) window.__aim_ai_onDemReady();
+            // Push new entries back to shared cache so teammates benefit
+            // on their next visit. Throttled to one push per site per
+            // session (see schedulePushSharedCache).
+            schedulePushSharedCache(siteID, sitePointKeys);
         });
     }
 
@@ -1108,6 +1322,15 @@
         controlChannel.onmessage = (ev) => {
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
+            else if (msg.type === 'TOKEN_VALUE') {
+                // PAT broadcast — caches in memory for shared elevation
+                // cache pulls/pushes. Same pattern Map Styler + MBT use.
+                const newToken = msg.token || '';
+                if (newToken !== elevSharedToken) {
+                    elevSharedToken = newToken;
+                    if (newToken) console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
+                }
+            }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -1146,6 +1369,9 @@
     }
     setupControlPanel();
     registerWithControlPanel();
+    // Ask Control Panel to replay the GitHub PAT — covers the case
+    // where we loaded after the panel's initial TOKEN_VALUE broadcast.
+    if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
     installRightClickHandler();
 
     // ============================================================
