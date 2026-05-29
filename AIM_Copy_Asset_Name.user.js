@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.28
+// @version      3.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.28';
+    const SCRIPT_VERSION = '3.29';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2353,7 +2353,15 @@
             if (state.unvalidatedOnly && r.validated !== false) return false;
             if (state.unshieldedOnly && !r.unshielded) return false;
             if (state.notesOnly && !r.hasNotes) return false;
-            if (q && !r.name.toLowerCase().includes(q) && !r.subtype.toLowerCase().includes(q)) return false;
+            if (q) {
+                // Matches name, subtype, OR Seg ID (segment rows only).
+                // Seg ID stringified so partial matches work — searching
+                // "2571" hits arc 2571233, 2571234, etc.
+                const matches = r.name.toLowerCase().includes(q)
+                    || r.subtype.toLowerCase().includes(q)
+                    || (r._segId != null && String(r._segId).includes(q));
+                if (!matches) return false;
+            }
             return true;
         });
         const dir = state.sortDir;
@@ -2480,7 +2488,7 @@
         searchRow.style.cssText = 'display:flex;gap:8px;align-items:center';
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
-        searchInput.placeholder = '🔍  Search name or subtype…';
+        searchInput.placeholder = '🔍  Search name, subtype, or Seg ID…';
         searchInput.value = sumPanelState.search;
         searchInput.style.cssText = 'flex:1;background:#15171c;color:#e6e6e6;border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:5px 8px;font:inherit;font-size:12px';
         searchInput.oninput = () => {

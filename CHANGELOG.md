@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.29** — search box now matches Segment ID too. Type "2571" to find arc 2571233. Search placeholder updated to "Search name, subtype, or Seg ID…".
 - **AIM Asset Inspector v3.28** — **NEW: Segment ID column** in the SUM panel.
   - Shows `arc.id` for FP segment rows (the value from Percepto's JSON), dash for everything else.
   - **Right-click → copy** the raw ID for cross-ref into JSON exports / screenshots / coworker chats.
