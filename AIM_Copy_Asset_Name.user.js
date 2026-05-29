@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.34
+// @version      3.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.34';
+    const SCRIPT_VERSION = '3.35';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2491,14 +2491,17 @@
             '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
-            '<Style id="verticalbuffer_style"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            // V-Buffer: BLUE (moved from yellow — yellow is now reserved
+            // for distro power lines per Exxon Powerlines KML standard).
+            // KML color aabbggrr: ffff0000 = full alpha + pure blue.
+            '<Style id="verticalbuffer_style"><LineStyle><color>ffff0000</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             '<Style id="horizontalbuffer_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4D00a5ff</color></PolyStyle></Style>',
-            // Power lines — match Map Styler's default colors so the
-            // exported KML looks like what users see in AIM:
-            //   distro = cyan (default Map Styler distro color)
-            //   trans  = red  (default Map Styler trans color)
-            '<Style id="powerline_distro_style"><LineStyle><color>ffdea01c</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
-            '<Style id="powerline_trans_style"><LineStyle><color>ff3030ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            // Power lines — Exxon Powerlines KML standard colors:
+            //   distro = YELLOW thin lines, ~50% opacity (8000ffff)
+            //   trans  = RED slightly thicker, ~70% opacity (b30000ff)
+            // KML format is aabbggrr: alpha+blue+green+red.
+            '<Style id="powerline_distro_style"><LineStyle><color>8000ffff</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            '<Style id="powerline_trans_style"><LineStyle><color>b30000ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
         ].join('\n');
     }
     // Escape XML-unsafe chars for use in element text + attributes.
