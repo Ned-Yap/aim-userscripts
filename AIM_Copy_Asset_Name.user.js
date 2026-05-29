@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.27
+// @version      3.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.27';
+    const SCRIPT_VERSION = '3.28';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1110,7 +1110,7 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+    const ALL_COL_KEYS = ['typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -1120,7 +1120,36 @@
         if (Array.isArray(stored) && stored.length > 0) {
             const known = new Set(ALL_COL_KEYS);
             const cleaned = stored.filter(k => known.has(k));
-            if (cleaned.length > 0) return cleaned;
+            // MIGRATION: if ALL_COL_KEYS has new columns the user's
+            // stored order doesn't know about (e.g. 'segId' added in
+            // v3.28), append them in their default position so the
+            // user actually SEES the new column instead of having to
+            // manually toggle it on from the hidden list.
+            const storedSet = new Set(cleaned);
+            const newKeys = ALL_COL_KEYS.filter(k => !storedSet.has(k));
+            if (cleaned.length > 0) {
+                if (newKeys.length > 0) {
+                    // Insert each new key right after its left neighbor
+                    // in the canonical ALL_COL_KEYS order so the user's
+                    // existing order is preserved + the new col lands
+                    // in its intended position.
+                    const out = cleaned.slice();
+                    newKeys.forEach(nk => {
+                        const idx = ALL_COL_KEYS.indexOf(nk);
+                        let insertAt = out.length;
+                        // Walk left in ALL_COL_KEYS — first existing
+                        // sibling tells us where to slot in.
+                        for (let i = idx - 1; i >= 0; i--) {
+                            const leftK = ALL_COL_KEYS[i];
+                            const pos = out.indexOf(leftK);
+                            if (pos >= 0) { insertAt = pos + 1; break; }
+                        }
+                        out.splice(insertAt, 0, nk);
+                    });
+                    return out;
+                }
+                return cleaned;
+            }
         }
         return ALL_COL_KEYS.slice();
     }
@@ -2236,6 +2265,7 @@
                         entity: e,
                         arc,                                       // segment-specific data
                         _arcIndex: i,                              // position in entity.arcs — stable across Percepto saves (arc IDs aren't)
+                        _segId: arc.id != null ? arc.id : null,    // arc.id from Percepto JSON — NOT stable; regenerates on FP save
                         _isSegment: true,
                         _rowKey: `${e.id}:${arc.id != null ? arc.id : i}`,
                         type: e.type,
@@ -2603,6 +2633,7 @@
             const COL_LABELS = {
                 typeShort: 'Type',
                 name:      'Name',
+                segId:     'Segment ID',
                 subtype:   'Subtype',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
@@ -3408,6 +3439,7 @@
             const allColDefs = [
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
+                { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
@@ -3557,6 +3589,24 @@
                         const nameColor = r._isSegment ? '#a8c8d2' : '#e6e6e6';
                         td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer`;
                         td.textContent = r.name || '(unnamed)';
+                    } else if (col.key === 'segId') {
+                        // FP segment rows show the arc's ID from Percepto's
+                        // JSON. NOT stable across saves — Percepto
+                        // regenerates IDs when an FP is edited. Useful as
+                        // a snapshot reference (cross-ref JSON / screenshots
+                        // / coworker chats), not as a stable identifier.
+                        // Non-segment rows show a dash.
+                        td.style.cssText = 'padding:5px 8px;color:#7a8a92;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        td.textContent = r._segId != null ? String(r._segId) : '—';
+                        td.title = r._segId != null
+                            ? `Arc ID ${r._segId} from current site data. Right-click: copy. NOTE: Percepto regenerates this on every FP save — use Seg # for stable identity.`
+                            : 'Only FP segment rows have a Seg ID.';
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            if (r._segId == null) return;
+                            copyToClipboard(String(r._segId), `Copied ${r._segId}`);
+                        };
                     } else if (col.key === 'subtype') {
                         td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
                         td.textContent = r.subtype || '—';
@@ -3723,6 +3773,7 @@
                 const data = exportRows().map(r => cols.map(col => {
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
+                    if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
                     if (col.key === 'subtype') return r.subtype || '';
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
                         || col.key === 'elevation' || col.key === 'agl') {

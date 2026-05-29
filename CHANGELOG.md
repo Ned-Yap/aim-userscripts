@@ -8,6 +8,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.28** — **NEW: Segment ID column** in the SUM panel.
+  - Shows `arc.id` for FP segment rows (the value from Percepto's JSON), dash for everything else.
+  - **Right-click → copy** the raw ID for cross-ref into JSON exports / screenshots / coworker chats.
+  - **Caveat in tooltip + commit msg**: arc IDs are NOT stable across Percepto saves — they regenerate on every FP edit. Useful as a snapshot reference, not as a permanent identifier. The segment NUMBER (1, 2, 3…) IS stable.
+  - **Migration**: existing users' saved column orders auto-merge the new `segId` column in its default position (between Name and Subtype). You won't need to manually toggle it on.
 - **AIM Asset Inspector v3.27** — **remove post-save verification entirely.** The verification step I added in v3.24 has caused more problems than it solved: Percepto stores integer meters internally, so writing 39 ft (= 11.887 m) round-trips back as either 11 m → 36 ft or 12 m → 39 ft depending on Percepto's rounding direction. Either way the verification flags it as a "mismatch" because the round-trip drift is ~3 ft. Bumping the tolerance in v3.26 helped but didn't solve it — drifts on bigger numbers (e.g. 2746 → 2743) still trip the alarm. The bulk-altitude-updater this pipeline is modeled on doesn't verify either, and it's solid. New behavior: editor closed cleanly + no validation error toast = save succeeded. Stop trying to second-guess Percepto.
   - Pre-flight checks (duplicate names, stale-queue warnings, validation-error detection during save) stay — those caught real issues. Just the after-save re-read is gone.
   - Audit log still written.
