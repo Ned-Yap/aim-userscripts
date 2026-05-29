@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.20** — **Show elevation sample points on map** (verification tool). New toggle in the SUM panel toolbar (light purple) drops a small purple circle on the Leaflet map for every sample point used to compute each row's elevation. Hover any dot for a tooltip showing the entity name + that exact point's elevation in ft / m. Off by default, persists per user (GM_setValue). Refreshes whenever the filtered row set changes — filter the table to one FP, see just that segment's samples on the map. Uses Leaflet's canvas renderer so 1000+ markers stay responsive. Clears markers automatically when the SUM panel closes.
 - **AIM Asset Inspector v3.19** — **Multi-point elevation sampling** with variable density per shape. Replaces v3.18's single-centroid-per-row sampling with a max-across-samples approach so the displayed Elevation is the **highest ground point the entity overlaps** — conservative for AGL planning.
   - **FP segments by length:** `<200 ft` = 3 samples (0/50/100%), `200-500 ft` = 5 samples (0/25/50/75/100%), `500-1000 ft` = 7 samples, `≥1000 ft` = 9 samples.
   - **Polygons (FFZ / NFZ / Asset):** every vertex + edge midpoints + extra subdivisions on edges longer than ~200 ft. Handles L / U / C corridor shapes natively — the perimeter traces the corridor and gets sampled along its entire length.

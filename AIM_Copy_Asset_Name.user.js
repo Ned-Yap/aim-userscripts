@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.19
+// @version      3.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.19';
+    const SCRIPT_VERSION = '3.20';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -135,6 +135,7 @@
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
+    const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
     const ELEV_CONCURRENCY = 4;
     let elevationCache = null;
@@ -334,6 +335,84 @@
         }
         return [];
     }
+    // ---- Sample-point map visualization (v3.20) ----
+    // Drops a small purple dot on the Leaflet map for each sample
+    // point we used to compute that row's max ground elevation.
+    // Off by default; toggled from the SUM panel toolbar. Lets the
+    // user audit that we're sampling the right places.
+    //
+    // Leaflet's `L` global lives in the iframe (Percepto's map runs
+    // there). When the SUM panel is open, this script is also in
+    // the iframe so `unsafeWindow.L` resolves correctly. Wrapped in
+    // try/catch so we degrade gracefully if Leaflet isn't reachable.
+    let sampleMarkers = [];
+    let sampleMarkersRenderer = null;
+    function getLeafletL() {
+        try { return unsafeWindow && unsafeWindow.L; } catch (e) {}
+        try { return window.L; } catch (e) {}
+        return null;
+    }
+    function hideSampleMarkers() {
+        const map = getLeafletMap();
+        sampleMarkers.forEach(m => {
+            try { if (map) map.removeLayer(m); } catch (e) {}
+        });
+        sampleMarkers = [];
+    }
+    function showSampleMarkersFor(rows) {
+        hideSampleMarkers();
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) {
+            console.warn(`${TAG} can't show sample markers — Leaflet or map missing`);
+            return;
+        }
+        // Canvas renderer keeps perf reasonable at 1000+ markers (a
+        // busy site can hit that). Single renderer shared across all
+        // markers; recreated whenever we re-render.
+        try {
+            sampleMarkersRenderer = L.canvas({ padding: 0.5 });
+        } catch (e) {
+            sampleMarkersRenderer = null;
+        }
+        rows.forEach(r => {
+            const sps = r._samplePoints;
+            if (!Array.isArray(sps) || sps.length === 0) return;
+            sps.forEach(p => {
+                if (!p || typeof p.lat !== 'number') return;
+                try {
+                    const opts = {
+                        radius: 3,
+                        color: '#7c3aed',          // deep purple stroke
+                        weight: 1,
+                        fillColor: '#c4b5fd',      // light purple fill (matches Elevation col)
+                        fillOpacity: 0.85,
+                        opacity: 0.95,
+                        interactive: true,
+                        bubblingMouseEvents: false,
+                    };
+                    if (sampleMarkersRenderer) opts.renderer = sampleMarkersRenderer;
+                    const marker = L.circleMarker([p.lat, p.lng], opts);
+                    // Tooltip: row name + this sample's elevation
+                    const elev = getElevationFromCache(p.lat, p.lng);
+                    let tip;
+                    if (elev != null) {
+                        const ft = Math.round(elev * 3.28084);
+                        tip = `${r.name}<br>${ft.toLocaleString()} ft / ${elev.toFixed(1)} m`;
+                    } else {
+                        tip = `${r.name}<br>(elevation loading…)`;
+                    }
+                    marker.bindTooltip(tip, { sticky: true, opacity: 0.95 });
+                    marker.addTo(map);
+                    sampleMarkers.push(marker);
+                } catch (e) {
+                    // One bad marker shouldn't kill the rest.
+                }
+            });
+        });
+        console.log(`${TAG} rendered ${sampleMarkers.length} sample-point markers`);
+    }
+
     // Returns the MAX elevation across an array of sample points,
     // pulling from the cache only. Null if no samples are cached yet.
     function maxCachedElevation(points) {
@@ -1218,6 +1297,10 @@
         // so it survives reloads. Hidden columns are simply absent from
         // this array. Reorder via ↑/↓ in the Columns ▾ menu.
         columnOrder: loadColumnOrder(),
+        // Persistent: when ON, the SUM panel drops a small purple dot
+        // on the Leaflet map for every sample point used to compute
+        // each row's elevation. Off by default to keep the map clean.
+        showSamples: elevGmGet(CACHE_KEY_SHOW_SAMPLES, false),
     };
 
     function injectSumButton(doc) {
@@ -1285,6 +1368,10 @@
     function closeSummaryPanel() {
         const el = document.getElementById(SUM_PANEL_ID);
         if (el) el.remove();
+        // Clear any sample-point markers when the panel closes — they'd
+        // be dangling without the toggle to manage them. Toggle state
+        // itself persists, so reopening with showSamples=true rebuilds.
+        hideSampleMarkers();
     }
 
     function openSummaryPanel() {
@@ -1468,6 +1555,9 @@
                 }
             });
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            // redrawTable re-renders markers with the now-loaded
+            // elevations in their tooltips (replacing the placeholder
+            // "(loading…)" text shown before the cache hit).
         };
         kickOffDemFetch(siteID, allRows);
 
@@ -1640,6 +1730,31 @@
         unitsLbl.appendChild(unitsCb);
         unitsLbl.appendChild(document.createTextNode('Show in feet (uncheck for meters)'));
         optsRow.appendChild(unitsLbl);
+
+        // Show-sample-points toggle (v3.20). When ON, drops a small
+        // purple dot on the Leaflet map for every sample point used
+        // to compute each (filtered) row's elevation. Persists across
+        // panel reopens. Refreshes whenever the filtered row set
+        // changes (driven from redrawTable below).
+        const samplesLbl = document.createElement('label');
+        samplesLbl.style.cssText = 'display:flex;align-items:center;gap:4px;color:#c4b5fd;font-size:11px;cursor:pointer;margin-left:6px';
+        samplesLbl.title = 'Drop purple dots on the map at every sample location used for elevation. Hover a dot for its elevation.';
+        const samplesCb = document.createElement('input');
+        samplesCb.type = 'checkbox';
+        samplesCb.checked = !!sumPanelState.showSamples;
+        samplesCb.style.cssText = 'accent-color:#c4b5fd;cursor:pointer';
+        samplesCb.onchange = () => {
+            sumPanelState.showSamples = samplesCb.checked;
+            elevGmSet(CACHE_KEY_SHOW_SAMPLES, sumPanelState.showSamples);
+            if (samplesCb.checked) {
+                showSampleMarkersFor(filterAndSortRows(allRows, sumPanelState));
+            } else {
+                hideSampleMarkers();
+            }
+        };
+        samplesLbl.appendChild(samplesCb);
+        samplesLbl.appendChild(document.createTextNode('Show elevation sample points on map'));
+        optsRow.appendChild(samplesLbl);
 
         // "Summary" button — opens the site stats popup.
         const summaryBtn = document.createElement('button');
@@ -2706,6 +2821,10 @@
 
             countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
             refreshQueueUi();
+            // Re-render sample-point markers whenever the filtered row
+            // set changes — keeps the map in sync with what's visible.
+            // Honors the persisted toggle so reopens stay consistent.
+            if (sumPanelState.showSamples) showSampleMarkersFor(rows);
 
             // Helper — pick which rows to export. Selection wins when any
             // are checked; otherwise the current filter+sort snapshot.
