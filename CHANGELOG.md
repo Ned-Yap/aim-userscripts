@@ -8,6 +8,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.16** — **NEW: inline edit + pending queue for FP segment altitudes (phase 1).**
+  - **Click any Min Alt or Max Alt cell on an FP segment row** → cell turns into a text input. Type a new whole-foot value (or a formula like `2720+50` or `(2720+50)*2`). Enter/Tab/blur queues the edit; Esc cancels. Right-click on a cell with a pending edit copies the NEW value.
+  - **Yellow pending markers:** queued cells show the original value struck-through plus the new value in yellow (`2,720` `2,800`). Hover for "was X, will be Y" tooltip.
+  - **Queue UI in footer:** pill shows count (`📋 5 queued edits`); `Copy queue → Sheets` button copies TSV (Entity / Segment / Field / Old / New / Δ) for paste into your planning sheet; `Discard queue` button wipes the queue. UI only appears when there's something queued.
+  - **Site-aware** — queue clears automatically when the user navigates to a different site (entity IDs wouldn't match anymore).
+  - **NOT INCLUDED:** applying the edits to Percepto. This is the planning/queue half. v3.17 will add the "Apply via editor" button that drives Percepto's entity edit dialog for each pending change.
+  - Matches MBT's `pendingAltitudes` pattern + formula parser.
 - **AIM Asset Inspector v3.15** — SUM panel polish pass on top of v3.14:
   - **Reorderable + persistent columns.** Columns ▾ menu now mirrors MBT: visible columns at the top with ↑/↓ arrows to reorder + checkboxes to hide, hidden columns below the divider with checkboxes to add, Reset button to restore defaults. Order persists across reloads via GM storage (`aim-ai-column-order`).
   - **Comma-formatted altitudes** — Min Alt, Max Alt, Min/Max Delta now display as `2,633` instead of `2633`. Elevation already had this. AGL too.

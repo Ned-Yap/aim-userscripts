@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.15
+// @version      3.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.15';
+    const SCRIPT_VERSION = '3.16';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -930,6 +930,68 @@
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
     }
+
+    // ============================================================
+    // Pending segment-altitude edits (v3.16 phase 1 — queue only).
+    //
+    // In-memory store keyed by `${entityId}:${arcId}:${field}` so each
+    // segment can have one pending Min edit + one pending Max edit
+    // independently. Cleared when the site changes (rowKeys would no
+    // longer match the loaded entity set) or via Discard All. Survives
+    // closing the panel so the user doesn't lose work on accidental
+    // close — matches the MBT pendingAltitudes pattern.
+    //
+    // v3.17 will add the "Apply" path that drives Percepto's entity
+    // editor for each pending edit. Phase 1 ships queue + clipboard
+    // export only so the user gets the planning value immediately.
+    // ============================================================
+    const pendingSegmentEdits = {};
+    let pendingEditsSite = null;     // siteID the edits belong to
+    function pendingEditKey(entityId, arcId, field) {
+        return `${entityId}:${arcId}:${field}`;
+    }
+    function getPendingEdit(entityId, arcId, field) {
+        return pendingSegmentEdits[pendingEditKey(entityId, arcId, field)];
+    }
+    function queuePendingEdit(entry) {
+        pendingSegmentEdits[pendingEditKey(entry.entityId, entry.arcId, entry.field)] = entry;
+    }
+    function discardPendingEdit(entityId, arcId, field) {
+        delete pendingSegmentEdits[pendingEditKey(entityId, arcId, field)];
+    }
+    function clearAllPendingEdits() {
+        Object.keys(pendingSegmentEdits).forEach(k => delete pendingSegmentEdits[k]);
+    }
+    function pendingEditCount() {
+        return Object.keys(pendingSegmentEdits).length;
+    }
+    function ensurePendingForSite(siteID) {
+        if (pendingEditsSite !== siteID) {
+            if (pendingEditCount() > 0) {
+                console.log(`${TAG} site changed (${pendingEditsSite} → ${siteID}) — clearing ${pendingEditCount()} pending edits`);
+            }
+            clearAllPendingEdits();
+            pendingEditsSite = siteID;
+        }
+    }
+
+    // Parse a number OR a math formula (e.g. "2974+15", "(2974+15)*2").
+    // Strips any non-math chars before eval — only digits, dot, +, -,
+    // *, /, parens, spaces allowed. Same impl as MBT.
+    function parseFormulaValue(s) {
+        if (s == null) return NaN;
+        const trimmed = String(s).trim().replace(/^=/, ''); // tolerate leading "="
+        if (!trimmed) return NaN;
+        if (/[+\-*/()]/.test(trimmed)) {
+            const clean = trimmed.replace(/[^0-9.+\-*/()\s]/g, '');
+            if (!clean) return NaN;
+            try {
+                const result = Function(`"use strict"; return (${clean})`)();
+                return Number(result);
+            } catch (e) { return NaN; }
+        }
+        return Number(trimmed);
+    }
     let sumPanelState = {
         search: '',
         typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
@@ -1175,6 +1237,7 @@
 
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
+        ensurePendingForSite(siteID);
         const allRows = buildSummaryRows(siteID);
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
@@ -1594,6 +1657,80 @@
         footer.appendChild(tsvBtn);
         footer.appendChild(jsonBtn);
         footer.appendChild(refreshBtn);
+
+        // --- Pending-edits queue area (v3.16) ---
+        // Sits to the right of the normal copy buttons. Only visible
+        // when at least one Min/Max edit is queued. "Queue: N" pill
+        // is informational; the two buttons let the user copy the
+        // queue for Sheets (paste into their planning sheet) or
+        // discard it entirely. Apply-via-editor is v3.17.
+        const queueDivider = document.createElement('div');
+        queueDivider.style.cssText = 'width:1px;height:18px;background:rgba(255,255,255,0.12);margin:0 2px';
+        const queuePill = document.createElement('span');
+        queuePill.style.cssText = 'color:#ffd54f;font-size:11px;font-weight:700;padding:3px 8px;background:rgba(255,213,79,0.10);border:1px solid rgba(255,213,79,0.35);border-radius:3px;cursor:default;letter-spacing:0.3px';
+        queuePill.title = 'Pending altitude edits — queued, not yet applied';
+        const queueCopyBtn = document.createElement('button');
+        queueCopyBtn.textContent = 'Copy queue → Sheets';
+        queueCopyBtn.style.cssText = BTN_CSS + ';color:#ffd54f;border-color:rgba(255,213,79,0.45)';
+        queueCopyBtn.title = 'Copy the pending-edits queue as TSV for paste into Google Sheets / Excel';
+        const queueDiscardBtn = document.createElement('button');
+        queueDiscardBtn.textContent = 'Discard queue';
+        queueDiscardBtn.style.cssText = BTN_CSS + ';color:#ff8a80;border-color:rgba(255,138,128,0.35)';
+        queueDiscardBtn.title = 'Throw away all pending altitude edits';
+        footer.appendChild(queueDivider);
+        footer.appendChild(queuePill);
+        footer.appendChild(queueCopyBtn);
+        footer.appendChild(queueDiscardBtn);
+        // refreshQueueUi() — show/hide based on count, update pill text.
+        // Called on every redraw + after queue mutations.
+        function refreshQueueUi() {
+            const n = pendingEditCount();
+            const visible = n > 0;
+            queueDivider.style.display = visible ? '' : 'none';
+            queuePill.style.display = visible ? '' : 'none';
+            queueCopyBtn.style.display = visible ? '' : 'none';
+            queueDiscardBtn.style.display = visible ? '' : 'none';
+            queuePill.textContent = `📋 ${n} queued edit${n === 1 ? '' : 's'}`;
+        }
+        refreshQueueUi();
+        queueCopyBtn.onclick = () => {
+            const n = pendingEditCount();
+            if (n === 0) return;
+            // TSV: Entity, Segment, Field, Old, New, Delta (in ft if ft mode)
+            const useFt = !!sumPanelState.unitsFt;
+            const conv = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+            const unit = useFt ? 'ft' : 'm';
+            const header = ['Entity', 'Segment', 'Field', `Old (${unit})`, `New (${unit})`, `Δ (${unit})`];
+            const lines = [header.join('\t')];
+            Object.values(pendingSegmentEdits).forEach(e => {
+                const oldV = conv(e.oldValueM);
+                const newV = conv(e.newValueM);
+                const delta = newV - oldV;
+                const sign = delta > 0 ? '+' : '';
+                // segmentName already has the "FP - Seg N" format; split.
+                const segMatch = e.segmentName.match(/^(.+?) - (Seg \d+)$/);
+                const entName = segMatch ? segMatch[1] : (e.fpName || '');
+                const segName = segMatch ? segMatch[2] : e.segmentName;
+                lines.push([
+                    entName,
+                    segName,
+                    e.field === 'min_alt' ? 'Min Alt' : 'Max Alt',
+                    String(oldV),
+                    String(newV),
+                    `${sign}${delta}`,
+                ].join('\t'));
+            });
+            copyToClipboard(lines.join('\n'), `Copied ${n} pending edit${n === 1 ? '' : 's'} for Sheets`);
+        };
+        queueDiscardBtn.onclick = () => {
+            const n = pendingEditCount();
+            if (n === 0) return;
+            if (!confirm(`Discard ${n} pending altitude edit${n === 1 ? '' : 's'}?`)) return;
+            clearAllPendingEdits();
+            redrawTable();
+            refreshQueueUi();
+            showToast('Pending edits cleared');
+        };
         panel.appendChild(footer);
 
         // Resize handle — small grip in the bottom-right corner. Drag to
@@ -1804,21 +1941,63 @@
                         td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
                         td.textContent = r.subtype || '—';
                     } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
-                        // Comma-grouped, right-click copies raw value
-                        // (no commas, no unit suffix) for paste into
-                        // formulas / the bulk-edit input we'll build
-                        // in v3.16.
-                        td.style.cssText = 'padding:5px 8px;color:#e6e6e6;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
-                        td.textContent = col.fmt(r[col.dataKey]);
+                        // Min/Max/Delta cells. Min and Max on FP segment
+                        // rows are INLINE-EDITABLE in v3.16: clicking the
+                        // cell opens a text input that accepts a number
+                        // or a formula. The edit queues to pendingSegmentEdits
+                        // (a planning queue — applying via Percepto's
+                        // entity editor is v3.17 work).
+                        const editable = r._isSegment && (col.key === 'altMin' || col.key === 'altMax');
+                        const fieldName = col.key === 'altMin' ? 'min_alt' : 'max_alt';
+                        const pending = editable
+                            ? getPendingEdit(r.entity.id, r.arc.id, fieldName)
+                            : null;
+                        // Color: yellow tint if there's a pending edit; default white.
+                        const baseColor = pending ? '#ffd54f' : '#e6e6e6';
+                        td.style.cssText = `padding:5px 8px;color:${baseColor};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer${editable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                        // For pending: show OLD value strikethrough + NEW
+                        // value in yellow. Mirrors MBT's display pattern.
+                        if (pending) {
+                            const oldDisp = col.fmt(r[col.dataKey]);
+                            const newDisp = col.fmt(pending.newValueM);
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = oldDisp;
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px;font-weight:normal';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = newDisp;
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `Pending edit — was ${col.raw(r[col.dataKey])}, will be ${col.raw(pending.newValueM)}. Click to re-edit · Right-click: copy raw.`;
+                        } else {
+                            td.textContent = col.fmt(r[col.dataKey]);
+                            if (editable) {
+                                td.title = 'Click: edit · Right-click: copy raw';
+                            } else {
+                                td.title = 'Click: pan/inspect · Right-click: copy raw';
+                            }
+                        }
+                        // Override row-click for editable Min/Max cells —
+                        // single click opens the editor (not pan). Right-
+                        // click always copies the raw value. Delta is
+                        // derived, never editable.
+                        if (editable) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineSegmentEdit(td, r, fieldName);
+                            };
+                        }
                         td.oncontextmenu = (ev) => {
                             ev.preventDefault();
                             ev.stopPropagation();
-                            const v = r[col.dataKey];
+                            // Right-click on a cell with a pending edit
+                            // copies the NEW value, not the old one — the
+                            // pending value is what the user cares about.
+                            const v = pending ? pending.newValueM : r[col.dataKey];
                             if (v == null) return;
                             const raw = col.raw(v);
                             copyToClipboard(raw, `Copied ${raw}`);
                         };
-                        td.title = 'Click: pan/inspect · Right-click: copy raw number';
                     } else if (col.key === 'elevation') {
                         // MBT-style: light purple, bold, comma-grouped.
                         // Right-click copies the raw unformatted number
@@ -1863,6 +2042,7 @@
             tableWrap.appendChild(table);
 
             countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
+            refreshQueueUi();
 
             // Helper — pick which rows to export. Selection wins when any
             // are checked; otherwise the current filter+sort snapshot.
@@ -1965,6 +2145,82 @@
         }
         try { map.setView([lat, lng], Math.max(18, map.getZoom())); }
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
+    }
+
+    // Open an inline editor on a Min Alt or Max Alt cell of an FP
+    // segment row. Replaces cell content with a text input pre-filled
+    // with the current (or pending) value. Accepts plain numbers or
+    // formulas ("2720+50", "(2720+50)*2"). Enter/Tab/blur commits to
+    // the pending queue; Escape cancels. Triggers a redraw so the
+    // yellow "(new: N)" marker appears.
+    function startInlineSegmentEdit(td, row, field) {
+        if (!row || !row._isSegment || !row.arc) return;
+        const isMin = field === 'min_alt';
+        const currentM = isMin ? row.altMinM : row.altMaxM;
+        if (currentM == null) return;
+        const useFt = !!sumPanelState.unitsFt;
+        const existing = getPendingEdit(row.entity.id, row.arc.id, field);
+        const startValM = existing ? existing.newValueM : currentM;
+        const startDisp = useFt ? Math.round(startValM * 3.28084) : Number(startValM.toFixed(1));
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = String(startDisp);
+        input.title = 'Type a number or formula (e.g. 2720+50). Enter = queue · Esc = cancel.';
+        input.style.cssText = 'width:70px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px;text-align:right;font-variant-numeric:tabular-nums';
+        td.innerHTML = '';
+        td.appendChild(input);
+        input.focus();
+        input.select();
+
+        let cancelled = false;
+        const commit = () => {
+            if (cancelled) return;
+            const parsed = parseFormulaValue(input.value);
+            if (!isFinite(parsed)) {
+                showToast('Invalid value or formula', 'rgba(255,82,82,0.6)');
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            const newDisp = useFt ? Math.round(parsed) : Number(parsed.toFixed(1));
+            const origDisp = useFt ? Math.round(currentM * 3.28084) : Number(currentM.toFixed(1));
+            const newValueM = useFt ? newDisp / 3.28084 : newDisp;
+            if (newDisp === origDisp) {
+                // No-op edit → wipe any prior pending entry on this field
+                // so the cell goes back to clean display.
+                if (existing) {
+                    discardPendingEdit(row.entity.id, row.arc.id, field);
+                    showToast('Reverted to original value');
+                }
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            queuePendingEdit({
+                entityId: row.entity.id,
+                arcId: row.arc.id,
+                field,
+                oldValueM: currentM,
+                newValueM,
+                segmentName: row.name,
+                fpName: row.entity.name || '',
+            });
+            const unitTxt = useFt ? 'ft' : 'm';
+            const lbl = isMin ? 'Min' : 'Max';
+            showToast(`Queued: ${row.name} ${lbl} → ${newDisp.toLocaleString()} ${unitTxt}`, 'rgba(255,213,79,0.7)');
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelled = true;
+                input.onblur = null;
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            }
+        };
     }
 
     // Fit the map to a single FP arc — uses both endpoints as the bounds
