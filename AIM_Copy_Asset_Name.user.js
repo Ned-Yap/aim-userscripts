@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.25
+// @version      3.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.25';
+    const SCRIPT_VERSION = '3.26';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -103,14 +103,25 @@
     // ============================================================
     // Data fetch — internal endpoint, cookie auth (no token needed)
     // ============================================================
+    // Returns a Promise that resolves AFTER the new data is in
+    // mapObjectsBySite. Callers can `await` to ensure post-save reads
+    // see the fresh server state. With force=true, bypasses both the
+    // in-flight dedup AND any HTTP cache (Percepto + browser).
     function fetchMapObjects(siteID, force) {
-        if (!siteID) return;
-        if (fetchingSites.has(siteID)) return;
-        if (mapObjectsBySite[siteID] && !force) return;
+        if (!siteID) return Promise.resolve();
+        // Force bypasses in-flight dedup — verification needs FRESH
+        // data, not whatever's already on the wire (could be a stale
+        // pre-save request triggered by an unrelated Percepto event).
+        if (!force && fetchingSites.has(siteID)) return Promise.resolve();
+        if (!force && mapObjectsBySite[siteID]) return Promise.resolve();
         fetchingSites.add(siteID);
-        const url = MAP_OBJECTS_URL + encodeURIComponent(siteID);
-        console.log(`${TAG} fetching map_objects for site ${siteID}`);
-        fetch(url, { credentials: 'same-origin' })
+        // Cache-bust query param when forcing — defeats HTTP cache +
+        // any CDN/proxy layer. The endpoint ignores unknown params.
+        let url = MAP_OBJECTS_URL + encodeURIComponent(siteID);
+        if (force) url += `&_t=${Date.now()}`;
+        console.log(`${TAG} fetching map_objects for site ${siteID}${force ? ' (force, cache-bust)' : ''}`);
+        const headers = force ? { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' } : {};
+        return fetch(url, { credentials: 'same-origin', cache: force ? 'no-store' : 'default', headers })
             .then(r => {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json();
@@ -1770,7 +1781,9 @@
         //    Percepto data changed since the queue was built (someone
         //    else edited, or a partial prior apply succeeded). Warning,
         //    not blocking — user might want to overwrite anyway.
-        const tolM = 0.5; // ~1.5 ft tolerance for rounding drift
+        // Tolerance matches the apply verification — covers Percepto's
+        // internal integer-meter rounding (~3 ft round-trip drift).
+        const tolM = 1.0;
         Object.values(pendingSegmentEdits).forEach(e => {
             const ent = entities.find(en => en.id === e.entityId);
             if (!ent) return; // already caught above
@@ -2068,39 +2081,46 @@
             return { ok: false, reason: 'save timed out', appliedCount };
         }
         console.log(`${TAG} apply: ${label} — editor closed, verifying values…`);
-        // 7. POST-SAVE VERIFICATION. Percepto's save triggers a
-        //    map_objects refetch; wait briefly + re-read the entity
-        //    to confirm the values we wrote are what's actually in
-        //    the data. If Percepto silently rejected (e.g. snapped
-        //    to a different value due to internal rounding), we
-        //    catch it here instead of falsely reporting success.
+        // 7. POST-SAVE VERIFICATION.
+        //    - Wait 1s for Percepto's backend to commit the write
+        //      (FP saves with many segments are slower).
+        //    - Force-fetch with cache-busting (avoid HTTP/CDN cache
+        //      returning the pre-save snapshot).
+        //    - Compare in DISPLAY UNITS with a tolerance that covers
+        //      Percepto's internal rounding (Percepto stores integer
+        //      meters internally — round-trip 39 ft → 11.887 m may
+        //      come back as 12 m → 39 ft displayed, or 11 m → 36 ft).
+        //      Tolerance: 2 ft / 1 m.
         const siteID = getCurrentSiteID();
         let verified = false;
         if (siteID) {
-            // Force a fresh fetch — the in-memory cache may still
-            // have pre-save values from the prior fetch.
-            await fetchMapObjects(siteID, true);
-            await sleep(600);
+            await sleep(1000); // backend commit window
+            await fetchMapObjects(siteID, true); // now truly awaitable
+            const useFt = !!sumPanelState.unitsFt;
+            const tolDisp = useFt ? 2 : 1;
+            const toDisp = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
             let mismatchCount = 0;
-            const tolM = 0.5;
+            const mismatchDetails = [];
             for (const e of group.edits) {
                 const actualM = readCurrentAltForEdit(e);
                 if (actualM == null) {
                     mismatchCount++;
+                    mismatchDetails.push(`${e.field}: couldn't read`);
                     continue;
                 }
-                if (Math.abs(actualM - e.newValueM) > tolM) {
+                const wroteD = toDisp(e.newValueM);
+                const actualD = toDisp(actualM);
+                if (Math.abs(wroteD - actualD) > tolDisp) {
                     mismatchCount++;
-                    const useFt = !!sumPanelState.unitsFt;
-                    const conv = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
-                    const unit = useFt ? 'ft' : 'm';
-                    console.warn(`${TAG} apply: ${label} ${e.field} verify FAIL — wrote ${conv(e.newValueM)}${unit}, actual ${conv(actualM)}${unit}`);
+                    mismatchDetails.push(`${e.field}: wrote ${wroteD} got ${actualD}`);
+                    console.warn(`${TAG} apply: ${label} ${e.field} verify FAIL — wrote ${wroteD}${useFt ? 'ft' : 'm'}, actual ${actualD}${useFt ? 'ft' : 'm'} (diff > ${tolDisp})`);
                 }
             }
             if (mismatchCount === 0) {
                 verified = true;
             } else {
-                applyState.errors.push({ entityName: label, reason: `save succeeded but ${mismatchCount}/${group.edits.length} value(s) didn't stick (Percepto rejected silently?)` });
+                const reason = `${mismatchCount}/${group.edits.length} value(s) didn't match after verification: ${mismatchDetails.slice(0, 3).join('; ')}${mismatchDetails.length > 3 ? '…' : ''}`;
+                applyState.errors.push({ entityName: label, reason });
                 return { ok: false, reason: `${mismatchCount} value(s) failed verification`, appliedCount, verified: false };
             }
         }

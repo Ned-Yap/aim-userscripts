@@ -8,6 +8,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.26** — fix stale-data false verification failures.
+  - **ROOT CAUSE**: `fetchMapObjects()` was NOT awaitable — returned `undefined` synchronously while firing a background fetch. My `await fetchMapObjects(...)` in the verification step did nothing. The read happened against the in-memory cache which still held the **pre-save** snapshot. Plus the fetch had no cache-busting, so even when it did complete, HTTP/CDN caches could return the stale response.
+  - **Fix 1**: `fetchMapObjects()` now returns a `Promise` that resolves after `mapObjectsBySite` is updated. Callers' `await` actually waits.
+  - **Fix 2**: When called with `force=true`, the URL gets a `&_t={timestamp}` cache-buster + `Cache-Control: no-cache` headers + `cache: 'no-store'` fetch option. Bypasses browser, CDN, and any reverse-proxy cache.
+  - **Fix 3**: `force=true` also bypasses the in-flight dedup so a stale concurrent request can't cause us to short-circuit out of getting fresh data.
+  - **Fix 4**: Backend commit window — verification now sleeps 1 s after editor close before re-fetch (was 600 ms after re-fetch). FP saves with many segments need that.
+  - **Fix 5**: Verification tolerance bumped from 0.5 m to 1 m (2 ft) and now compares in DISPLAY UNITS. Percepto stores integer meters internally, so writing 39 ft (= 11.887 m) may round-trip back as either 12 m → 39 ft or 11 m → 36 ft depending on Percepto's rounding direction. The new tolerance covers both. Stale-queue check tolerance bumped the same.
+  - **Better error logs**: failure message now includes the actual mismatched values (`min_alt: wrote 39 got 36`) instead of just a count.
 - **AIM Asset Inspector v3.25** — fix Percepto's arc-ID regeneration false-failures + auto-refresh after apply.
   - **ROOT CAUSE**: when Percepto saves an FP, it regenerates every arc with a new `id` (e.g. 2558017 → 2571233). v3.24's post-save verification looked up arcs by `arcId` to confirm the new value stuck — `find()` returned nothing for the new IDs → reported "save succeeded but 28/28 value(s) didn't stick" even though the data actually saved correctly. Same bug bit the apply step on retries: stale queue arc IDs no longer matched the editor's current arc list.
   - **Fix**: queue entries now also store `arcIndex` (position in `entity.arcs`). That position is stable across saves. Both apply and verification now try `arcId` first, fall back to `arcIndex` when the ID lookup fails. Console logs the fallback when it kicks in.
