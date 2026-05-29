@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.31
+// @version      3.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.31';
+    const SCRIPT_VERSION = '3.32';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2410,20 +2410,36 @@
     //     [3D] Folder: Vertical Buffers > FFZ & FP sub-folders
     // ============================================================
     const KML_FT = 3.28084;
+    const KML_FT_TO_M = 1 / KML_FT;
     const KML_BUFFER_OFFSET_FT = 50;  // V-buffer is 50 ft below min_alt
-    // Centralized styles. Short IDs (s_asset vs asset_style) reduce
-    // file size by a few KB on a busy site.
-    const KML_STYLES = `
-<Style id="s_asset"><IconStyle><scale>1.0</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon></IconStyle><LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle><color>66ffffff</color></PolyStyle></Style>
-<Style id="s_ffz"><LineStyle><color>ff5fff5f</color><width>2</width></LineStyle><PolyStyle><color>335fff5f</color></PolyStyle></Style>
-<Style id="s_nfz"><LineStyle><color>ff5252ff</color><width>2</width></LineStyle><PolyStyle><color>335252ff</color></PolyStyle></Style>
-<Style id="s_fp"><LineStyle><color>ffdea01c</color><width>3</width></LineStyle></Style>
-<Style id="s_mk_general"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>
-<Style id="s_mk_tower"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>
-<Style id="s_mk_hazard"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>
-<Style id="s_vbuf_ffz"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle><PolyStyle><color>3300ffff</color></PolyStyle></Style>
-<Style id="s_vbuf_fp"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle></Style>
-`;
+    // Style palette ported from Stand_Alone_AIM_SS_Generator_V8.pyw —
+    // these are the AIM-matching colors coworkers are used to seeing in
+    // both Percepto and the Python KML output. KML color = aabbggrr.
+    //   Freezone        = ff00ff00  GREEN
+    //   No-fly          = ff0000ff  RED
+    //   Flight Path     = ffffff00  CYAN
+    //   Asset           = ffffffff  WHITE
+    //   Vertical Buf    = ff00ffff  YELLOW
+    //   Horizontal Buf  = ff00a5ff  ORANGE
+    // Per-mode variants: 3D uses translucent fill (33xxxxxx), 2D uses
+    // no fill (<fill>0</fill>) so polygons read as outlines on terrain.
+    function buildKmlStyles(mode) {
+        const m3 = mode === '3D';
+        const fillFreezone   = m3 ? '<color>3300ff00</color>' : '<fill>0</fill>';
+        const fillNFZ        = m3 ? '<color>330000ff</color>' : '<fill>0</fill>';
+        const fillAsset      = m3 ? '<color>33ffffff</color>' : '<fill>0</fill>';
+        return [
+            '<Style id="asset_style"><LineStyle><color>ffffffff</color><width>1</width></LineStyle><PolyStyle>' + fillAsset + '</PolyStyle></Style>',
+            '<Style id="freezone_style"><LineStyle><color>ff00ff00</color><width>2</width></LineStyle><PolyStyle>' + fillFreezone + '</PolyStyle></Style>',
+            '<Style id="nofly_style"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle><PolyStyle>' + fillNFZ + '</PolyStyle></Style>',
+            '<Style id="flightpath_style"><LineStyle><color>ffffff00</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
+            '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
+            '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
+            '<Style id="verticalbuffer_style"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            '<Style id="horizontalbuffer_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4D00a5ff</color></PolyStyle></Style>',
+        ].join('\n');
+    }
     // Escape XML-unsafe chars for use in element text + attributes.
     function xmlEscape(s) {
         if (s == null) return '';
@@ -2495,10 +2511,11 @@
         if (arc.wait_until_approved === true) lines.push('<b>⚠ Approval Required</b>');
         return `<![CDATA[${lines.join('<br>')}]]>`;
     }
-    // Asset polygon — 2D: clamp; 3D: extruded box from ground to claimed elev (or 4ft default).
-    function kmlAssetGeometry(item, mode) {
+    // Asset polygon. Python rule: 3D = extruded box capped at 10 ft AGL
+    // (above site ground), with extrude=1 drawing walls from polygon
+    // down to ground. 2D = ground-clamped flat polygon.
+    function kmlAssetGeometry(item, mode, siteDatumM) {
         if (!Array.isArray(item.coords) || item.coords.length < 3) {
-            // Markers stored as type 3 with single coord — emit a point.
             if (item.coords && item.coords[0]) {
                 return `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords([item.coords[0]])}</coordinates></Point>`;
             }
@@ -2506,42 +2523,63 @@
         }
         const ring = closeRing(item.coords);
         if (mode === '3D') {
-            const alt = (item.custom && typeof item.custom.elevation_asl === 'number')
-                ? item.custom.elevation_asl
-                : 0;
+            const alt = (10 * KML_FT_TO_M) + (siteDatumM || 0); // 10 ft above ground, MSL
             return `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
         }
         return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
-    // Zone polygon (FFZ/NFZ) — 2D: clamp; 3D: extruded box (min_alt → max_alt).
-    function kmlZoneGeometry(item, mode) {
+    // FFZ polygon in 3D = full extruded BOX = bottom cap + top cap +
+    // one rectangular wall per edge. All in a MultiGeometry so Google
+    // Earth renders the solid 3D volume. Matches Python output structure.
+    function kmlFreezoneGeometry(item, mode) {
         if (!Array.isArray(item.coords) || item.coords.length < 3) return '';
         const ring = closeRing(item.coords);
         if (mode === '3D') {
-            const minA = item.restrictions && item.restrictions.minAlt != null ? item.restrictions.minAlt : 0;
-            const maxA = item.restrictions && item.restrictions.maxAlt != null ? item.restrictions.maxAlt : minA;
-            // Extruded 3D box: a MultiGeometry holding two cap polygons
-            // (top at max_alt, bottom at min_alt). Google Earth renders
-            // them as a solid column. extrude=1 on the top cap draws
-            // side walls down to ground; combined with the bottom cap
-            // at min_alt this approximates a box from min→max alt.
-            const ringStr = kmlCoords(ring, maxA);
-            const ringStrBottom = kmlCoords(ring, minA);
-            return `<MultiGeometry>`
-                 + `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${ringStr}</coordinates></LinearRing></outerBoundaryIs></Polygon>`
-                 + `<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${ringStrBottom}</coordinates></LinearRing></outerBoundaryIs></Polygon>`
-                 + `</MultiGeometry>`;
+            const r = item.restrictions || {};
+            if (r.minAlt == null) return ''; // Python skips FFZ without min_alt
+            const minA = r.minAlt;
+            const maxA = r.maxAlt != null ? r.maxAlt : minA + 37; // ~120 ft default span if missing
+            const faces = [];
+            // Bottom cap at min_alt
+            faces.push(`<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, minA)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+            // Top cap at max_alt
+            faces.push(`<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, maxA)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+            // One wall polygon per edge: rectangle p1-p2 (bottom) ↔ p2-p1 (top)
+            const coords = item.coords; // unclosed (not the ring)
+            for (let i = 0; i < coords.length; i++) {
+                const p1 = coords[i];
+                const p2 = coords[(i + 1) % coords.length];
+                const wall = `${p1.lng},${p1.lat},${minA} ${p2.lng},${p2.lat},${minA} ${p2.lng},${p2.lat},${maxA} ${p1.lng},${p1.lat},${maxA} ${p1.lng},${p1.lat},${minA}`;
+                faces.push(`<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${wall}</coordinates></LinearRing></outerBoundaryIs></Polygon>`);
+            }
+            return `<MultiGeometry>${faces.join('')}</MultiGeometry>`;
         }
         return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
-    // FP segment as a LineString.
+    // NFZ polygon. Python rule: 3D = polygon at 400 ft AGL with
+    // extrude=1 (Google Earth draws walls down to ground = visual
+    // "extends to ground" column). 2D = ground-clamped.
+    function kmlNFZGeometry(item, mode, siteDatumM) {
+        if (!Array.isArray(item.coords) || item.coords.length < 3) return '';
+        const ring = closeRing(item.coords);
+        if (mode === '3D') {
+            const alt = (400 * KML_FT_TO_M) + (siteDatumM || 0);
+            return `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+        }
+        return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+    }
+    // FP segment. Python rule: 3D = rectangular VERTICAL WALL polygon
+    // spanning min_alt → max_alt over the arc footprint. NOT a flat
+    // line — gives the FP visible height in Google Earth so users can
+    // see the vertical envelope. 2D = ground-clamped LineString.
     function kmlArcGeometry(arc, mode) {
         if (!arc || !arc.point_a || !arc.point_b) return '';
-        const pts = [arc.point_a, arc.point_b];
-        if (mode === '3D' && typeof arc.min_alt === 'number') {
-            return `<LineString><altitudeMode>absolute</altitudeMode><coordinates>${kmlCoords(pts, arc.min_alt)}</coordinates></LineString>`;
+        const p1 = arc.point_a, p2 = arc.point_b;
+        if (mode === '3D' && typeof arc.min_alt === 'number' && typeof arc.max_alt === 'number') {
+            const wall = `${p1.lng},${p1.lat},${arc.min_alt} ${p2.lng},${p2.lat},${arc.min_alt} ${p2.lng},${p2.lat},${arc.max_alt} ${p1.lng},${p1.lat},${arc.max_alt} ${p1.lng},${p1.lat},${arc.min_alt}`;
+            return `<MultiGeometry><Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${wall}</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>`;
         }
-        return `<LineString><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords(pts, 0)}</coordinates></LineString>`;
+        return `<LineString><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords([p1, p2], 0)}</coordinates></LineString>`;
     }
     // Marker as a Point.
     function kmlMarkerGeometry(item, mode) {
@@ -2609,102 +2647,102 @@
         xml.push('<kml xmlns="http://www.opengis.net/kml/2.2">');
         xml.push(`<Document><name>${xmlEscape(siteName || `Site ${siteID}`)} (${mode})</name>`);
         xml.push(`<description><![CDATA[Generated by AIM Asset Inspector v${SCRIPT_VERSION} · ${new Date().toISOString().slice(0, 10)}<br>Site datum: ${(siteDatumM * KML_FT).toFixed(1)} ft / ${siteDatumM.toFixed(1)} m MSL]]></description>`);
-        xml.push(KML_STYLES.trim());
+        xml.push(buildKmlStyles(mode));
+
+        // Folder structure ports the Python tool's exact layout —
+        // separate top-level folders for each entity type so Google
+        // Earth's tree matches what coworkers are used to seeing in
+        // the PYW output.
 
         // Assets
         if (include.assets && byType[3].length > 0) {
-            xml.push(`<Folder><name>Assets (${byType[3].length})</name>`);
+            xml.push('<Folder><name>Asset</name>');
             byType[3].forEach(e => {
-                const geom = kmlAssetGeometry(e, mode);
+                const geom = kmlAssetGeometry(e, mode, siteDatumM);
                 if (!geom) return;
-                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_asset</styleUrl>${geom}</Placemark>`);
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#asset_style</styleUrl>${geom}</Placemark>`);
             });
             xml.push('</Folder>');
         }
-        // Flight Paths (nested folder per FP)
+        // Flight Paths — each FP is its own subfolder of placemarks (one per arc)
         if (include.fps && byType[15].length > 0) {
-            xml.push(`<Folder><name>Flight Paths (${byType[15].length})</name>`);
+            xml.push('<Folder><name>Flight Path</name>');
             byType[15].forEach(e => {
                 const arcs = Array.isArray(e.arcs) ? e.arcs : [];
-                xml.push(`<Folder id="fp_${e.id}"><name>${xmlEscape(e.name)} (${arcs.length} segs)</name>`);
+                xml.push(`<Folder id="fp_${e.id}"><name>${xmlEscape(e.name)}</name>`);
                 arcs.forEach((arc, i) => {
                     const geom = kmlArcGeometry(arc, mode);
                     if (!geom) return;
-                    xml.push(`<Placemark id="arc_${arc.id != null ? arc.id : i}"><name>${xmlEscape(e.name)} - Seg ${i + 1}</name><description>${kmlArcDescription(e, arc, i, opts)}</description><styleUrl>#s_fp</styleUrl>${geom}</Placemark>`);
+                    const pmName = mode === '3D' ? `${e.name} - Segment ${arc.id != null ? arc.id : (i + 1)}` : e.name;
+                    xml.push(`<Placemark id="arc_${arc.id != null ? arc.id : i}"><name>${xmlEscape(pmName)}</name><description>${kmlArcDescription(e, arc, i, opts)}</description><styleUrl>#flightpath_style</styleUrl>${geom}</Placemark>`);
                 });
                 xml.push('</Folder>');
             });
             xml.push('</Folder>');
         }
-        // Free-Fly Zones
+        // Freezone
         if (include.ffzs && byType[16].length > 0) {
-            xml.push(`<Folder><name>Free-Fly Zones (${byType[16].length})</name>`);
+            xml.push('<Folder><name>Freezone</name>');
             byType[16].forEach(e => {
-                const geom = kmlZoneGeometry(e, mode);
+                const geom = kmlFreezoneGeometry(e, mode);
                 if (!geom) return;
-                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_ffz</styleUrl>${geom}</Placemark>`);
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#freezone_style</styleUrl>${geom}</Placemark>`);
             });
             xml.push('</Folder>');
         }
-        // No-Fly Zones
+        // No-fly Zones
         if (include.nfzs && byType[4].length > 0) {
-            xml.push(`<Folder><name>No-Fly Zones (${byType[4].length})</name>`);
+            xml.push('<Folder><name>No-fly</name>');
             byType[4].forEach(e => {
-                const geom = kmlZoneGeometry(e, mode);
+                const geom = kmlNFZGeometry(e, mode, siteDatumM);
                 if (!geom) return;
-                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_nfz</styleUrl>${geom}</Placemark>`);
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#nofly_style</styleUrl>${geom}</Placemark>`);
             });
             xml.push('</Folder>');
         }
-        // General Markers — consolidated parent with one subfolder per subtype
-        const totalMarkers = byType[19].general.length + byType[19].tower.length + byType[19].hazard.length;
-        if (include.markers && totalMarkers > 0) {
-            xml.push(`<Folder><name>General Markers (${totalMarkers})</name>`);
-            const subFolders = [
-                { label: 'Tower', items: byType[19].tower },
-                { label: 'Hazard', items: byType[19].hazard },
-                { label: 'General', items: byType[19].general },
+        // General Markers — separate top-level folders per subtype to
+        // match Python output ("General Marker - Tower" etc.). This
+        // makes the Google Earth tree filterable per subtype like
+        // coworkers expect.
+        if (include.markers) {
+            const subTypes = [
+                { label: 'General Marker - General', items: byType[19].general, styleId: 'generalmarker-general_style' },
+                { label: 'General Marker - Tower',   items: byType[19].tower,   styleId: 'generalmarker-tower_style' },
+                { label: 'General Marker - Hazard',  items: byType[19].hazard,  styleId: 'generalmarker-hazard_style' },
             ];
-            subFolders.forEach(s => {
+            subTypes.forEach(s => {
                 if (s.items.length === 0) return;
-                xml.push(`<Folder><name>${s.label} (${s.items.length})</name>`);
+                xml.push(`<Folder><name>${s.label}</name>`);
                 s.items.forEach(e => {
                     const geom = kmlMarkerGeometry(e, mode);
                     if (!geom) return;
-                    xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#${kmlMarkerStyleId(e)}</styleUrl>${geom}</Placemark>`);
+                    xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#${s.styleId}</styleUrl>${geom}</Placemark>`);
                 });
                 xml.push('</Folder>');
             });
-            xml.push('</Folder>');
         }
-        // 3D-only: Vertical Buffers (50 ft below FFZ min + FP min)
+        // 3D-only: Vertical Buffers — separate FFZ + FP folders (matches Python)
         if (mode === '3D' && include.vbuffers) {
             const ffzWithMin = byType[16].filter(e => e.restrictions && e.restrictions.minAlt != null);
+            if (ffzWithMin.length > 0) {
+                xml.push('<Folder><name>Freezone Vertical Buffers</name>');
+                ffzWithMin.forEach(e => {
+                    const geom = kmlVBufferZone(e);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="vbuffer_pm_${e.id}"><name>${xmlEscape(e.name)} - VBuffer</name><styleUrl>#verticalbuffer_style</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            }
             const fpWithArcs = byType[15].filter(e => Array.isArray(e.arcs) && e.arcs.length > 0);
-            if (ffzWithMin.length > 0 || fpWithArcs.length > 0) {
-                xml.push('<Folder><name>Vertical Buffers (50 ft)</name>');
-                if (ffzWithMin.length > 0) {
-                    xml.push(`<Folder><name>FFZ V-Buffers (${ffzWithMin.length})</name>`);
-                    ffzWithMin.forEach(e => {
-                        const geom = kmlVBufferZone(e);
+            if (fpWithArcs.length > 0) {
+                xml.push('<Folder><name>Flight Path Vertical Buffers</name>');
+                fpWithArcs.forEach(e => {
+                    e.arcs.forEach((arc, i) => {
+                        const geom = kmlVBufferArc(arc);
                         if (!geom) return;
-                        xml.push(`<Placemark id="vbuf_${e.id}"><name>${xmlEscape(e.name)} - VBuffer</name><styleUrl>#s_vbuf_ffz</styleUrl>${geom}</Placemark>`);
+                        xml.push(`<Placemark id="vbuffer_arc_${arc.id != null ? arc.id : i}"><name>${xmlEscape(e.name)} - Segment ${arc.id != null ? arc.id : (i + 1)} - VBuffer</name><styleUrl>#verticalbuffer_style</styleUrl>${geom}</Placemark>`);
                     });
-                    xml.push('</Folder>');
-                }
-                if (fpWithArcs.length > 0) {
-                    xml.push(`<Folder><name>FP V-Buffers (${fpWithArcs.length})</name>`);
-                    fpWithArcs.forEach(e => {
-                        xml.push(`<Folder><name>${xmlEscape(e.name)}</name>`);
-                        e.arcs.forEach((arc, i) => {
-                            const geom = kmlVBufferArc(arc);
-                            if (!geom) return;
-                            xml.push(`<Placemark id="vbuf_arc_${arc.id != null ? arc.id : i}"><name>Seg ${i + 1} - VBuffer</name><styleUrl>#s_vbuf_fp</styleUrl>${geom}</Placemark>`);
-                        });
-                        xml.push('</Folder>');
-                    });
-                    xml.push('</Folder>');
-                }
+                });
                 xml.push('</Folder>');
             }
         }

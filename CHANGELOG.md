@@ -8,6 +8,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.32** — Site Setup Analyzer rewritten for **exact Python parity** (after v3.30's restructure diverged too far from what coworkers expect in Google Earth).
+  - **Colors now match AIM exactly** — Freezone GREEN (`ff00ff00`), No-fly RED (`ff0000ff`), Flight Path CYAN (`ffffff00`), Asset WHITE, Vertical Buffer YELLOW, Horizontal Buffer ORANGE. Same KML color values the Python stand-alone uses + same Percepto on-screen colors.
+  - **Folder structure mirrors Python output** — separate top-level folders: `Asset`, `Flight Path`, `Freezone`, `No-fly`, `General Marker - General/Tower/Hazard` (3 separate folders, not consolidated). Plus `Freezone Vertical Buffers` + `Flight Path Vertical Buffers` for 3D.
+  - **FP segments now have visible vertical height in 3D** — emitted as a rectangular WALL polygon spanning min_alt → max_alt, not a flat 3D line. This was the major v3.30 bug.
+  - **FFZ in 3D is now a proper extruded box** — bottom cap + top cap + one wall polygon per edge, all wrapped in MultiGeometry. Renders as solid 3D volume in Google Earth (v3.30's 2-polygon attempt rendered as wireframe).
+  - **NFZ in 3D now extrudes from ground** — polygon at 400ft AGL with `extrude=1`, matches Python.
+  - **Asset in 3D extrudes** — polygon at 10ft AGL with `extrude=1`.
+  - Style IDs match Python (`freezone_style`, `flightpath_style`, etc.) so anyone diffing both outputs sees the same structure.
 - **AIM Asset Inspector v3.31** — fix: KML download blocked by iframe sandbox. Percepto loads us into a sandboxed iframe that lacks `allow-downloads`, so the v3.30 anchor-click download failed silently with a console message. Fix: do the blob creation + anchor + click in the TOP window's context (parent frame, not sandboxed). Falls back to in-frame attempt if `window.top` is cross-origin. If both fail, the existing "Copy to clipboard" path still works.
 - **AIM Asset Inspector v3.30** — **NEW: Site Setup Analyzer (KML export, Phase 1).** Replaces the Stand_Alone_AIM_SS_Generator_V8.pyw workflow for the common case (Google Earth visualization). New 🗺️ **Analyzer** button in the SUM panel toolbar (next to 📊 Summary) opens a modal:
   - **2D mode** — all geometry clamped to ground (flat polygons + lines + pins).
