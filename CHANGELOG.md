@@ -8,6 +8,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.33** — Site Setup Analyzer description + altitude polish:
+  - **Assets no longer underground.** Switched Assets + NFZs from `absolute` altitude (which needed an accurate site_ground_elevation — we don't always have one) to `relativeToGround`. Google Earth now follows the actual terrain at each entity's exact location, so Assets sit at ~20 ft above the surface they're on, regardless of site datum. NFZ columns are 400 ft tall above local ground.
+  - **Restored full description data.** v3.32 missed the raw `item.description` field — that's where Percepto's "Desig: x | Div: y | Cat: z | Type: w | ID: nnnn" header lives for assets. Now included verbatim as the first description block (matches Python).
+  - **AGL + MSL dual altitudes** in all altitude lines, formatted like Python: `Min Altitude (AGL): 102.7 ft / 31.3 m | (MSL): 3,056.0 ft / 931.5 m`. Site Datum Elevation prominent in each placemark.
+  - **Better Site Datum calculation.** Three-tier fallback: (1) average of all asset `custom.elevation_asl` values — most reliable, real Percepto MSL data; (2) average of DEM-cached centroids; (3) zero with the line omitted. Was always falling to zero before because DEM cache often empty at export time.
 - **AIM Asset Inspector v3.32** — Site Setup Analyzer rewritten for **exact Python parity** (after v3.30's restructure diverged too far from what coworkers expect in Google Earth).
   - **Colors now match AIM exactly** — Freezone GREEN (`ff00ff00`), No-fly RED (`ff0000ff`), Flight Path CYAN (`ffffff00`), Asset WHITE, Vertical Buffer YELLOW, Horizontal Buffer ORANGE. Same KML color values the Python stand-alone uses + same Percepto on-screen colors.
   - **Folder structure mirrors Python output** — separate top-level folders: `Asset`, `Flight Path`, `Freezone`, `No-fly`, `General Marker - General/Tower/Hazard` (3 separate folders, not consolidated). Plus `Freezone Vertical Buffers` + `Flight Path Vertical Buffers` for 3D.

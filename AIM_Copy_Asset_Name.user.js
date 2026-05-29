@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.32
+// @version      3.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.32';
+    const SCRIPT_VERSION = '3.33';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2459,62 +2459,96 @@
         if (first.lat === last.lat && first.lng === last.lng) return points;
         return points.concat([first]);
     }
-    // Build the CDATA description block — dual-unit altitudes + key
-    // metadata. Compact (single-line HTML) to minimize KML size.
+    // Format a dual-line "Label (AGL): ftAGL / mAGL | (MSL): ftMSL / mMSL"
+    // entry — matches Python's _format_alt_line output exactly. Bold ft
+    // values stand out against m secondary readout.
+    function fmtAltLineKML(label, aglM, mslM) {
+        const aglFt = aglM * KML_FT;
+        const mslFt = mslM * KML_FT;
+        return `<b>${label} (AGL):</b> <b><font color="#00008B">${aglFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${aglM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m | <b>(MSL):</b> <b><font color="#00008B">${mslFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${mslM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m`;
+    }
+    // Build the CDATA description for an entity placemark. Mirrors
+    // Python's _generate_detailed_description structure: raw description
+    // first (preserves "Desig: x | Div: y | Cat: z | Type: w | ID: nnnn"
+    // header that comes pre-formatted from Percepto), then Object Details
+    // section with site datum + dual AGL/MSL altitudes.
     function kmlDescription(item, opts) {
         const { siteDatumM } = opts;
-        const lines = [];
-        const datumFt = (siteDatumM || 0) * KML_FT;
-        if (siteDatumM != null) {
-            lines.push(`<b>Site Datum:</b> ${datumFt.toFixed(1)} ft / ${siteDatumM.toFixed(1)} m MSL`);
+        const parts = [];
+        // 1. Original description from Percepto (asset designation line, etc.)
+        if (item.description && String(item.description).trim()) {
+            parts.push(xmlEscape(String(item.description).trim()));
         }
-        if (item.type === 3 && item.custom) {
-            if (item.custom.poi_type_str) lines.push(`<b>Subtype:</b> ${xmlEscape(item.custom.poi_type_str)}`);
-            if (item.custom.elevation_asl != null) {
-                const ft = item.custom.elevation_asl * KML_FT;
-                lines.push(`<b>Asset Elevation:</b> ${ft.toFixed(1)} ft / ${item.custom.elevation_asl.toFixed(1)} m MSL`);
-            }
-            if (item.custom.relative_alt != null) lines.push(`<b>Height AGL:</b> ${(item.custom.relative_alt * KML_FT).toFixed(1)} ft`);
+        // 2. Object Details header + site datum
+        const details = ['<b>--- Object Details ---</b>'];
+        if (siteDatumM > 0) {
+            const datumFt = siteDatumM * KML_FT;
+            details.push(`<b>Site Datum Elevation:</b> <b><font color="#00008B">${datumFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${siteDatumM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL`);
         }
-        // FFZ / NFZ altitude range
-        if ((item.type === 4 || item.type === 16) && item.restrictions) {
-            const r = item.restrictions;
-            if (r.minAlt != null) {
-                const aglFt = (r.minAlt - (siteDatumM || 0)) * KML_FT;
-                const mslFt = r.minAlt * KML_FT;
-                lines.push(`<b>Min Alt:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
+        // 3. Altitude block — FFZ/NFZ pull from restrictions, Assets from custom
+        let minAltM = null, maxAltM = null;
+        if (item.type === 4 || item.type === 16) {
+            if (item.restrictions) {
+                minAltM = item.restrictions.minAlt;
+                maxAltM = item.restrictions.maxAlt;
             }
-            if (r.maxAlt != null) {
-                const aglFt = (r.maxAlt - (siteDatumM || 0)) * KML_FT;
-                const mslFt = r.maxAlt * KML_FT;
-                lines.push(`<b>Max Alt:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
+        } else if (item.type === 3 && item.custom) {
+            if (typeof item.custom.elevation_asl === 'number') {
+                // Asset's claimed elevation IS its MSL altitude. Show it as
+                // a single-line dual-format value.
+                const aslM = item.custom.elevation_asl;
+                const aglM = aslM - (siteDatumM || 0);
+                details.push(`<b>Asset Elevation:</b> <b><font color="#00008B">${(aslM * KML_FT).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${aslM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL (${aglM >= 0 ? '+' : ''}${(aglM * KML_FT).toFixed(1)} ft AGL)`);
+            }
+            if (typeof item.custom.relative_alt === 'number' && item.custom.relative_alt > 0) {
+                details.push(`<b>Height AGL:</b> ${(item.custom.relative_alt * KML_FT).toFixed(1)} ft / ${item.custom.relative_alt.toFixed(1)} m`);
             }
         }
-        if (item.description) lines.push(`<b>Notes:</b> ${xmlEscape(String(item.description).trim()).substring(0, 400)}`);
-        if (item.is_unshielded) lines.push(`<b>⚠ Unshielded</b>`);
-        return `<![CDATA[${lines.join('<br>')}]]>`;
+        if (minAltM != null) {
+            const aglM = minAltM - (siteDatumM || 0);
+            details.push(fmtAltLineKML('Min Altitude', aglM, minAltM));
+        }
+        if (maxAltM != null) {
+            const aglM = maxAltM - (siteDatumM || 0);
+            details.push(fmtAltLineKML('Max Altitude', aglM, maxAltM));
+        }
+        if (item.is_unshielded) details.push('<b><font color="#ff6060">⚠ Unshielded</font></b>');
+        parts.push(details.join('<br><br>'));
+        return `<![CDATA[${parts.join('<br><br>')}]]>`;
     }
-    // Per-segment description for FP arcs.
+    // FP arc description — includes parent link + per-segment altitudes.
     function kmlArcDescription(fp, arc, idx, opts) {
         const { siteDatumM } = opts;
-        const lines = [`<b>Parent FP:</b> ${xmlEscape(fp.name)}`,
-                       `<b>Segment:</b> #${idx + 1} (ID ${arc.id != null ? arc.id : 'n/a'})`];
-        if (typeof arc.distance === 'number') lines.push(`<b>Distance:</b> ${(arc.distance * KML_FT).toFixed(0)} ft / ${arc.distance.toFixed(1)} m`);
-        const addAlt = (label, m) => {
-            if (m == null) return;
-            const aglFt = (m - (siteDatumM || 0)) * KML_FT;
-            const mslFt = m * KML_FT;
-            lines.push(`<b>${label}:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
-        };
-        addAlt('Min Alt', arc.min_alt);
-        addAlt('Max Alt', arc.max_alt);
-        if (arc.wait_until_approved === true) lines.push('<b>⚠ Approval Required</b>');
-        return `<![CDATA[${lines.join('<br>')}]]>`;
+        const parts = [`<b>Parent Path:</b> <a href="#pm_${fp.id};flyto">${xmlEscape(fp.name)}</a>`];
+        const details = ['<b>--- Object Details ---</b>'];
+        if (siteDatumM > 0) {
+            const datumFt = siteDatumM * KML_FT;
+            details.push(`<b>Site Datum Elevation:</b> <b><font color="#00008B">${datumFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${siteDatumM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL`);
+        }
+        if (typeof arc.distance === 'number') {
+            details.push(`<b>Segment Length:</b> ${(arc.distance * KML_FT).toFixed(1)} ft / ${arc.distance.toFixed(1)} m`);
+        }
+        if (typeof arc.min_alt === 'number') {
+            const aglM = arc.min_alt - (siteDatumM || 0);
+            details.push(fmtAltLineKML('Min Altitude', aglM, arc.min_alt));
+        }
+        if (typeof arc.max_alt === 'number') {
+            const aglM = arc.max_alt - (siteDatumM || 0);
+            details.push(fmtAltLineKML('Max Altitude', aglM, arc.max_alt));
+        }
+        if (arc.wait_until_approved === true) {
+            details.push('<b><font color="#ff9800">⚠ Approval Required</font></b>');
+        }
+        parts.push(details.join('<br><br>'));
+        return `<![CDATA[${parts.join('<br><br>')}]]>`;
     }
-    // Asset polygon. Python rule: 3D = extruded box capped at 10 ft AGL
-    // (above site ground), with extrude=1 drawing walls from polygon
-    // down to ground. 2D = ground-clamped flat polygon.
-    function kmlAssetGeometry(item, mode, siteDatumM) {
+    // Asset polygon. Python uses absolute altitude with site_ground_elev
+    // baked in — but that requires accurate terrain data we don't always
+    // have. We use `relativeToGround` instead: Google Earth follows the
+    // actual terrain at the asset's exact location, so assets sit ON
+    // the ground regardless of whether our site datum is correct.
+    // Height: 20 ft (bumped from Python's 10 ft per user preference).
+    function kmlAssetGeometry(item, mode) {
         if (!Array.isArray(item.coords) || item.coords.length < 3) {
             if (item.coords && item.coords[0]) {
                 return `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords([item.coords[0]])}</coordinates></Point>`;
@@ -2523,8 +2557,8 @@
         }
         const ring = closeRing(item.coords);
         if (mode === '3D') {
-            const alt = (10 * KML_FT_TO_M) + (siteDatumM || 0); // 10 ft above ground, MSL
-            return `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+            const altM = 20 * KML_FT_TO_M; // 20 ft above terrain
+            return `<Polygon><extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, altM)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
         }
         return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
@@ -2556,15 +2590,16 @@
         }
         return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
-    // NFZ polygon. Python rule: 3D = polygon at 400 ft AGL with
-    // extrude=1 (Google Earth draws walls down to ground = visual
-    // "extends to ground" column). 2D = ground-clamped.
-    function kmlNFZGeometry(item, mode, siteDatumM) {
+    // NFZ polygon. 3D = polygon at 400 ft above terrain (relativeToGround)
+    // with extrude=1, so Google Earth draws walls from the polygon down
+    // to actual ground level — gives a 400ft tall column following the
+    // real terrain underneath. 2D = ground-clamped.
+    function kmlNFZGeometry(item, mode) {
         if (!Array.isArray(item.coords) || item.coords.length < 3) return '';
         const ring = closeRing(item.coords);
         if (mode === '3D') {
-            const alt = (400 * KML_FT_TO_M) + (siteDatumM || 0);
-            return `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+            const altM = 400 * KML_FT_TO_M;
+            return `<Polygon><extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, altM)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
         }
         return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
@@ -2617,16 +2652,30 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
         const entities = bucket.entities || [];
-        // Site datum = average elevation of all entity centroids that
-        // have a DEM-resolved value. Falls back to 0 if nothing loaded.
-        let datumSum = 0, datumCount = 0;
-        entities.forEach(e => {
-            const c = getEntityCentroid(e);
-            if (!c) return;
-            const v = getElevationFromCache(c.lat, c.lng);
-            if (v != null) { datumSum += v; datumCount++; }
-        });
-        const siteDatumM = datumCount > 0 ? datumSum / datumCount : 0;
+        // Site datum elevation (MSL) — three-tier fallback:
+        //   1. Average of all asset `custom.elevation_asl` values
+        //      (assets store real MSL elevations from Percepto, the
+        //      most reliable source — no DEM cache dependency).
+        //   2. Average of DEM-cached entity centroids (if asset elev
+        //      is missing or sparse — works when SUM panel has been
+        //      open long enough for the bulk fetch to populate).
+        //   3. 0 (last-resort; description omits site datum line).
+        let siteDatumM = 0;
+        const assetAlts = entities
+            .filter(e => e.type === 3 && e.custom && typeof e.custom.elevation_asl === 'number')
+            .map(e => e.custom.elevation_asl);
+        if (assetAlts.length > 0) {
+            siteDatumM = assetAlts.reduce((s, v) => s + v, 0) / assetAlts.length;
+        } else {
+            let demSum = 0, demCount = 0;
+            entities.forEach(e => {
+                const c = getEntityCentroid(e);
+                if (!c) return;
+                const v = getElevationFromCache(c.lat, c.lng);
+                if (v != null) { demSum += v; demCount++; }
+            });
+            if (demCount > 0) siteDatumM = demSum / demCount;
+        }
         const opts = { siteDatumM };
 
         // Bucket entities by type for folder construction
@@ -2658,7 +2707,7 @@
         if (include.assets && byType[3].length > 0) {
             xml.push('<Folder><name>Asset</name>');
             byType[3].forEach(e => {
-                const geom = kmlAssetGeometry(e, mode, siteDatumM);
+                const geom = kmlAssetGeometry(e, mode);
                 if (!geom) return;
                 xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#asset_style</styleUrl>${geom}</Placemark>`);
             });
@@ -2694,7 +2743,7 @@
         if (include.nfzs && byType[4].length > 0) {
             xml.push('<Folder><name>No-fly</name>');
             byType[4].forEach(e => {
-                const geom = kmlNFZGeometry(e, mode, siteDatumM);
+                const geom = kmlNFZGeometry(e, mode);
                 if (!geom) return;
                 xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#nofly_style</styleUrl>${geom}</Placemark>`);
             });
