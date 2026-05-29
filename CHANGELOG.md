@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.27** — **remove post-save verification entirely.** The verification step I added in v3.24 has caused more problems than it solved: Percepto stores integer meters internally, so writing 39 ft (= 11.887 m) round-trips back as either 11 m → 36 ft or 12 m → 39 ft depending on Percepto's rounding direction. Either way the verification flags it as a "mismatch" because the round-trip drift is ~3 ft. Bumping the tolerance in v3.26 helped but didn't solve it — drifts on bigger numbers (e.g. 2746 → 2743) still trip the alarm. The bulk-altitude-updater this pipeline is modeled on doesn't verify either, and it's solid. New behavior: editor closed cleanly + no validation error toast = save succeeded. Stop trying to second-guess Percepto.
+  - Pre-flight checks (duplicate names, stale-queue warnings, validation-error detection during save) stay — those caught real issues. Just the after-save re-read is gone.
+  - Audit log still written.
+  - Auto-refresh after run still fires.
 - **AIM Asset Inspector v3.26** — fix stale-data false verification failures.
   - **ROOT CAUSE**: `fetchMapObjects()` was NOT awaitable — returned `undefined` synchronously while firing a background fetch. My `await fetchMapObjects(...)` in the verification step did nothing. The read happened against the in-memory cache which still held the **pre-save** snapshot. Plus the fetch had no cache-busting, so even when it did complete, HTTP/CDN caches could return the stale response.
   - **Fix 1**: `fetchMapObjects()` now returns a `Promise` that resolves after `mapObjectsBySite` is updated. Callers' `await` actually waits.
