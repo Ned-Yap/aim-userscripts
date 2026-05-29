@@ -8,6 +8,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.23** — apply-pipeline fixes after first live test.
+  - **Fixed: editor detection.** v3.22 looked for `.upsert-entity__title` which doesn't exist in current Percepto. Switched to reading the entity name from the `#upsert-entity-form-name` input value. This was the root cause of every "editor did not open" failure.
+  - **Relaxed match.** If the editor opens but the name doesn't match what we clicked, we now WARN + skip (don't write wrong values) instead of looping forever waiting for the right title. Removes the 8-second per-entity stall on mismatch.
+  - **One-click retry.** If the editor doesn't open within 8 s of the first sidebar click, retry the click once (Percepto's sidebar occasionally drops a click mid-render).
+  - **Multiple sidebar item selectors** — tries `.map-entities__entity-item`, `.map-entities__entity`, `.map-entities__list-item`, etc. so a future Percepto class rename doesn't break the entire pipeline.
+  - **Diagnostic logging** — every step prints to console with the `[AIM AI] apply: ...` tag. Per entity: starting · clicking sidebar item · editor open · found N Min/Max inputs · set N values · SAVED. Failures log the specific reason. Re-run + share the console output if anything still misbehaves.
 - **AIM Asset Inspector v3.22** — **▶ Apply queue — automated commit of pending altitude edits.** New green button in the queue footer drives Percepto's entity editor for every queued Min/Max edit. Behavior:
   - **Grouped by entity** — an FP with 6 queued segments opens the editor ONCE and saves ONCE.
   - **FFZ-first ordering** — all FFZs apply before any FP segment. Required by AIM's overlap/steepness safety checks (FP saves fail if FFZ endpoints haven't moved yet).

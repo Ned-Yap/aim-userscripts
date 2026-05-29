@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.22
+// @version      3.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.22';
+    const SCRIPT_VERSION = '3.23';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1371,10 +1371,29 @@
         return panels[panels.length - 1];
     }
 
+    // Read the entity name from the open editor. Current Percepto stores
+    // it in `#upsert-entity-form-name` (an `<input>`), not in a title
+    // element. We fall back to a couple of older selectors in case the
+    // markup shifts back.
     function getEditorTitle(panelDoc) {
+        const nameInput = panelDoc.querySelector('#upsert-entity-form-name');
+        if (nameInput && typeof nameInput.value === 'string' && nameInput.value.trim()) {
+            return nameInput.value.trim();
+        }
         const t = panelDoc.querySelector('.upsert-entity__title')
             || panelDoc.querySelector('.site-setup-header__title');
         return t ? (t.textContent || '').trim() : '';
+    }
+    // True iff an editor panel is open AND it actually has a populated
+    // name input. Filters out half-rendered editor shells that may
+    // exist during transition frames.
+    function findOpenEditorWithName() {
+        const panels = scanAllDocs('.upsert-entity');
+        for (let i = panels.length - 1; i >= 0; i--) {
+            const t = getEditorTitle(panels[i].doc);
+            if (t) return panels[i];
+        }
+        return null;
     }
 
     // Find the FP-segment Min/Max inputs in the editor. Returns
@@ -1414,30 +1433,54 @@
         return { minInputs, maxInputs };
     }
 
-    // Find an entity in the Map Entities sidebar by name. Returns
-    // { el, doc } or null. Scrolls the virtualized list up to N
-    // pages before giving up (Percepto recycles offscreen items).
+    // Find an entity in the Map Entities sidebar by name. The
+    // SIDEBAR_ITEM_SELECTORS list tries multiple known class shapes
+    // (Percepto has gone through a few). The first that matches
+    // anything is used for the whole search.
+    const SIDEBAR_ITEM_SELECTORS = [
+        '.map-entities__entity-item',
+        '.map-entities__entity',
+        '.map-entities__list-item',
+        '.map-entities .entity-item',
+    ];
+    function findSidebarItems() {
+        for (const sel of SIDEBAR_ITEM_SELECTORS) {
+            const hits = scanAllDocs(sel);
+            if (hits.length > 0) return hits;
+        }
+        return [];
+    }
+    function getSidebarItemName(item) {
+        // Try the inner name span class; fall back to the item's own
+        // text content (trimmed) if the inner selector misses.
+        const nm = item.el.querySelector('.map-entities__entity-name')
+            || item.el.querySelector('.entity-name')
+            || item.el.querySelector('[class*="entity-name"]');
+        if (nm && nm.textContent) return nm.textContent.trim();
+        return (item.el.textContent || '').trim();
+    }
     async function findEntityInSidebar(name, scrollLimit = 30) {
-        // First pass — check what's currently rendered.
-        const initial = scanAllDocs('.map-entities__entity-item').find(it => {
-            const nm = it.el.querySelector('.map-entities__entity-name');
-            return nm && (nm.textContent || '').trim() === name;
+        const matchName = name.trim().toLowerCase();
+        const findMatch = () => findSidebarItems().find(it => {
+            const t = getSidebarItemName(it).toLowerCase();
+            return t === matchName;
         });
+        const initial = findMatch();
         if (initial) return initial;
-        // Scroll the list to find more.
-        const anyItem = scanAllDocs('.map-entities__entity-item')[0];
+        const anyItem = findSidebarItems()[0];
         const list = anyItem
-            ? (anyItem.el.closest('.map-entities__virtualized-list') || anyItem.el.parentElement)
+            ? (anyItem.el.closest('.map-entities__virtualized-list')
+                || anyItem.el.closest('[class*="virtualized"]')
+                || anyItem.el.parentElement)
             : null;
-        if (!list) return null;
-        // First, scroll to top so we restart the search.
+        if (!list) {
+            console.warn(`${TAG} apply: no sidebar list found — entity-item selector may be stale`);
+            return null;
+        }
         list.scrollTop = 0;
         await sleep(250);
         for (let i = 0; i < scrollLimit; i++) {
-            const hit = scanAllDocs('.map-entities__entity-item').find(it => {
-                const nm = it.el.querySelector('.map-entities__entity-name');
-                return nm && (nm.textContent || '').trim() === name;
-            });
+            const hit = findMatch();
             if (hit) {
                 hit.el.scrollIntoView({ block: 'center' });
                 await sleep(150);
@@ -1445,7 +1488,7 @@
             }
             const before = list.scrollTop;
             list.scrollTop += list.clientHeight * 0.7;
-            if (list.scrollTop === before) break;       // hit bottom
+            if (list.scrollTop === before) break;
             await sleep(200);
         }
         return null;
@@ -1642,6 +1685,7 @@
     // failure recorded in applyState.errors).
     async function applyOneEntity(group) {
         const label = group.entityName || '(unnamed)';
+        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${group.isFfz ? ', FFZ' : ', FP'})`);
         // 1. Close any existing editor (we may have landed in the
         //    wrong one from a previous step).
         await closeEditor();
@@ -1649,24 +1693,49 @@
         const hit = await findEntityInSidebar(label);
         if (!hit) {
             applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
-            console.warn(`${TAG} apply: entity not in sidebar: ${label}`);
+            console.warn(`${TAG} apply: ${label} — entity not in sidebar`);
             return false;
         }
+        console.log(`${TAG} apply: ${label} — clicking sidebar item`);
         clickElDispatch(hit.el, hit.doc);
-        // 3. Wait for editor panel to render with this entity's title.
-        const editor = await waitForCondition(() => {
-            const ed = findOpenEditor();
-            if (!ed) return null;
-            const t = getEditorTitle(ed.doc).toLowerCase();
-            return t && t.includes(label.toLowerCase()) ? ed : null;
-        }, 8000, 250);
+        // 3. Wait for ANY editor with a populated name input to render.
+        //    Then verify the name matches ours; if not, warn but proceed
+        //    (matches the Bulk Altitude Updater pattern — relying on
+        //    "we just clicked this item" as the source of truth).
+        const editor = await waitForCondition(
+            () => findOpenEditorWithName(),
+            8000, 250,
+        );
         if (!editor) {
-            applyState.errors.push({ entityName: label, reason: 'editor did not open' });
-            console.warn(`${TAG} apply: editor did not open for ${label}`);
+            // Try one more click in case the first was eaten by a
+            // race with React rendering. Sometimes Percepto's sidebar
+            // ignores the first click while it's mid-update.
+            console.warn(`${TAG} apply: ${label} — no editor after 8s, retrying click`);
+            clickElDispatch(hit.el, hit.doc);
+            const retry = await waitForCondition(() => findOpenEditorWithName(), 6000, 250);
+            if (!retry) {
+                applyState.errors.push({ entityName: label, reason: 'editor did not open (after retry)' });
+                console.warn(`${TAG} apply: ${label} — editor still not open after retry`);
+                return false;
+            }
+        }
+        const finalEditor = findOpenEditorWithName();
+        if (!finalEditor) {
+            applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
             return false;
         }
+        const openedName = getEditorTitle(finalEditor.doc);
+        if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
+            // Wrong entity in the editor — bail to avoid writing the
+            // wrong values. Don't close (let user see the state).
+            console.warn(`${TAG} apply: ${label} — editor shows different entity "${openedName}" — skipping`);
+            applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
+            return false;
+        }
+        console.log(`${TAG} apply: ${label} — editor open, name="${openedName}"`);
         // 4. Find the inputs.
-        const { minInputs, maxInputs } = findEditorInputs(editor.doc);
+        const { minInputs, maxInputs } = findEditorInputs(finalEditor.doc);
+        console.log(`${TAG} apply: ${label} — found ${minInputs.length} Min input(s), ${maxInputs.length} Max input(s)`);
         if (minInputs.length === 0 && maxInputs.length === 0) {
             applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
             console.warn(`${TAG} apply: no inputs found for ${label}`);
@@ -1712,14 +1781,17 @@
             await closeEditor();
             return false;
         }
+        console.log(`${TAG} apply: ${label} — set ${appliedCount} input value(s), saving…`);
         // 6. Save + confirm modal.
         await sleep(400);
         const saved = await saveCurrentEditor();
         if (!saved) {
             applyState.errors.push({ entityName: label, reason: 'save timed out (validation error?)' });
+            console.warn(`${TAG} apply: ${label} — save did NOT close editor within timeout`);
             // Leave editor open so the user can see what went wrong.
             return false;
         }
+        console.log(`${TAG} apply: ${label} — SAVED ✓`);
         return true;
     }
     let sumPanelState = {
