@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.21
+// @version      3.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.21';
+    const SCRIPT_VERSION = '3.22';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1282,6 +1282,446 @@
         }
         return Number(trimmed);
     }
+
+    // ============================================================
+    // APPLY QUEUE — automated commit of pending edits (v3.22)
+    //
+    // Drives Percepto's entity edit dialog for each pending edit by:
+    //   1. Grouping queue by entity (one editor open per entity, not
+    //      one per edit — an FP with 6 queued segments is one save).
+    //   2. Sorting groups FFZ-FIRST, then FP — matches AIM's safety
+    //      check order (FFZ endpoints must already be in place before
+    //      FP saves don't trip the overlap/steepness validators).
+    //   3. For each group, asynchronously: find entity in sidebar,
+    //      click to select, wait for `.upsert-entity` panel, populate
+    //      Min/Max inputs via React-aware setter, click Save, wait
+    //      for confirm modal, click confirm, wait for editor to
+    //      close. Conservative ~800-2000 ms delays between steps.
+    //   4. Per-entity error handling: timeout, missing input, save
+    //      failure all log + skip to next instead of stalling. Final
+    //      report shows successes / skipped / errors.
+    //
+    // Patterns lifted from AIM_Bulk_Altitude_Updater.user.js — that
+    // script proves this DOM approach works on Percepto's current UI.
+    // ============================================================
+
+    // Scan TOP + iframe(s) for elements matching a selector. Returns
+    // an array of { el, doc } so callers can dispatch events from
+    // the correct document context.
+    function scanAllDocs(selector, textSearch = '') {
+        const results = [];
+        function recurse(win) {
+            try {
+                const doc = win.document;
+                let els = Array.from(doc.querySelectorAll(selector));
+                if (textSearch) {
+                    els = els.filter(el => el.textContent.toLowerCase().includes(textSearch.toLowerCase()));
+                }
+                els.forEach(el => results.push({ el, doc }));
+                const frames = doc.querySelectorAll('iframe');
+                frames.forEach(f => { if (f.contentWindow) recurse(f.contentWindow); });
+            } catch (e) { /* cross-origin frame — skip */ }
+        }
+        recurse(window);
+        try { if (window.top && window.top !== window) recurse(window.top); } catch (e) {}
+        return results;
+    }
+
+    function clickElDispatch(el, doc) {
+        if (!el) return;
+        const opts = { bubbles: true, cancelable: true, view: doc.defaultView || window };
+        ['mousedown', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, opts)));
+    }
+
+    // React-aware value setter — bypasses React's synthetic event
+    // system so setting input.value actually registers in state.
+    function setReactInputValue(input, value) {
+        if (!input) return;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, String(value));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    }
+
+    // Helper — wait until the predicate returns truthy or we hit the
+    // timeout. Returns a Promise that resolves to the predicate value
+    // (or null on timeout). Polls every 200 ms.
+    function waitForCondition(predicate, timeoutMs = 8000, pollMs = 200) {
+        const startedAt = Date.now();
+        return new Promise(resolve => {
+            const tick = () => {
+                let v = null;
+                try { v = predicate(); } catch (e) {}
+                if (v) return resolve(v);
+                if (Date.now() - startedAt >= timeoutMs) return resolve(null);
+                setTimeout(tick, pollMs);
+            };
+            tick();
+        });
+    }
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // Locate the editor panel currently open. Returns { panel, doc }
+    // or null. Multiple panels can race during transitions — we take
+    // the LAST one (most-recently opened) for stability.
+    function findOpenEditor() {
+        const panels = scanAllDocs('.upsert-entity');
+        if (panels.length === 0) return null;
+        return panels[panels.length - 1];
+    }
+
+    function getEditorTitle(panelDoc) {
+        const t = panelDoc.querySelector('.upsert-entity__title')
+            || panelDoc.querySelector('.site-setup-header__title');
+        return t ? (t.textContent || '').trim() : '';
+    }
+
+    // Find the FP-segment Min/Max inputs in the editor. Returns
+    // { minInputs, maxInputs } arrays indexed by table-row order
+    // (which corresponds to arc order in Percepto's UI). For FFZ
+    // there's only one set of inputs (entity-level) — falls back
+    // to label-text matching when the table layout isn't present.
+    function findEditorInputs(panelDoc) {
+        const minInputs = [], maxInputs = [];
+        const tableRows = panelDoc.querySelectorAll('.flight-path-form-content__table-row');
+        if (tableRows.length > 0) {
+            tableRows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                if (cells.length >= 3) {
+                    const mn = cells[1].querySelector('input.ant-input-number-input');
+                    const mx = cells[2].querySelector('input.ant-input-number-input');
+                    if (mn) minInputs.push(mn);
+                    if (mx) maxInputs.push(mx);
+                }
+            });
+            return { minInputs, maxInputs };
+        }
+        // FFZ path — find by label
+        Array.from(panelDoc.querySelectorAll('label')).forEach(label => {
+            const txt = (label.textContent || '').toLowerCase();
+            const isMin = txt.includes('min') && (txt.includes('alt') || txt.includes('elev'));
+            const isMax = txt.includes('max') && (txt.includes('alt') || txt.includes('elev'));
+            if (!isMin && !isMax) return;
+            let input = label.getAttribute('for') ? panelDoc.getElementById(label.getAttribute('for')) : null;
+            if (!input) input = (label.closest('.ant-form-item') || label.parentElement)
+                .querySelector('input.ant-input-number-input, input.ant-input, input[type="number"]');
+            if (input) {
+                if (isMin) minInputs.push(input);
+                if (isMax) maxInputs.push(input);
+            }
+        });
+        return { minInputs, maxInputs };
+    }
+
+    // Find an entity in the Map Entities sidebar by name. Returns
+    // { el, doc } or null. Scrolls the virtualized list up to N
+    // pages before giving up (Percepto recycles offscreen items).
+    async function findEntityInSidebar(name, scrollLimit = 30) {
+        // First pass — check what's currently rendered.
+        const initial = scanAllDocs('.map-entities__entity-item').find(it => {
+            const nm = it.el.querySelector('.map-entities__entity-name');
+            return nm && (nm.textContent || '').trim() === name;
+        });
+        if (initial) return initial;
+        // Scroll the list to find more.
+        const anyItem = scanAllDocs('.map-entities__entity-item')[0];
+        const list = anyItem
+            ? (anyItem.el.closest('.map-entities__virtualized-list') || anyItem.el.parentElement)
+            : null;
+        if (!list) return null;
+        // First, scroll to top so we restart the search.
+        list.scrollTop = 0;
+        await sleep(250);
+        for (let i = 0; i < scrollLimit; i++) {
+            const hit = scanAllDocs('.map-entities__entity-item').find(it => {
+                const nm = it.el.querySelector('.map-entities__entity-name');
+                return nm && (nm.textContent || '').trim() === name;
+            });
+            if (hit) {
+                hit.el.scrollIntoView({ block: 'center' });
+                await sleep(150);
+                return hit;
+            }
+            const before = list.scrollTop;
+            list.scrollTop += list.clientHeight * 0.7;
+            if (list.scrollTop === before) break;       // hit bottom
+            await sleep(200);
+        }
+        return null;
+    }
+
+    // Close any open editor by clicking its Cancel button — used to
+    // reset state if a previous entity left the editor open or if
+    // we landed in the wrong one.
+    async function closeEditor() {
+        const ed = findOpenEditor();
+        if (!ed) return true;
+        const cancel = ed.doc.querySelector('.upsert-entity__cancel-button');
+        if (cancel) {
+            clickElDispatch(cancel, ed.doc);
+            await waitForCondition(() => !findOpenEditor(), 4000, 200);
+        }
+        return !findOpenEditor();
+    }
+
+    // Save the current editor — clicks Save, then handles the
+    // confirmation modal if one appears (.ant-btn-primary with
+    // "Save" text, last visible). Waits for editor to close.
+    async function saveCurrentEditor() {
+        const ed = findOpenEditor();
+        if (!ed) return false;
+        const save = ed.doc.querySelector('.upsert-entity__save-button')
+            || Array.from(ed.doc.querySelectorAll('button')).find(b => /save/i.test(b.textContent || ''));
+        if (!save) return false;
+        clickElDispatch(save, ed.doc);
+        // Confirm modal — appears for some entity types. Click the
+        // LAST primary button matching "save" (modals nest behind
+        // earlier ones; last is foremost).
+        await sleep(800);
+        const confirmBtns = scanAllDocs('button.ant-btn-primary').filter(it => /save/i.test(it.el.textContent || ''));
+        if (confirmBtns.length > 0) {
+            const last = confirmBtns[confirmBtns.length - 1];
+            clickElDispatch(last.el, last.doc);
+        }
+        // Wait for editor to vanish — that's our "save succeeded" signal.
+        const closed = await waitForCondition(() => !findOpenEditor(), 8000, 200);
+        return !!closed;
+    }
+
+    // Apply pipeline state. Held in module scope so the UI can poll
+    // for status updates + the abort flag works mid-flight.
+    const applyState = {
+        running: false,
+        aborted: false,
+        total: 0,
+        done: 0,
+        errors: [],          // [{entityName, reason}, ...]
+        currentLabel: '',
+    };
+
+    // Group the pending queue by entity. Returns an array of:
+    //   { entityName, entityId, isFfz, edits: [pendingEntry, ...] }
+    // FFZ groups come first, then FP groups. Sort within groups by
+    // arc id so segment edits run in deterministic order.
+    function groupPendingByEntity() {
+        const byKey = new Map();
+        Object.values(pendingSegmentEdits).forEach(e => {
+            const key = `${e.isFfz ? 'ffz' : 'fp'}:${e.entityId}`;
+            if (!byKey.has(key)) {
+                byKey.set(key, {
+                    entityName: e.fpName || '',
+                    entityId: e.entityId,
+                    isFfz: !!e.isFfz,
+                    edits: [],
+                });
+            }
+            byKey.get(key).edits.push(e);
+        });
+        const groups = Array.from(byKey.values());
+        groups.forEach(g => {
+            g.edits.sort((a, b) => {
+                const ra = a.arcId == null ? -1 : a.arcId;
+                const rb = b.arcId == null ? -1 : b.arcId;
+                return ra - rb;
+            });
+        });
+        groups.sort((a, b) => {
+            if (a.isFfz !== b.isFfz) return a.isFfz ? -1 : 1;
+            return String(a.entityName).localeCompare(String(b.entityName));
+        });
+        return groups;
+    }
+
+    // Modal shown during apply — large floating progress + abort
+    // button. Locks the user out of clicking elsewhere on the SUM
+    // panel while a run is in flight (clicks during apply can race
+    // with the script setting input values).
+    const APPLY_MODAL_ID = 'aim-ai-apply-modal';
+    function openApplyProgressModal(groups) {
+        closeApplyProgressModal();
+        const m = document.createElement('div');
+        m.id = APPLY_MODAL_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.75);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:20px 28px;min-width:460px;max-width:90vw;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        box.innerHTML = `
+            <div style="color:#5fff5f;font-weight:700;font-size:15px;margin-bottom:6px">▶ Applying queued edits</div>
+            <div style="color:#888;font-size:11px;margin-bottom:14px">FFZs first, then FP segments. Do not click around.</div>
+            <div id="aim-ai-apply-label" style="color:#cfd6dc;font-size:12px;margin-bottom:8px;min-height:18px">Preparing…</div>
+            <div style="height:8px;background:rgba(95,255,95,0.15);border-radius:4px;overflow:hidden;margin-bottom:10px">
+                <div id="aim-ai-apply-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#5fff5f,#3fcf3f);transition:width 200ms ease-out"></div>
+            </div>
+            <div id="aim-ai-apply-stats" style="color:#9ad;font-size:11px;font-variant-numeric:tabular-nums;min-height:16px"></div>
+            <div id="aim-ai-apply-errors" style="color:#ff8a80;font-size:11px;margin-top:6px;max-height:120px;overflow-y:auto"></div>
+            <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
+                <button id="aim-ai-apply-abort" style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">Abort after current entity</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        const abort = box.querySelector('#aim-ai-apply-abort');
+        abort.onclick = () => {
+            applyState.aborted = true;
+            abort.disabled = true;
+            abort.textContent = 'Aborting after current entity…';
+            abort.style.opacity = '0.5';
+        };
+    }
+    function updateApplyProgressModal(st) {
+        const m = document.getElementById(APPLY_MODAL_ID);
+        if (!m) return;
+        const labelEl = m.querySelector('#aim-ai-apply-label');
+        const fillEl = m.querySelector('#aim-ai-apply-fill');
+        const statsEl = m.querySelector('#aim-ai-apply-stats');
+        const errEl = m.querySelector('#aim-ai-apply-errors');
+        if (labelEl) labelEl.textContent = st.currentLabel || (st.running ? 'Working…' : 'Complete.');
+        const pct = st.total > 0 ? Math.round((st.done / st.total) * 100) : 0;
+        if (fillEl) fillEl.style.width = pct + '%';
+        if (statsEl) statsEl.textContent = `${st.done} / ${st.total} edits applied (${pct}%)`
+            + (st.errors.length ? ` · ${st.errors.length} error${st.errors.length === 1 ? '' : 's'}` : '');
+        if (errEl) {
+            errEl.innerHTML = '';
+            st.errors.forEach(e => {
+                const r = document.createElement('div');
+                r.textContent = `• ${e.entityName}: ${e.reason}`;
+                errEl.appendChild(r);
+            });
+        }
+    }
+    function closeApplyProgressModal() {
+        const m = document.getElementById(APPLY_MODAL_ID);
+        if (m) m.remove();
+    }
+
+    // The actual apply pipeline — async, processes one group at a
+    // time. Calls onProgress(state) on every step so the UI can
+    // update. Honors applyState.aborted between groups.
+    async function runApplyPipeline(onProgress) {
+        const groups = groupPendingByEntity();
+        applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
+        applyState.done = 0;
+        applyState.errors = [];
+        applyState.running = true;
+        applyState.aborted = false;
+        try {
+            // Close any leftover editor before we start so we begin in a
+            // known state. Some sites leave a stale editor from earlier.
+            await closeEditor();
+            for (let gi = 0; gi < groups.length; gi++) {
+                if (applyState.aborted) break;
+                const g = groups[gi];
+                applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})`;
+                onProgress(applyState);
+                const ok = await applyOneEntity(g);
+                if (ok) {
+                    applyState.done += g.edits.length;
+                    // Remove successful edits from the pending queue
+                    // so reruns don't re-apply. Failed groups stay
+                    // queued for the user to retry / inspect.
+                    g.edits.forEach(e => {
+                        discardPendingEdit(e.entityId, e.arcId, e.field);
+                    });
+                }
+                onProgress(applyState);
+                // Small breath between entities — gives Percepto's
+                // sidebar a moment to settle before we scroll for
+                // the next entity. Also helps if a save triggered
+                // a backend write that flickers the panel.
+                await sleep(600);
+            }
+        } finally {
+            applyState.running = false;
+            applyState.currentLabel = '';
+            onProgress(applyState);
+        }
+    }
+
+    // Process one entity group: open editor, set all values, save.
+    // Returns true if save succeeded, false otherwise (with the
+    // failure recorded in applyState.errors).
+    async function applyOneEntity(group) {
+        const label = group.entityName || '(unnamed)';
+        // 1. Close any existing editor (we may have landed in the
+        //    wrong one from a previous step).
+        await closeEditor();
+        // 2. Find + click the entity in the sidebar.
+        const hit = await findEntityInSidebar(label);
+        if (!hit) {
+            applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
+            console.warn(`${TAG} apply: entity not in sidebar: ${label}`);
+            return false;
+        }
+        clickElDispatch(hit.el, hit.doc);
+        // 3. Wait for editor panel to render with this entity's title.
+        const editor = await waitForCondition(() => {
+            const ed = findOpenEditor();
+            if (!ed) return null;
+            const t = getEditorTitle(ed.doc).toLowerCase();
+            return t && t.includes(label.toLowerCase()) ? ed : null;
+        }, 8000, 250);
+        if (!editor) {
+            applyState.errors.push({ entityName: label, reason: 'editor did not open' });
+            console.warn(`${TAG} apply: editor did not open for ${label}`);
+            return false;
+        }
+        // 4. Find the inputs.
+        const { minInputs, maxInputs } = findEditorInputs(editor.doc);
+        if (minInputs.length === 0 && maxInputs.length === 0) {
+            applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
+            console.warn(`${TAG} apply: no inputs found for ${label}`);
+            await closeEditor();
+            return false;
+        }
+        // 5. Set values. For FP segment edits, index = arc order in
+        //    the buildSummaryRows pass. We re-resolve from the
+        //    entity's arcs to compute the right row index per edit.
+        const entityFromGroup = (() => {
+            const siteID = getCurrentSiteID();
+            const bucket = siteID ? mapObjectsBySite[siteID] : null;
+            return bucket ? (bucket.entities || []).find(en => en.id === group.entityId) : null;
+        })();
+        // Convert each edit into an input mutation.
+        let appliedCount = 0;
+        for (const ed of group.edits) {
+            const valFt = Math.round(ed.newValueM * 3.28084); // Percepto's inputs are feet
+            const isMin = ed.field === 'min_alt';
+            // FFZ: single Min/Max inputs (use index 0).
+            // FP segment: index = position of this arc in entity.arcs.
+            let idx = 0;
+            if (!group.isFfz) {
+                const arcs = (entityFromGroup && Array.isArray(entityFromGroup.arcs)) ? entityFromGroup.arcs : [];
+                idx = arcs.findIndex(a => a && a.id === ed.arcId);
+                if (idx < 0) {
+                    console.warn(`${TAG} apply: arc ${ed.arcId} not found in ${label}; skipping this edit`);
+                    continue;
+                }
+            }
+            const targetInputs = isMin ? minInputs : maxInputs;
+            const target = targetInputs[idx];
+            if (!target) {
+                console.warn(`${TAG} apply: input ${isMin ? 'Min' : 'Max'}[${idx}] missing for ${label}; skipping`);
+                continue;
+            }
+            setReactInputValue(target, valFt);
+            appliedCount++;
+            await sleep(80);
+        }
+        if (appliedCount === 0) {
+            applyState.errors.push({ entityName: label, reason: 'no inputs matched any edit' });
+            await closeEditor();
+            return false;
+        }
+        // 6. Save + confirm modal.
+        await sleep(400);
+        const saved = await saveCurrentEditor();
+        if (!saved) {
+            applyState.errors.push({ entityName: label, reason: 'save timed out (validation error?)' });
+            // Leave editor open so the user can see what went wrong.
+            return false;
+        }
+        return true;
+    }
     let sumPanelState = {
         search: '',
         typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
@@ -2405,8 +2845,16 @@
         queueDiscardBtn.textContent = 'Discard queue';
         queueDiscardBtn.style.cssText = BTN_CSS + ';color:#ff8a80;border-color:rgba(255,138,128,0.35)';
         queueDiscardBtn.title = 'Throw away all pending altitude edits';
+        // Apply queue — drives Percepto's entity editor for each
+        // pending edit. Destructive: writes to the live site. Strong
+        // confirm + per-entity error handling + abort button.
+        const queueApplyBtn = document.createElement('button');
+        queueApplyBtn.textContent = '▶ Apply queue';
+        queueApplyBtn.style.cssText = BTN_CSS + ';color:#5fff5f;border-color:rgba(95,255,95,0.55);font-weight:600';
+        queueApplyBtn.title = 'Open Percepto\'s entity editor for each pending edit, set values, save. FFZs first, then FP segments.';
         footer.appendChild(queueDivider);
         footer.appendChild(queuePill);
+        footer.appendChild(queueApplyBtn);
         footer.appendChild(queueCopyBtn);
         footer.appendChild(queueDiscardBtn);
         // refreshQueueUi() — show/hide based on count, update pill text.
@@ -2418,6 +2866,11 @@
             queuePill.style.display = visible ? '' : 'none';
             queueCopyBtn.style.display = visible ? '' : 'none';
             queueDiscardBtn.style.display = visible ? '' : 'none';
+            queueApplyBtn.style.display = visible ? '' : 'none';
+            // Disable Apply while a run is in progress so the user
+            // can't double-launch. The button's onclick also guards.
+            queueApplyBtn.disabled = applyState.running;
+            queueApplyBtn.style.opacity = applyState.running ? '0.5' : '';
             queuePill.textContent = `📋 ${n} queued edit${n === 1 ? '' : 's'}`;
         }
         refreshQueueUi();
@@ -2465,6 +2918,41 @@
             redrawTable();
             refreshQueueUi();
             showToast('Pending edits cleared');
+        };
+        queueApplyBtn.onclick = () => {
+            const n = pendingEditCount();
+            if (n === 0) return;
+            if (applyState.running) return;
+            const groups = groupPendingByEntity();
+            const fpCount = groups.filter(g => !g.isFfz).length;
+            const ffzCount = groups.filter(g => g.isFfz).length;
+            const msg = `Apply ${n} altitude edit${n === 1 ? '' : 's'} across ${groups.length} entit${groups.length === 1 ? 'y' : 'ies'}?\n\n`
+                + `Order: ${ffzCount} FFZ${ffzCount === 1 ? '' : 's'} first, then ${fpCount} FP${fpCount === 1 ? '' : 's'}.\n`
+                + `Per-entity time: ~3-6 seconds (one editor open + save).\n`
+                + `Estimated total: ~${Math.ceil(groups.length * 4 / 60)} min.\n\n`
+                + `This WRITES to the live site. Do NOT click around while it runs.\n`
+                + `An abort button will appear during the run.`;
+            if (!confirm(msg)) return;
+            openApplyProgressModal(groups);
+            runApplyPipeline((st) => {
+                updateApplyProgressModal(st);
+                // Mirror pending count down to footer as edits succeed.
+                refreshQueueUi();
+                // Live-redraw the table so successful edits visually
+                // disappear from the row markers (since we remove
+                // them from the queue as each entity completes).
+                redrawTable();
+            }).then(() => {
+                closeApplyProgressModal();
+                const failed = applyState.errors.length;
+                const ok = applyState.done;
+                if (failed === 0) {
+                    showToast(`✓ Applied ${ok} edit${ok === 1 ? '' : 's'} successfully`, 'rgba(95,255,95,0.6)');
+                } else {
+                    showToast(`Applied ${ok} · ${failed} failed (see console)`, 'rgba(255,138,128,0.6)');
+                    console.warn(`${TAG} apply failures:`, applyState.errors);
+                }
+            });
         };
         panel.appendChild(footer);
 

@@ -8,6 +8,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.22** — **▶ Apply queue — automated commit of pending altitude edits.** New green button in the queue footer drives Percepto's entity editor for every queued Min/Max edit. Behavior:
+  - **Grouped by entity** — an FP with 6 queued segments opens the editor ONCE and saves ONCE.
+  - **FFZ-first ordering** — all FFZs apply before any FP segment. Required by AIM's overlap/steepness safety checks (FP saves fail if FFZ endpoints haven't moved yet).
+  - **Strong confirm dialog** before launch — estimates time, warns the user not to click around.
+  - **Modal progress overlay** during run: live label "X of Y: entity_name (N edits)", progress bar, per-entity error list as they happen.
+  - **Per-entity error handling** — missing input, editor failed to open, save timed out → log + skip, continue. Successful edits get popped from the queue; failures stay so the user can retry.
+  - **Abort button** in the modal — finishes the current entity then stops cleanly. Already-applied edits remain applied.
+  - **Final summary toast** — `✓ Applied N successfully` or `Applied X · N failed (see console)`.
+  - Patterns lifted from `AIM_Bulk_Altitude_Updater.user.js` (proven on Percepto's live UI): `.upsert-entity` panel detection, `.flight-path-form-content__table-row` for FP segment inputs, label-text matching for FFZ inputs, React-aware value setter, `.upsert-entity__save-button` + last-primary-button modal confirm.
 - **AIM Asset Inspector v3.21** — sample-point polish.
   - **Bigger + higher-contrast dots:** radius 3 → 6, black border + bright gold fill so they pop against any base layer (satellite, KML, drawing). Hovering is now actually doable.
   - **Skip NFZ + Asset from DEM sampling.** NFZs extend infinitely up (no flight planning under them). Assets carry their claimed `elevation_asl` (auto-set during creation) so a DEM lookup is redundant. Cuts ~30-40% of first-load queries on a typical site. FP segments + FFZs still sampled.
