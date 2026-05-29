@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.30
+// @version      3.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.30';
+    const SCRIPT_VERSION = '3.31';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2712,22 +2712,43 @@
         return xml.join('\n');
     }
     // Trigger a browser file download of `content` as a .kml file.
+    //
+    // Percepto loads us into a sandboxed iframe with allow-scripts +
+    // allow-same-origin but NOT allow-downloads. anchor.click() with
+    // a download attribute is blocked from inside that iframe. The
+    // workaround is to do the WHOLE thing (blob creation + anchor +
+    // click) in the TOP window's context — the parent frame isn't
+    // sandboxed. Same-origin so we can reach into it.
+    //
+    // Falls through to a same-frame attempt if window.top isn't
+    // reachable (e.g. cross-origin parent) and that fails too →
+    // returns false so the caller can fall back to clipboard.
     function downloadKMLFile(filename, content) {
-        try {
-            const blob = new Blob([content], { type: 'application/vnd.google-earth.kml+xml' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
+        const tryDownload = (win, doc) => {
+            const blob = new win.Blob([content], { type: 'application/vnd.google-earth.kml+xml' });
+            const url = win.URL.createObjectURL(blob);
+            const a = doc.createElement('a');
             a.href = url;
             a.download = filename;
-            document.body.appendChild(a);
+            doc.body.appendChild(a);
             a.click();
             setTimeout(() => {
-                URL.revokeObjectURL(url);
-                a.remove();
+                try { win.URL.revokeObjectURL(url); } catch (e) {}
+                try { a.remove(); } catch (e) {}
             }, 100);
+        };
+        try {
+            const topWin = window.top || window;
+            tryDownload(topWin, topWin.document);
             return true;
         } catch (e) {
-            console.warn(`${TAG} download failed:`, e);
+            console.warn(`${TAG} download via top frame failed (${e && e.message}); retrying in-frame`);
+        }
+        try {
+            tryDownload(window, document);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} download failed entirely:`, e);
             return false;
         }
     }

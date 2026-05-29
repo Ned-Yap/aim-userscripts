@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.31** — fix: KML download blocked by iframe sandbox. Percepto loads us into a sandboxed iframe that lacks `allow-downloads`, so the v3.30 anchor-click download failed silently with a console message. Fix: do the blob creation + anchor + click in the TOP window's context (parent frame, not sandboxed). Falls back to in-frame attempt if `window.top` is cross-origin. If both fail, the existing "Copy to clipboard" path still works.
 - **AIM Asset Inspector v3.30** — **NEW: Site Setup Analyzer (KML export, Phase 1).** Replaces the Stand_Alone_AIM_SS_Generator_V8.pyw workflow for the common case (Google Earth visualization). New 🗺️ **Analyzer** button in the SUM panel toolbar (next to 📊 Summary) opens a modal:
   - **2D mode** — all geometry clamped to ground (flat polygons + lines + pins).
   - **3D mode** — Assets extruded to their claimed `elevation_asl`; FFZ/NFZ extruded as `MultiGeometry` boxes from `min_alt` to `max_alt`; FP segments drawn as 3D lines at `min_alt`; markers at `marker_height` (when set). Includes optional **Vertical Buffers** (50 ft below FFZ min + FP min) as separate folders.
