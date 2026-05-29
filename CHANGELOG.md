@@ -8,6 +8,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.25** — fix Percepto's arc-ID regeneration false-failures + auto-refresh after apply.
+  - **ROOT CAUSE**: when Percepto saves an FP, it regenerates every arc with a new `id` (e.g. 2558017 → 2571233). v3.24's post-save verification looked up arcs by `arcId` to confirm the new value stuck — `find()` returned nothing for the new IDs → reported "save succeeded but 28/28 value(s) didn't stick" even though the data actually saved correctly. Same bug bit the apply step on retries: stale queue arc IDs no longer matched the editor's current arc list.
+  - **Fix**: queue entries now also store `arcIndex` (position in `entity.arcs`). That position is stable across saves. Both apply and verification now try `arcId` first, fall back to `arcIndex` when the ID lookup fails. Console logs the fallback when it kicks in.
+  - **NEW: auto-refresh after apply.** When a live run finishes with at least one successful save, the SUM panel auto-refreshes (refetch + re-render). User sees the updated state immediately without clicking Refresh. Dry runs and aborted runs skip the refresh (nothing to show).
 - **AIM Asset Inspector v3.24** — **Bulletproof apply** pass. After the first successful live run (v3.23), hardening across nine specific failure modes:
   - **FFZ matcher fix.** v3.23 picked up `Minimum emergency altitude` as a Min match (harmless because we only wrote to `minInputs[0]`, but a risk if Percepto ever reordered the inputs). Now explicitly excludes any label containing "emergency" / "emerg".
   - **Pre-flight: duplicate name detection.** If any queued entity has a same-named sibling on the site, the run REFUSES to start (we couldn't safely click "the right one"). Shows which names are duplicates.

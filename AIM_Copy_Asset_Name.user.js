@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.24
+// @version      3.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.24';
+    const SCRIPT_VERSION = '3.25';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1255,6 +1255,11 @@
         queuePendingEdit({
             entityId: row.entity.id,
             arcId,
+            // CRITICAL: arcIndex is the stable identifier for FP
+            // segments. Percepto regenerates arc IDs on save, so
+            // matching by arcId post-save would fail. arcIndex
+            // (position in entity.arcs) survives saves.
+            arcIndex: row._isSegment ? row._arcIndex : null,
             isFfz: isFfzRow(row),
             field,
             oldValueM: currentM,
@@ -1802,7 +1807,14 @@
             if (!ent.restrictions) return null;
             return edit.field === 'min_alt' ? ent.restrictions.minAlt : ent.restrictions.maxAlt;
         }
-        const arc = Array.isArray(ent.arcs) ? ent.arcs.find(a => a && a.id === edit.arcId) : null;
+        // FP segment: try arcId first, then fall back to arcIndex.
+        // Percepto regenerates arc IDs on save, so post-save lookups by
+        // ID return null. arcIndex (position) survives saves.
+        if (!Array.isArray(ent.arcs)) return null;
+        let arc = ent.arcs.find(a => a && a.id === edit.arcId);
+        if (!arc && edit.arcIndex != null && edit.arcIndex < ent.arcs.length) {
+            arc = ent.arcs[edit.arcIndex];
+        }
         if (!arc) return null;
         return edit.field === 'min_alt' ? arc.min_alt : arc.max_alt;
     }
@@ -1876,10 +1888,6 @@
         } finally {
             applyState.running = false;
             applyState.currentLabel = '';
-            // Write audit log to window for after-action review. Sample:
-            //   copy(JSON.stringify(window.__aim_ai_lastApplyLog, null, 2))
-            // and paste to a file. Each entry has the entity, edits, and
-            // whether post-save verification confirmed the write.
             window.__aim_ai_lastApplyLog = {
                 site: getCurrentSiteID(),
                 startTime: new Date(applyState.startTime).toISOString(),
@@ -1893,6 +1901,29 @@
             };
             console.log(`${TAG} apply: audit log → window.__aim_ai_lastApplyLog`);
             onProgress(applyState);
+            // AUTO-REFRESH after a live run that wrote anything. Force
+            // a final fetch + re-render the SUM panel so the user sees
+            // the updated state immediately (otherwise they'd need to
+            // manually click Refresh to see the new values + queue).
+            // Skipped for dry runs (no data changed) and aborted runs
+            // (user explicitly stopped — don't surprise them).
+            if (!dryRun && applyState.done > 0 && !applyState.aborted) {
+                try {
+                    const sid = getCurrentSiteID();
+                    if (sid) {
+                        await fetchMapObjects(sid, true);
+                        await sleep(200);
+                        // Re-render — preserves sumPanelState (column
+                        // order, filters, selection, etc.) since that's
+                        // module-scoped.
+                        if (document.getElementById(SUM_PANEL_ID)) {
+                            renderSummaryPanel(sid);
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`${TAG} apply: auto-refresh failed:`, e);
+                }
+            }
         }
     }
 
@@ -1969,12 +2000,20 @@
             const isMin = ed.field === 'min_alt';
             // FFZ: single Min/Max inputs (use index 0).
             // FP segment: index = position of this arc in entity.arcs.
+            //   Prefer arc.id match (works when queue is fresh) but
+            //   fall back to stored arcIndex (works when Percepto has
+            //   regenerated arc IDs since the queue was built — that
+            //   happens automatically after every FP save).
             let idx = 0;
             if (!group.isFfz) {
                 const arcs = (entityFromGroup && Array.isArray(entityFromGroup.arcs)) ? entityFromGroup.arcs : [];
                 idx = arcs.findIndex(a => a && a.id === ed.arcId);
+                if (idx < 0 && ed.arcIndex != null && ed.arcIndex < arcs.length) {
+                    idx = ed.arcIndex;
+                    console.log(`${TAG} apply: ${label} — arc ${ed.arcId} not found, falling back to arcIndex=${ed.arcIndex}`);
+                }
                 if (idx < 0) {
-                    console.warn(`${TAG} apply: arc ${ed.arcId} not found in ${label}; skipping this edit`);
+                    console.warn(`${TAG} apply: arc ${ed.arcId} (idx ${ed.arcIndex}) not found in ${label}; skipping this edit`);
                     continue;
                 }
             }
@@ -2212,6 +2251,7 @@
                     out.push({
                         entity: e,
                         arc,                                       // segment-specific data
+                        _arcIndex: i,                              // position in entity.arcs — stable across Percepto saves (arc IDs aren't)
                         _isSegment: true,
                         _rowKey: `${e.id}:${arc.id != null ? arc.id : i}`,
                         type: e.type,
