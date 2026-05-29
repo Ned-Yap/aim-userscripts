@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.37
+// @version      3.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -9,7 +9,8 @@
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-end
 // ==/UserScript==
 
@@ -26,7 +27,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.37';
+    const SCRIPT_VERSION = '3.38';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -154,12 +155,30 @@
     let elevActive = 0;
     const elevInFlight = {};
 
+    // Loud one-time warning if GM_* are missing. Critical because if
+    // these no-op, EVERYTHING that "persists" silently doesn't —
+    // elevation cache, column order, panel preferences, etc. v3.37 and
+    // earlier had `@grant none` which made these unavailable; the
+    // helpers checked typeof === 'function' and silently no-opped.
+    let _gmWarnedMissing = false;
     function elevGmGet(key, def) {
-        try { if (typeof GM_getValue === 'function') return GM_getValue(key, def); } catch (e) {}
+        try {
+            if (typeof GM_getValue === 'function') return GM_getValue(key, def);
+        } catch (e) {}
+        if (!_gmWarnedMissing) {
+            _gmWarnedMissing = true;
+            console.warn(`${TAG} ⚠ GM_getValue/GM_setValue not available — check @grant directives. Persistence is BROKEN until fixed.`);
+        }
         return def;
     }
     function elevGmSet(key, val) {
-        try { if (typeof GM_setValue === 'function') GM_setValue(key, val); } catch (e) {}
+        try {
+            if (typeof GM_setValue === 'function') { GM_setValue(key, val); return; }
+        } catch (e) { console.warn(`${TAG} GM_setValue threw:`, e); return; }
+        if (!_gmWarnedMissing) {
+            _gmWarnedMissing = true;
+            console.warn(`${TAG} ⚠ GM_setValue not available — check @grant directives. Persistence is BROKEN until fixed.`);
+        }
     }
     function loadElevationCache() {
         if (elevationCache) return elevationCache;
