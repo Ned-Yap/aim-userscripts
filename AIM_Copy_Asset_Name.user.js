@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.14
+// @version      3.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.14';
+    const SCRIPT_VERSION = '3.15';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -134,6 +134,7 @@
     // altitude-endpoint memory for the discovery story.
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
+    const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
     const ELEV_CONCURRENCY = 4;
     let elevationCache = null;
@@ -910,7 +911,25 @@
     const SUM_PANEL_ID = 'aim-sum-panel';
     // Default visible columns — user can toggle via "Columns ▾" menu.
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
+    // Source-of-truth column order — used as the default when the user
+    // hasn't customized + as the upper bound when validating stored order.
     const ALL_COL_KEYS = ['typeShort', 'name', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+
+    // Load the persisted column order from GM storage. Falls back to the
+    // default order. Filters out any unknown keys (forwards-compat with
+    // older stored states that may reference dropped columns).
+    function loadColumnOrder() {
+        const stored = elevGmGet(CACHE_KEY_COLUMN_ORDER, null);
+        if (Array.isArray(stored) && stored.length > 0) {
+            const known = new Set(ALL_COL_KEYS);
+            const cleaned = stored.filter(k => known.has(k));
+            if (cleaned.length > 0) return cleaned;
+        }
+        return ALL_COL_KEYS.slice();
+    }
+    function saveColumnOrder(order) {
+        elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
+    }
     let sumPanelState = {
         search: '',
         typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
@@ -928,7 +947,10 @@
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
         selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
-        visibleCols: new Set(ALL_COL_KEYS),
+        // Ordered list of visible column keys. Persisted to GM_setValue
+        // so it survives reloads. Hidden columns are simply absent from
+        // this array. Reorder via ↑/↓ in the Columns ▾ menu.
+        columnOrder: loadColumnOrder(),
     };
 
     function injectSumButton(doc) {
@@ -1374,34 +1396,136 @@
             // region — `absolute` was pinning to the body and adding right-
             // edge / bottom-edge horizontal scrollbars to the page when the
             // menu sat near the panel's right corner.
-            colsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 10px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:160px';
-            const colDefs = [
-                { key: 'typeShort', label: 'Type' },
-                { key: 'name',      label: 'Name' },
-                { key: 'subtype',   label: 'Subtype' },
-                { key: 'altMin',    label: 'Min Alt' },
-                { key: 'altMax',    label: 'Max Alt' },
-                { key: 'altDelta',  label: 'Δ Alt (Max − Min)' },
-                { key: 'elevation', label: 'Elevation' },
-                { key: 'agl',       label: 'AGL (Min Alt − Elev)' },
-                { key: 'validated', label: 'Valid' },
-            ];
-            colDefs.forEach(({ key, label }) => {
-                const row = document.createElement('label');
-                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer';
-                const cb = document.createElement('input');
-                cb.type = 'checkbox';
-                cb.checked = sumPanelState.visibleCols.has(key);
-                cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
-                cb.onchange = () => {
-                    if (cb.checked) sumPanelState.visibleCols.add(key);
-                    else sumPanelState.visibleCols.delete(key);
+            colsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:240px';
+            const COL_LABELS = {
+                typeShort: 'Type',
+                name:      'Name',
+                subtype:   'Subtype',
+                altMin:    'Min Alt',
+                altMax:    'Max Alt',
+                altDelta:  'Min/Max Delta',
+                elevation: 'Elevation',
+                agl:       'AGL (Min Alt − Elev)',
+                validated: 'Valid',
+            };
+            // MBT-style menu: visible columns first with ↑/↓ reorder
+            // arrows + remove checkbox, then a divider, then hidden
+            // columns with an add checkbox. State persists per
+            // user (GM_setValue). Re-renders the menu in place after
+            // each change so the user can do multiple edits.
+            function rebuildColsMenu() {
+                colsMenuEl.innerHTML = '';
+                const visible = sumPanelState.columnOrder.slice();
+                const visSet = new Set(visible);
+                const hidden = ALL_COL_KEYS.filter(k => !visSet.has(k));
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:4px 12px 4px;font-weight:700';
+                head.textContent = 'Visible (use ↑↓ to reorder)';
+                colsMenuEl.appendChild(head);
+                visible.forEach((key, i) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px';
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.checked = true;
+                    cb.title = 'Hide column';
+                    cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+                    cb.onchange = () => {
+                        if (!cb.checked) {
+                            sumPanelState.columnOrder = sumPanelState.columnOrder.filter(k => k !== key);
+                            saveColumnOrder(sumPanelState.columnOrder);
+                            redrawTable();
+                            rebuildColsMenu();
+                        }
+                    };
+                    row.appendChild(cb);
+                    const lbl = document.createElement('span');
+                    lbl.textContent = COL_LABELS[key] || key;
+                    lbl.style.cssText = 'flex:1';
+                    row.appendChild(lbl);
+                    const arrowBtnStyle = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1';
+                    const upBtn = document.createElement('button');
+                    upBtn.textContent = '↑';
+                    upBtn.title = 'Move up';
+                    upBtn.style.cssText = arrowBtnStyle;
+                    upBtn.disabled = i === 0;
+                    if (upBtn.disabled) upBtn.style.opacity = '0.35';
+                    upBtn.onclick = () => {
+                        const arr = sumPanelState.columnOrder;
+                        const idx = arr.indexOf(key);
+                        if (idx > 0) {
+                            arr.splice(idx, 1);
+                            arr.splice(idx - 1, 0, key);
+                            saveColumnOrder(arr);
+                            redrawTable();
+                            rebuildColsMenu();
+                        }
+                    };
+                    const dnBtn = document.createElement('button');
+                    dnBtn.textContent = '↓';
+                    dnBtn.title = 'Move down';
+                    dnBtn.style.cssText = arrowBtnStyle;
+                    dnBtn.disabled = i === visible.length - 1;
+                    if (dnBtn.disabled) dnBtn.style.opacity = '0.35';
+                    dnBtn.onclick = () => {
+                        const arr = sumPanelState.columnOrder;
+                        const idx = arr.indexOf(key);
+                        if (idx >= 0 && idx < arr.length - 1) {
+                            arr.splice(idx, 1);
+                            arr.splice(idx + 1, 0, key);
+                            saveColumnOrder(arr);
+                            redrawTable();
+                            rebuildColsMenu();
+                        }
+                    };
+                    row.appendChild(upBtn);
+                    row.appendChild(dnBtn);
+                    colsMenuEl.appendChild(row);
+                });
+                if (hidden.length > 0) {
+                    const hr = document.createElement('div');
+                    hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                    colsMenuEl.appendChild(hr);
+                    const head2 = document.createElement('div');
+                    head2.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:2px 12px 4px;font-weight:700';
+                    head2.textContent = 'Hidden';
+                    colsMenuEl.appendChild(head2);
+                    hidden.forEach(key => {
+                        const row = document.createElement('label');
+                        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                        const cb = document.createElement('input');
+                        cb.type = 'checkbox';
+                        cb.checked = false;
+                        cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
+                        cb.onchange = () => {
+                            if (cb.checked) {
+                                sumPanelState.columnOrder.push(key);
+                                saveColumnOrder(sumPanelState.columnOrder);
+                                redrawTable();
+                                rebuildColsMenu();
+                            }
+                        };
+                        row.appendChild(cb);
+                        row.appendChild(document.createTextNode(COL_LABELS[key] || key));
+                        colsMenuEl.appendChild(row);
+                    });
+                }
+                const hr2 = document.createElement('div');
+                hr2.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                colsMenuEl.appendChild(hr2);
+                const resetBtn = document.createElement('button');
+                resetBtn.type = 'button';
+                resetBtn.textContent = 'Reset to defaults';
+                resetBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 4px';
+                resetBtn.onclick = () => {
+                    sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+                    saveColumnOrder(sumPanelState.columnOrder);
                     redrawTable();
+                    rebuildColsMenu();
                 };
-                row.appendChild(cb);
-                row.appendChild(document.createTextNode(label));
-                colsMenuEl.appendChild(row);
-            });
+                colsMenuEl.appendChild(resetBtn);
+            }
+            rebuildColsMenu();
             // Position just below the button, then clamp post-mount so it
             // doesn't push past the viewport edge (which used to trigger
             // a page-level scrollbar).
@@ -1527,18 +1651,15 @@
             // dataKey (the property on the row for the value) and a render
             // function for the cell.
             const unitLbl = sumPanelState.unitsFt ? 'ft' : 'm';
+            // Display: comma-grouped whole feet (or meters with one
+            // decimal). Used for every altitude/elevation column so the
+            // numbers line up + are easy to read at a glance.
             const fmtAlt = (m) => {
-                if (m == null) return '—';
-                return sumPanelState.unitsFt ? (m * 3.28084).toFixed(0) : m.toFixed(1);
-            };
-            // MBT-style elevation formatter — comma-grouped whole feet (or
-            // meters with one decimal). Right-click on cell copies the raw
-            // unformatted number per `fmtRaw`.
-            const fmtElev = (m) => {
                 if (m == null) return '—';
                 const v = sumPanelState.unitsFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
                 return v.toLocaleString('en-US', { maximumFractionDigits: 1 });
             };
+            // Raw value for right-click → copy (no commas, no units).
             const fmtRaw = (m) => {
                 if (m == null) return '';
                 return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
@@ -1547,14 +1668,20 @@
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
-                { key: 'altMin',    label: `Min Alt (${unitLbl})`, w: 80, num: true, dataKey: 'altMinM',   fmt: fmtAlt },
-                { key: 'altMax',    label: `Max Alt (${unitLbl})`, w: 80, num: true, dataKey: 'altMaxM',   fmt: fmtAlt },
-                { key: 'altDelta',  label: `Δ Alt (${unitLbl})`,   w: 70, num: true, dataKey: 'altDeltaM', fmt: fmtAlt },
-                { key: 'elevation', label: `Elevation (${unitLbl})`, w: 100, num: true, dataKey: 'elevationM', fmt: fmtElev, raw: fmtRaw },
-                { key: 'agl',       label: `AGL (${unitLbl})`,     w: 80, num: true, dataKey: 'aglM',      fmt: fmtAlt },
+                { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'altDelta',  label: `Min/Max Delta (${unitLbl})`, w: 100, num: true, dataKey: 'altDeltaM', fmt: fmtAlt, raw: fmtRaw },
+                { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
+                { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
             ];
-            const cols = allColDefs.filter(c => sumPanelState.visibleCols.has(c.key));
+            const COL_BY_KEY = Object.fromEntries(allColDefs.map(c => [c.key, c]));
+            // Honor the user's persisted order — visibleCols was replaced
+            // by columnOrder (an ordered array). Map order → defs and
+            // drop any keys we don't know about (forwards compat).
+            const cols = sumPanelState.columnOrder
+                .map(k => COL_BY_KEY[k])
+                .filter(Boolean);
 
             // Header row — first cell is the select-all checkbox, then
             // user-selected columns sorted by their canonical position.
@@ -1677,8 +1804,21 @@
                         td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
                         td.textContent = r.subtype || '—';
                     } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
-                        td.style.cssText = 'padding:5px 8px;color:#bbb;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        // Comma-grouped, right-click copies raw value
+                        // (no commas, no unit suffix) for paste into
+                        // formulas / the bulk-edit input we'll build
+                        // in v3.16.
+                        td.style.cssText = 'padding:5px 8px;color:#e6e6e6;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
                         td.textContent = col.fmt(r[col.dataKey]);
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const v = r[col.dataKey];
+                            if (v == null) return;
+                            const raw = col.raw(v);
+                            copyToClipboard(raw, `Copied ${raw}`);
+                        };
+                        td.title = 'Click: pan/inspect · Right-click: copy raw number';
                     } else if (col.key === 'elevation') {
                         // MBT-style: light purple, bold, comma-grouped.
                         // Right-click copies the raw unformatted number
@@ -1695,13 +1835,13 @@
                         td.title = 'Click: pan/inspect · Right-click: copy raw number';
                     } else if (col.key === 'agl') {
                         // AGL = Min Alt − Elevation. Color rules match MBT
-                        // navigate AGL: red <90 ft / green 90-170 / blue >170.
+                        // navigate AGL: red <90 ft / green 90-200 / blue >200.
                         const d = r.aglM;
                         let color = '#bbb';
                         if (d != null) {
                             const ft = d * 3.28084;
                             if (ft < 90) color = '#ff5252';
-                            else if (ft > 170) color = '#3399ff';
+                            else if (ft > 200) color = '#3399ff';
                             else color = '#5fff5f';
                         }
                         td.style.cssText = `padding:5px 8px;color:${color};text-align:right;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;cursor:pointer`;
