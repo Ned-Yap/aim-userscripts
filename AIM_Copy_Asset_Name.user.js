@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.35
+// @version      3.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.35';
+    const SCRIPT_VERSION = '3.36';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -165,6 +165,9 @@
         if (elevationCache) return elevationCache;
         try { elevationCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
         catch (e) { elevationCache = {}; }
+        const n = Object.keys(elevationCache).length;
+        const sizeKb = Math.round(JSON.stringify(elevationCache).length / 1024);
+        console.log(`${TAG} DEM elevation cache loaded: ${n.toLocaleString()} points (${sizeKb} KB)${n === 0 ? ' — empty (first run / cleared / Tampermonkey storage evicted)' : ''}`);
         return elevationCache;
     }
     // Debounced cache write — synchronous GM_setValue of growing cache
@@ -452,6 +455,7 @@
         if (demFetchInFlight) return;
         const points = [];
         const seen = new Set();
+        let cacheHits = 0;
         rows.forEach(r => {
             const sps = r._samplePoints;
             if (!Array.isArray(sps)) return;
@@ -461,11 +465,17 @@
                 if (seen.has(key)) return;
                 seen.add(key);
                 const cache = loadElevationCache();
-                if (cache[key] != null) return;
+                if (cache[key] != null) { cacheHits++; return; }
                 if (elevInFlight[key]) return;
                 points.push({ lat: p.lat, lng: p.lng });
             });
         });
+        // Diagnostic: shows whether the persistent cache is doing its
+        // job. If `new` is consistently == `total unique` across page
+        // reloads, the cache isn't persisting or the keys aren't
+        // matching — investigate. Healthy second-load run should
+        // show `new: 0` (or very few, for newly added entities).
+        console.log(`${TAG} DEM bulk for site ${siteID}: ${seen.size} unique sample points · ${cacheHits} cache hits · ${points.length} new (need fetch)`);
         if (points.length === 0) {
             // Cache already covers everything — call hook anyway in case
             // the rows were built before cache returned (race protection).
@@ -2448,19 +2458,32 @@
     }
     // Render a single Map Styler feature as KML. Features are
     // { type: 'line'|'polygon', coords: [{lat,lng},...], pmIdx, visible }.
-    function kmlPowerLineFeature(feat, mode, styleId) {
+    // In 3D, lines are raised to `heightFt` above local terrain
+    // (relativeToGround) so they sit at realistic wire altitude for
+    // visual drone-clearance planning. Defaults:
+    //   Distribution: 35 ft (Permian Basin typical 30-45 ft)
+    //   Transmission: 80 ft (varies 40-150 ft by voltage class)
+    function kmlPowerLineFeature(feat, mode, heightFt) {
         if (!feat || !Array.isArray(feat.coords) || feat.coords.length < 2) return '';
-        // Skip features the user has marked as hidden in Map Styler —
-        // they're considered bogus or noisy by the user, no value in
-        // exporting them.
         if (feat.visible === false) return '';
-        const altMode = mode === '3D' ? 'clampToGround' : 'clampToGround'; // power lines = ground-clamped both modes
+        if (mode === '3D' && typeof heightFt === 'number' && heightFt > 0) {
+            const altM = heightFt * KML_FT_TO_M;
+            if (feat.type === 'line') {
+                return `<LineString><altitudeMode>relativeToGround</altitudeMode><coordinates>${kmlCoords(feat.coords, altM)}</coordinates></LineString>`;
+            }
+            if (feat.type === 'polygon') {
+                const ring = closeRing(feat.coords);
+                return `<Polygon><altitudeMode>relativeToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, altM)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+            }
+            return '';
+        }
+        // 2D mode — ground-clamped.
         if (feat.type === 'line') {
-            return `<LineString><altitudeMode>${altMode}</altitudeMode><coordinates>${kmlCoords(feat.coords, 0)}</coordinates></LineString>`;
+            return `<LineString><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords(feat.coords, 0)}</coordinates></LineString>`;
         }
         if (feat.type === 'polygon') {
             const ring = closeRing(feat.coords);
-            return `<Polygon><altitudeMode>${altMode}</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+            return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
         }
         return '';
     }
@@ -2875,19 +2898,23 @@
         if (include.powerlines && hasPowerLinesFor(siteID)) {
             const distroN = powerLinesKml.distro.length;
             const transN = powerLinesKml.trans.length;
+            const distroHt = (typeof options.distroHeightFt === 'number' && options.distroHeightFt >= 0) ? options.distroHeightFt : 35;
+            const transHt = (typeof options.transHeightFt === 'number' && options.transHeightFt >= 0) ? options.transHeightFt : 80;
             if (distroN > 0) {
-                xml.push(`<Folder><name>Power Lines - Distribution (${distroN})</name>`);
+                const htLabel = mode === '3D' ? ` @ ${distroHt} ft AGL` : '';
+                xml.push(`<Folder><name>Power Lines - Distribution (${distroN})${htLabel}</name>`);
                 powerLinesKml.distro.forEach((feat, i) => {
-                    const geom = kmlPowerLineFeature(feat, mode);
+                    const geom = kmlPowerLineFeature(feat, mode, distroHt);
                     if (!geom) return;
                     xml.push(`<Placemark id="distro_${i}"><name>Distro line ${i + 1}</name><styleUrl>#powerline_distro_style</styleUrl>${geom}</Placemark>`);
                 });
                 xml.push('</Folder>');
             }
             if (transN > 0) {
-                xml.push(`<Folder><name>Power Lines - Transmission (${transN})</name>`);
+                const htLabel = mode === '3D' ? ` @ ${transHt} ft AGL` : '';
+                xml.push(`<Folder><name>Power Lines - Transmission (${transN})${htLabel}</name>`);
                 powerLinesKml.trans.forEach((feat, i) => {
-                    const geom = kmlPowerLineFeature(feat, mode);
+                    const geom = kmlPowerLineFeature(feat, mode, transHt);
                     if (!geom) return;
                     xml.push(`<Placemark id="trans_${i}"><name>Trans line ${i + 1}</name><styleUrl>#powerline_trans_style</styleUrl>${geom}</Placemark>`);
                 });
@@ -3009,6 +3036,14 @@
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-powerlines-label"><input type="checkbox" data-inc="powerlines" checked style="accent-color:#7adfe6"> Power Lines <span id="aim-ai-pl-status" style="color:#888;font-size:10px">(requesting…)</span></label>
                 </div>
             </div>
+            <div id="aim-ai-pl-heights" style="margin-bottom:14px;padding:8px 10px;background:rgba(255,213,79,0.05);border:1px dashed rgba(255,213,79,0.25);border-radius:3px">
+                <div style="font-size:11px;color:#ffd54f;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Power line heights (3D only)</div>
+                <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11px">
+                    <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Distribution:</span><input type="number" id="aim-ai-distro-ht" value="35" min="0" max="200" step="5" style="width:60px;background:#1a1d23;border:1px solid rgba(255,213,79,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888">ft AGL</span></label>
+                    <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Transmission:</span><input type="number" id="aim-ai-trans-ht" value="80" min="0" max="300" step="5" style="width:60px;background:#1a1d23;border:1px solid rgba(255,213,79,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888">ft AGL</span></label>
+                </div>
+                <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Permian Basin: distro typically 30-45 ft (35 default), trans 40-150 ft depending on voltage (80 default for safety). Adjust per-site.</div>
+            </div>
             <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 <button id="aim-ai-kml-cancel" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
@@ -3026,7 +3061,16 @@
             box.querySelectorAll('input[data-inc]').forEach(cb => {
                 include[cb.dataset.inc] = cb.checked;
             });
-            return { mode, include, siteName: `Site ${siteID} Map - ${siteName}` };
+            const distroIn = box.querySelector('#aim-ai-distro-ht');
+            const transIn = box.querySelector('#aim-ai-trans-ht');
+            const distroHeightFt = distroIn ? parseFloat(distroIn.value) : 35;
+            const transHeightFt = transIn ? parseFloat(transIn.value) : 80;
+            return {
+                mode, include,
+                distroHeightFt: isFinite(distroHeightFt) ? distroHeightFt : 35,
+                transHeightFt: isFinite(transHeightFt) ? transHeightFt : 80,
+                siteName: `Site ${siteID} Map - ${siteName}`,
+            };
         };
         const updateStats = () => {
             const opts = readOpts();
@@ -3040,8 +3084,16 @@
             const mode = box.querySelector('input[name="aim-ai-kml-mode"]:checked').value;
             const lbl = box.querySelector('#aim-ai-vbuffers-label');
             lbl.style.display = mode === '3D' ? '' : 'none';
+            // Power line heights only matter in 3D — 2D is ground-clamped.
+            const phts = box.querySelector('#aim-ai-pl-heights');
+            if (phts) phts.style.display = mode === '3D' ? '' : 'none';
             updateStats();
         };
+        // Live preview on height input changes.
+        const dh = box.querySelector('#aim-ai-distro-ht');
+        const th = box.querySelector('#aim-ai-trans-ht');
+        if (dh) dh.oninput = updateStats;
+        if (th) th.oninput = updateStats;
         box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
         box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = updateStats);
         updateVbufferVis();
