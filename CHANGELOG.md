@@ -8,6 +8,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.30** — **NEW: Site Setup Analyzer (KML export, Phase 1).** Replaces the Stand_Alone_AIM_SS_Generator_V8.pyw workflow for the common case (Google Earth visualization). New 🗺️ **Analyzer** button in the SUM panel toolbar (next to 📊 Summary) opens a modal:
+  - **2D mode** — all geometry clamped to ground (flat polygons + lines + pins).
+  - **3D mode** — Assets extruded to their claimed `elevation_asl`; FFZ/NFZ extruded as `MultiGeometry` boxes from `min_alt` to `max_alt`; FP segments drawn as 3D lines at `min_alt`; markers at `marker_height` (when set). Includes optional **Vertical Buffers** (50 ft below FFZ min + FP min) as separate folders.
+  - **Folder structure restructured for clarity** vs the Python output: General Markers consolidated into ONE parent folder with subfolders by type (Tower / Hazard / General) instead of 3 sibling top-level folders. Folder names spelled out ("Free-Fly Zones" not "Freezone"). Short style IDs to shave file size.
+  - **Per-folder include checkboxes** in the modal — exclude anything you don't want in the output.
+  - **Two export paths**: 📋 Copy to clipboard or ⬇ Download `.kml` (browser blob download). Filename: `Site_<id>_Map_(<mode>).kml` (matches the Python naming convention).
+  - **Description blocks** are compact single-line HTML (no padding `<br><br><br>` like the Python). Each entity shows site datum, subtype, dual-unit altitudes (ft AGL / ft MSL), notes if present, ⚠ Unshielded flag if set. FP segments also show parent FP name, segment number + ID, distance, and an ⚠ Approval Required flag.
+  - **NOT in this phase** (deferred to v3.31+): H-Buffer geometry (needs shapely-equivalent polygon buffer math), validation rules + Violations folder, GitHub upload of generated KML to `aim-userscripts-data`.
 - **AIM Map Styler v34.42** — **NEW: "Unhide all file-hidden lines" button** in both Distro and Trans category settings. One-click recovery for broken KML exports (the 1598-distro.kml situation we hit earlier — Google Earth had shipped every placemark with `<visibility>0</visibility>`, making them all invisible with no easy way to interact). The button walks the parsed features for the category, finds every placemark the FILE says is hidden, and creates a local-pending override flipping it visible. Idempotent (re-running does nothing if all lines are already showing). No GitHub roundtrip — purely a local view override. Toast confirms how many lines were unhid. Pairs with the existing "Clear all my local hides" — that one wipes pending overrides; this one ADDS overrides to flip file-hidden lines visible.
 - **AIM Asset Inspector v3.29** — search box now matches Segment ID too. Type "2571" to find arc 2571233. Search placeholder updated to "Search name, subtype, or Seg ID…".
 - **AIM Asset Inspector v3.28** — **NEW: Segment ID column** in the SUM panel.

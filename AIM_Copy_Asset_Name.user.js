@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.29
+// @version      3.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.29';
+    const SCRIPT_VERSION = '3.30';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2387,6 +2387,457 @@
         return out;
     }
 
+    // ============================================================
+    // SITE SETUP ANALYZER (v3.30) — KML EXPORT
+    //
+    // Generates a Google-Earth-ready KML of the entire site setup
+    // from in-memory mapObjectsBySite data (no extra fetch needed).
+    // Two modes:
+    //   2D — everything clamped to ground (flat polygons)
+    //   3D — FFZ/NFZ extruded boxes from min_alt to max_alt,
+    //        FP segments at min_alt, Assets extruded at claimed elev,
+    //        plus optional V-Buffer overlays below FP min_alt + FFZ
+    //
+    // Output structure (improved over the Python source):
+    //   Document
+    //     Styles (compact short IDs)
+    //     Folder: Assets
+    //     Folder: Flight Paths
+    //       Folder per FP > Placemark per segment
+    //     Folder: Free-Fly Zones
+    //     Folder: No-Fly Zones
+    //     Folder: General Markers (consolidated, w/ subfolders by type)
+    //     [3D] Folder: Vertical Buffers > FFZ & FP sub-folders
+    // ============================================================
+    const KML_FT = 3.28084;
+    const KML_BUFFER_OFFSET_FT = 50;  // V-buffer is 50 ft below min_alt
+    // Centralized styles. Short IDs (s_asset vs asset_style) reduce
+    // file size by a few KB on a busy site.
+    const KML_STYLES = `
+<Style id="s_asset"><IconStyle><scale>1.0</scale><Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon></IconStyle><LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle><color>66ffffff</color></PolyStyle></Style>
+<Style id="s_ffz"><LineStyle><color>ff5fff5f</color><width>2</width></LineStyle><PolyStyle><color>335fff5f</color></PolyStyle></Style>
+<Style id="s_nfz"><LineStyle><color>ff5252ff</color><width>2</width></LineStyle><PolyStyle><color>335252ff</color></PolyStyle></Style>
+<Style id="s_fp"><LineStyle><color>ffdea01c</color><width>3</width></LineStyle></Style>
+<Style id="s_mk_general"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>
+<Style id="s_mk_tower"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>
+<Style id="s_mk_hazard"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>
+<Style id="s_vbuf_ffz"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle><PolyStyle><color>3300ffff</color></PolyStyle></Style>
+<Style id="s_vbuf_fp"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle></Style>
+`;
+    // Escape XML-unsafe chars for use in element text + attributes.
+    function xmlEscape(s) {
+        if (s == null) return '';
+        return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+    }
+    // KML wants `lng,lat,alt` triples space-separated. Defaults alt=0.
+    function kmlCoords(points, alt) {
+        if (!Array.isArray(points)) return '';
+        return points.filter(p => p && typeof p.lat === 'number' && typeof p.lng === 'number')
+            .map(p => `${p.lng},${p.lat},${alt != null ? alt : 0}`)
+            .join(' ');
+    }
+    // Polygon ring needs explicit closing coord (first == last).
+    function closeRing(points) {
+        if (!Array.isArray(points) || points.length < 2) return points;
+        const first = points[0], last = points[points.length - 1];
+        if (first.lat === last.lat && first.lng === last.lng) return points;
+        return points.concat([first]);
+    }
+    // Build the CDATA description block — dual-unit altitudes + key
+    // metadata. Compact (single-line HTML) to minimize KML size.
+    function kmlDescription(item, opts) {
+        const { siteDatumM } = opts;
+        const lines = [];
+        const datumFt = (siteDatumM || 0) * KML_FT;
+        if (siteDatumM != null) {
+            lines.push(`<b>Site Datum:</b> ${datumFt.toFixed(1)} ft / ${siteDatumM.toFixed(1)} m MSL`);
+        }
+        if (item.type === 3 && item.custom) {
+            if (item.custom.poi_type_str) lines.push(`<b>Subtype:</b> ${xmlEscape(item.custom.poi_type_str)}`);
+            if (item.custom.elevation_asl != null) {
+                const ft = item.custom.elevation_asl * KML_FT;
+                lines.push(`<b>Asset Elevation:</b> ${ft.toFixed(1)} ft / ${item.custom.elevation_asl.toFixed(1)} m MSL`);
+            }
+            if (item.custom.relative_alt != null) lines.push(`<b>Height AGL:</b> ${(item.custom.relative_alt * KML_FT).toFixed(1)} ft`);
+        }
+        // FFZ / NFZ altitude range
+        if ((item.type === 4 || item.type === 16) && item.restrictions) {
+            const r = item.restrictions;
+            if (r.minAlt != null) {
+                const aglFt = (r.minAlt - (siteDatumM || 0)) * KML_FT;
+                const mslFt = r.minAlt * KML_FT;
+                lines.push(`<b>Min Alt:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
+            }
+            if (r.maxAlt != null) {
+                const aglFt = (r.maxAlt - (siteDatumM || 0)) * KML_FT;
+                const mslFt = r.maxAlt * KML_FT;
+                lines.push(`<b>Max Alt:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
+            }
+        }
+        if (item.description) lines.push(`<b>Notes:</b> ${xmlEscape(String(item.description).trim()).substring(0, 400)}`);
+        if (item.is_unshielded) lines.push(`<b>⚠ Unshielded</b>`);
+        return `<![CDATA[${lines.join('<br>')}]]>`;
+    }
+    // Per-segment description for FP arcs.
+    function kmlArcDescription(fp, arc, idx, opts) {
+        const { siteDatumM } = opts;
+        const lines = [`<b>Parent FP:</b> ${xmlEscape(fp.name)}`,
+                       `<b>Segment:</b> #${idx + 1} (ID ${arc.id != null ? arc.id : 'n/a'})`];
+        if (typeof arc.distance === 'number') lines.push(`<b>Distance:</b> ${(arc.distance * KML_FT).toFixed(0)} ft / ${arc.distance.toFixed(1)} m`);
+        const addAlt = (label, m) => {
+            if (m == null) return;
+            const aglFt = (m - (siteDatumM || 0)) * KML_FT;
+            const mslFt = m * KML_FT;
+            lines.push(`<b>${label}:</b> ${aglFt.toFixed(0)} ft AGL / ${mslFt.toFixed(0)} ft MSL`);
+        };
+        addAlt('Min Alt', arc.min_alt);
+        addAlt('Max Alt', arc.max_alt);
+        if (arc.wait_until_approved === true) lines.push('<b>⚠ Approval Required</b>');
+        return `<![CDATA[${lines.join('<br>')}]]>`;
+    }
+    // Asset polygon — 2D: clamp; 3D: extruded box from ground to claimed elev (or 4ft default).
+    function kmlAssetGeometry(item, mode) {
+        if (!Array.isArray(item.coords) || item.coords.length < 3) {
+            // Markers stored as type 3 with single coord — emit a point.
+            if (item.coords && item.coords[0]) {
+                return `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords([item.coords[0]])}</coordinates></Point>`;
+            }
+            return '';
+        }
+        const ring = closeRing(item.coords);
+        if (mode === '3D') {
+            const alt = (item.custom && typeof item.custom.elevation_asl === 'number')
+                ? item.custom.elevation_asl
+                : 0;
+            return `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+        }
+        return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+    }
+    // Zone polygon (FFZ/NFZ) — 2D: clamp; 3D: extruded box (min_alt → max_alt).
+    function kmlZoneGeometry(item, mode) {
+        if (!Array.isArray(item.coords) || item.coords.length < 3) return '';
+        const ring = closeRing(item.coords);
+        if (mode === '3D') {
+            const minA = item.restrictions && item.restrictions.minAlt != null ? item.restrictions.minAlt : 0;
+            const maxA = item.restrictions && item.restrictions.maxAlt != null ? item.restrictions.maxAlt : minA;
+            // Extruded 3D box: a MultiGeometry holding two cap polygons
+            // (top at max_alt, bottom at min_alt). Google Earth renders
+            // them as a solid column. extrude=1 on the top cap draws
+            // side walls down to ground; combined with the bottom cap
+            // at min_alt this approximates a box from min→max alt.
+            const ringStr = kmlCoords(ring, maxA);
+            const ringStrBottom = kmlCoords(ring, minA);
+            return `<MultiGeometry>`
+                 + `<Polygon><extrude>1</extrude><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${ringStr}</coordinates></LinearRing></outerBoundaryIs></Polygon>`
+                 + `<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${ringStrBottom}</coordinates></LinearRing></outerBoundaryIs></Polygon>`
+                 + `</MultiGeometry>`;
+        }
+        return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+    }
+    // FP segment as a LineString.
+    function kmlArcGeometry(arc, mode) {
+        if (!arc || !arc.point_a || !arc.point_b) return '';
+        const pts = [arc.point_a, arc.point_b];
+        if (mode === '3D' && typeof arc.min_alt === 'number') {
+            return `<LineString><altitudeMode>absolute</altitudeMode><coordinates>${kmlCoords(pts, arc.min_alt)}</coordinates></LineString>`;
+        }
+        return `<LineString><altitudeMode>clampToGround</altitudeMode><coordinates>${kmlCoords(pts, 0)}</coordinates></LineString>`;
+    }
+    // Marker as a Point.
+    function kmlMarkerGeometry(item, mode) {
+        const c = (Array.isArray(item.coords) && item.coords[0]) || null;
+        if (!c) return '';
+        if (mode === '3D' && typeof item.marker_height === 'number' && item.marker_height > 0) {
+            return `<Point><extrude>1</extrude><altitudeMode>relativeToGround</altitudeMode><coordinates>${c.lng},${c.lat},${item.marker_height}</coordinates></Point>`;
+        }
+        return `<Point><altitudeMode>clampToGround</altitudeMode><coordinates>${c.lng},${c.lat},0</coordinates></Point>`;
+    }
+    // V-Buffer geometry for an FFZ — same polygon shape, offset below min_alt.
+    function kmlVBufferZone(item) {
+        if (!Array.isArray(item.coords) || item.coords.length < 3) return '';
+        if (!item.restrictions || item.restrictions.minAlt == null) return '';
+        const ring = closeRing(item.coords);
+        const alt = item.restrictions.minAlt - (KML_BUFFER_OFFSET_FT / KML_FT);
+        return `<Polygon><altitudeMode>absolute</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, alt)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+    }
+    // V-Buffer geometry for an FP segment — same line, offset below min_alt.
+    function kmlVBufferArc(arc) {
+        if (!arc || !arc.point_a || !arc.point_b || typeof arc.min_alt !== 'number') return '';
+        const alt = arc.min_alt - (KML_BUFFER_OFFSET_FT / KML_FT);
+        return `<LineString><altitudeMode>absolute</altitudeMode><coordinates>${kmlCoords([arc.point_a, arc.point_b], alt)}</coordinates></LineString>`;
+    }
+    // Mark-pin marker style by general_marker_type.
+    function kmlMarkerStyleId(item) {
+        const t = (item.general_marker_type || 'general').toLowerCase();
+        if (t === 'tower') return 's_mk_tower';
+        if (t === 'hazard') return 's_mk_hazard';
+        return 's_mk_general';
+    }
+    // Main entry point — builds the entire KML string.
+    function buildSiteKML(siteID, options) {
+        const { mode, include, siteName } = options;
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket) return null;
+        const entities = bucket.entities || [];
+        // Site datum = average elevation of all entity centroids that
+        // have a DEM-resolved value. Falls back to 0 if nothing loaded.
+        let datumSum = 0, datumCount = 0;
+        entities.forEach(e => {
+            const c = getEntityCentroid(e);
+            if (!c) return;
+            const v = getElevationFromCache(c.lat, c.lng);
+            if (v != null) { datumSum += v; datumCount++; }
+        });
+        const siteDatumM = datumCount > 0 ? datumSum / datumCount : 0;
+        const opts = { siteDatumM };
+
+        // Bucket entities by type for folder construction
+        const byType = { 3: [], 4: [], 15: [], 16: [], 19: { general: [], tower: [], hazard: [] } };
+        entities.forEach(e => {
+            if (e.type === 19) {
+                const t = (e.general_marker_type || 'general').toLowerCase();
+                if (t === 'tower') byType[19].tower.push(e);
+                else if (t === 'hazard') byType[19].hazard.push(e);
+                else byType[19].general.push(e);
+            } else if (byType[e.type] !== undefined) {
+                byType[e.type].push(e);
+            }
+        });
+
+        const xml = [];
+        xml.push('<?xml version="1.0" encoding="UTF-8"?>');
+        xml.push('<kml xmlns="http://www.opengis.net/kml/2.2">');
+        xml.push(`<Document><name>${xmlEscape(siteName || `Site ${siteID}`)} (${mode})</name>`);
+        xml.push(`<description><![CDATA[Generated by AIM Asset Inspector v${SCRIPT_VERSION} · ${new Date().toISOString().slice(0, 10)}<br>Site datum: ${(siteDatumM * KML_FT).toFixed(1)} ft / ${siteDatumM.toFixed(1)} m MSL]]></description>`);
+        xml.push(KML_STYLES.trim());
+
+        // Assets
+        if (include.assets && byType[3].length > 0) {
+            xml.push(`<Folder><name>Assets (${byType[3].length})</name>`);
+            byType[3].forEach(e => {
+                const geom = kmlAssetGeometry(e, mode);
+                if (!geom) return;
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_asset</styleUrl>${geom}</Placemark>`);
+            });
+            xml.push('</Folder>');
+        }
+        // Flight Paths (nested folder per FP)
+        if (include.fps && byType[15].length > 0) {
+            xml.push(`<Folder><name>Flight Paths (${byType[15].length})</name>`);
+            byType[15].forEach(e => {
+                const arcs = Array.isArray(e.arcs) ? e.arcs : [];
+                xml.push(`<Folder id="fp_${e.id}"><name>${xmlEscape(e.name)} (${arcs.length} segs)</name>`);
+                arcs.forEach((arc, i) => {
+                    const geom = kmlArcGeometry(arc, mode);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="arc_${arc.id != null ? arc.id : i}"><name>${xmlEscape(e.name)} - Seg ${i + 1}</name><description>${kmlArcDescription(e, arc, i, opts)}</description><styleUrl>#s_fp</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            });
+            xml.push('</Folder>');
+        }
+        // Free-Fly Zones
+        if (include.ffzs && byType[16].length > 0) {
+            xml.push(`<Folder><name>Free-Fly Zones (${byType[16].length})</name>`);
+            byType[16].forEach(e => {
+                const geom = kmlZoneGeometry(e, mode);
+                if (!geom) return;
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_ffz</styleUrl>${geom}</Placemark>`);
+            });
+            xml.push('</Folder>');
+        }
+        // No-Fly Zones
+        if (include.nfzs && byType[4].length > 0) {
+            xml.push(`<Folder><name>No-Fly Zones (${byType[4].length})</name>`);
+            byType[4].forEach(e => {
+                const geom = kmlZoneGeometry(e, mode);
+                if (!geom) return;
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#s_nfz</styleUrl>${geom}</Placemark>`);
+            });
+            xml.push('</Folder>');
+        }
+        // General Markers — consolidated parent with one subfolder per subtype
+        const totalMarkers = byType[19].general.length + byType[19].tower.length + byType[19].hazard.length;
+        if (include.markers && totalMarkers > 0) {
+            xml.push(`<Folder><name>General Markers (${totalMarkers})</name>`);
+            const subFolders = [
+                { label: 'Tower', items: byType[19].tower },
+                { label: 'Hazard', items: byType[19].hazard },
+                { label: 'General', items: byType[19].general },
+            ];
+            subFolders.forEach(s => {
+                if (s.items.length === 0) return;
+                xml.push(`<Folder><name>${s.label} (${s.items.length})</name>`);
+                s.items.forEach(e => {
+                    const geom = kmlMarkerGeometry(e, mode);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#${kmlMarkerStyleId(e)}</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            });
+            xml.push('</Folder>');
+        }
+        // 3D-only: Vertical Buffers (50 ft below FFZ min + FP min)
+        if (mode === '3D' && include.vbuffers) {
+            const ffzWithMin = byType[16].filter(e => e.restrictions && e.restrictions.minAlt != null);
+            const fpWithArcs = byType[15].filter(e => Array.isArray(e.arcs) && e.arcs.length > 0);
+            if (ffzWithMin.length > 0 || fpWithArcs.length > 0) {
+                xml.push('<Folder><name>Vertical Buffers (50 ft)</name>');
+                if (ffzWithMin.length > 0) {
+                    xml.push(`<Folder><name>FFZ V-Buffers (${ffzWithMin.length})</name>`);
+                    ffzWithMin.forEach(e => {
+                        const geom = kmlVBufferZone(e);
+                        if (!geom) return;
+                        xml.push(`<Placemark id="vbuf_${e.id}"><name>${xmlEscape(e.name)} - VBuffer</name><styleUrl>#s_vbuf_ffz</styleUrl>${geom}</Placemark>`);
+                    });
+                    xml.push('</Folder>');
+                }
+                if (fpWithArcs.length > 0) {
+                    xml.push(`<Folder><name>FP V-Buffers (${fpWithArcs.length})</name>`);
+                    fpWithArcs.forEach(e => {
+                        xml.push(`<Folder><name>${xmlEscape(e.name)}</name>`);
+                        e.arcs.forEach((arc, i) => {
+                            const geom = kmlVBufferArc(arc);
+                            if (!geom) return;
+                            xml.push(`<Placemark id="vbuf_arc_${arc.id != null ? arc.id : i}"><name>Seg ${i + 1} - VBuffer</name><styleUrl>#s_vbuf_fp</styleUrl>${geom}</Placemark>`);
+                        });
+                        xml.push('</Folder>');
+                    });
+                    xml.push('</Folder>');
+                }
+                xml.push('</Folder>');
+            }
+        }
+        xml.push('</Document></kml>');
+        return xml.join('\n');
+    }
+    // Trigger a browser file download of `content` as a .kml file.
+    function downloadKMLFile(filename, content) {
+        try {
+            const blob = new Blob([content], { type: 'application/vnd.google-earth.kml+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+                a.remove();
+            }, 100);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} download failed:`, e);
+            return false;
+        }
+    }
+
+    // Site Setup Analyzer modal — KML format toggle + folder
+    // checkboxes + download/copy buttons. Floating draggable like
+    // the Stats popup; closes on Cancel or outside-click.
+    const ANALYZER_MODAL_ID = 'aim-ai-analyzer-modal';
+    function openSiteAnalyzer(siteID) {
+        closeSiteAnalyzer();
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket || !bucket.entities) {
+            showToast('No site data loaded', 'rgba(255,82,82,0.6)');
+            return;
+        }
+        const entities = bucket.entities;
+        const counts = {
+            assets: entities.filter(e => e.type === 3).length,
+            fps: entities.filter(e => e.type === 15).length,
+            ffzs: entities.filter(e => e.type === 16).length,
+            nfzs: entities.filter(e => e.type === 4).length,
+            markers: entities.filter(e => e.type === 19).length,
+        };
+        const m = document.createElement('div');
+        m.id = ANALYZER_MODAL_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:20px 24px;min-width:480px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const siteName = getCurrentSiteName() || `Site ${siteID}`;
+        box.innerHTML = `
+            <div style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px">🗺️ Site Setup Analyzer</div>
+            <div style="color:#888;font-size:11px;margin-bottom:14px">${xmlEscape(siteName)} · ${entities.length} entities · KML export</div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Format</div>
+                <label style="display:inline-flex;align-items:center;gap:6px;margin-right:18px;cursor:pointer"><input type="radio" name="aim-ai-kml-mode" value="3D" checked style="accent-color:#7adfe6"> 3D (extruded, V-Buffers)</label>
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="radio" name="aim-ai-kml-mode" value="2D" style="accent-color:#7adfe6"> 2D (clamped to ground)</label>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Include folders</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;font-size:12px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="assets" checked style="accent-color:#7adfe6"> Assets (${counts.assets})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="fps" checked style="accent-color:#7adfe6"> Flight Paths (${counts.fps})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="ffzs" checked style="accent-color:#7adfe6"> Free-Fly Zones (${counts.ffzs})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="nfzs" checked style="accent-color:#7adfe6"> No-Fly Zones (${counts.nfzs})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="markers" checked style="accent-color:#7adfe6"> General Markers (${counts.markers})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-vbuffers-label"><input type="checkbox" data-inc="vbuffers" checked style="accent-color:#7adfe6"> Vertical Buffers (3D only)</label>
+                </div>
+            </div>
+            <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                <button id="aim-ai-kml-cancel" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
+                <button id="aim-ai-kml-copy" style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📋 Copy to clipboard</button>
+                <button id="aim-ai-kml-dl" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">⬇ Download .kml</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        m.onclick = (ev) => { if (ev.target === m) closeSiteAnalyzer(); };
+
+        const readOpts = () => {
+            const mode = box.querySelector('input[name="aim-ai-kml-mode"]:checked').value;
+            const include = {};
+            box.querySelectorAll('input[data-inc]').forEach(cb => {
+                include[cb.dataset.inc] = cb.checked;
+            });
+            return { mode, include, siteName: `Site ${siteID} Map - ${siteName}` };
+        };
+        const updateStats = () => {
+            const opts = readOpts();
+            const kml = buildSiteKML(siteID, opts);
+            const sizeKb = kml ? (new Blob([kml]).size / 1024).toFixed(0) : 0;
+            const stats = box.querySelector('#aim-ai-kml-stats');
+            stats.textContent = `${opts.mode} export · ~${sizeKb} KB`;
+        };
+        // V-Buffers checkbox only relevant for 3D — show/hide based on mode.
+        const updateVbufferVis = () => {
+            const mode = box.querySelector('input[name="aim-ai-kml-mode"]:checked').value;
+            const lbl = box.querySelector('#aim-ai-vbuffers-label');
+            lbl.style.display = mode === '3D' ? '' : 'none';
+            updateStats();
+        };
+        box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
+        box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = updateStats);
+        updateVbufferVis();
+
+        box.querySelector('#aim-ai-kml-cancel').onclick = closeSiteAnalyzer;
+        box.querySelector('#aim-ai-kml-copy').onclick = () => {
+            const opts = readOpts();
+            const kml = buildSiteKML(siteID, opts);
+            if (!kml) { showToast('Failed to build KML'); return; }
+            copyToClipboard(kml, `Copied ${opts.mode} KML to clipboard (${(new Blob([kml]).size / 1024).toFixed(0)} KB)`);
+        };
+        box.querySelector('#aim-ai-kml-dl').onclick = () => {
+            const opts = readOpts();
+            const kml = buildSiteKML(siteID, opts);
+            if (!kml) { showToast('Failed to build KML'); return; }
+            // Filename: Site_<id>_Map_(<mode>).kml — matches Python pattern
+            const fname = `Site_${siteID}_Map_(${opts.mode}).kml`;
+            if (downloadKMLFile(fname, kml)) {
+                showToast(`Downloaded ${fname}`, 'rgba(95,255,95,0.6)');
+            } else {
+                showToast('Download failed — try Copy to clipboard', 'rgba(255,82,82,0.6)');
+            }
+        };
+    }
+    function closeSiteAnalyzer() {
+        const m = document.getElementById(ANALYZER_MODAL_ID);
+        if (m) m.remove();
+    }
+
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
         ensurePendingForSite(siteID);
@@ -2621,6 +3072,20 @@
             openStatsPopup(siteID);
         };
         optsRow.appendChild(summaryBtn);
+
+        // "Analyzer" button — opens the Site Setup Analyzer modal
+        // (KML export pipeline). Placed next to Summary for visual grouping
+        // (both are site-wide overview tools).
+        const analyzerBtn = document.createElement('button');
+        analyzerBtn.type = 'button';
+        analyzerBtn.textContent = '🗺️ Analyzer';
+        analyzerBtn.title = 'Site Setup Analyzer — export 2D / 3D KML for Google Earth';
+        analyzerBtn.style.cssText = 'background:rgba(20,210,220,0.15);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        analyzerBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            openSiteAnalyzer(siteID);
+        };
+        optsRow.appendChild(analyzerBtn);
 
         // Columns menu — opens a small popover with one checkbox per column.
         // Hidden columns are also omitted from CSV/TSV exports.
