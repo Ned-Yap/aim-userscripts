@@ -8,7 +8,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.18** — Bulk → Delta + FFZ editing + DEM progress bar + FFZ-first commit ordering hooks.
+
 - **AIM Asset Inspector v3.17** — **Live derived columns + AGL inline edit + Bulk → AGL button.**
+  - **NEW: Bulk → Delta** button (yellow, next to Bulk → AGL). Popover has separate inputs for FP segments (default 20 ft) and FFZ entities (default 30 ft) — SOPs. Queues Max Alt = effective Min + target delta. Chains correctly after Bulk → AGL (uses the in-queue Min, not the original).
+  - **FFZ inline editing** — FFZ Min / Max / AGL cells are now click-to-edit just like FP segments. Generalized the underlying `queueAltEdit` + `isEditableRow` helpers so any future entity type that supports altitude edits gets parity for free.
+  - **Bulk → AGL** now includes FFZ rows (was FP segments only).
+  - **DEM progress bar** appears above the table during elevation fetch. Shows `N / total (pct%)` with a moving fill; auto-hides ~600 ms after the bulk fetch completes. No bar at all when the cache already covers everything.
+  - **Copy queue → Sheets** now exports a `Type` column (FFZ / FP) as the first column and sorts FFZs first — same order the v3.19 automated apply path will use (AIM's overlap/steepness checks block FP saves when their FFZ endpoints haven't moved yet).
+  - Queue entries now carry an `isFfz` flag for the apply pipeline.
+
   - **Min/Max Delta** and **AGL** now update **live** when you edit Min or Max — both cells show the original value strikethrough + the new derived value in yellow. Edit one, watch the rest of the row reflect the new math instantly.
   - **AGL is now inline-editable on FP segment rows.** Click an AGL cell → text input pre-filled with current AGL. Type a target value (or formula). The script computes `new Min Alt = Elevation + target AGL` and queues a Min Alt edit. So you can approach altitude planning from either direction (Min ↔ AGL). Editor blocks if elevation hasn't loaded yet.
   - **NEW: Bulk → AGL** button in the toolbar (yellow). Opens a popover:
