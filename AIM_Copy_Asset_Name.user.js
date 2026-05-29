@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.16
+// @version      3.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.16';
+    const SCRIPT_VERSION = '3.17';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -975,6 +975,68 @@
         }
     }
 
+    // Computes the EFFECTIVE values for a row, honoring any pending
+    // min_alt / max_alt edits in the queue. Used by every renderer that
+    // shows derived data (Delta, AGL) so a queued Min edit reflects
+    // immediately on those derived cells in yellow. Returns flags so
+    // the cell renderer knows whether to paint pending state.
+    function effectiveValues(r) {
+        let effMin = r.altMinM;
+        let effMax = r.altMaxM;
+        let minP = null, maxP = null;
+        if (r._isSegment && r.arc) {
+            minP = getPendingEdit(r.entity.id, r.arc.id, 'min_alt');
+            maxP = getPendingEdit(r.entity.id, r.arc.id, 'max_alt');
+            if (minP) effMin = minP.newValueM;
+            if (maxP) effMax = maxP.newValueM;
+        }
+        const effDelta = (effMin != null && effMax != null) ? (effMax - effMin) : null;
+        const effAgl = (effMin != null && r.elevationM != null) ? (effMin - r.elevationM) : null;
+        return {
+            effMin, effMax, effDelta, effAgl,
+            minPending: !!minP, maxPending: !!maxP,
+            // A derived cell is "pending" when its inputs changed.
+            deltaPending: !!(minP || maxP),
+            aglPending: !!minP,
+        };
+    }
+
+    // Helper used by both inline AGL edit + bulk AGL apply. Given a
+    // target AGL (in meters) for a segment row, computes the new Min
+    // Alt = elevation + AGL and queues it as a min_alt pending edit.
+    // Returns true if the edit was queued, false if no-op or invalid.
+    function queueMinForAgl(row, targetAglM) {
+        if (!row || !row._isSegment || !row.arc) return false;
+        if (row.elevationM == null) return false;
+        if (!isFinite(targetAglM)) return false;
+        const newMinM = row.elevationM + targetAglM;
+        // Compare in display units so the user's "100 ft" doesn't get
+        // queued as a no-op due to sub-foot floating-point drift.
+        const useFt = !!sumPanelState.unitsFt;
+        const newDisp = useFt ? Math.round(newMinM * 3.28084) : Number(newMinM.toFixed(1));
+        const curDisp = useFt ? Math.round(row.altMinM * 3.28084) : Number(row.altMinM.toFixed(1));
+        if (newDisp === curDisp) {
+            // Already at target — clear any stale pending edit for this field.
+            if (getPendingEdit(row.entity.id, row.arc.id, 'min_alt')) {
+                discardPendingEdit(row.entity.id, row.arc.id, 'min_alt');
+            }
+            return false;
+        }
+        // Re-quantize back to meters via the display value so the queue
+        // stores the rounded number the user actually sees in the cell.
+        const newValueM = useFt ? newDisp / 3.28084 : newDisp;
+        queuePendingEdit({
+            entityId: row.entity.id,
+            arcId: row.arc.id,
+            field: 'min_alt',
+            oldValueM: row.altMinM,
+            newValueM,
+            segmentName: row.name,
+            fpName: row.entity.name || '',
+        });
+        return true;
+    }
+
     // Parse a number OR a math formula (e.g. "2974+15", "(2974+15)*2").
     // Strips any non-math chars before eval — only digits, dot, +, -,
     // *, /, parens, spaces allowed. Same impl as MBT.
@@ -1613,8 +1675,183 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(colsBtn);
+
+        // --- Bulk → AGL button ---
+        // Opens a popover that lets the user queue Min Alt edits across
+        // all FP segments (or just the selected ones) targeting a single
+        // AGL value. Defaults to 100 ft per the user's standard (floor
+        // of every FP at 100 ft AGL except in specific situations they
+        // can manually unqueue).
+        const bulkBtn = document.createElement('button');
+        bulkBtn.type = 'button';
+        bulkBtn.textContent = 'Bulk → AGL';
+        bulkBtn.title = 'Queue Min Alt edits across FP segments to hit a target AGL';
+        bulkBtn.style.cssText = 'background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        let bulkPopEl = null;
+        bulkBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (bulkPopEl) { bulkPopEl.remove(); bulkPopEl = null; return; }
+            bulkPopEl = buildBulkAglPopover(bulkBtn, () => {
+                if (bulkPopEl) { bulkPopEl.remove(); bulkPopEl = null; }
+            });
+            document.body.appendChild(bulkPopEl);
+            const r = bulkBtn.getBoundingClientRect();
+            bulkPopEl.style.left = r.left + 'px';
+            bulkPopEl.style.top = (r.bottom + 4) + 'px';
+            const rect = bulkPopEl.getBoundingClientRect();
+            if (rect.right > window.innerWidth - 8) {
+                bulkPopEl.style.left = (window.innerWidth - rect.width - 8) + 'px';
+            }
+            const onDocClick = (e) => {
+                if (bulkPopEl && !bulkPopEl.contains(e.target) && e.target !== bulkBtn) {
+                    bulkPopEl.remove(); bulkPopEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(bulkBtn);
         toolbar.appendChild(optsRow);
         panel.appendChild(toolbar);
+
+        // Builds the popover shown when the user clicks "Bulk → AGL".
+        // Captures the current rows + selection state when called, so
+        // the "Queue N edits" preview reflects what would actually
+        // happen. Re-builds whenever the target AGL changes.
+        function buildBulkAglPopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:300px';
+            const useFt = !!sumPanelState.unitsFt;
+            const unitTxt = useFt ? 'ft' : 'm';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🎯 Bulk Set Min Alt to Target AGL';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'For each FP segment, queues a Min Alt = elevation + target AGL. Skips segments already at target. You can unqueue individual segments after.';
+            pop.appendChild(help);
+
+            // Target input
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px';
+            const lbl1 = document.createElement('label');
+            lbl1.textContent = `Target AGL (${unitTxt}):`;
+            lbl1.style.cssText = 'flex:1;color:#cfd6dc';
+            row1.appendChild(lbl1);
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.value = useFt ? '100' : '30';
+            inp.min = '0';
+            inp.step = useFt ? '10' : '5';
+            inp.style.cssText = 'width:80px;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:12px;text-align:right';
+            row1.appendChild(inp);
+            pop.appendChild(row1);
+
+            // Scope radio
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:10px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = 'aim-ai-bulk-scope';
+                r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r);
+                l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All FP segments on this site', false);
+            const selScope = mkScope('sel', `Selected segments only (${selCount} selected)`, selCount === 0);
+            // Default: if user has a selection, use it; else all.
+            if (selCount > 0) selScope.r.checked = true;
+            else allScope.r.checked = true;
+            row2.appendChild(allScope.l);
+            row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            // Live preview — "X edits would be queued" updates as user
+            // changes target or scope. computeEligible returns the
+            // segment-rows that need an edit (rows that don't already
+            // match the target).
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            const computeEligible = () => {
+                const targetVal = parseFloat(inp.value);
+                if (!isFinite(targetVal)) return { eligible: [], targetM: NaN };
+                const targetM = useFt ? targetVal / 3.28084 : targetVal;
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const candidates = allRows.filter(r => {
+                    if (!r._isSegment) return false;
+                    if (r.elevationM == null) return false;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return false;
+                    return true;
+                });
+                const eligible = candidates.filter(r => {
+                    const newMinM = r.elevationM + targetM;
+                    const newDisp = useFt ? Math.round(newMinM * 3.28084) : Number(newMinM.toFixed(1));
+                    const curDisp = useFt ? Math.round(r.altMinM * 3.28084) : Number(r.altMinM.toFixed(1));
+                    return newDisp !== curDisp;
+                });
+                return { eligible, targetM, totalSegments: candidates.length };
+            };
+            const refreshPreview = () => {
+                const { eligible, targetM, totalSegments } = computeEligible();
+                if (!isFinite(targetM)) {
+                    preview.textContent = '⚠️ Invalid target value';
+                    return;
+                }
+                if (totalSegments === 0) {
+                    preview.textContent = '⚠️ No eligible segments (need loaded elevation).';
+                    return;
+                }
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> edit${eligible.length === 1 ? '' : 's'} · skipping ${totalSegments - eligible.length} already at target.`;
+            };
+            refreshPreview();
+            inp.oninput = refreshPreview;
+            allScope.r.onchange = refreshPreview;
+            selScope.r.onchange = refreshPreview;
+
+            // Buttons
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, targetM } = computeEligible();
+                if (!isFinite(targetM)) {
+                    showToast('Invalid target value', 'rgba(255,82,82,0.6)');
+                    return;
+                }
+                if (eligible.length === 0) {
+                    showToast('Nothing to queue — all eligible segments already at target');
+                    return;
+                }
+                let queued = 0;
+                eligible.forEach(r => { if (queueMinForAgl(r, targetM)) queued++; });
+                const tDisp = useFt ? Math.round(targetM * 3.28084) : Number(targetM.toFixed(1));
+                showToast(`Queued ${queued} Min Alt edit${queued === 1 ? '' : 's'} → ${tDisp}${unitTxt} AGL`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
 
         // --- Table area ---
         const tableWrap = document.createElement('div');
@@ -1924,6 +2161,22 @@
                     );
                 };
 
+                // Compute the effective Min/Max/Delta/AGL once per row
+                // (with any pending edits applied) so every column that
+                // depends on these values stays consistent — editing Min
+                // immediately yellow-tints Delta + AGL too, and editing
+                // AGL routes through Min and yellow-tints Min + Delta.
+                const eff = effectiveValues(r);
+                // AGL color (used in two places — color the AGL cell + the
+                // bulk-target preview).
+                const aglColor = (() => {
+                    if (eff.effAgl == null) return '#bbb';
+                    const ft = eff.effAgl * 3.28084;
+                    if (ft < 90) return '#ff5252';
+                    if (ft > 200) return '#3399ff';
+                    return '#5fff5f';
+                })();
+
                 cols.forEach(col => {
                     const td = document.createElement('td');
                     td.style.cursor = 'pointer';
@@ -1941,46 +2194,49 @@
                         td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
                         td.textContent = r.subtype || '—';
                     } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
-                        // Min/Max/Delta cells. Min and Max on FP segment
-                        // rows are INLINE-EDITABLE in v3.16: clicking the
-                        // cell opens a text input that accepts a number
-                        // or a formula. The edit queues to pendingSegmentEdits
-                        // (a planning queue — applying via Percepto's
-                        // entity editor is v3.17 work).
+                        // Min, Max, and Delta cells. Min/Max on FP segment
+                        // rows are inline-editable. Delta is derived; never
+                        // directly editable but updates live when Min/Max
+                        // change (pending=true if either input is pending).
                         const editable = r._isSegment && (col.key === 'altMin' || col.key === 'altMax');
                         const fieldName = col.key === 'altMin' ? 'min_alt' : 'max_alt';
-                        const pending = editable
-                            ? getPendingEdit(r.entity.id, r.arc.id, fieldName)
-                            : null;
-                        // Color: yellow tint if there's a pending edit; default white.
+                        // Pending check — for Delta, true if EITHER min/max
+                        // has a pending edit; for Min/Max, true iff that
+                        // exact field has a pending edit.
+                        let pending = false, origM = null, newM = null;
+                        if (col.key === 'altMin') {
+                            pending = eff.minPending;
+                            origM = r.altMinM;
+                            newM = eff.effMin;
+                        } else if (col.key === 'altMax') {
+                            pending = eff.maxPending;
+                            origM = r.altMaxM;
+                            newM = eff.effMax;
+                        } else { // altDelta
+                            pending = eff.deltaPending;
+                            origM = r.altDeltaM;
+                            newM = eff.effDelta;
+                        }
                         const baseColor = pending ? '#ffd54f' : '#e6e6e6';
                         td.style.cssText = `padding:5px 8px;color:${baseColor};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer${editable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
-                        // For pending: show OLD value strikethrough + NEW
-                        // value in yellow. Mirrors MBT's display pattern.
-                        if (pending) {
-                            const oldDisp = col.fmt(r[col.dataKey]);
-                            const newDisp = col.fmt(pending.newValueM);
+                        if (pending && origM != null) {
                             const oldSpan = document.createElement('span');
-                            oldSpan.textContent = oldDisp;
+                            oldSpan.textContent = col.fmt(origM);
                             oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px;font-weight:normal';
                             const newSpan = document.createElement('span');
-                            newSpan.textContent = newDisp;
+                            newSpan.textContent = col.fmt(newM);
                             newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
                             td.appendChild(oldSpan);
                             td.appendChild(newSpan);
-                            td.title = `Pending edit — was ${col.raw(r[col.dataKey])}, will be ${col.raw(pending.newValueM)}. Click to re-edit · Right-click: copy raw.`;
+                            td.title = `Was ${col.raw(origM)}, will be ${col.raw(newM)}.${editable ? ' Click to re-edit · Right-click: copy raw.' : ' Derived — edit Min or Max to change.'}`;
                         } else {
-                            td.textContent = col.fmt(r[col.dataKey]);
+                            td.textContent = col.fmt(newM);
                             if (editable) {
                                 td.title = 'Click: edit · Right-click: copy raw';
                             } else {
                                 td.title = 'Click: pan/inspect · Right-click: copy raw';
                             }
                         }
-                        // Override row-click for editable Min/Max cells —
-                        // single click opens the editor (not pan). Right-
-                        // click always copies the raw value. Delta is
-                        // derived, never editable.
                         if (editable) {
                             td.onclick = (ev) => {
                                 ev.stopPropagation();
@@ -1990,12 +2246,11 @@
                         td.oncontextmenu = (ev) => {
                             ev.preventDefault();
                             ev.stopPropagation();
-                            // Right-click on a cell with a pending edit
-                            // copies the NEW value, not the old one — the
-                            // pending value is what the user cares about.
-                            const v = pending ? pending.newValueM : r[col.dataKey];
-                            if (v == null) return;
-                            const raw = col.raw(v);
+                            // Right-click copies the EFFECTIVE value (new
+                            // if pending, otherwise current). That's what
+                            // the user sees and wants in the paste.
+                            if (newM == null) return;
+                            const raw = col.raw(newM);
                             copyToClipboard(raw, `Copied ${raw}`);
                         };
                     } else if (col.key === 'elevation') {
@@ -2013,18 +2268,47 @@
                         };
                         td.title = 'Click: pan/inspect · Right-click: copy raw number';
                     } else if (col.key === 'agl') {
-                        // AGL = Min Alt − Elevation. Color rules match MBT
-                        // navigate AGL: red <90 ft / green 90-200 / blue >200.
-                        const d = r.aglM;
-                        let color = '#bbb';
-                        if (d != null) {
-                            const ft = d * 3.28084;
-                            if (ft < 90) color = '#ff5252';
-                            else if (ft > 200) color = '#3399ff';
-                            else color = '#5fff5f';
+                        // AGL is derived (Min − Elevation). For FP segment
+                        // rows it's also INLINE-EDITABLE: editing AGL
+                        // queues a Min edit equal to elevation + AGL.
+                        // Lets the user approach altitude from either
+                        // direction. Live-updates when Min changes too.
+                        const editable = r._isSegment && r.elevationM != null;
+                        td.style.cssText = `padding:5px 8px;color:${aglColor};text-align:right;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;cursor:pointer${editable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                        if (eff.aglPending && r.aglM != null) {
+                            // Pending: show OLD AGL strikethrough + NEW
+                            // AGL in yellow (overriding the color rule
+                            // so the user sees this is a queued change).
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = col.fmt(r.aglM);
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px;font-weight:normal';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = col.fmt(eff.effAgl);
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `AGL was ${col.raw(r.aglM)}, will be ${col.raw(eff.effAgl)}.${editable ? ' Click to re-edit.' : ''}`;
+                        } else {
+                            td.textContent = col.fmt(eff.effAgl);
+                            if (editable) {
+                                td.title = 'Click: edit AGL (will queue Min Alt = Elev + AGL) · Right-click: copy raw';
+                            } else {
+                                td.title = 'Click: pan/inspect · Right-click: copy raw';
+                            }
                         }
-                        td.style.cssText = `padding:5px 8px;color:${color};text-align:right;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;cursor:pointer`;
-                        td.textContent = col.fmt(d);
+                        if (editable) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineSegmentEdit(td, r, 'agl');
+                            };
+                        }
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            if (eff.effAgl == null) return;
+                            const raw = col.raw(eff.effAgl);
+                            copyToClipboard(raw, `Copied ${raw}`);
+                        };
                     } else if (col.key === 'validated') {
                         // null → N/A (Assets/Markers — Percepto hides the toggle for these).
                         // true → green ✓, false → red ✗ for FFZ/FP/NFZ.
@@ -2147,19 +2431,40 @@
         catch (e) { console.warn(`${TAG} setView threw:`, e); }
     }
 
-    // Open an inline editor on a Min Alt or Max Alt cell of an FP
+    // Open an inline editor on a Min Alt / Max Alt / AGL cell of an FP
     // segment row. Replaces cell content with a text input pre-filled
-    // with the current (or pending) value. Accepts plain numbers or
-    // formulas ("2720+50", "(2720+50)*2"). Enter/Tab/blur commits to
-    // the pending queue; Escape cancels. Triggers a redraw so the
-    // yellow "(new: N)" marker appears.
+    // with the current (or pending-derived) value. Accepts plain
+    // numbers or formulas ("2720+50", "(2720+50)*2"). Enter/Tab/blur
+    // commits to the pending queue; Escape cancels.
+    //
+    // AGL is a derived field — editing AGL queues a min_alt edit
+    // computed as `elevation + targetAGL`. The user can approach the
+    // altitude from either direction.
     function startInlineSegmentEdit(td, row, field) {
         if (!row || !row._isSegment || !row.arc) return;
         const isMin = field === 'min_alt';
-        const currentM = isMin ? row.altMinM : row.altMaxM;
+        const isMax = field === 'max_alt';
+        const isAgl = field === 'agl';
+        // AGL editing requires loaded elevation — otherwise we can't
+        // translate target AGL → Min Alt.
+        if (isAgl && row.elevationM == null) {
+            showToast('Elevation not loaded yet — can\'t edit AGL', 'rgba(255,82,82,0.6)');
+            return;
+        }
+        // Pull current value depending on which field we're editing.
+        // For Min/Max, use the source-of-truth altMinM/altMaxM (the
+        // pending overlay is layered in via `existing` below). For AGL,
+        // start from the EFFECTIVE AGL so a chain of Min then AGL edits
+        // pre-fills the input with the most recently displayed value.
+        let currentM;
+        if (isMin) currentM = row.altMinM;
+        else if (isMax) currentM = row.altMaxM;
+        else if (isAgl) currentM = effectiveValues(row).effAgl;
         if (currentM == null) return;
         const useFt = !!sumPanelState.unitsFt;
-        const existing = getPendingEdit(row.entity.id, row.arc.id, field);
+        // Only Min/Max have direct pending entries — AGL pulls from the
+        // derived state. existing is null for AGL edits.
+        const existing = !isAgl ? getPendingEdit(row.entity.id, row.arc.id, field) : null;
         const startValM = existing ? existing.newValueM : currentM;
         const startDisp = useFt ? Math.round(startValM * 3.28084) : Number(startValM.toFixed(1));
 
@@ -2183,8 +2488,25 @@
                 return;
             }
             const newDisp = useFt ? Math.round(parsed) : Number(parsed.toFixed(1));
-            const origDisp = useFt ? Math.round(currentM * 3.28084) : Number(currentM.toFixed(1));
             const newValueM = useFt ? newDisp / 3.28084 : newDisp;
+            const unitTxt = useFt ? 'ft' : 'm';
+
+            // AGL edit → translate to a Min Alt edit through queueMinForAgl.
+            // We pass the new target AGL in meters; the helper handles the
+            // elevation lookup, no-op detection, and rounding.
+            if (isAgl) {
+                const queued = queueMinForAgl(row, newValueM);
+                if (queued) {
+                    showToast(`Queued: ${row.name} AGL → ${newDisp.toLocaleString()} ${unitTxt}`, 'rgba(255,213,79,0.7)');
+                } else {
+                    showToast('AGL already at target — no change');
+                }
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+
+            // Min/Max path.
+            const origDisp = useFt ? Math.round(currentM * 3.28084) : Number(currentM.toFixed(1));
             if (newDisp === origDisp) {
                 // No-op edit → wipe any prior pending entry on this field
                 // so the cell goes back to clean display.
@@ -2204,7 +2526,6 @@
                 segmentName: row.name,
                 fpName: row.entity.name || '',
             });
-            const unitTxt = useFt ? 'ft' : 'm';
             const lbl = isMin ? 'Min' : 'Max';
             showToast(`Queued: ${row.name} ${lbl} → ${newDisp.toLocaleString()} ${unitTxt}`, 'rgba(255,213,79,0.7)');
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();

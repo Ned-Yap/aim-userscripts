@@ -8,6 +8,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Asset Inspector v3.17** — **Live derived columns + AGL inline edit + Bulk → AGL button.**
+  - **Min/Max Delta** and **AGL** now update **live** when you edit Min or Max — both cells show the original value strikethrough + the new derived value in yellow. Edit one, watch the rest of the row reflect the new math instantly.
+  - **AGL is now inline-editable on FP segment rows.** Click an AGL cell → text input pre-filled with current AGL. Type a target value (or formula). The script computes `new Min Alt = Elevation + target AGL` and queues a Min Alt edit. So you can approach altitude planning from either direction (Min ↔ AGL). Editor blocks if elevation hasn't loaded yet.
+  - **NEW: Bulk → AGL** button in the toolbar (yellow). Opens a popover:
+    - Target AGL input (defaults to `100` ft / `30` m).
+    - Scope radio: **All FP segments** or **Selected segments only** (auto-selects "selected" when you have a multi-select).
+    - Live preview: `Will queue N edits · skipping M already at target`.
+    - One click → queues all eligible Min Alt edits in one shot. Skips segments already at the target value. You can still un-queue individual segments after by clicking the cell + typing back the old value, or by hitting Discard queue.
+  - Right-click on Min/Max/Delta/AGL cells now copies the EFFECTIVE value (the new one if pending), not the original — matches what you see.
 - **AIM Asset Inspector v3.16** — **NEW: inline edit + pending queue for FP segment altitudes (phase 1).**
   - **Click any Min Alt or Max Alt cell on an FP segment row** → cell turns into a text input. Type a new whole-foot value (or a formula like `2720+50` or `(2720+50)*2`). Enter/Tab/blur queues the edit; Esc cancels. Right-click on a cell with a pending edit copies the NEW value.
   - **Yellow pending markers:** queued cells show the original value struck-through plus the new value in yellow (`2,720` `2,800`). Hover for "was X, will be Y" tooltip.
