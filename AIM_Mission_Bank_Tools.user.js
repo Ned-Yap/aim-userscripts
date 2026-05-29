@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.50
+// @version      0.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.50';
+    const SCRIPT_VERSION = '0.51';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -278,18 +278,34 @@
     // the whole object each call. During a 96-point bulk fetch this
     // could fire 96 times. Coalesce into one write 1s after the last
     // completion. flushElevationCache() forces immediate save if needed.
+    // CHECKPOINT-EVERY-N strategy (v0.51) — same fix as Asset
+    // Inspector v3.37. Old 1s-debounce-only approach lost the
+    // cache when a bulk fetch ended without 1s of idle time, since
+    // GM_setValue is async in Tampermonkey and beforeunload doesn't
+    // get to complete the write. Now we commit every 50 new entries.
+    const ELEV_SAVE_BATCH = 50;
+    let elevDirtyCount = 0;
     let elevSaveTimer = null;
     function saveElevationCache() {
         if (!elevationCache) return;
+        elevDirtyCount++;
+        if (elevDirtyCount >= ELEV_SAVE_BATCH) {
+            if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
+            elevDirtyCount = 0;
+            try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
+            return;
+        }
         if (elevSaveTimer) clearTimeout(elevSaveTimer);
         elevSaveTimer = setTimeout(() => {
             elevSaveTimer = null;
+            elevDirtyCount = 0;
             try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
         }, 1000);
     }
     function flushElevationCache() {
         if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
         if (!elevationCache) return;
+        elevDirtyCount = 0;
         try { gmSet(CACHE_KEY_ELEVATIONS, elevationCache); } catch (e) {}
     }
 

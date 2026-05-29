@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.36
+// @version      3.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.36';
+    const SCRIPT_VERSION = '3.37';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -170,21 +170,46 @@
         console.log(`${TAG} DEM elevation cache loaded: ${n.toLocaleString()} points (${sizeKb} KB)${n === 0 ? ' — empty (first run / cleared / Tampermonkey storage evicted)' : ''}`);
         return elevationCache;
     }
-    // Debounced cache write — synchronous GM_setValue of growing cache
-    // serialized 200+ times per bulk fetch would block the main thread.
+    // Cache write strategy (v3.37):
+    //   - CHECKPOINT every ELEV_SAVE_BATCH new entries (50).
+    //     Don't wait for the debounce to fire; commit-as-you-go.
+    //   - TRAILING debounce 1 s after the last entry catches the
+    //     tail of a fetch run that ends below the batch threshold.
+    //   - beforeunload flush is best-effort (GM_setValue is async
+    //     in Tampermonkey/Chrome — may not complete before unload).
+    // v3.36 + earlier used only the debounce, so a 1000+-point bulk
+    // fetch could finish without ever writing if the page was
+    // refreshed before the 1 s idle window elapsed. End result was
+    // every page load re-fetching everything from scratch.
+    const ELEV_SAVE_BATCH = 50;
+    let elevDirtyCount = 0;
     let elevSaveTimer = null;
     function saveElevationCache() {
         if (!elevationCache) return;
+        elevDirtyCount++;
+        if (elevDirtyCount >= ELEV_SAVE_BATCH) {
+            if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
+            const totalCount = Object.keys(elevationCache).length;
+            elevDirtyCount = 0;
+            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            catch (e) { console.warn(`${TAG} elevation cache write failed:`, e); }
+            console.log(`${TAG} DEM cache checkpoint: ${totalCount.toLocaleString()} total entries persisted`);
+            return;
+        }
         if (elevSaveTimer) clearTimeout(elevSaveTimer);
         elevSaveTimer = setTimeout(() => {
             elevSaveTimer = null;
-            elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache);
+            elevDirtyCount = 0;
+            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            catch (e) { console.warn(`${TAG} elevation cache trailing-write failed:`, e); }
         }, 1000);
     }
     function flushElevationCache() {
         if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
         if (!elevationCache) return;
-        elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache);
+        elevDirtyCount = 0;
+        try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+        catch (e) {}
     }
     function elevCacheKey(lat, lng) {
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
