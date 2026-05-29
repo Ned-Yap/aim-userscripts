@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.23
+// @version      3.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.23';
+    const SCRIPT_VERSION = '3.24';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1416,9 +1416,15 @@
             });
             return { minInputs, maxInputs };
         }
-        // FFZ path — find by label
+        // FFZ path — find by label. BULLETPROOF: explicitly exclude
+        // "emergency" / "emerg" from Min/Max matches. Without this, the
+        // "Minimum emergency altitude" label also matched "min + alt"
+        // and ended up in minInputs[1] (harmless in v3.23 since we only
+        // write to index 0, but a risk if Percepto ever reorders the
+        // inputs).
         Array.from(panelDoc.querySelectorAll('label')).forEach(label => {
             const txt = (label.textContent || '').toLowerCase();
+            if (txt.includes('emergency') || txt.includes('emerg')) return;
             const isMin = txt.includes('min') && (txt.includes('alt') || txt.includes('elev'));
             const isMax = txt.includes('max') && (txt.includes('alt') || txt.includes('elev'));
             if (!isMin && !isMax) return;
@@ -1528,8 +1534,34 @@
             clickElDispatch(last.el, last.doc);
         }
         // Wait for editor to vanish — that's our "save succeeded" signal.
-        const closed = await waitForCondition(() => !findOpenEditor(), 8000, 200);
+        // 15s tolerates slow networks + heavy entities (FPs with many
+        // segments take ~3-4s to save on a busy site).
+        const closed = await waitForCondition(() => !findOpenEditor(), 15000, 250);
         return !!closed;
+    }
+
+    // Look for Percepto validation toasts that appear when a save is
+    // rejected. Currently checked: ant-message-error (toast), and
+    // ant-notification-notice with error icon. Returns the first
+    // error text found, or null if none.
+    function findValidationError() {
+        const messageErrs = scanAllDocs('.ant-message-error');
+        if (messageErrs.length > 0) {
+            const txt = (messageErrs[0].el.textContent || '').trim();
+            if (txt) return txt;
+        }
+        const noticeErrs = scanAllDocs('.ant-notification-notice-error');
+        if (noticeErrs.length > 0) {
+            const txt = (noticeErrs[0].el.textContent || '').trim();
+            if (txt) return txt;
+        }
+        // Inline form-field errors — flag the first one we find.
+        const fieldErrs = scanAllDocs('.ant-form-item-explain-error');
+        if (fieldErrs.length > 0) {
+            const txt = (fieldErrs[0].el.textContent || '').trim();
+            if (txt) return txt;
+        }
+        return null;
     }
 
     // Apply pipeline state. Held in module scope so the UI can poll
@@ -1574,6 +1606,62 @@
             return String(a.entityName).localeCompare(String(b.entityName));
         });
         return groups;
+    }
+
+    // Launcher modal — shown BEFORE the apply run starts. Replaces
+    // the plain confirm() with a richer UI that surfaces stale-queue
+    // warnings + offers the dry-run option. User picks Live or Dry
+    // Run; clicking either invokes opts.onLaunch({dryRun}).
+    const APPLY_LAUNCHER_ID = 'aim-ai-apply-launcher';
+    function openApplyLauncher(cfg) {
+        closeApplyLauncher();
+        const { editCount, groupCount, fpCount, ffzCount, warnings, onLaunch } = cfg;
+        const m = document.createElement('div');
+        m.id = APPLY_LAUNCHER_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:22px 28px;min-width:520px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const etaMin = Math.ceil(groupCount * 5 / 60);
+        const warnHtml = warnings.length > 0
+            ? `<div style="margin-top:12px;padding:10px 12px;background:rgba(255,213,79,0.10);border:1px solid rgba(255,213,79,0.40);border-radius:4px">
+                 <div style="color:#ffd54f;font-weight:700;font-size:12px;margin-bottom:6px">⚠ ${warnings.length} stale-queue warning${warnings.length === 1 ? '' : 's'} — Percepto data changed since queue was built</div>
+                 <div style="color:#cfd6dc;font-size:11px;max-height:180px;overflow-y:auto;line-height:1.5">${warnings.map(w => '• ' + w.replace(/</g, '&lt;')).join('<br>')}</div>
+                 <div style="color:#888;font-size:10px;margin-top:6px">Applying will OVERWRITE the current values with what's queued.</div>
+               </div>`
+            : '';
+        box.innerHTML = `
+            <div style="color:#5fff5f;font-weight:700;font-size:16px;margin-bottom:4px">▶ Apply queue</div>
+            <div style="color:#888;font-size:11px;margin-bottom:12px">FFZs first, then FP segments. Per-entity ~3-6 s.</div>
+            <div style="color:#cfd6dc;font-size:13px;line-height:1.7">
+                <strong>${editCount}</strong> edit${editCount === 1 ? '' : 's'} across <strong>${groupCount}</strong> entit${groupCount === 1 ? 'y' : 'ies'}<br>
+                Order: <strong style="color:#5fff5f">${ffzCount}</strong> FFZ${ffzCount === 1 ? '' : 's'}, then <strong style="color:#7adfe6">${fpCount}</strong> FP${fpCount === 1 ? '' : 's'}<br>
+                Estimated total: ~<strong>${etaMin}</strong> min
+            </div>
+            ${warnHtml}
+            <div style="margin-top:14px;padding:10px 12px;background:rgba(196,181,253,0.08);border:1px solid rgba(196,181,253,0.30);border-radius:4px;color:#c4b5fd;font-size:11px;line-height:1.5">
+                <strong>Dry Run</strong> walks the entire pipeline (opens editors, sets values) but <strong>cancels instead of saving</strong>. Use it to verify the script targets the right inputs without touching live data.
+            </div>
+            <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                <button id="aim-ai-launch-cancel" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px">Cancel</button>
+                <button id="aim-ai-launch-dry" style="background:rgba(196,181,253,0.18);color:#c4b5fd;border:1px solid rgba(196,181,253,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🧪 Dry Run (no save)</button>
+                <button id="aim-ai-launch-live" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">▶ Apply for real</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        box.querySelector('#aim-ai-launch-cancel').onclick = closeApplyLauncher;
+        box.querySelector('#aim-ai-launch-dry').onclick = () => {
+            closeApplyLauncher();
+            onLaunch({ dryRun: true });
+        };
+        box.querySelector('#aim-ai-launch-live').onclick = () => {
+            closeApplyLauncher();
+            onLaunch({ dryRun: false });
+        };
+    }
+    function closeApplyLauncher() {
+        const m = document.getElementById(APPLY_LAUNCHER_ID);
+        if (m) m.remove();
     }
 
     // Modal shown during apply — large floating progress + abort
@@ -1637,45 +1725,173 @@
         if (m) m.remove();
     }
 
+    // Pre-flight checks before any save runs. Returns
+    //   { ok: true } on clean pass
+    //   { ok: false, blocking: [...], warnings: [...] }
+    // BLOCKING failures stop the apply entirely (e.g. duplicate names —
+    // we'd pick the wrong entity). WARNINGS surface to the user but
+    // they can proceed (e.g. stale queue — entity changed since queue
+    // was built, but maybe that's expected after a partial apply).
+    function preflightCheckQueue() {
+        const result = { ok: true, blocking: [], warnings: [] };
+        const siteID = getCurrentSiteID();
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        const entities = bucket ? (bucket.entities || []) : [];
+        if (entities.length === 0) {
+            result.ok = false;
+            result.blocking.push('No entities loaded for this site — refresh first.');
+            return result;
+        }
+        // 1. Duplicate name check. For every queued entity name,
+        //    count how many entities on the site share that name.
+        //    >1 = ambiguous; we can't safely click "the right one".
+        const queuedNames = new Set();
+        Object.values(pendingSegmentEdits).forEach(e => {
+            if (e.fpName) queuedNames.add(e.fpName);
+        });
+        queuedNames.forEach(name => {
+            const matches = entities.filter(en => (en.name || '').trim() === name.trim());
+            if (matches.length > 1) {
+                result.ok = false;
+                result.blocking.push(`Duplicate entity name "${name}" (${matches.length} matches) — script can't pick the right one.`);
+            }
+            if (matches.length === 0) {
+                result.ok = false;
+                result.blocking.push(`Entity "${name}" no longer exists on this site (deleted since queue built?).`);
+            }
+        });
+        // 2. Stale-queue check. For every queued edit, compare its
+        //    `oldValueM` against the entity's CURRENT value. Drift =
+        //    Percepto data changed since the queue was built (someone
+        //    else edited, or a partial prior apply succeeded). Warning,
+        //    not blocking — user might want to overwrite anyway.
+        const tolM = 0.5; // ~1.5 ft tolerance for rounding drift
+        Object.values(pendingSegmentEdits).forEach(e => {
+            const ent = entities.find(en => en.id === e.entityId);
+            if (!ent) return; // already caught above
+            let currentM = null;
+            if (e.isFfz) {
+                if (ent.restrictions) {
+                    currentM = e.field === 'min_alt' ? ent.restrictions.minAlt : ent.restrictions.maxAlt;
+                }
+            } else if (Array.isArray(ent.arcs)) {
+                const arc = ent.arcs.find(a => a && a.id === e.arcId);
+                if (arc) currentM = e.field === 'min_alt' ? arc.min_alt : arc.max_alt;
+            }
+            if (currentM != null && Math.abs(currentM - e.oldValueM) > tolM) {
+                const useFt = !!sumPanelState.unitsFt;
+                const conv = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+                const unit = useFt ? 'ft' : 'm';
+                const fld = e.field === 'min_alt' ? 'Min' : 'Max';
+                result.warnings.push(`${e.segmentName} ${fld}: queued from ${conv(e.oldValueM)}${unit} but current value is ${conv(currentM)}${unit} (Percepto data changed since queue built — apply will overwrite).`);
+            }
+        });
+        return result;
+    }
+
+    // Returns the entity's CURRENT Min/Max altitude in meters for a
+    // queued edit, pulled live from the bucket. Used for post-save
+    // verification — confirms what we wrote actually stuck.
+    function readCurrentAltForEdit(edit) {
+        const siteID = getCurrentSiteID();
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        if (!bucket) return null;
+        const ent = (bucket.entities || []).find(en => en.id === edit.entityId);
+        if (!ent) return null;
+        if (edit.isFfz) {
+            if (!ent.restrictions) return null;
+            return edit.field === 'min_alt' ? ent.restrictions.minAlt : ent.restrictions.maxAlt;
+        }
+        const arc = Array.isArray(ent.arcs) ? ent.arcs.find(a => a && a.id === edit.arcId) : null;
+        if (!arc) return null;
+        return edit.field === 'min_alt' ? arc.min_alt : arc.max_alt;
+    }
+
     // The actual apply pipeline — async, processes one group at a
     // time. Calls onProgress(state) on every step so the UI can
     // update. Honors applyState.aborted between groups.
-    async function runApplyPipeline(onProgress) {
+    async function runApplyPipeline(onProgress, opts) {
+        const { dryRun } = opts || {};
         const groups = groupPendingByEntity();
         applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
         applyState.done = 0;
         applyState.errors = [];
         applyState.running = true;
         applyState.aborted = false;
+        applyState.dryRun = !!dryRun;
+        applyState.startTime = Date.now();
+        const auditEntries = [];
+        // Outer try/catch — bulletproof guarantee that applyState.running
+        // returns to false even on unhandled exception. Without this, a
+        // thrown error inside the loop would leave the UI thinking a run
+        // is in flight forever (blocking future runs until page refresh).
         try {
-            // Close any leftover editor before we start so we begin in a
-            // known state. Some sites leave a stale editor from earlier.
             await closeEditor();
             for (let gi = 0; gi < groups.length; gi++) {
                 if (applyState.aborted) break;
                 const g = groups[gi];
-                applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})`;
+                applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
                 onProgress(applyState);
-                const ok = await applyOneEntity(g);
-                if (ok) {
+                const entityStart = Date.now();
+                let outcome;
+                try {
+                    outcome = await applyOneEntity(g, { dryRun });
+                } catch (err) {
+                    outcome = { ok: false, reason: `unhandled exception: ${err && err.message ? err.message : err}`, appliedCount: 0 };
+                    applyState.errors.push({ entityName: g.entityName, reason: outcome.reason });
+                    console.error(`${TAG} apply: ${g.entityName} threw:`, err);
+                }
+                const durationMs = Date.now() - entityStart;
+                auditEntries.push({
+                    entityName: g.entityName,
+                    entityId: g.entityId,
+                    isFfz: g.isFfz,
+                    editsAttempted: g.edits.length,
+                    editsApplied: outcome.appliedCount || 0,
+                    success: !!outcome.ok,
+                    reason: outcome.reason || '',
+                    verified: outcome.verified === true,
+                    durationMs,
+                    edits: g.edits.map(e => ({
+                        field: e.field,
+                        arcId: e.arcId,
+                        oldValueM: e.oldValueM,
+                        newValueM: e.newValueM,
+                    })),
+                });
+                if (outcome.ok) {
                     applyState.done += g.edits.length;
-                    // Remove successful edits from the pending queue
-                    // so reruns don't re-apply. Failed groups stay
-                    // queued for the user to retry / inspect.
-                    g.edits.forEach(e => {
-                        discardPendingEdit(e.entityId, e.arcId, e.field);
-                    });
+                    if (!dryRun) {
+                        g.edits.forEach(e => {
+                            discardPendingEdit(e.entityId, e.arcId, e.field);
+                        });
+                    }
                 }
                 onProgress(applyState);
-                // Small breath between entities — gives Percepto's
-                // sidebar a moment to settle before we scroll for
-                // the next entity. Also helps if a save triggered
-                // a backend write that flickers the panel.
                 await sleep(600);
             }
+        } catch (err) {
+            console.error(`${TAG} apply pipeline unhandled exception:`, err);
+            applyState.errors.push({ entityName: '(pipeline)', reason: `unhandled: ${err && err.message ? err.message : err}` });
         } finally {
             applyState.running = false;
             applyState.currentLabel = '';
+            // Write audit log to window for after-action review. Sample:
+            //   copy(JSON.stringify(window.__aim_ai_lastApplyLog, null, 2))
+            // and paste to a file. Each entry has the entity, edits, and
+            // whether post-save verification confirmed the write.
+            window.__aim_ai_lastApplyLog = {
+                site: getCurrentSiteID(),
+                startTime: new Date(applyState.startTime).toISOString(),
+                endTime: new Date().toISOString(),
+                totalDurationMs: Date.now() - applyState.startTime,
+                dryRun: !!dryRun,
+                editsRequested: applyState.total,
+                editsApplied: applyState.done,
+                errors: applyState.errors.slice(),
+                entities: auditEntries,
+            };
+            console.log(`${TAG} apply: audit log → window.__aim_ai_lastApplyLog`);
             onProgress(applyState);
         }
     }
@@ -1683,9 +1899,10 @@
     // Process one entity group: open editor, set all values, save.
     // Returns true if save succeeded, false otherwise (with the
     // failure recorded in applyState.errors).
-    async function applyOneEntity(group) {
+    async function applyOneEntity(group, opts) {
+        const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
-        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${group.isFfz ? ', FFZ' : ', FP'})`);
+        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${group.isFfz ? ', FFZ' : ', FP'})${dryRun ? ' [DRY RUN]' : ''}`);
         // 1. Close any existing editor (we may have landed in the
         //    wrong one from a previous step).
         await closeEditor();
@@ -1694,7 +1911,7 @@
         if (!hit) {
             applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
             console.warn(`${TAG} apply: ${label} — entity not in sidebar`);
-            return false;
+            return { ok: false, reason: 'not found in sidebar', appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — clicking sidebar item`);
         clickElDispatch(hit.el, hit.doc);
@@ -1704,33 +1921,28 @@
         //    "we just clicked this item" as the source of truth).
         const editor = await waitForCondition(
             () => findOpenEditorWithName(),
-            8000, 250,
+            15000, 250,
         );
         if (!editor) {
-            // Try one more click in case the first was eaten by a
-            // race with React rendering. Sometimes Percepto's sidebar
-            // ignores the first click while it's mid-update.
-            console.warn(`${TAG} apply: ${label} — no editor after 8s, retrying click`);
+            console.warn(`${TAG} apply: ${label} — no editor after 15s, retrying click`);
             clickElDispatch(hit.el, hit.doc);
-            const retry = await waitForCondition(() => findOpenEditorWithName(), 6000, 250);
+            const retry = await waitForCondition(() => findOpenEditorWithName(), 10000, 250);
             if (!retry) {
                 applyState.errors.push({ entityName: label, reason: 'editor did not open (after retry)' });
                 console.warn(`${TAG} apply: ${label} — editor still not open after retry`);
-                return false;
+                return { ok: false, reason: 'editor did not open', appliedCount: 0 };
             }
         }
         const finalEditor = findOpenEditorWithName();
         if (!finalEditor) {
             applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
-            return false;
+            return { ok: false, reason: 'editor lost', appliedCount: 0 };
         }
         const openedName = getEditorTitle(finalEditor.doc);
         if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
-            // Wrong entity in the editor — bail to avoid writing the
-            // wrong values. Don't close (let user see the state).
             console.warn(`${TAG} apply: ${label} — editor shows different entity "${openedName}" — skipping`);
             applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
-            return false;
+            return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — editor open, name="${openedName}"`);
         // 4. Find the inputs.
@@ -1740,7 +1952,7 @@
             applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
             console.warn(`${TAG} apply: no inputs found for ${label}`);
             await closeEditor();
-            return false;
+            return { ok: false, reason: 'no Min/Max inputs found', appliedCount: 0 };
         }
         // 5. Set values. For FP segment edits, index = arc order in
         //    the buildSummaryRows pass. We re-resolve from the
@@ -1779,20 +1991,82 @@
         if (appliedCount === 0) {
             applyState.errors.push({ entityName: label, reason: 'no inputs matched any edit' });
             await closeEditor();
-            return false;
+            return { ok: false, reason: 'no inputs matched any edit', appliedCount: 0 };
         }
-        console.log(`${TAG} apply: ${label} — set ${appliedCount} input value(s), saving…`);
-        // 6. Save + confirm modal.
+        console.log(`${TAG} apply: ${label} — set ${appliedCount} input value(s)${dryRun ? ' [DRY RUN — skipping save]' : ', saving…'}`);
+        // DRY RUN — don't click save. Cancel out instead so the
+        // user's data isn't touched. Return success so the audit log
+        // reflects what would have been written.
+        if (dryRun) {
+            await sleep(800);
+            // Check for any pre-save validation warning visible right
+            // away (Percepto sometimes flags out-of-range values
+            // immediately on input).
+            const valErr = findValidationError();
+            await closeEditor();
+            if (valErr) {
+                console.warn(`${TAG} apply: ${label} — [DRY RUN] Percepto would reject this save: ${valErr}`);
+                applyState.errors.push({ entityName: label, reason: `[DRY] would fail: ${valErr}` });
+                return { ok: false, reason: `[DRY] would fail: ${valErr}`, appliedCount };
+            }
+            return { ok: true, reason: '[DRY RUN] values set + cancelled', appliedCount, verified: false };
+        }
+        // 6. Save + watch for validation errors during the save.
         await sleep(400);
         const saved = await saveCurrentEditor();
-        if (!saved) {
-            applyState.errors.push({ entityName: label, reason: 'save timed out (validation error?)' });
-            console.warn(`${TAG} apply: ${label} — save did NOT close editor within timeout`);
-            // Leave editor open so the user can see what went wrong.
-            return false;
+        // After save: scan for validation toasts/errors. If present,
+        // mark as failed even if the editor closed cleanly.
+        const valErr = findValidationError();
+        if (valErr) {
+            applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
+            console.warn(`${TAG} apply: ${label} — validation error: ${valErr}`);
+            await closeEditor(); // best-effort cleanup
+            return { ok: false, reason: `validation: ${valErr}`, appliedCount };
         }
-        console.log(`${TAG} apply: ${label} — SAVED ✓`);
-        return true;
+        if (!saved) {
+            applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
+            console.warn(`${TAG} apply: ${label} — save did NOT close editor within timeout`);
+            return { ok: false, reason: 'save timed out', appliedCount };
+        }
+        console.log(`${TAG} apply: ${label} — editor closed, verifying values…`);
+        // 7. POST-SAVE VERIFICATION. Percepto's save triggers a
+        //    map_objects refetch; wait briefly + re-read the entity
+        //    to confirm the values we wrote are what's actually in
+        //    the data. If Percepto silently rejected (e.g. snapped
+        //    to a different value due to internal rounding), we
+        //    catch it here instead of falsely reporting success.
+        const siteID = getCurrentSiteID();
+        let verified = false;
+        if (siteID) {
+            // Force a fresh fetch — the in-memory cache may still
+            // have pre-save values from the prior fetch.
+            await fetchMapObjects(siteID, true);
+            await sleep(600);
+            let mismatchCount = 0;
+            const tolM = 0.5;
+            for (const e of group.edits) {
+                const actualM = readCurrentAltForEdit(e);
+                if (actualM == null) {
+                    mismatchCount++;
+                    continue;
+                }
+                if (Math.abs(actualM - e.newValueM) > tolM) {
+                    mismatchCount++;
+                    const useFt = !!sumPanelState.unitsFt;
+                    const conv = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+                    const unit = useFt ? 'ft' : 'm';
+                    console.warn(`${TAG} apply: ${label} ${e.field} verify FAIL — wrote ${conv(e.newValueM)}${unit}, actual ${conv(actualM)}${unit}`);
+                }
+            }
+            if (mismatchCount === 0) {
+                verified = true;
+            } else {
+                applyState.errors.push({ entityName: label, reason: `save succeeded but ${mismatchCount}/${group.edits.length} value(s) didn't stick (Percepto rejected silently?)` });
+                return { ok: false, reason: `${mismatchCount} value(s) failed verification`, appliedCount, verified: false };
+            }
+        }
+        console.log(`${TAG} apply: ${label} — SAVED ✓ (verified=${verified})`);
+        return { ok: true, reason: '', appliedCount, verified };
     }
     let sumPanelState = {
         search: '',
@@ -2995,35 +3269,46 @@
             const n = pendingEditCount();
             if (n === 0) return;
             if (applyState.running) return;
+            // Pre-flight: catch blocking issues + surface warnings
+            // BEFORE the user commits to a run. Blocking = refuse;
+            // warnings = show + ask permission.
+            const pre = preflightCheckQueue();
+            if (!pre.ok) {
+                alert(`Cannot apply queue — blocking issues:\n\n${pre.blocking.map(b => '• ' + b).join('\n')}\n\nFix these and try again.`);
+                return;
+            }
             const groups = groupPendingByEntity();
             const fpCount = groups.filter(g => !g.isFfz).length;
             const ffzCount = groups.filter(g => g.isFfz).length;
-            const msg = `Apply ${n} altitude edit${n === 1 ? '' : 's'} across ${groups.length} entit${groups.length === 1 ? 'y' : 'ies'}?\n\n`
-                + `Order: ${ffzCount} FFZ${ffzCount === 1 ? '' : 's'} first, then ${fpCount} FP${fpCount === 1 ? '' : 's'}.\n`
-                + `Per-entity time: ~3-6 seconds (one editor open + save).\n`
-                + `Estimated total: ~${Math.ceil(groups.length * 4 / 60)} min.\n\n`
-                + `This WRITES to the live site. Do NOT click around while it runs.\n`
-                + `An abort button will appear during the run.`;
-            if (!confirm(msg)) return;
-            openApplyProgressModal(groups);
-            runApplyPipeline((st) => {
-                updateApplyProgressModal(st);
-                // Mirror pending count down to footer as edits succeed.
-                refreshQueueUi();
-                // Live-redraw the table so successful edits visually
-                // disappear from the row markers (since we remove
-                // them from the queue as each entity completes).
-                redrawTable();
-            }).then(() => {
-                closeApplyProgressModal();
-                const failed = applyState.errors.length;
-                const ok = applyState.done;
-                if (failed === 0) {
-                    showToast(`✓ Applied ${ok} edit${ok === 1 ? '' : 's'} successfully`, 'rgba(95,255,95,0.6)');
-                } else {
-                    showToast(`Applied ${ok} · ${failed} failed (see console)`, 'rgba(255,138,128,0.6)');
-                    console.warn(`${TAG} apply failures:`, applyState.errors);
-                }
+            // Open the launcher modal — picks dry-run vs live + shows
+            // warnings before any action. Replaces the bare confirm()
+            // dialog so the user can see drift warnings.
+            openApplyLauncher({
+                editCount: n,
+                groupCount: groups.length,
+                fpCount,
+                ffzCount,
+                warnings: pre.warnings,
+                onLaunch: (opts) => {
+                    openApplyProgressModal(groups);
+                    runApplyPipeline((st) => {
+                        updateApplyProgressModal(st);
+                        refreshQueueUi();
+                        redrawTable();
+                    }, opts).then(() => {
+                        closeApplyProgressModal();
+                        const failed = applyState.errors.length;
+                        const ok = applyState.done;
+                        const tag = opts.dryRun ? '[DRY RUN] ' : '';
+                        if (failed === 0) {
+                            showToast(`${tag}✓ ${opts.dryRun ? 'Walked' : 'Applied'} ${ok} edit${ok === 1 ? '' : 's'} successfully`, 'rgba(95,255,95,0.6)');
+                        } else {
+                            showToast(`${tag}${opts.dryRun ? 'Walked' : 'Applied'} ${ok} · ${failed} failed (see console)`, 'rgba(255,138,128,0.6)');
+                            console.warn(`${TAG} apply failures:`, applyState.errors);
+                            console.log(`${TAG} apply: full audit log at window.__aim_ai_lastApplyLog`);
+                        }
+                    });
+                },
             });
         };
         panel.appendChild(footer);
