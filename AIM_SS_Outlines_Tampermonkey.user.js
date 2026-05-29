@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.42
+// @version      34.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.42';
+    const SCRIPT_VERSION = '34.43';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4347,6 +4347,40 @@
     installListener();
     installAssetLockHandler();
     installKMLEditHandlers();
+    setupKmlDataResponder();
+
+    // KML data sharing — other AIM scripts (Asset Inspector's Site Setup
+    // Analyzer) need access to the parsed KML features we've already
+    // loaded. Rather than have each script re-fetch from GitHub, expose
+    // the in-memory data on a dedicated channel.
+    //   REQUEST_KML_FEATURES { siteID }
+    //     → KML_FEATURES_RESPONSE { siteID, distro: [feat,…], trans: [feat,…] }
+    // Both sides early-out if siteID mismatches their current site, so a
+    // request fired before a site nav doesn't pollute the response.
+    function setupKmlDataResponder() {
+        let chan;
+        try { chan = new BroadcastChannel('AIM_KML_DATA'); }
+        catch (e) { console.warn(`${TAG} KML data channel unavailable:`, e); return; }
+        chan.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type !== 'REQUEST_KML_FEATURES') return;
+            const reqSite = m.siteID;
+            if (!reqSite) return;
+            // Only respond if we have data for the requested site —
+            // avoids the asker getting empty arrays from another tab on
+            // a different site.
+            const distro = kmlFeatures[`${reqSite}|distro`] || [];
+            const trans = kmlFeatures[`${reqSite}|trans`] || [];
+            if (distro.length === 0 && trans.length === 0) return;
+            chan.postMessage({
+                type: 'KML_FEATURES_RESPONSE',
+                siteID: reqSite,
+                distro,
+                trans,
+                fromVersion: SCRIPT_VERSION,
+            });
+        };
+    }
 
     // Safety net: if no SET_TOGGLE for `master` arrives shortly after
     // registration, auto-activate. Symptom this prevents: when the Control

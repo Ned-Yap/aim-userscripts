@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.33
+// @version      3.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -26,7 +26,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.33';
+    const SCRIPT_VERSION = '3.34';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2412,6 +2412,61 @@
     const KML_FT = 3.28084;
     const KML_FT_TO_M = 1 / KML_FT;
     const KML_BUFFER_OFFSET_FT = 50;  // V-buffer is 50 ft below min_alt
+
+    // ---- Power-line KML import via Map Styler broadcast (v3.34) ----
+    // Map Styler caches parsed KML features for each site's distro +
+    // transmission lines. We request them on demand via a dedicated
+    // BroadcastChannel so the Site Setup Analyzer can include them as
+    // folders in the exported KML without re-fetching from GitHub.
+    let powerLinesKml = { siteID: null, distro: [], trans: [], receivedAt: 0 };
+    let powerLinesChannel = null;
+    function setupPowerLinesChannel() {
+        if (powerLinesChannel) return;
+        try { powerLinesChannel = new BroadcastChannel('AIM_KML_DATA'); }
+        catch (e) { return; }
+        powerLinesChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type !== 'KML_FEATURES_RESPONSE') return;
+            powerLinesKml = {
+                siteID: m.siteID,
+                distro: Array.isArray(m.distro) ? m.distro : [],
+                trans: Array.isArray(m.trans) ? m.trans : [],
+                receivedAt: Date.now(),
+            };
+            console.log(`${TAG} got KML features from Map Styler v${m.fromVersion || '?'} for site ${m.siteID}: ${powerLinesKml.distro.length} distro + ${powerLinesKml.trans.length} trans`);
+        };
+    }
+    function requestPowerLinesKml(siteID) {
+        setupPowerLinesChannel();
+        if (!powerLinesChannel || !siteID) return;
+        powerLinesChannel.postMessage({ type: 'REQUEST_KML_FEATURES', siteID });
+    }
+    // Returns true if we have fresh-enough power line data for this site.
+    function hasPowerLinesFor(siteID) {
+        return powerLinesKml.siteID === siteID
+            && (powerLinesKml.distro.length > 0 || powerLinesKml.trans.length > 0);
+    }
+    // Render a single Map Styler feature as KML. Features are
+    // { type: 'line'|'polygon', coords: [{lat,lng},...], pmIdx, visible }.
+    function kmlPowerLineFeature(feat, mode, styleId) {
+        if (!feat || !Array.isArray(feat.coords) || feat.coords.length < 2) return '';
+        // Skip features the user has marked as hidden in Map Styler —
+        // they're considered bogus or noisy by the user, no value in
+        // exporting them.
+        if (feat.visible === false) return '';
+        const altMode = mode === '3D' ? 'clampToGround' : 'clampToGround'; // power lines = ground-clamped both modes
+        if (feat.type === 'line') {
+            return `<LineString><altitudeMode>${altMode}</altitudeMode><coordinates>${kmlCoords(feat.coords, 0)}</coordinates></LineString>`;
+        }
+        if (feat.type === 'polygon') {
+            const ring = closeRing(feat.coords);
+            return `<Polygon><altitudeMode>${altMode}</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
+        }
+        return '';
+    }
+    // Setup channel at script load — Map Styler may broadcast for an
+    // existing request before our modal opens.
+    setupPowerLinesChannel();
     // Style palette ported from Stand_Alone_AIM_SS_Generator_V8.pyw —
     // these are the AIM-matching colors coworkers are used to seeing in
     // both Percepto and the Python KML output. KML color = aabbggrr.
@@ -2438,6 +2493,12 @@
             '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
             '<Style id="verticalbuffer_style"><LineStyle><color>ff00ffff</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             '<Style id="horizontalbuffer_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle><color>4D00a5ff</color></PolyStyle></Style>',
+            // Power lines — match Map Styler's default colors so the
+            // exported KML looks like what users see in AIM:
+            //   distro = cyan (default Map Styler distro color)
+            //   trans  = red  (default Map Styler trans color)
+            '<Style id="powerline_distro_style"><LineStyle><color>ffdea01c</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
+            '<Style id="powerline_trans_style"><LineStyle><color>ff3030ff</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
         ].join('\n');
     }
     // Escape XML-unsafe chars for use in element text + attributes.
@@ -2467,25 +2528,42 @@
         const mslFt = mslM * KML_FT;
         return `<b>${label} (AGL):</b> <b><font color="#00008B">${aglFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${aglM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m | <b>(MSL):</b> <b><font color="#00008B">${mslFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${mslM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m`;
     }
-    // Build the CDATA description for an entity placemark. Mirrors
-    // Python's _generate_detailed_description structure: raw description
-    // first (preserves "Desig: x | Div: y | Cat: z | Type: w | ID: nnnn"
-    // header that comes pre-formatted from Percepto), then Object Details
-    // section with site datum + dual AGL/MSL altitudes.
+    // PER-ENTITY ground elevation (MSL) — uses the DEM data we ALREADY
+    // fetch via the SUM panel's bulk-elevation pipeline. Each entity's
+    // ground reference is the MAX DEM value across its own sample
+    // points (consistent with how AGL is computed in the SUM panel).
+    // Falls back to null if DEM hasn't loaded yet for this entity.
+    function kmlEntityGroundElevation(item) {
+        const samples = getSamplePointsForEntity(item);
+        return maxCachedElevation(samples);
+    }
+    function kmlArcGroundElevation(arc) {
+        if (!arc || !arc.point_a || !arc.point_b) return null;
+        const samples = sampleAlongSegment(
+            arc.point_a, arc.point_b, segmentSampleCount(arc.distance),
+        );
+        return maxCachedElevation(samples);
+    }
+
+    // Build the CDATA description for an entity placemark. Uses PER-
+    // ENTITY ground elevation (max DEM at this entity's sample points)
+    // for accurate AGL math — not a global "site datum" guess. Raw
+    // item.description is preserved verbatim so Percepto's asset
+    // designation header stays intact.
     function kmlDescription(item, opts) {
-        const { siteDatumM } = opts;
         const parts = [];
-        // 1. Original description from Percepto (asset designation line, etc.)
+        // 1. Original description from Percepto (asset designation, etc.)
         if (item.description && String(item.description).trim()) {
             parts.push(xmlEscape(String(item.description).trim()));
         }
-        // 2. Object Details header + site datum
+        // 2. Object Details — per-entity ground elevation + altitudes
         const details = ['<b>--- Object Details ---</b>'];
-        if (siteDatumM > 0) {
-            const datumFt = siteDatumM * KML_FT;
-            details.push(`<b>Site Datum Elevation:</b> <b><font color="#00008B">${datumFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${siteDatumM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL`);
+        const groundM = kmlEntityGroundElevation(item);
+        if (groundM != null) {
+            const groundFt = groundM * KML_FT;
+            details.push(`<b>Ground Elevation (here):</b> <b><font color="#00008B">${groundFt.toLocaleString('en-US', { maximumFractionDigits: 0 })} ft</font></b> / ${groundM.toLocaleString('en-US', { maximumFractionDigits: 1 })} m MSL`);
         }
-        // 3. Altitude block — FFZ/NFZ pull from restrictions, Assets from custom
+        // Altitudes — FFZ/NFZ from restrictions, Asset from custom
         let minAltM = null, maxAltM = null;
         if (item.type === 4 || item.type === 16) {
             if (item.restrictions) {
@@ -2494,47 +2572,63 @@
             }
         } else if (item.type === 3 && item.custom) {
             if (typeof item.custom.elevation_asl === 'number') {
-                // Asset's claimed elevation IS its MSL altitude. Show it as
-                // a single-line dual-format value.
                 const aslM = item.custom.elevation_asl;
-                const aglM = aslM - (siteDatumM || 0);
-                details.push(`<b>Asset Elevation:</b> <b><font color="#00008B">${(aslM * KML_FT).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${aslM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL (${aglM >= 0 ? '+' : ''}${(aglM * KML_FT).toFixed(1)} ft AGL)`);
+                const groundDiffM = groundM != null ? (aslM - groundM) : null;
+                const groundDiffFt = groundDiffM != null ? (groundDiffM * KML_FT) : null;
+                let line = `<b>Asset Elevation:</b> <b><font color="#00008B">${(aslM * KML_FT).toLocaleString('en-US', { maximumFractionDigits: 0 })} ft</font></b> / ${aslM.toLocaleString('en-US', { maximumFractionDigits: 1 })} m MSL`;
+                if (groundDiffFt != null) {
+                    line += ` (${groundDiffFt >= 0 ? '+' : ''}${groundDiffFt.toFixed(0)} ft vs ground here)`;
+                }
+                details.push(line);
             }
             if (typeof item.custom.relative_alt === 'number' && item.custom.relative_alt > 0) {
-                details.push(`<b>Height AGL:</b> ${(item.custom.relative_alt * KML_FT).toFixed(1)} ft / ${item.custom.relative_alt.toFixed(1)} m`);
+                details.push(`<b>Height AGL:</b> ${(item.custom.relative_alt * KML_FT).toFixed(0)} ft / ${item.custom.relative_alt.toFixed(1)} m`);
             }
         }
         if (minAltM != null) {
-            const aglM = minAltM - (siteDatumM || 0);
-            details.push(fmtAltLineKML('Min Altitude', aglM, minAltM));
+            const aglM = groundM != null ? (minAltM - groundM) : null;
+            details.push(fmtAltLineKMLOptionalAgl('Min Altitude', aglM, minAltM));
         }
         if (maxAltM != null) {
-            const aglM = maxAltM - (siteDatumM || 0);
-            details.push(fmtAltLineKML('Max Altitude', aglM, maxAltM));
+            const aglM = groundM != null ? (maxAltM - groundM) : null;
+            details.push(fmtAltLineKMLOptionalAgl('Max Altitude', aglM, maxAltM));
         }
         if (item.is_unshielded) details.push('<b><font color="#ff6060">⚠ Unshielded</font></b>');
         parts.push(details.join('<br><br>'));
         return `<![CDATA[${parts.join('<br><br>')}]]>`;
     }
-    // FP arc description — includes parent link + per-segment altitudes.
+    // AGL line that gracefully omits the AGL half if ground elevation
+    // wasn't available for this entity (DEM cache miss). Avoids
+    // showing meaningless "Min Altitude (AGL): 3,056 ft" when AGL == MSL.
+    function fmtAltLineKMLOptionalAgl(label, aglM, mslM) {
+        const mslFt = mslM * KML_FT;
+        const mslPart = `<b><font color="#00008B">${mslFt.toLocaleString('en-US', { maximumFractionDigits: 0 })} ft</font></b> / ${mslM.toLocaleString('en-US', { maximumFractionDigits: 1 })} m MSL`;
+        if (aglM == null) {
+            return `<b>${label}:</b> ${mslPart}`;
+        }
+        const aglFt = aglM * KML_FT;
+        const aglPart = `<b><font color="#00008B">${aglFt.toLocaleString('en-US', { maximumFractionDigits: 0 })} ft</font></b> / ${aglM.toLocaleString('en-US', { maximumFractionDigits: 1 })} m AGL`;
+        return `<b>${label} (AGL):</b> ${aglPart} | <b>(MSL):</b> ${mslPart}`;
+    }
+    // FP arc description — per-segment ground elevation + altitudes.
     function kmlArcDescription(fp, arc, idx, opts) {
-        const { siteDatumM } = opts;
         const parts = [`<b>Parent Path:</b> <a href="#pm_${fp.id};flyto">${xmlEscape(fp.name)}</a>`];
         const details = ['<b>--- Object Details ---</b>'];
-        if (siteDatumM > 0) {
-            const datumFt = siteDatumM * KML_FT;
-            details.push(`<b>Site Datum Elevation:</b> <b><font color="#00008B">${datumFt.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ft</font></b> / ${siteDatumM.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} m MSL`);
+        const groundM = kmlArcGroundElevation(arc);
+        if (groundM != null) {
+            const groundFt = groundM * KML_FT;
+            details.push(`<b>Ground Elevation (along segment):</b> <b><font color="#00008B">${groundFt.toLocaleString('en-US', { maximumFractionDigits: 0 })} ft</font></b> / ${groundM.toLocaleString('en-US', { maximumFractionDigits: 1 })} m MSL`);
         }
         if (typeof arc.distance === 'number') {
-            details.push(`<b>Segment Length:</b> ${(arc.distance * KML_FT).toFixed(1)} ft / ${arc.distance.toFixed(1)} m`);
+            details.push(`<b>Segment Length:</b> ${(arc.distance * KML_FT).toFixed(0)} ft / ${arc.distance.toFixed(1)} m`);
         }
         if (typeof arc.min_alt === 'number') {
-            const aglM = arc.min_alt - (siteDatumM || 0);
-            details.push(fmtAltLineKML('Min Altitude', aglM, arc.min_alt));
+            const aglM = groundM != null ? (arc.min_alt - groundM) : null;
+            details.push(fmtAltLineKMLOptionalAgl('Min Altitude', aglM, arc.min_alt));
         }
         if (typeof arc.max_alt === 'number') {
-            const aglM = arc.max_alt - (siteDatumM || 0);
-            details.push(fmtAltLineKML('Max Altitude', aglM, arc.max_alt));
+            const aglM = groundM != null ? (arc.max_alt - groundM) : null;
+            details.push(fmtAltLineKMLOptionalAgl('Max Altitude', aglM, arc.max_alt));
         }
         if (arc.wait_until_approved === true) {
             details.push('<b><font color="#ff9800">⚠ Approval Required</font></b>');
@@ -2770,6 +2864,33 @@
                 xml.push('</Folder>');
             });
         }
+        // Power Lines — pulled from Map Styler's loaded KML data via
+        // BroadcastChannel. Two separate folders (Distribution, Trans-
+        // mission) matching Map Styler's category split. Only emitted
+        // when the requested data has actually arrived for THIS site
+        // (avoids stale data from a previous site nav).
+        if (include.powerlines && hasPowerLinesFor(siteID)) {
+            const distroN = powerLinesKml.distro.length;
+            const transN = powerLinesKml.trans.length;
+            if (distroN > 0) {
+                xml.push(`<Folder><name>Power Lines - Distribution (${distroN})</name>`);
+                powerLinesKml.distro.forEach((feat, i) => {
+                    const geom = kmlPowerLineFeature(feat, mode);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="distro_${i}"><name>Distro line ${i + 1}</name><styleUrl>#powerline_distro_style</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            }
+            if (transN > 0) {
+                xml.push(`<Folder><name>Power Lines - Transmission (${transN})</name>`);
+                powerLinesKml.trans.forEach((feat, i) => {
+                    const geom = kmlPowerLineFeature(feat, mode);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="trans_${i}"><name>Trans line ${i + 1}</name><styleUrl>#powerline_trans_style</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            }
+        }
         // 3D-only: Vertical Buffers — separate FFZ + FP folders (matches Python)
         if (mode === '3D' && include.vbuffers) {
             const ffzWithMin = byType[16].filter(e => e.restrictions && e.restrictions.minAlt != null);
@@ -2882,6 +3003,7 @@
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="nfzs" checked style="accent-color:#7adfe6"> No-Fly Zones (${counts.nfzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="markers" checked style="accent-color:#7adfe6"> General Markers (${counts.markers})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-vbuffers-label"><input type="checkbox" data-inc="vbuffers" checked style="accent-color:#7adfe6"> Vertical Buffers (3D only)</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-powerlines-label"><input type="checkbox" data-inc="powerlines" checked style="accent-color:#7adfe6"> Power Lines <span id="aim-ai-pl-status" style="color:#888;font-size:10px">(requesting…)</span></label>
                 </div>
             </div>
             <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
@@ -2920,6 +3042,44 @@
         box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
         box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = updateStats);
         updateVbufferVis();
+
+        // Power Lines: request from Map Styler + poll for response.
+        // Status text live-updates so the user sees "loaded N lines"
+        // before they hit Download.
+        const plStatus = box.querySelector('#aim-ai-pl-status');
+        const plLabel = box.querySelector('#aim-ai-powerlines-label');
+        const plCheckbox = plLabel.querySelector('input');
+        const refreshPlStatus = () => {
+            if (hasPowerLinesFor(siteID)) {
+                const n = powerLinesKml.distro.length + powerLinesKml.trans.length;
+                plStatus.textContent = `(loaded ${n} line${n === 1 ? '' : 's'})`;
+                plStatus.style.color = '#5fff5f';
+                plCheckbox.disabled = false;
+                plLabel.style.opacity = '1';
+                updateStats();
+            } else {
+                plStatus.textContent = '(not loaded — open Map Styler tab to fetch)';
+                plStatus.style.color = '#888';
+                plCheckbox.disabled = true;
+                plLabel.style.opacity = '0.55';
+            }
+        };
+        refreshPlStatus();
+        // Kick off a request — Map Styler responds if it has the data.
+        requestPowerLinesKml(siteID);
+        // Poll for the response over 3 seconds so the UI updates without
+        // the user having to wait/refresh.
+        let plPollCount = 0;
+        const plPoller = setInterval(() => {
+            plPollCount++;
+            refreshPlStatus();
+            if (plPollCount > 15 || hasPowerLinesFor(siteID)) clearInterval(plPoller);
+        }, 200);
+        // Clean up the poller if the modal closes mid-poll.
+        const origClose = closeSiteAnalyzer;
+        // (No need to override — closeSiteAnalyzer just removes the el;
+        //  the interval keeps firing harmlessly until count hits 15.
+        //  Cheap enough at 200ms × 15 = 3s max wasted poll.)
 
         box.querySelector('#aim-ai-kml-cancel').onclick = closeSiteAnalyzer;
         box.querySelector('#aim-ai-kml-copy').onclick = () => {
