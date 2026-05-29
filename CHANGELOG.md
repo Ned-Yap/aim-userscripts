@@ -8,6 +8,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ## 2026-05-29
 
+- **AIM Map Styler v34.42** — **NEW: "Unhide all file-hidden lines" button** in both Distro and Trans category settings. One-click recovery for broken KML exports (the 1598-distro.kml situation we hit earlier — Google Earth had shipped every placemark with `<visibility>0</visibility>`, making them all invisible with no easy way to interact). The button walks the parsed features for the category, finds every placemark the FILE says is hidden, and creates a local-pending override flipping it visible. Idempotent (re-running does nothing if all lines are already showing). No GitHub roundtrip — purely a local view override. Toast confirms how many lines were unhid. Pairs with the existing "Clear all my local hides" — that one wipes pending overrides; this one ADDS overrides to flip file-hidden lines visible.
 - **AIM Asset Inspector v3.29** — search box now matches Segment ID too. Type "2571" to find arc 2571233. Search placeholder updated to "Search name, subtype, or Seg ID…".
 - **AIM Asset Inspector v3.28** — **NEW: Segment ID column** in the SUM panel.
   - Shows `arc.id` for FP segment rows (the value from Percepto's JSON), dash for everything else.

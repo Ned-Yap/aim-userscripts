@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.41
+// @version      34.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.41';
+    const SCRIPT_VERSION = '34.42';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -172,6 +172,7 @@
                 { id: 'distro.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
                 { id: 'distro.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
                 { id: 'distro-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-distro' },
+                { id: 'distro-unhide-file', label: 'Unhide all file-hidden lines', type: 'button', action: 'unhide-file-distro' },
                 { type: 'header', label: 'Pending commits to GitHub' },
                 { id: 'distro-add-new', label: 'Add new line (draw on map)', type: 'button', action: 'add-new-distro' },
                 { id: 'distro-commit', label: 'Commit pending changes', type: 'button', action: 'commit-distro' },
@@ -198,6 +199,7 @@
                 { id: 'trans.show-hidden', label: 'Show my hidden lines (dashed)', type: 'boolean', default: false },
                 { id: 'trans.hidden-color', label: 'Hidden color', type: 'color', default: '#888888' },
                 { id: 'trans-clear-hides', label: 'Clear all my local hides', type: 'button', action: 'clear-hides-trans' },
+                { id: 'trans-unhide-file', label: 'Unhide all file-hidden lines', type: 'button', action: 'unhide-file-trans' },
                 { type: 'header', label: 'Pending commits to GitHub' },
                 { id: 'trans-add-new', label: 'Add new line (draw on map)', type: 'button', action: 'add-new-trans' },
                 { id: 'trans-commit', label: 'Commit pending changes', type: 'button', action: 'commit-trans' },
@@ -1492,6 +1494,49 @@
         }
         setPending(siteID, type, {});
         showKMLToast(`Cleared ${before} local ${type} hide${before === 1 ? '' : 's'}.`, 3500);
+        if (isActive) runUpdate();
+    }
+
+    // "Unhide all file-hidden lines" — durable workaround for broken KML
+    // exports (e.g. site 1598-distro.kml shipped with <visibility>0</>
+    // on every placemark, a Google Earth export artifact). Walks the
+    // parsed features for one category, finds every placemark with
+    // file-visibility=false, sets a pending override = true so they
+    // render. Local-only (no GitHub roundtrip) — matches the existing
+    // hide/show pattern. Idempotent: re-running does nothing if there
+    // are no file-hidden lines left to flip.
+    function unhideAllFileHidden(type) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const key = `${siteID}|${type}`;
+        const features = kmlFeatures[key];
+        if (!features || features.length === 0) {
+            showKMLToast(`No ${type} KML loaded yet.`, 3000);
+            return;
+        }
+        // Collect unique placemark indices where the file says visible=false.
+        // Multiple features can share a pmIdx (a MultiGeometry placemark);
+        // we only need one entry per pmIdx in pending.
+        const fileHiddenIdx = new Set();
+        features.forEach(f => {
+            if (f.visible === false && f.pmIdx != null) fileHiddenIdx.add(f.pmIdx);
+        });
+        if (fileHiddenIdx.size === 0) {
+            showKMLToast(`No file-hidden ${type} lines on this site.`, 3000);
+            return;
+        }
+        const p = getPending(siteID, type);
+        let flipped = 0;
+        fileHiddenIdx.forEach(pmIdx => {
+            const k = String(pmIdx);
+            // If already overridden to visible, leave it. Otherwise set to true.
+            if (p[k] !== true) {
+                p[k] = true;
+                flipped++;
+            }
+        });
+        setPending(siteID, type, p);
+        showKMLToast(`Unhid ${flipped} file-hidden ${type} line${flipped === 1 ? '' : 's'} (local override).`, 4000);
         if (isActive) runUpdate();
     }
 
@@ -4205,6 +4250,8 @@
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
+                else if (msg.actionId === 'unhide-file-distro') unhideAllFileHidden('distro');
+                else if (msg.actionId === 'unhide-file-trans') unhideAllFileHidden('trans');
                 else if (msg.actionId === 'split-distro') splitMultiSegmentPlacemarks('distro');
                 else if (msg.actionId === 'split-trans') splitMultiSegmentPlacemarks('trans');
                 else if (msg.actionId === 'commit-distro') commitPendingOps('distro');
