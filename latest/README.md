@@ -42,7 +42,18 @@ Dev and prod scripts share the same internals (SCRIPT_ID, GM storage keys, Broad
 
 **Rule:** in Tampermonkey, disable the production version of a script before enabling its `Latest - ` counterpart. Toggle is a single click on the script's row in the dashboard.
 
-Storage isolation note: GM storage is keyed by `@name`, so each dev script starts with empty GM storage. The DEM elevation cache, column-order prefs, etc. will rebuild on first run after switching to the dev version. localStorage is shared across @names — token, panel prefs, hotkey rebinds stay.
+### What resets when you first enable a Latest script
+
+Tampermonkey GM storage is per-`@name`. Latest copies start with an empty GM namespace. Things that **do not carry over** from prod and need to be re-set via the Latest Control Panel:
+
+- **GitHub PAT** (the big one) — open Latest Control Panel → GitHub Connection → Edit → paste PAT → Save & Test. Without this, Map Styler can't fetch KMLs and Asset Inspector can't pull the shared elevation cache.
+- **Perf Shield**: hide-satellite, ortho-lowres, suppress-debug-logs, every network-block toggle.
+- **Map Styler**: KML cache (rebuilds on activation, but only after PAT is set).
+- **Asset Inspector**: DEM cache, column order, show-samples toggle.
+
+Things that **do carry over** (localStorage is shared across @names):
+- Hotkey rebinds
+- Control Panel toggle prefs that go through `setToggle()` (most of the visible checkboxes per script).
 
 ---
 
