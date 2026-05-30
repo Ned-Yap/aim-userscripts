@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -43,7 +43,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -86,6 +86,14 @@
                 if (m.type === 'STATUS') {
                     status = { ...status, ...m };
                     renderUI();
+                    // v0.11: every STATUS arrival proves Map Styler's
+                    // control-channel listener is live. Re-send the
+                    // edit-mode toggle so we recover from the init-race
+                    // where PLE sends SET_TOGGLE before Map Styler is
+                    // listening. SET_TOGGLE is idempotent in Map Styler
+                    // (early-returns on unchanged value) so this is safe
+                    // to fire on every STATUS without thrash.
+                    if (editEnabled) setStylerEditMode(true);
                 }
             };
         }
