@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.49
+// @version      34.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.49';
+    const SCRIPT_VERSION = '34.50';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2464,6 +2464,9 @@
         const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
         if (doc.querySelector('parsererror')) throw new Error('XML parse error');
         const placemarks = Array.from(doc.querySelectorAll('Placemark'));
+        const beforeCount = placemarks.length;
+        const beforeLen = xmlText.length;
+        console.log(`${TAG} applyCommitOpsToKML: ${beforeCount} placemarks, ${beforeLen} chars, ops=`, JSON.parse(JSON.stringify(co)));
 
         // 1. Apply modify ops first (before deletes shift the indices).
         Object.keys(co.ops).forEach(key => {
@@ -2473,13 +2476,17 @@
             if (isNaN(idx) || idx < 0 || idx >= placemarks.length) return;
             const pm = placemarks[idx];
             const coordsEl = pm.querySelector('LineString > coordinates');
-            if (!coordsEl) return;
+            if (!coordsEl) {
+                console.warn(`${TAG} modify pmIdx=${idx}: no LineString>coordinates found, skipping`);
+                return;
+            }
             const text = (op.coords || []).map(c => {
                 const lng = Number(c[0]), lat = Number(c[1]);
                 const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
                 return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
             }).join(' ');
             coordsEl.textContent = text;
+            console.log(`${TAG} modify pmIdx=${idx}: ${op.coords.length} verts written`);
         });
 
         // 2. Apply delete ops, descending order so live placemarks
@@ -2489,10 +2496,27 @@
             .map(k => parseInt(k, 10))
             .filter(n => !isNaN(n) && n >= 0 && n < placemarks.length)
             .sort((a, b) => b - a);
+        const droppedIdxs = Object.keys(co.ops)
+            .filter(k => co.ops[k].op === 'delete')
+            .map(k => parseInt(k, 10))
+            .filter(n => isNaN(n) || n < 0 || n >= placemarks.length);
+        if (droppedIdxs.length > 0) {
+            console.warn(`${TAG} delete: ${droppedIdxs.length} pmIdx values out of bounds (max=${placemarks.length - 1}):`, droppedIdxs);
+        }
+        let removed = 0;
         deleteIdxs.forEach(idx => {
             const pm = placemarks[idx];
-            if (pm && pm.parentNode) pm.parentNode.removeChild(pm);
+            if (pm && pm.parentNode) {
+                pm.parentNode.removeChild(pm);
+                removed++;
+                console.log(`${TAG} delete pmIdx=${idx}: removed (parent=${pm.parentNode && pm.parentNode.nodeName})`);
+            } else {
+                console.warn(`${TAG} delete pmIdx=${idx}: SKIPPED (pm=${!!pm}, hasParent=${!!(pm && pm.parentNode)})`);
+            }
         });
+        if (removed !== deleteIdxs.length) {
+            console.warn(`${TAG} delete: requested ${deleteIdxs.length} removals, actually removed ${removed}`);
+        }
 
         // 3. Apply added placemarks — append into the first Document
         //    (or Folder, or root kml element if no container).
@@ -2520,7 +2544,10 @@
             });
         }
 
-        return new XMLSerializer().serializeToString(doc);
+        const out = new XMLSerializer().serializeToString(doc);
+        const afterCount = (out.match(/<Placemark[\s>]/g) || []).length;
+        console.log(`${TAG} applyCommitOpsToKML: serialized ${out.length} chars, ${afterCount} Placemarks (was ${beforeCount}, delta ${afterCount - beforeCount})`);
+        return out;
     }
 
     function putCommitOpsToGitHub(siteID, type, xmlText, sha, token, summaryText) {
