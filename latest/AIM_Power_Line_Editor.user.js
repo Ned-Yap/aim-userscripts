@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,7 +34,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -246,10 +246,15 @@
         // Match the existing .map-tools__button look. Use the same class
         // soup the host app's other tools use so styling comes for free.
         const wrapper = document.createElement('div');
+        // v0.6: z-index:100001 keeps the ⚡ button (and its child panel)
+        // ABOVE the AIM Control Panel dropdown (z-index:100000). The CP
+        // extends DOWN from the gear button and otherwise paints over ⚡
+        // (which sits below gear in the .map-tools strip). With the bump,
+        // ⚡ remains visible + clickable even when CP is open.
         wrapper.innerHTML = `
             <div class="ant-dropdown-trigger map-tools__button pr-dropdown ${BUTTON_CLASS}"
                  title="Power Lines edit mode"
-                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none">
+                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none;z-index:100001">
                 <span class="aim-ple-icon" style="font-size:18px;line-height:1;color:#e6e6e6">⚡</span>
             </div>
         `;
