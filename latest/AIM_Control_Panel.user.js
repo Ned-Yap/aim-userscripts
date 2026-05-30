@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.24
+// @version      1.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.24';
+    const VERSION = '1.25';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -659,7 +659,11 @@
         // Dark theme: matches the host app's dark grey, ~85% opacity so the map
         // shows through faintly without losing text contrast.
         panel.style.cssText = [
-            'position:absolute', 'top:calc(100% + 6px)', 'right:0',
+            // v1.25: right:35px (was 0) shifts the dropdown ~35px LEFT of
+            // the gear's right edge so it doesn't get covered by the Power
+            // Line Editor's icon strip (⚡ + [+D] + [+T] + …) hanging
+            // below the ⚡ button at right:0 of the same .map-tools strip.
+            'position:absolute', 'top:calc(100% + 6px)', 'right:35px',
             'min-width:280px', 'max-width:360px',
             // Cap height aggressively so the panel stays compact and scrolls
             // internally instead of stretching down past where the user wants
