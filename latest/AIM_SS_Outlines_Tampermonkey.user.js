@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.43
+// @version      34.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.43';
+    const SCRIPT_VERSION = '34.44';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1577,6 +1577,10 @@
     function setCommitOps(siteID, type, obj) {
         if (!siteID) return;
         gmSet(commitOpsKey(siteID, type), obj || emptyCommitOps());
+        // Notify Power Line Editor so its dirty-count badge stays current.
+        // Wrapped in try/catch because broadcastPowerLineStatus is hoisted
+        // but the channel may not be set up yet during very early calls.
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function commitOpsCount(siteID, type) {
@@ -2617,6 +2621,7 @@
         buildVertexEditToolbar();
         showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles · Save or Discard from the toolbar.`, 6000);
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function buildVertexEditToolbar() {
@@ -2682,6 +2687,7 @@
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         vertexEditState = null;
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     // ============================================================
@@ -2726,6 +2732,7 @@
         if (container) container.style.cursor = 'crosshair';
         buildDrawToolbar();
         showKMLToast(`Drawing new ${type} line — click map to add vertices · Save when done · Esc to cancel.`, 7000);
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function buildDrawToolbar() {
@@ -2817,6 +2824,7 @@
         if (!silent) showKMLToast('Drawing cancelled.', 2500);
         drawingState = null;
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     // Small modal for naming a newly-drawn line. Optional input;
@@ -4348,6 +4356,74 @@
     installAssetLockHandler();
     installKMLEditHandlers();
     setupKmlDataResponder();
+    setupPowerLineEditorBridge();
+
+    // Power Line Editor bridge — the editor lives in its own script
+    // (AIM_Power_Line_Editor.user.js) and owns the floating toolbar +
+    // M1 click detection. All the actual edit + commit code stays here
+    // (it's tightly coupled with rendering + commit pipeline). The
+    // editor drives us via these messages; we push status updates so
+    // its dirty-count badge stays in sync.
+    //
+    //   editor → styler:
+    //     ENTER_VERTEX_EDIT { kmlType, pmIdx }
+    //     ENTER_DRAW_MODE   { kmlType }
+    //     EXIT_VERTEX_EDIT  { save?: bool }     // explicit exit
+    //     COMMIT_KML        { kmlType }
+    //     DISCARD_OPS       { kmlType }
+    //     REQUEST_STATUS
+    //   styler → editor:
+    //     STATUS { siteID, distroCount, transCount,
+    //              vertexEditActive, drawModeActive,
+    //              vertexEditType?, vertexEditPmIdx? }
+    //
+    // Status is broadcast on REQUEST_STATUS and on any state change
+    // (setCommitOps, enterVertexEdit, exitVertexEdit, enterDrawMode,
+    // exitDrawMode, commit success/failure).
+    let powerLineEditorChannel = null;
+    function broadcastPowerLineStatus() {
+        if (!powerLineEditorChannel) return;
+        const siteID = getCurrentSiteID();
+        powerLineEditorChannel.postMessage({
+            type: 'STATUS',
+            siteID,
+            distroCount: siteID ? commitOpsCount(siteID, 'distro') : 0,
+            transCount: siteID ? commitOpsCount(siteID, 'trans') : 0,
+            vertexEditActive: !!vertexEditState,
+            vertexEditType: vertexEditState ? vertexEditState.type : null,
+            vertexEditPmIdx: vertexEditState ? vertexEditState.pmIdx : null,
+            drawModeActive: !!drawingState,
+            drawModeType: drawingState ? drawingState.type : null,
+        });
+    }
+    function setupPowerLineEditorBridge() {
+        try { powerLineEditorChannel = new BroadcastChannel('AIM_POWER_LINE_EDIT'); }
+        catch (e) { console.warn(`${TAG} PLE channel unavailable:`, e); return; }
+        powerLineEditorChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'REQUEST_STATUS') { broadcastPowerLineStatus(); return; }
+            // Only IFRAME (the one with the map) should act on commands.
+            // Both TOP + IFRAME receive the broadcast, but enterVertexEdit
+            // / enterDrawMode need the map. Use isActive (only true in the
+            // frame that found .leaflet-map-pane) as the gate.
+            if (!isActive) return;
+            try {
+                if (m.type === 'ENTER_VERTEX_EDIT' && m.kmlType && Number.isFinite(m.pmIdx)) {
+                    enterVertexEdit(m.kmlType, m.pmIdx);
+                } else if (m.type === 'EXIT_VERTEX_EDIT') {
+                    exitVertexEdit({ save: !!m.save });
+                } else if (m.type === 'ENTER_DRAW_MODE' && m.kmlType) {
+                    enterDrawMode(m.kmlType);
+                } else if (m.type === 'COMMIT_KML' && m.kmlType) {
+                    commitKMLChanges(m.kmlType);
+                } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
+                    discardCommitOps(m.kmlType);
+                }
+            } catch (e) {
+                console.warn(`${TAG} PLE command failed (${m.type}):`, e);
+            }
+        };
+    }
 
     // KML data sharing — other AIM scripts (Asset Inspector's Site Setup
     // Analyzer) need access to the parsed KML features we've already
