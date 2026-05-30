@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-30
+
+- **AIM Control Panel v1.24** — **STABILITY FIX: hide-satellite checkbox unresponsive + several inputs need multiple clicks before they accept edits.** Both bugs shared one root cause. When you opened the panel, the broadcast `REQUEST_REGISTRATIONS` made every script in both TOP and IFRAME (~28 contexts) re-register. Each REGISTER triggered a full `renderPanel()` that wiped the panel's innerHTML, plus echoed N `SET_TOGGLE` messages — and each echo bounced back through the cross-context panel triggering ANOTHER renderPanel. The panel was re-rendering dozens of times in the first ~500ms after open. If you clicked a checkbox or input during that burst, the element was destroyed mid-click and the change event was lost. Three coordinated fixes:
+  - **rAF-debounced render**: all internal re-render triggers now coalesce into one `requestAnimationFrame` callback. Burst of 28+ render requests = 1 actual render.
+  - **Idempotent `handleRegister`**: re-registers with structurally identical payloads (same toggles, hotkeys, version) skip both the SET_TOGGLE echo broadcast AND the re-render.
+  - **Idempotent SET_TOGGLE echo**: if the broadcast value matches what's already in prefs, no re-render is triggered.
+  - **Symptom check after install**: open the panel, click "Hide satellite base tiles" — should toggle on the first click every time. Click any number/color input — should accept focus on the first click. Watch console for any new errors (none expected).
+
+---
+
 ## 2026-05-29
 
 - **AIM Asset Inspector v3.39** — **NEW: shared elevation DB on the team's GitHub data repo.** First-visit fetches per site are now a thing of the past for any teammate who comes after you.

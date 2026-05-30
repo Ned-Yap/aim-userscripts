@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.23
+// @version      1.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.23';
+    const VERSION = '1.24';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -325,9 +325,15 @@
         } else if (msg.type === 'SET_TOGGLE' && msg.scriptId && msg.toggleId !== undefined) {
             // A script changed one of its settings (e.g. toggled via hotkey).
             // Mirror into our prefs so UI stays in sync. Don't re-broadcast.
+            // v1.24: skip the re-render when the new value matches what's
+            // already in prefs — every SET_TOGGLE echo from REGISTER bounces
+            // back here, and without this guard each one triggered a full
+            // renderPanel(), destroying inputs the user just clicked.
             const v = msg.value !== undefined ? msg.value : msg.enabled;
+            const prev = state.prefs[msg.scriptId] && state.prefs[msg.scriptId][msg.toggleId];
+            const changed = prev !== v;
             setToggle(msg.scriptId, msg.toggleId, v);
-            if (state.panelOpen) renderPanel();
+            if (changed && state.panelOpen) scheduleRender();
         } else if (msg.type === 'REQUEST_TOKEN') {
             const token = getToken();
             if (token && state.channel) {
@@ -358,13 +364,31 @@
         return out;
     }
 
+    // v1.24 — cheap structural signature of a REGISTER payload. Used to
+    // skip re-renders when a script re-registers with identical content
+    // (Map Styler re-registers on every category toggle, every script
+    // re-registers on REQUEST_REGISTRATIONS, etc). Doesn't include
+    // lastSeen / frame so timestamp drift doesn't invalidate the cache.
+    function registrationSignature(msg) {
+        return JSON.stringify({
+            n: msg.name, v: msg.version, g: msg.group, p: msg.priority,
+            s: msg.scope, t: msg.toggles, h: msg.hotkeys,
+        });
+    }
+
     function handleRegister(msg) {
         if (!msg.scriptId) return;
-        state.registry.set(msg.scriptId, { ...msg, lastSeen: Date.now() });
+        const prev = state.registry.get(msg.scriptId);
+        const sig = registrationSignature(msg);
+        const isIdentical = prev && prev.__sig === sig;
+        state.registry.set(msg.scriptId, { ...msg, lastSeen: Date.now(), __sig: sig });
         // Echo back the current value for each registered setting. Carries
         // both `value` (typed) and `enabled` (bool) — scripts can read whichever
         // they're built for. Saves each script from doing its own localStorage.
-        if (Array.isArray(msg.toggles) && state.channel) {
+        // v1.24: only echo on FIRST register of this scriptId; re-registers
+        // with identical payload don't need to re-broadcast (scripts already
+        // have the values from the first echo).
+        if (!isIdentical && Array.isArray(msg.toggles) && state.channel) {
             flattenToggles(msg.toggles).forEach(t => {
                 const value = getToggle(msg.scriptId, t.id, t.default);
                 state.channel.postMessage({
@@ -374,7 +398,10 @@
                 });
             });
         }
-        if (state.panelOpen) renderPanel();
+        // v1.24: skip the re-render when nothing structural changed —
+        // avoids the burst-of-renderPanel-on-open that was destroying
+        // freshly-clicked inputs/checkboxes mid-click.
+        if (!isIdentical && state.panelOpen) scheduleRender();
     }
 
     function requestRegistrations() {
@@ -1150,6 +1177,26 @@
                 ${resetIconHtml(scriptId, t, value)}
             </label>
         `;
+    }
+
+    // v1.24 — coalesce burst renderPanel() calls. When the panel opens we
+    // broadcast REQUEST_REGISTRATIONS; each script in TOP + IFRAME responds
+    // with REGISTER, and each REGISTER echoes back N SET_TOGGLEs (one per
+    // toggle in the script). With ~14 scripts × 2 contexts that adds up to
+    // dozens of renderPanel() calls in the first ~500ms after open. Each
+    // render rebuilds panel.innerHTML, which destroys any input/checkbox
+    // the user clicked mid-burst — losing the change event entirely.
+    // Symptom: "hide-satellite checkbox unresponsive", "inputs need
+    // multiple clicks before they accept edits". Fix: rAF-debounce.
+    let renderScheduled = false;
+    function scheduleRender() {
+        if (renderScheduled) return;
+        if (!state.panelEl || !state.panelOpen) return;
+        renderScheduled = true;
+        requestAnimationFrame(() => {
+            renderScheduled = false;
+            renderPanel();
+        });
     }
 
     function renderPanel() {
