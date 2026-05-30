@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,7 +34,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -246,15 +246,16 @@
         // Match the existing .map-tools__button look. Use the same class
         // soup the host app's other tools use so styling comes for free.
         const wrapper = document.createElement('div');
-        // v0.6: z-index:100001 keeps the ⚡ button (and its child panel)
-        // ABOVE the AIM Control Panel dropdown (z-index:100000). The CP
-        // extends DOWN from the gear button and otherwise paints over ⚡
-        // (which sits below gear in the .map-tools strip). With the bump,
-        // ⚡ remains visible + clickable even when CP is open.
+        // v0.7: z-index pushed to 2147483647 (max safe i32) so ⚡ is
+        // guaranteed to paint above the AIM Control Panel dropdown
+        // regardless of any intermediate stacking context. Previous v0.6
+        // used 100001 which should have worked but the user reported
+        // the bolt still being hidden behind the CP. Max value rules
+        // out any "another container has higher z-index" possibility.
         wrapper.innerHTML = `
             <div class="ant-dropdown-trigger map-tools__button pr-dropdown ${BUTTON_CLASS}"
                  title="Power Lines edit mode"
-                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none;z-index:100001">
+                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none;z-index:2147483647;isolation:isolate">
                 <span class="aim-ple-icon" style="font-size:18px;line-height:1;color:#e6e6e6">⚡</span>
             </div>
         `;
@@ -274,10 +275,13 @@
         });
         // Tooltip hints at both interactions.
         buttonEl.title = 'Power Lines: M1 = open menu · M2 = toggle edit mode';
-        // Build panel inside the button so it positions relative to it.
+        // v0.7: panel now lives in document.body (position:fixed) instead
+        // of inside buttonEl. Avoids any parent stacking-context surprises
+        // and lets us compute exact pixel coordinates relative to the
+        // Control Panel + ⚡ button on each show.
         createPanel();
         renderButtonState();
-        console.log(`${TAG} button injected into .map-tools`);
+        console.log(`${TAG} v${SCRIPT_VERSION} button injected into .map-tools`);
         return true;
     }
 
@@ -301,66 +305,81 @@
     }
 
     function createPanel() {
-        if (panelEl || !buttonEl) return;
+        if (panelEl) return;
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
-        // v0.5: dynamic positioning via positionPanel(). Two modes:
-        //   default (Control Panel closed): BELOW the ⚡ button, shifted
-        //     LEFT past the toolbar column → sits in the empty bottom-
-        //     right of the map.
-        //   Control Panel open: ABOVE the gear button, still shifted
-        //     LEFT → sits above the Control Panel, no overlap with the
-        //     toolbar buttons.
-        // Both modes use right:40px so the panel right edge sits ~10px
-        // to the LEFT of the toolbar column (toolbar buttons are 30px
-        // wide; ⚡ is at right:0 of the strip, panel-right at 40px from
-        // ⚡-right clears the buttons).
+        // v0.7: panel attached to document.body (NOT buttonEl) with
+        // position:fixed + computed coordinates. Reasons:
+        //   - Escapes any parent stacking context — guaranteed paint
+        //     order without relying on ancestor z-index behavior.
+        //   - Lets us position the panel relative to the Control Panel
+        //     when it's open (cleanly tucked above its top edge,
+        //     right-aligned with CP) instead of guessing at toolbar
+        //     button height with calc().
         panelEl.style.cssText = [
-            'position:absolute',
-            'right:40px',                      // shifted LEFT of toolbar column
-            'top:calc(100% + 6px)',            // default: BELOW ⚡
-            'background:rgba(40,40,40,0.92)', 'color:#e6e6e6',
+            'position:fixed',
+            'background:rgba(40,40,40,0.94)', 'color:#e6e6e6',
             'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
             'border:1px solid rgba(57,255,20,0.45)', 'border-radius:6px',
             'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
-            'z-index:100000', 'padding:6px',
-            'display:none', // shown via renderButtonState
+            'z-index:2147483647', // same max as the ⚡ button
+            'padding:6px',
+            'display:none',
             'flex-direction:column', 'gap:5px', 'align-items:stretch',
-            'min-width:170px',
+            'min-width:180px', 'max-width:220px',
             'font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
             'cursor:default',
         ].join(';');
-        swallowMouseEvents(panelEl); // panel clicks must NOT zoom the map
-        buttonEl.appendChild(panelEl);
+        swallowMouseEvents(panelEl);
+        document.body.appendChild(panelEl);
         watchControlPanelForReposition();
+        // Reposition on window resize (fixed coords need recompute).
+        window.addEventListener('resize', () => { if (panelOpen) positionPanel(); }, false);
     }
 
     // Is Percepto's AIM Control Panel dropdown open right now?
     function isControlPanelOpen() {
         const cp = document.querySelector('.aim-control-panel');
         if (!cp) return false;
-        // The panel toggles display:none/block. offsetParent==null also
-        // catches the case where some ancestor hides it.
         return cp.style.display !== 'none' && cp.offsetParent !== null;
     }
 
-    // Move the panel into the right slot for the current Control Panel state.
-    // Called on every panel render + via MutationObserver on the CP element.
+    // Compute panel position in viewport coords. Two modes:
+    //   CP open  → panel sits IMMEDIATELY above the CP's top edge,
+    //              right-aligned to CP.right (so it stacks vertically
+    //              with CP — flush together, no floating gap).
+    //   default  → panel sits below ⚡ button, right edge shifted
+    //              ~10px LEFT of the toolbar column so no buttons covered.
     function positionPanel() {
-        if (!panelEl) return;
-        if (isControlPanelOpen()) {
-            // ABOVE the gear: bottom = ⚡_top + (gear height + spacing).
-            // Gear is one button above ⚡ (each map-tools button is
-            // ~38px tall including row gap). Add ~6px to be clearly
-            // above gear top. That puts panel BOTTOM above gear TOP,
-            // which is above the Control Panel TOP.
-            panelEl.style.top = 'auto';
-            panelEl.style.bottom = 'calc(100% + 44px)';
+        if (!panelEl || !buttonEl) return;
+        const btnRect = buttonEl.getBoundingClientRect();
+        const cp = document.querySelector('.aim-control-panel');
+        const cpOpen = cp && cp.style.display !== 'none' && cp.offsetParent !== null;
+        // Reset before measuring (so we get natural panel height each time)
+        panelEl.style.top = 'auto';
+        panelEl.style.bottom = 'auto';
+        panelEl.style.left = 'auto';
+        panelEl.style.right = 'auto';
+        panelEl.style.display = 'flex';
+        panelEl.style.visibility = 'hidden';
+        const panelRect = panelEl.getBoundingClientRect();
+        panelEl.style.visibility = 'visible';
+        if (cpOpen) {
+            const cpRect = cp.getBoundingClientRect();
+            // Panel bottom 6px above CP top; right-aligned with CP.
+            const right = window.innerWidth - cpRect.right;
+            const bottom = window.innerHeight - cpRect.top + 6;
+            panelEl.style.right = `${Math.max(8, right)}px`;
+            panelEl.style.bottom = `${Math.max(8, bottom)}px`;
             panelEl.style.boxShadow = '0 -6px 22px rgba(0,0,0,0.55)';
         } else {
-            // BELOW ⚡ in the empty map area.
-            panelEl.style.bottom = 'auto';
-            panelEl.style.top = 'calc(100% + 6px)';
+            // Below ⚡, shifted LEFT past toolbar column (each toolbar
+            // button ≈ 30px wide; offset 40px clears the column with
+            // ~10px breathing room).
+            const right = window.innerWidth - btnRect.right + 40;
+            const top = btnRect.bottom + 6;
+            panelEl.style.right = `${Math.max(8, right)}px`;
+            panelEl.style.top = `${Math.max(8, top)}px`;
             panelEl.style.boxShadow = '0 6px 22px rgba(0,0,0,0.55)';
         }
     }
@@ -480,20 +499,62 @@
 
     function renderPanelContents() {
         if (!panelEl) return;
-        panelEl.style.display = panelOpen ? 'flex' : 'none';
-        if (!panelOpen) { panelEl.innerHTML = ''; return; }
-        // Reposition based on Control Panel state (below ⚡ vs above gear).
-        positionPanel();
+        if (!panelOpen) {
+            panelEl.style.display = 'none';
+            panelEl.innerHTML = '';
+            return;
+        }
         panelEl.innerHTML = '';
 
-        // Header shows edit mode state so the user always knows which
-        // mode they're in regardless of bolt glow visibility.
-        const header = document.createElement('div');
-        header.innerHTML = editEnabled
-            ? 'Power Lines &nbsp;<span style="color:#39ff14;font-size:10px">● edit on</span>'
-            : 'Power Lines &nbsp;<span style="color:#888;font-size:10px">○ edit off (M2 on ⚡)</span>';
-        header.style.cssText = 'color:rgb(20,210,220);font-weight:600;padding:2px 4px 4px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
-        panelEl.appendChild(header);
+        // ROW 1: title + close X (right-aligned). Clicking X closes
+        // panel without needing to find the ⚡ button (which can be
+        // hidden if CP is open and the z-index fix didn't take).
+        const titleRow = document.createElement('div');
+        titleRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:2px 2px 4px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:4px';
+        const title = document.createElement('div');
+        title.textContent = 'Power Lines';
+        title.style.cssText = 'color:rgb(20,210,220);font-weight:600';
+        titleRow.appendChild(title);
+        const closeX = document.createElement('button');
+        closeX.type = 'button';
+        closeX.textContent = '✕';
+        closeX.title = 'Close panel (M1 ⚡)';
+        closeX.style.cssText = 'background:transparent;border:none;color:#888;cursor:pointer;font-size:14px;line-height:1;padding:2px 6px;border-radius:3px';
+        closeX.addEventListener('mouseenter', () => { closeX.style.background = 'rgba(255,80,80,0.18)'; closeX.style.color = '#ff8585'; });
+        closeX.addEventListener('mouseleave', () => { closeX.style.background = 'transparent'; closeX.style.color = '#888'; });
+        closeX.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            setPanelOpen(false);
+        });
+        titleRow.appendChild(closeX);
+        panelEl.appendChild(titleRow);
+
+        // ROW 2: edit-mode toggle button. Click to toggle without
+        // needing to find the ⚡ button. Same effect as M2 on ⚡.
+        const editToggle = document.createElement('button');
+        editToggle.type = 'button';
+        editToggle.innerHTML = editEnabled
+            ? '<span style="color:#39ff14">●</span> Edit mode: <b>ON</b>'
+            : '<span style="color:#888">○</span> Edit mode: <b>OFF</b>';
+        editToggle.title = 'Toggle edit mode (same as M2 on ⚡)';
+        editToggle.style.cssText = [
+            'width:100%', 'padding:5px 10px', 'border-radius:4px',
+            `background:${editEnabled ? 'rgba(57,255,20,0.10)' : 'rgba(255,255,255,0.04)'}`,
+            `border:1px solid ${editEnabled ? 'rgba(57,255,20,0.45)' : 'rgba(255,255,255,0.15)'}`,
+            'color:#e6e6e6', 'cursor:pointer', 'font:inherit',
+            'text-align:center', 'margin-bottom:4px',
+        ].join(';');
+        editToggle.addEventListener('mouseenter', () => {
+            editToggle.style.background = editEnabled ? 'rgba(57,255,20,0.20)' : 'rgba(255,255,255,0.10)';
+        });
+        editToggle.addEventListener('mouseleave', () => {
+            editToggle.style.background = editEnabled ? 'rgba(57,255,20,0.10)' : 'rgba(255,255,255,0.04)';
+        });
+        editToggle.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            setEditEnabled(!editEnabled);
+        });
+        panelEl.appendChild(editToggle);
 
         // Add Line — distro
         panelEl.appendChild(btn(
@@ -555,10 +616,14 @@
             const hint = document.createElement('div');
             hint.textContent = editEnabled
                 ? 'M1 on any line to edit vertices'
-                : 'Enable edit mode (M2 on ⚡) to click lines';
+                : 'Click "Edit mode" above to enable';
             hint.style.cssText = 'color:#888;font-size:10px;padding:4px 6px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;font-style:italic';
             panelEl.appendChild(hint);
         }
+
+        // Reposition AFTER content is built so the panel height we
+        // measure in positionPanel is the real rendered height.
+        positionPanel();
     }
 
     // ------- Init -------
