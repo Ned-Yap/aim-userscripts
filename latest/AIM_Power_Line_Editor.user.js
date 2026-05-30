@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,20 +34,34 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
-    // Persistent master toggle in localStorage so the editor remembers
-    // it was ON across reloads. NOT GM_setValue — we want it shared
-    // across @name (so Latest + future prod versions see the same state).
-    const MASTER_STORAGE_KEY = 'aim-ple-master';
-    function readMaster() {
-        try { return localStorage.getItem(MASTER_STORAGE_KEY) === 'true'; }
+    // v0.4: Split into two independent state knobs.
+    //
+    // editEnabled (persisted) — controls whether M1 on a power line
+    //   enters vertex edit AND whether Map Styler's distro/trans
+    //   edit-mode toggles are on. Toggled by **M2 (right-click) on ⚡**.
+    //   Visual: bolt at full color + neon-green glow + bigger when ON;
+    //   greyscale + no glow when OFF.
+    //
+    // panelOpen (session only — not persisted) — controls visibility
+    //   of the Add/Commit/Discard dropdown panel. Toggled by **M1
+    //   (left-click) on ⚡**. Closes automatically when user starts
+    //   a draw or vertex edit so the panel doesn't block the map.
+    //
+    // The split lets the user keep edit mode on continuously (so M1
+    // on lines always Just Works) while only opening the panel briefly
+    // for the rare add/commit/discard actions. User feedback:
+    // "I can't have the big Add buttons eating up a bunch of realestate".
+    const EDIT_STORAGE_KEY = 'aim-ple-edit-enabled';
+    function readEditEnabled() {
+        try { return localStorage.getItem(EDIT_STORAGE_KEY) === 'true'; }
         catch (e) { return false; }
     }
-    function writeMaster(on) {
-        try { localStorage.setItem(MASTER_STORAGE_KEY, on ? 'true' : 'false'); }
+    function writeEditEnabled(on) {
+        try { localStorage.setItem(EDIT_STORAGE_KEY, on ? 'true' : 'false'); }
         catch (e) {}
     }
 
@@ -79,7 +93,7 @@
                 const m = ev.data || {};
                 if (m.type === 'STATUS') {
                     status = { ...status, ...m };
-                    renderToolbar();
+                    renderButtonState();
                 }
             };
         }
@@ -111,13 +125,14 @@
         });
     }
 
-    // ------- Master toggle state -------
-    let masterOn = readMaster();
+    // ------- State -------
+    let editEnabled = readEditEnabled();
+    let panelOpen = false; // session only, not persisted
 
-    function setMaster(on) {
-        if (on === masterOn) return;
-        masterOn = on;
-        writeMaster(on);
+    function setEditEnabled(on) {
+        if (on === editEnabled) return;
+        editEnabled = on;
+        writeEditEnabled(on);
         setStylerEditMode(on);
         if (on) {
             installClickInterceptor();
@@ -127,10 +142,14 @@
             // If a vertex edit or draw was in progress, exit it cleanly
             // so the user isn't left with stranded handles.
             if (status.vertexEditActive) sendPle({ type: 'EXIT_VERTEX_EDIT', save: false });
-            // Drawing mode: no "exit without saving" message yet; user can
-            // press Esc which Styler's handler picks up.
         }
-        renderToolbar();
+        renderButtonState();
+    }
+
+    function setPanelOpen(on) {
+        if (on === panelOpen) return;
+        panelOpen = on;
+        renderButtonState();
     }
 
     // ------- M1 click interceptor -------
@@ -146,7 +165,7 @@
     let lastClickAt = 0;
 
     function onLineClick(e) {
-        if (!masterOn) return;
+        if (!editEnabled) return;
         if (e.button !== 0) return;
         // Don't intercept while a vertex-edit is already active — the
         // user is dragging handles, clicks elsewhere should be ignored
@@ -238,10 +257,18 @@
         tools.appendChild(el);
         buttonEl = el;
         swallowMouseEvents(buttonEl); // prevent map-zoom on accidental dblclick
+        // v0.4: M1 toggles panel; M2 toggles editing. Separates the
+        // visible-but-occasional panel from the persistent edit mode.
         buttonEl.addEventListener('click', (e) => {
             e.preventDefault(); e.stopPropagation();
-            setMaster(!masterOn);
+            setPanelOpen(!panelOpen);
         });
+        buttonEl.addEventListener('contextmenu', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            setEditEnabled(!editEnabled);
+        });
+        // Tooltip hints at both interactions.
+        buttonEl.title = 'Power Lines: M1 = open menu · M2 = toggle edit mode';
         // Build panel inside the button so it positions relative to it.
         createPanel();
         renderButtonState();
@@ -272,23 +299,31 @@
         if (panelEl || !buttonEl) return;
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
-        // v0.3: opens to the LEFT of the ⚡ button (right:calc(100%+8px))
-        // instead of below it. Previously the panel anchored top:100%
-        // right:0 which collided with the Control Panel's gear dropdown
-        // — both expand leftward from the same map-tools strip. Going
-        // left puts us in the empty map area; no sibling-panel overlap.
+        // v0.4: panel opens ABOVE the ⚡ button (bottom:calc(100%+6px)),
+        // extending UP into the map area. ⚡ is the last button in the
+        // .map-tools strip so "up" is open space.
+        //
+        // Why above instead of beside: the Control Panel gear dropdown
+        // opens DOWN from the gear (which is just above ⚡), extending
+        // leftward 360px. Anywhere LEFT of ⚡ collides with the Control
+        // Panel. Opening UP avoids that — panel + Control Panel never
+        // intersect. User feedback: "needs to move above (North) of
+        // the control while it's open".
+        //
+        // Trade-off: the panel briefly covers the gear/layers/trash
+        // buttons above ⚡ while open. User can M1 ⚡ again to close.
         panelEl.style.cssText = [
             'position:absolute',
-            'top:0',                          // align with button top
-            'right:calc(100% + 8px)',         // sit to LEFT of button
+            'bottom:calc(100% + 6px)',        // ABOVE the ⚡ button
+            'right:0',                         // align right edges
             'background:rgba(40,40,40,0.92)', 'color:#e6e6e6',
             'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
-            'border:1px solid rgba(20,210,220,0.4)', 'border-radius:6px',
-            'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
+            'border:1px solid rgba(57,255,20,0.45)', 'border-radius:6px',
+            'box-shadow:0 -6px 22px rgba(0,0,0,0.55)',
             'z-index:100000', 'padding:6px',
             'display:none', // shown via renderButtonState
             'flex-direction:column', 'gap:5px', 'align-items:stretch',
-            'min-width:160px',
+            'min-width:170px',
             'font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
             'cursor:default',
         ].join(';');
@@ -332,20 +367,33 @@
         return b;
     }
 
-    // ⚡ button visual state: dim when off, cyan-tinted when on. Also
-    // pokes the dirty-count badge onto the icon when there are pending
-    // edits, regardless of master state (so user sees uncommitted work).
+    // ⚡ button visual state:
+    //   - editEnabled=ON  → native orange ⚡ + neon-green glow + larger
+    //   - editEnabled=OFF → greyscale ⚡ + no glow + standard size
+    // Independent of panelOpen — the panel is just a menu, not a mode.
+    // Dirty-count badge shows regardless so uncommitted work is always
+    // visible (even when editing is off).
     function renderButtonState() {
         if (!buttonEl) return;
         const icon = buttonEl.querySelector('.aim-ple-icon');
         if (icon) {
-            // The ⚡ glyph is an emoji — its native color (orange/amber) shows
-            // through regardless of `color`, so we lean into that and use the
-            // text-shadow as a cyan halo. v0.3: larger 3-layer glow per user.
-            icon.style.color = masterOn ? 'rgb(20,210,220)' : '#e6e6e6';
-            icon.style.textShadow = masterOn
-                ? '0 0 10px rgba(20,210,220,0.95), 0 0 20px rgba(20,210,220,0.65), 0 0 30px rgba(20,210,220,0.35)'
-                : 'none';
+            if (editEnabled) {
+                // Brighter + bigger + neon-green 3-layer halo. The ⚡
+                // glyph is an emoji so its native orange shows through;
+                // the glow is the cue (not the icon color).
+                icon.style.filter = 'none';
+                icon.style.fontSize = '22px';
+                icon.style.textShadow = [
+                    '0 0 8px  rgba(57,255,20,0.95)',
+                    '0 0 18px rgba(57,255,20,0.70)',
+                    '0 0 32px rgba(57,255,20,0.40)',
+                ].join(', ');
+            } else {
+                // Desaturate + dim to "this is off / not in use" cue.
+                icon.style.filter = 'grayscale(1) brightness(0.65)';
+                icon.style.fontSize = '18px';
+                icon.style.textShadow = 'none';
+            }
         }
         // Dirty-count badge in the corner of the button.
         let badge = buttonEl.querySelector('.aim-ple-badge');
@@ -375,12 +423,16 @@
 
     function renderPanelContents() {
         if (!panelEl) return;
-        panelEl.style.display = masterOn ? 'flex' : 'none';
-        if (!masterOn) { panelEl.innerHTML = ''; return; }
+        panelEl.style.display = panelOpen ? 'flex' : 'none';
+        if (!panelOpen) { panelEl.innerHTML = ''; return; }
         panelEl.innerHTML = '';
 
+        // Header shows edit mode state so the user always knows which
+        // mode they're in regardless of bolt glow visibility.
         const header = document.createElement('div');
-        header.textContent = 'Power Lines';
+        header.innerHTML = editEnabled
+            ? 'Power Lines &nbsp;<span style="color:#39ff14;font-size:10px">● edit on</span>'
+            : 'Power Lines &nbsp;<span style="color:#888;font-size:10px">○ edit off (M2 on ⚡)</span>';
         header.style.cssText = 'color:rgb(20,210,220);font-weight:600;padding:2px 4px 4px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
         panelEl.appendChild(header);
 
@@ -442,15 +494,13 @@
             panelEl.appendChild(ind);
         } else {
             const hint = document.createElement('div');
-            hint.textContent = 'M1 on any line to edit vertices';
+            hint.textContent = editEnabled
+                ? 'M1 on any line to edit vertices'
+                : 'Enable edit mode (M2 on ⚡) to click lines';
             hint.style.cssText = 'color:#888;font-size:10px;padding:4px 6px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;font-style:italic';
             panelEl.appendChild(hint);
         }
     }
-
-    // Wrapper used by external state changes (master flip, STATUS arrival,
-    // setMaster). Same name as before so init/setMaster don't need updating.
-    function renderToolbar() { renderButtonState(); }
 
     // ------- Init -------
     function init() {
@@ -463,16 +513,16 @@
         }
         setupChannels();
         ensureButton();
-        // If the master was ON before reload, restore the click interceptor
+        // If edit mode was ON before reload, restore the click interceptor
         // and tell Map Styler to flip its edit-mode toggles back on.
-        if (masterOn) {
+        if (editEnabled) {
             setStylerEditMode(true);
             installClickInterceptor();
         }
         // Ask for current dirty counts so the badge is accurate on load.
         // Use a small delay to let Map Styler finish its own init first.
         setTimeout(requestStatus, 800);
-        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — master ${masterOn ? 'ON' : 'OFF'}`);
+        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — edit ${editEnabled ? 'ON' : 'OFF'}`);
     }
 
     if (document.readyState === 'loading') {

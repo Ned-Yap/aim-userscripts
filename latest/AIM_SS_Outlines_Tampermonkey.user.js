@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.45
+// @version      34.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.45';
+    const SCRIPT_VERSION = '34.46';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2731,7 +2731,10 @@
         const container = map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = 'crosshair';
         buildDrawToolbar();
-        showKMLToast(`Drawing new ${type} line — click map to add vertices · Save when done · Esc to cancel.`, 7000);
+        // v34.46: removed the showKMLToast announcement — the floating
+        // green draw-toolbar (with vertex count + Save/Undo/Cancel) is
+        // already on-screen and tells the user the same thing without
+        // covering the map. User feedback: "I like the green one better".
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
@@ -4420,7 +4423,11 @@
                 } else if (m.type === 'ENTER_DRAW_MODE' && m.kmlType) {
                     enterDrawMode(m.kmlType);
                 } else if (m.type === 'COMMIT_KML' && m.kmlType) {
-                    commitKMLChanges(m.kmlType);
+                    // v34.46: was commitKMLChanges (legacy hide-only path);
+                    // commitPendingOps is the ops-aware fn that handles
+                    // modify/delete/added. Was silently saying "no pending
+                    // changes" for newly-added lines.
+                    commitPendingOps(m.kmlType);
                 } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
                     discardCommitOps(m.kmlType);
                 }
