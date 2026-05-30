@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,7 +34,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -299,27 +299,25 @@
         if (panelEl || !buttonEl) return;
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
-        // v0.4: panel opens ABOVE the ⚡ button (bottom:calc(100%+6px)),
-        // extending UP into the map area. ⚡ is the last button in the
-        // .map-tools strip so "up" is open space.
-        //
-        // Why above instead of beside: the Control Panel gear dropdown
-        // opens DOWN from the gear (which is just above ⚡), extending
-        // leftward 360px. Anywhere LEFT of ⚡ collides with the Control
-        // Panel. Opening UP avoids that — panel + Control Panel never
-        // intersect. User feedback: "needs to move above (North) of
-        // the control while it's open".
-        //
-        // Trade-off: the panel briefly covers the gear/layers/trash
-        // buttons above ⚡ while open. User can M1 ⚡ again to close.
+        // v0.5: dynamic positioning via positionPanel(). Two modes:
+        //   default (Control Panel closed): BELOW the ⚡ button, shifted
+        //     LEFT past the toolbar column → sits in the empty bottom-
+        //     right of the map.
+        //   Control Panel open: ABOVE the gear button, still shifted
+        //     LEFT → sits above the Control Panel, no overlap with the
+        //     toolbar buttons.
+        // Both modes use right:40px so the panel right edge sits ~10px
+        // to the LEFT of the toolbar column (toolbar buttons are 30px
+        // wide; ⚡ is at right:0 of the strip, panel-right at 40px from
+        // ⚡-right clears the buttons).
         panelEl.style.cssText = [
             'position:absolute',
-            'bottom:calc(100% + 6px)',        // ABOVE the ⚡ button
-            'right:0',                         // align right edges
+            'right:40px',                      // shifted LEFT of toolbar column
+            'top:calc(100% + 6px)',            // default: BELOW ⚡
             'background:rgba(40,40,40,0.92)', 'color:#e6e6e6',
             'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
             'border:1px solid rgba(57,255,20,0.45)', 'border-radius:6px',
-            'box-shadow:0 -6px 22px rgba(0,0,0,0.55)',
+            'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
             'z-index:100000', 'padding:6px',
             'display:none', // shown via renderButtonState
             'flex-direction:column', 'gap:5px', 'align-items:stretch',
@@ -329,6 +327,60 @@
         ].join(';');
         swallowMouseEvents(panelEl); // panel clicks must NOT zoom the map
         buttonEl.appendChild(panelEl);
+        watchControlPanelForReposition();
+    }
+
+    // Is Percepto's AIM Control Panel dropdown open right now?
+    function isControlPanelOpen() {
+        const cp = document.querySelector('.aim-control-panel');
+        if (!cp) return false;
+        // The panel toggles display:none/block. offsetParent==null also
+        // catches the case where some ancestor hides it.
+        return cp.style.display !== 'none' && cp.offsetParent !== null;
+    }
+
+    // Move the panel into the right slot for the current Control Panel state.
+    // Called on every panel render + via MutationObserver on the CP element.
+    function positionPanel() {
+        if (!panelEl) return;
+        if (isControlPanelOpen()) {
+            // ABOVE the gear: bottom = ⚡_top + (gear height + spacing).
+            // Gear is one button above ⚡ (each map-tools button is
+            // ~38px tall including row gap). Add ~6px to be clearly
+            // above gear top. That puts panel BOTTOM above gear TOP,
+            // which is above the Control Panel TOP.
+            panelEl.style.top = 'auto';
+            panelEl.style.bottom = 'calc(100% + 44px)';
+            panelEl.style.boxShadow = '0 -6px 22px rgba(0,0,0,0.55)';
+        } else {
+            // BELOW ⚡ in the empty map area.
+            panelEl.style.bottom = 'auto';
+            panelEl.style.top = 'calc(100% + 6px)';
+            panelEl.style.boxShadow = '0 6px 22px rgba(0,0,0,0.55)';
+        }
+    }
+
+    // Watch the AIM Control Panel for open/close so we can reposition
+    // OUR panel in response. The CP element gets attribute changes
+    // (style.display) when toggled. We re-observe each time we see the
+    // CP appear (it's created lazily by Control Panel script).
+    let cpObserver = null;
+    let cpObserverTarget = null;
+    function watchControlPanelForReposition() {
+        const findAndObserve = () => {
+            const cp = document.querySelector('.aim-control-panel');
+            if (!cp || cp === cpObserverTarget) return;
+            if (cpObserver) { try { cpObserver.disconnect(); } catch (e) {} }
+            cpObserverTarget = cp;
+            cpObserver = new MutationObserver(() => {
+                if (panelOpen) positionPanel();
+            });
+            cpObserver.observe(cp, { attributes: true, attributeFilter: ['style'] });
+        };
+        findAndObserve();
+        // CP can be re-created (React re-renders, etc.) — keep checking.
+        const bodyObserver = new MutationObserver(findAndObserve);
+        if (document.body) bodyObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function btn(label, title, onClick, opts) {
@@ -425,6 +477,8 @@
         if (!panelEl) return;
         panelEl.style.display = panelOpen ? 'flex' : 'none';
         if (!panelOpen) { panelEl.innerHTML = ''; return; }
+        // Reposition based on Control Panel state (below ⚡ vs above gear).
+        positionPanel();
         panelEl.innerHTML = '';
 
         // Header shows edit mode state so the user always knows which
