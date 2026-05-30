@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.50
+// @version      34.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.50';
+    const SCRIPT_VERSION = '34.51';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1678,12 +1678,14 @@
     // we can't fix from a userscript.
     function applyCommittedXmlToLocalState(siteID, type, xmlText) {
         const k = kmlKey(siteID, type);
+        const beforeCount = (kmlFeatures[k] || []).length;
         try {
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
             const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
             gmSet(KML_CACHE_PREFIX + k, { features, at: Date.now(), path });
             kmlMissing.delete(k);
+            console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
             return true;
         } catch (e) {
             // Shouldn't happen — we just built this XML ourselves. Fall
@@ -2604,7 +2606,23 @@
                         } catch (e) {
                             console.warn(`${TAG} commit-ops: could not parse PUT response for SHA cache:`, e);
                         }
-                        if (isActive) runUpdate();
+                        // v34.51: fire runUpdate immediately AND a second
+                        // one after 250ms. The render uses a debounced
+                        // MutationObserver — a single runUpdate sometimes
+                        // gets coalesced with Leaflet's own SVG updates
+                        // and the wipe-rebuild misses the stale deleted
+                        // path. A second pass guarantees the user-visible
+                        // state catches up to kmlFeatures.
+                        if (isActive) {
+                            console.log(`${TAG} commit-ops: firing runUpdate (isActive=${isActive})`);
+                            runUpdate();
+                            setTimeout(() => {
+                                console.log(`${TAG} commit-ops: firing safety-net runUpdate`);
+                                if (isActive) runUpdate();
+                            }, 250);
+                        } else {
+                            console.warn(`${TAG} commit-ops: NOT firing runUpdate, isActive=false`);
+                        }
                     } else if (resp.status === 409) {
                         // v34.49: cached SHA may be stale (someone else committed
                         // OR rare api.github.com eventual-consistency window).
