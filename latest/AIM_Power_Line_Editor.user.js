@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
-// @description  Power Lines editing UX layer. Registers with AIM Control Panel as a regular script (Edit mode toggle + Add Line / Commit / Discard buttons live inside the gear dropdown). ⚡ in the map-tools strip is a visual state indicator + M2 quick-toggle for edit mode. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
+// @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -13,28 +13,29 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// What this is — v0.8 (post-redesign)
-// ===================================
-// All Power Lines controls live inside the AIM Control Panel dropdown
-// (gear icon → Power Lines section). No more floating panel. Reasons:
-//   - Eliminates positioning fights with Percepto's right-side toolbar
-//     and the Control Panel dropdown itself.
-//   - Matches the existing pattern every other AIM script uses.
-//   - Auto-collapses when user clicks elsewhere (Control Panel handles).
+// v0.9 design
+// ===========
+// ⚡ button: always positioned as the LAST child of .map-tools so it sits
+//   BELOW the AIM Controls gear button. v0.8 had it injected via
+//   appendChild but Control Panel's gear button injected later sometimes
+//   put ⚡ second-to-last. v0.9 uses a MutationObserver-driven reorder
+//   to keep ⚡ at the bottom no matter what.
 //
-// The ⚡ button in .map-tools stays as a:
-//   - Visual state indicator (orange + green glow when edit mode ON;
-//     greyscale when OFF).
-//   - M2 (right-click) quick-toggle for edit mode (no need to open
-//     the gear dropdown for the most common action).
-//   - M1 (left-click) is a no-op — controls live in the gear dropdown.
+// Small icon strip below ⚡ (M1 toggles open/close):
+//   +D  Add distribution line   (yellow border)
+//   +T  Add transmission line   (red border)
+//   ✓   Commit all              (green, only when any dirty count > 0)
+//   ✗   Discard all             (red, only when any dirty count > 0)
+// Each button is 30x30 with a hover tooltip carrying full help text.
+// Strip is persistent (localStorage) — stays open across reloads until
+// user M1 ⚡ to close.
 //
-// All commit / draw / vertex-edit state still lives in Map Styler.
-// This script:
-//   1. Owns the Control Panel registration (toggles + button actions)
-//   2. Owns the ⚡ button (visual state + M2 quick-toggle)
-//   3. Owns M1-on-power-line click detection
-//   4. Routes all commands to Map Styler via AIM_POWER_LINE_EDIT
+// M2 (right-click) on ⚡ = toggle edit mode (the most common quick action).
+//
+// In the AIM Controls gear dropdown: Power Lines section with just
+// {master, edit-mode} toggles. The action buttons live in the floating
+// strip, not in the dropdown — keeps the dropdown short and the strip
+// is faster to reach for repeated actions.
 //
 // Log tag: [AIM PLE]
 
@@ -42,22 +43,23 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
-    // Edit mode persists across reloads via localStorage (shared across @name).
+    // Persistent state (localStorage, shared across @name).
     const EDIT_STORAGE_KEY = 'aim-ple-edit-enabled';
-    function readEditEnabled() {
-        try { return localStorage.getItem(EDIT_STORAGE_KEY) === 'true'; }
+    const STRIP_STORAGE_KEY = 'aim-ple-strip-open';
+    function readBool(key) {
+        try { return localStorage.getItem(key) === 'true'; }
         catch (e) { return false; }
     }
-    function writeEditEnabled(on) {
-        try { localStorage.setItem(EDIT_STORAGE_KEY, on ? 'true' : 'false'); }
+    function writeBool(key, on) {
+        try { localStorage.setItem(key, on ? 'true' : 'false'); }
         catch (e) {}
     }
 
-    // ------- Channel setup -------
+    // ------- Channels -------
     const PLE_CHANNEL_NAME = 'AIM_POWER_LINE_EDIT';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-power-line-editor';
@@ -83,7 +85,7 @@
                 const m = ev.data || {};
                 if (m.type === 'STATUS') {
                     status = { ...status, ...m };
-                    renderButtonState();
+                    renderUI();
                 }
             };
         }
@@ -98,9 +100,6 @@
     }
     function requestStatus() { sendPle({ type: 'REQUEST_STATUS' }); }
 
-    // Flip Map Styler's per-category edit-mode toggles via the existing
-    // Control Panel SET_TOGGLE mechanism. Map Styler listens on the
-    // CONTROL channel for these and updates internally.
     function setStylerEditMode(on) {
         if (!controlChannel) return;
         ['distro.edit-mode', 'trans.edit-mode'].forEach(toggleId => {
@@ -116,15 +115,16 @@
         });
     }
 
-    // ------- Edit mode state -------
+    // ------- State -------
     let masterEnabled = true;
-    let editEnabled = readEditEnabled();
+    let editEnabled = readBool(EDIT_STORAGE_KEY);
+    let stripOpen = readBool(STRIP_STORAGE_KEY);
 
     function setEditEnabled(on, opts) {
         opts = opts || {};
         if (on === editEnabled) return;
         editEnabled = on;
-        writeEditEnabled(on);
+        writeBool(EDIT_STORAGE_KEY, on);
         setStylerEditMode(on);
         if (on) {
             installClickInterceptor();
@@ -133,23 +133,26 @@
             uninstallClickInterceptor();
             if (status.vertexEditActive) sendPle({ type: 'EXIT_VERTEX_EDIT', save: false });
         }
-        renderButtonState();
-        // Tell Control Panel about the new state so its checkbox stays in sync
-        // (someone could toggle it via M2 on ⚡ while the panel is open).
+        renderUI();
+        // Echo to Control Panel so the gear-menu checkbox stays in sync.
         if (!opts.fromControlPanel && controlChannel) {
             try {
                 controlChannel.postMessage({
-                    type: 'SET_TOGGLE',
-                    scriptId: SCRIPT_ID,
-                    toggleId: 'edit-mode',
-                    value: on,
-                    enabled: on,
+                    type: 'SET_TOGGLE', scriptId: SCRIPT_ID, toggleId: 'edit-mode',
+                    value: on, enabled: on,
                 });
             } catch (e) {}
         }
     }
 
-    // ------- Control Panel registration + message handling -------
+    function setStripOpen(on) {
+        if (on === stripOpen) return;
+        stripOpen = on;
+        writeBool(STRIP_STORAGE_KEY, on);
+        renderUI();
+    }
+
+    // ------- Control Panel -------
     function handleControlMessage(ev) {
         const msg = ev.data || {};
         if (msg.type === 'REQUEST_REGISTRATIONS') {
@@ -158,28 +161,10 @@
             const v = msg.value !== undefined ? msg.value : msg.enabled;
             if (msg.toggleId === 'master') {
                 masterEnabled = !!v;
-                renderButtonState();
+                renderUI();
             } else if (msg.toggleId === 'edit-mode') {
                 setEditEnabled(!!v, { fromControlPanel: true });
             }
-        } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) {
-            // Only IFRAME (which has the map) actually fires actions.
-            if (!IS_TOP) handleAction(msg.actionId);
-        }
-    }
-
-    function handleAction(actionId) {
-        switch (actionId) {
-            case 'add-distro':   sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'distro' }); break;
-            case 'add-trans':    sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'trans' }); break;
-            case 'commit-distro': sendPle({ type: 'COMMIT_KML', kmlType: 'distro' }); break;
-            case 'commit-trans':  sendPle({ type: 'COMMIT_KML', kmlType: 'trans' }); break;
-            case 'discard-all':
-                if (status.distroCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'distro' });
-                if (status.transCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'trans' });
-                break;
-            default:
-                console.warn(`${TAG} unknown action: ${actionId}`);
         }
     }
 
@@ -192,20 +177,13 @@
             version: SCRIPT_VERSION,
             toggles: [
                 { id: 'master', label: 'Enable Power Line Editor', type: 'boolean', default: true, master: true },
-                { id: 'edit-mode', label: 'Edit mode (M1 lines to edit · M2 ⚡ to toggle)', type: 'boolean', default: false },
-                { type: 'header', label: 'Add' },
-                { id: 'add-distro', label: '+ Add distribution line', type: 'button', action: 'add-distro' },
-                { id: 'add-trans',  label: '+ Add transmission line',  type: 'button', action: 'add-trans' },
-                { type: 'header', label: 'Commit / Discard' },
-                { id: 'commit-distro', label: '☁ Commit distro changes', type: 'button', action: 'commit-distro' },
-                { id: 'commit-trans',  label: '☁ Commit trans changes',  type: 'button', action: 'commit-trans' },
-                { id: 'discard-all',   label: '✗ Discard all pending',    type: 'button', action: 'discard-all' },
+                { id: 'edit-mode', label: 'Edit mode (M1 lines · M2 ⚡ to toggle)', type: 'boolean', default: false },
             ],
             hotkeys: [],
         });
     }
 
-    // ------- M1 click interceptor on power-line paths -------
+    // ------- M1 click on power lines (vertex edit) -------
     let clickInterceptorInstalled = false;
     let lastClickAt = 0;
 
@@ -246,9 +224,11 @@
         clickInterceptorInstalled = false;
     }
 
-    // ------- ⚡ button in .map-tools -------
+    // ------- ⚡ button + strip -------
     const BUTTON_CLASS = 'aim-ple-button';
+    const STRIP_CLASS = 'aim-ple-strip';
     let buttonEl = null;
+    let stripEl = null;
     let injectTries = 0;
     const INJECT_MAX_TRIES = 60;
     const INJECT_RETRY_MS = 500;
@@ -263,15 +243,31 @@
         });
     }
 
+    // Always keep ⚡ as the LAST child of .map-tools (i.e. below the gear).
+    // Control Panel sometimes injects gear after PLE, which would otherwise
+    // leave ⚡ stuck between Layers and Gear.
+    function ensureLastChild() {
+        const tools = findToolsBar();
+        if (!tools || !buttonEl) return;
+        if (tools.lastElementChild !== buttonEl) {
+            tools.appendChild(buttonEl); // appendChild moves the element if already a child
+        }
+    }
+
     function injectButton() {
         const tools = findToolsBar();
         if (!tools) return false;
-        if (buttonEl && tools.contains(buttonEl)) return true;
+        if (buttonEl && tools.contains(buttonEl)) {
+            ensureLastChild();
+            return true;
+        }
         const wrapper = document.createElement('div');
+        // z-index:2147483647 keeps ⚡ + child strip above the AIM Control
+        // Panel dropdown (z-index:100000) so they're never hidden behind it.
         wrapper.innerHTML = `
             <div class="ant-dropdown-trigger map-tools__button pr-dropdown ${BUTTON_CLASS}"
-                 title="Power Lines: M2 (right-click) to toggle edit mode · controls in AIM gear menu"
-                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none">
+                 title="Power Lines · M1 toggle strip · M2 toggle edit"
+                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none;z-index:2147483647;isolation:isolate">
                 <span class="aim-ple-icon" style="font-size:18px;line-height:1">⚡</span>
             </div>
         `;
@@ -279,16 +275,16 @@
         tools.appendChild(el);
         buttonEl = el;
         swallowMouseEvents(buttonEl);
-        // M1: no-op for now (could be made to open Control Panel + scroll
-        // to Power Lines section later — for now just a visual indicator).
-        buttonEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
-        // M2: quick-toggle edit mode. Most common action; bypasses needing
-        // to open the gear menu.
+        buttonEl.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            setStripOpen(!stripOpen);
+        });
         buttonEl.addEventListener('contextmenu', (e) => {
             e.preventDefault(); e.stopPropagation();
             setEditEnabled(!editEnabled);
         });
-        renderButtonState();
+        createStrip();
+        renderUI();
         console.log(`${TAG} v${SCRIPT_VERSION} button injected into .map-tools`);
         return true;
     }
@@ -297,9 +293,12 @@
         const obs = new MutationObserver(() => {
             if (buttonEl && !document.body.contains(buttonEl)) {
                 buttonEl = null;
+                stripEl = null;
                 injectButton();
             } else if (!buttonEl) {
                 injectButton();
+            } else {
+                ensureLastChild();
             }
         });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
@@ -312,13 +311,62 @@
         else console.warn(`${TAG} gave up injecting after ${INJECT_MAX_TRIES} tries — .map-tools not found`);
     }
 
-    // ⚡ visual state.
-    //   editEnabled ON  → native orange ⚡ + neon-green glow + larger
-    //   editEnabled OFF → greyscale ⚡ + no glow + standard size
-    // Dirty-count badge shows regardless so uncommitted work is always
-    // visible. Wider tooltip describes both M2 toggle + gear-menu controls.
-    function renderButtonState() {
+    function createStrip() {
+        if (stripEl || !buttonEl) return;
+        stripEl = document.createElement('div');
+        stripEl.className = STRIP_CLASS;
+        // Vertical strip directly below ⚡, right-aligned with the button.
+        // Each icon button is the same 30x30 size as the toolbar buttons.
+        // The strip extends DOWNWARD from ⚡ into the empty bottom-right
+        // map area (⚡ is already the last toolbar button → nothing below).
+        stripEl.style.cssText = [
+            'position:absolute',
+            'top:calc(100% + 4px)',
+            'right:0',
+            'display:none',
+            'flex-direction:column',
+            'gap:4px',
+            'z-index:2147483647',
+            'pointer-events:auto',
+        ].join(';');
+        swallowMouseEvents(stripEl);
+        buttonEl.appendChild(stripEl);
+    }
+
+    function iconBtn(glyph, title, onClick, opts) {
+        opts = opts || {};
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.title = title;
+        b.innerHTML = glyph;
+        b.style.cssText = [
+            'width:30px', 'height:30px',
+            'border-radius:4px',
+            `background:${opts.bg || 'rgba(54,54,54,0.95)'}`,
+            `border:1px solid ${opts.border || 'rgba(255,255,255,0.18)'}`,
+            `color:${opts.color || '#e6e6e6'}`,
+            'cursor:pointer',
+            'font-size:14px', 'font-weight:600',
+            'line-height:1',
+            'display:flex', 'align-items:center', 'justify-content:center',
+            'padding:0',
+            'box-shadow:0 2px 6px rgba(0,0,0,0.4)',
+        ].join(';');
+        const hoverBg = opts.hoverBg || 'rgba(75,75,75,0.95)';
+        const baseBg = opts.bg || 'rgba(54,54,54,0.95)';
+        b.addEventListener('mouseenter', () => { b.style.background = hoverBg; });
+        b.addEventListener('mouseleave', () => { b.style.background = baseBg; });
+        b.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            try { onClick(e); } catch (err) { console.warn(`${TAG} icon handler threw:`, err); }
+        });
+        return b;
+    }
+
+    // Render: ⚡ visual state + strip contents.
+    function renderUI() {
         if (!buttonEl) return;
+        // ⚡ visual
         const icon = buttonEl.querySelector('.aim-ple-icon');
         if (icon) {
             if (editEnabled) {
@@ -336,9 +384,10 @@
             }
         }
         buttonEl.title = editEnabled
-            ? 'Power Lines edit mode: ON · M2 to disable · controls in AIM gear menu'
-            : 'Power Lines edit mode: OFF · M2 to enable · controls in AIM gear menu';
-        // Dirty-count badge in the corner of the button.
+            ? 'Power Lines: edit mode ON · M1 to toggle action strip · M2 to disable edit'
+            : 'Power Lines: edit mode OFF · M1 to toggle action strip · M2 to enable edit';
+
+        // Dirty count badge
         let badge = buttonEl.querySelector('.aim-ple-badge');
         const totalDirty = status.distroCount + status.transCount;
         if (totalDirty > 0) {
@@ -361,6 +410,56 @@
         } else if (badge) {
             badge.remove();
         }
+
+        // Strip
+        if (!stripEl) return;
+        stripEl.style.display = (stripOpen && masterEnabled) ? 'flex' : 'none';
+        if (!stripOpen || !masterEnabled) {
+            stripEl.innerHTML = '';
+            return;
+        }
+        stripEl.innerHTML = '';
+
+        // + D: Add distribution line. Yellow border to match distro line color.
+        stripEl.appendChild(iconBtn(
+            '<span style="color:#ffd96b">+</span><span style="font-size:10px;margin-left:1px">D</span>',
+            'Add distribution line — click map to add vertices, Save in the green floating toolbar, Esc cancels',
+            () => sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'distro' }),
+            { border: 'rgba(255,217,107,0.55)' }
+        ));
+        // + T: Add transmission line. Red border to match trans line color.
+        stripEl.appendChild(iconBtn(
+            '<span style="color:#ff8585">+</span><span style="font-size:10px;margin-left:1px">T</span>',
+            'Add transmission line — click map to add vertices, Save in the green floating toolbar, Esc cancels',
+            () => sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'trans' }),
+            { border: 'rgba(255,133,133,0.55)' }
+        ));
+
+        // ✓ Commit all and ✗ Discard all — ONLY when there's something pending
+        if (totalDirty > 0) {
+            const parts = [];
+            if (status.distroCount > 0) parts.push(`${status.distroCount} distro`);
+            if (status.transCount > 0) parts.push(`${status.transCount} trans`);
+            const summary = parts.join(' + ');
+            stripEl.appendChild(iconBtn(
+                '✓',
+                `Commit all pending changes to GitHub (${summary})`,
+                () => {
+                    if (status.distroCount > 0) sendPle({ type: 'COMMIT_KML', kmlType: 'distro' });
+                    if (status.transCount > 0) sendPle({ type: 'COMMIT_KML', kmlType: 'trans' });
+                },
+                { bg: 'rgba(40,80,40,0.95)', hoverBg: 'rgba(60,140,60,0.95)', border: '#5fff5f', color: '#5fff5f' }
+            ));
+            stripEl.appendChild(iconBtn(
+                '✗',
+                `Discard ALL pending changes (${summary}). Has a confirm prompt.`,
+                () => {
+                    if (status.distroCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'distro' });
+                    if (status.transCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'trans' });
+                },
+                { bg: 'rgba(80,40,40,0.95)', hoverBg: 'rgba(140,60,60,0.95)', border: '#ff5050', color: '#ff8585' }
+            ));
+        }
     }
 
     // ------- Init -------
@@ -368,9 +467,6 @@
         setupChannels();
         registerWithControlPanel();
         if (IS_TOP) {
-            // TOP frame has no .map-tools (map lives in iframe) — skip
-            // ⚡ injection but keep channels/registration alive so the
-            // Control Panel sees us regardless of which frame it lives in.
             console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no ⚡ in this frame)`);
             return;
         }
@@ -380,7 +476,7 @@
             installClickInterceptor();
         }
         setTimeout(requestStatus, 800);
-        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — edit ${editEnabled ? 'ON' : 'OFF'}`);
+        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — edit ${editEnabled ? 'ON' : 'OFF'} · strip ${stripOpen ? 'OPEN' : 'CLOSED'}`);
     }
 
     if (document.readyState === 'loading') {
