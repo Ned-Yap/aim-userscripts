@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,7 +34,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -189,57 +189,106 @@
     }
 
     // ------- Toolbar UI -------
-    // Floating panel anchored to the map's left edge, vertically
-    // centered upper portion. Lives in document.body so it sits above
-    // every Percepto layer including the leaflet container.
+    // v0.2: ⚡ button injected into Percepto's `.map-tools` strip (the
+    // top-right vertical column of map controls). Mirrors the AIM Control
+    // Panel's gear-button injection pattern so it sits naturally alongside
+    // the other map tools — same classes, same look, same z-index.
     //
-    // Collapsed: just the master ⚡ button + (if dirty) a count badge.
-    // Expanded: master + dirty badge + a vertical strip of action buttons.
+    // When master is ON, a sub-panel appears directly BELOW the ⚡ button
+    // (position:absolute, top:calc(100% + 6px), right:0). The sub-panel
+    // STAYS OPEN as long as master is ON — unlike the Control Panel
+    // dropdown, this isn't dismissed by clicking the map. Click ⚡ again
+    // to close.
     //
-    // Only IFRAME hosts the toolbar (the map lives in the iframe; the
-    // TOP frame has no map to edit). TOP frame still listens on the PLE
-    // channel for status if we ever need it, but doesn't render UI.
-    const TOOLBAR_ID = 'aim-ple-toolbar';
-    let toolbarEl = null;
+    // Only IFRAME injects + hosts the toolbar (map lives in the iframe;
+    // TOP frame has no `.map-tools` to inject into).
+    const BUTTON_CLASS = 'aim-ple-button';
+    const PANEL_ID = 'aim-ple-panel';
+    let buttonEl = null;
+    let panelEl = null;
+    let injectTries = 0;
+    const INJECT_MAX_TRIES = 60;
+    const INJECT_RETRY_MS = 500;
 
-    function injectToolbarOnce() {
-        if (toolbarEl && document.body && document.body.contains(toolbarEl)) return;
-        if (!document.body) return;
-        // Avoid duplicate injection if both contexts somehow inject.
-        const existing = document.getElementById(TOOLBAR_ID);
-        if (existing) { toolbarEl = existing; renderToolbar(); return; }
-        toolbarEl = document.createElement('div');
-        toolbarEl.id = TOOLBAR_ID;
-        toolbarEl.style.cssText = [
-            'position:fixed',
-            'left:12px',
-            'top:50%',
-            'transform:translateY(-50%)',
-            'z-index:99998', // below the Map Styler vertex-edit toolbar (99999)
-            'display:flex',
-            'flex-direction:column',
-            'align-items:center',
-            'gap:6px',
-            'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-            'font-size:12px',
-            'user-select:none',
-        ].join(';');
-        document.body.appendChild(toolbarEl);
-        renderToolbar();
+    function findToolsBar() { return document.querySelector('.map-tools'); }
+
+    function swallowMouseEvents(el) {
+        ['click', 'dblclick', 'mousedown', 'mouseup',
+         'pointerdown', 'pointerup', 'pointermove',
+         'wheel', 'contextmenu', 'touchstart', 'touchend'].forEach(evt => {
+            el.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
     }
 
-    // Re-inject if Percepto/React tears it out. Cheap MutationObserver
-    // on body looking only for our id disappearing.
-    function watchToolbar() {
+    function injectButton() {
+        const tools = findToolsBar();
+        if (!tools) return false;
+        if (buttonEl && tools.contains(buttonEl)) return true;
+        // Match the existing .map-tools__button look. Use the same class
+        // soup the host app's other tools use so styling comes for free.
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = `
+            <div class="ant-dropdown-trigger map-tools__button pr-dropdown ${BUTTON_CLASS}"
+                 title="Power Lines edit mode"
+                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none">
+                <span class="aim-ple-icon" style="font-size:18px;line-height:1;color:#e6e6e6">⚡</span>
+            </div>
+        `;
+        const el = wrapper.firstElementChild;
+        tools.appendChild(el);
+        buttonEl = el;
+        swallowMouseEvents(buttonEl); // prevent map-zoom on accidental dblclick
+        buttonEl.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            setMaster(!masterOn);
+        });
+        // Build panel inside the button so it positions relative to it.
+        createPanel();
+        renderButtonState();
+        console.log(`${TAG} button injected into .map-tools`);
+        return true;
+    }
+
+    function watchToolsBar() {
         const obs = new MutationObserver(() => {
-            if (toolbarEl && !document.body.contains(toolbarEl)) {
-                toolbarEl = null;
-                injectToolbarOnce();
-            } else if (!toolbarEl) {
-                injectToolbarOnce();
+            if (buttonEl && !document.body.contains(buttonEl)) {
+                buttonEl = null; panelEl = null;
+                injectButton();
+            } else if (!buttonEl) {
+                injectButton();
             }
         });
-        if (document.body) obs.observe(document.body, { childList: true, subtree: false });
+        if (document.body) obs.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function ensureButton() {
+        if (injectButton()) { watchToolsBar(); return; }
+        injectTries++;
+        if (injectTries < INJECT_MAX_TRIES) setTimeout(ensureButton, INJECT_RETRY_MS);
+        else console.warn(`${TAG} gave up injecting after ${INJECT_MAX_TRIES} tries — .map-tools not found`);
+    }
+
+    function createPanel() {
+        if (panelEl || !buttonEl) return;
+        panelEl = document.createElement('div');
+        panelEl.id = PANEL_ID;
+        // Sub-panel positioned below the ⚡ button. Display toggled via
+        // renderButtonState() based on masterOn.
+        panelEl.style.cssText = [
+            'position:absolute', 'top:calc(100% + 6px)', 'right:0',
+            'background:rgba(40,40,40,0.92)', 'color:#e6e6e6',
+            'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
+            'border:1px solid rgba(255,255,255,0.18)', 'border-radius:6px',
+            'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
+            'z-index:100000', 'padding:6px',
+            'display:none', // shown via renderButtonState
+            'flex-direction:column', 'gap:5px', 'align-items:stretch',
+            'min-width:140px',
+            'font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+            'cursor:default',
+        ].join(';');
+        swallowMouseEvents(panelEl); // panel clicks must NOT zoom the map
+        buttonEl.appendChild(panelEl);
     }
 
     function btn(label, title, onClick, opts) {
@@ -249,160 +298,161 @@
         b.title = title;
         b.innerHTML = label;
         b.style.cssText = [
-            `width:${opts.width || 40}px`,
-            `height:${opts.height || 40}px`,
-            'border-radius:6px',
-            `background:${opts.bg || 'rgba(31,34,40,0.92)'}`,
+            'width:100%',
+            'min-height:30px',
+            'padding:5px 10px',
+            'border-radius:4px',
+            `background:${opts.bg || 'rgba(255,255,255,0.06)'}`,
             `border:1px solid ${opts.border || 'rgba(255,255,255,0.18)'}`,
             `color:${opts.color || '#e6e6e6'}`,
             'cursor:pointer',
-            'font-size:18px',
-            'line-height:1',
+            'font:inherit',
+            'text-align:left',
             'display:flex',
             'align-items:center',
-            'justify-content:center',
-            'box-shadow:0 2px 8px rgba(0,0,0,0.4)',
-            'backdrop-filter:blur(4px)',
-            '-webkit-backdrop-filter:blur(4px)',
-            'padding:0',
+            'gap:8px',
         ].join(';');
-        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onClick(e); });
-        // Prevent Leaflet from interpreting clicks on the toolbar as map clicks.
-        ['mousedown', 'mouseup', 'dblclick', 'pointerdown', 'pointerup'].forEach(ev => {
-            b.addEventListener(ev, (e) => e.stopPropagation());
+        // Click handler — capture+stop so Leaflet can't eat it. The panel
+        // already swallows propagation up to the map; this guarantees the
+        // button's own onClick fires regardless.
+        b.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            try { onClick(e); } catch (err) { console.warn(`${TAG} btn handler threw:`, err); }
         });
+        // Hover affordance.
+        const baseBg = opts.bg || 'rgba(255,255,255,0.06)';
+        const hoverBg = opts.hoverBg || 'rgba(255,255,255,0.12)';
+        b.addEventListener('mouseenter', () => { b.style.background = hoverBg; });
+        b.addEventListener('mouseleave', () => { b.style.background = baseBg; });
         return b;
     }
 
-    // Render the toolbar contents from current state. Cheap to call —
-    // wipes innerHTML and rebuilds. Called on master toggle + STATUS arrival.
-    function renderToolbar() {
-        if (!toolbarEl) return;
-        // Stop Leaflet getting any toolbar event regardless of which child fires it.
-        ['mousedown', 'mouseup', 'click', 'dblclick',
-         'pointerdown', 'pointerup', 'wheel', 'contextmenu'].forEach(ev => {
-            toolbarEl.addEventListener(ev, (e) => e.stopPropagation());
-        });
-        toolbarEl.innerHTML = '';
-        const totalDirty = status.distroCount + status.transCount;
-
-        // Master ⚡ button — always visible.
-        const masterBtn = btn(
-            '⚡',
-            masterOn ? 'Power Lines edit mode — click to disable' : 'Power Lines edit mode — click to enable',
-            () => setMaster(!masterOn),
-            {
-                width: 44, height: 44,
-                bg: masterOn ? 'rgba(20,210,220,0.92)' : 'rgba(31,34,40,0.92)',
-                border: masterOn ? '#7adfe6' : 'rgba(255,255,255,0.18)',
-                color: masterOn ? '#0a1a1d' : '#e6e6e6',
-            }
-        );
-        // Dirty-count badge on the master button (always visible if > 0).
-        if (totalDirty > 0) {
-            const badge = document.createElement('span');
-            badge.textContent = String(totalDirty);
-            badge.style.cssText = [
-                'position:absolute',
-                'top:-6px',
-                'right:-6px',
-                'min-width:18px',
-                'height:18px',
-                'border-radius:9px',
-                'background:#ffd96b',
-                'color:#000',
-                'font-size:11px',
-                'font-weight:700',
-                'display:flex',
-                'align-items:center',
-                'justify-content:center',
-                'padding:0 5px',
-                'box-shadow:0 1px 3px rgba(0,0,0,0.6)',
-                'pointer-events:none',
-            ].join(';');
-            masterBtn.style.position = 'relative';
-            masterBtn.appendChild(badge);
+    // ⚡ button visual state: dim when off, cyan-tinted when on. Also
+    // pokes the dirty-count badge onto the icon when there are pending
+    // edits, regardless of master state (so user sees uncommitted work).
+    function renderButtonState() {
+        if (!buttonEl) return;
+        const icon = buttonEl.querySelector('.aim-ple-icon');
+        if (icon) {
+            icon.style.color = masterOn ? 'rgb(20,210,220)' : '#e6e6e6';
+            icon.style.textShadow = masterOn ? '0 0 6px rgba(20,210,220,0.7)' : 'none';
         }
-        toolbarEl.appendChild(masterBtn);
+        // Dirty-count badge in the corner of the button.
+        let badge = buttonEl.querySelector('.aim-ple-badge');
+        const totalDirty = status.distroCount + status.transCount;
+        if (totalDirty > 0) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'aim-ple-badge';
+                badge.style.cssText = [
+                    'position:absolute', 'top:-4px', 'right:-4px',
+                    'min-width:16px', 'height:16px', 'border-radius:8px',
+                    'background:#ffd96b', 'color:#000',
+                    'font-size:10px', 'font-weight:700',
+                    'display:flex', 'align-items:center', 'justify-content:center',
+                    'padding:0 4px',
+                    'box-shadow:0 1px 3px rgba(0,0,0,0.6)',
+                    'pointer-events:none',
+                ].join(';');
+                buttonEl.appendChild(badge);
+            }
+            badge.textContent = String(totalDirty);
+        } else if (badge) {
+            badge.remove();
+        }
+        renderPanelContents();
+    }
 
-        if (!masterOn) return;
+    function renderPanelContents() {
+        if (!panelEl) return;
+        panelEl.style.display = masterOn ? 'flex' : 'none';
+        if (!masterOn) { panelEl.innerHTML = ''; return; }
+        panelEl.innerHTML = '';
 
-        // Visual separator (subtle line)
-        const sep = document.createElement('div');
-        sep.style.cssText = 'width:24px;height:1px;background:rgba(255,255,255,0.15);margin:2px 0';
-        toolbarEl.appendChild(sep);
+        const header = document.createElement('div');
+        header.textContent = 'Power Lines';
+        header.style.cssText = 'color:rgb(20,210,220);font-weight:600;padding:2px 4px 4px;border-bottom:1px solid rgba(255,255,255,0.08);margin-bottom:2px';
+        panelEl.appendChild(header);
 
         // Add Line — distro
-        toolbarEl.appendChild(btn(
-            '+<span style="font-size:10px;margin-left:1px">D</span>',
-            'Add new distribution line (click map to add vertices, Esc cancels)',
+        panelEl.appendChild(btn(
+            '<span style="color:#ffd96b">+</span> Add distro line',
+            'Click map to add vertices. Esc cancels. Save via Map Styler\'s floating toolbar.',
             () => sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'distro' })
         ));
         // Add Line — trans
-        toolbarEl.appendChild(btn(
-            '+<span style="font-size:10px;margin-left:1px">T</span>',
-            'Add new transmission line (click map to add vertices, Esc cancels)',
+        panelEl.appendChild(btn(
+            '<span style="color:#ff8585">+</span> Add trans line',
+            'Click map to add vertices. Esc cancels. Save via Map Styler\'s floating toolbar.',
             () => sendPle({ type: 'ENTER_DRAW_MODE', kmlType: 'trans' })
         ));
 
         // Commit per type — only show if there are dirty ops for that type.
         if (status.distroCount > 0) {
-            toolbarEl.appendChild(btn(
-                `☁<span style="font-size:9px;margin-left:1px">D</span>`,
-                `Commit ${status.distroCount} pending distro change${status.distroCount === 1 ? '' : 's'} to GitHub`,
+            panelEl.appendChild(btn(
+                `<span style="color:#5fff5f">☁</span> Commit distro (${status.distroCount})`,
+                `Commit ${status.distroCount} pending distribution change${status.distroCount === 1 ? '' : 's'} to GitHub`,
                 () => sendPle({ type: 'COMMIT_KML', kmlType: 'distro' }),
-                { bg: 'rgba(95,255,95,0.18)', border: '#5fff5f', color: '#5fff5f' }
+                { bg: 'rgba(95,255,95,0.10)', border: 'rgba(95,255,95,0.4)', hoverBg: 'rgba(95,255,95,0.20)' }
             ));
         }
         if (status.transCount > 0) {
-            toolbarEl.appendChild(btn(
-                `☁<span style="font-size:9px;margin-left:1px">T</span>`,
-                `Commit ${status.transCount} pending trans change${status.transCount === 1 ? '' : 's'} to GitHub`,
+            panelEl.appendChild(btn(
+                `<span style="color:#5fff5f">☁</span> Commit trans (${status.transCount})`,
+                `Commit ${status.transCount} pending transmission change${status.transCount === 1 ? '' : 's'} to GitHub`,
                 () => sendPle({ type: 'COMMIT_KML', kmlType: 'trans' }),
-                { bg: 'rgba(95,255,95,0.18)', border: '#5fff5f', color: '#5fff5f' }
+                { bg: 'rgba(95,255,95,0.10)', border: 'rgba(95,255,95,0.4)', hoverBg: 'rgba(95,255,95,0.20)' }
             ));
         }
 
-        // Discard — shown if anything is dirty. Confirms via Map Styler's
-        // own discardCommitOps which has its own confirm() prompt.
+        // Discard — shown if anything is dirty.
+        const totalDirty = status.distroCount + status.transCount;
         if (totalDirty > 0) {
-            toolbarEl.appendChild(btn(
-                '✗',
-                `Discard ALL pending changes (${totalDirty})`,
+            panelEl.appendChild(btn(
+                `<span style="color:#ff8585">✗</span> Discard all (${totalDirty})`,
+                `Discard ALL pending changes (${totalDirty}). Has its own confirm prompt.`,
                 () => {
                     if (status.distroCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'distro' });
                     if (status.transCount > 0) sendPle({ type: 'DISCARD_OPS', kmlType: 'trans' });
                 },
-                { bg: 'rgba(255,80,80,0.18)', border: '#ff8585', color: '#ff8585' }
+                { bg: 'rgba(255,80,80,0.10)', border: 'rgba(255,133,133,0.4)', hoverBg: 'rgba(255,80,80,0.20)' }
             ));
         }
 
-        // Status footer (current edit indicator)
+        // Status footer.
         if (status.vertexEditActive) {
             const ind = document.createElement('div');
-            ind.textContent = `editing ${status.vertexEditType} #${status.vertexEditPmIdx}`;
-            ind.style.cssText = 'color:#7adfe6;font-size:10px;text-align:center;max-width:80px;line-height:1.2;margin-top:4px';
-            toolbarEl.appendChild(ind);
+            ind.textContent = `▸ editing ${status.vertexEditType} #${status.vertexEditPmIdx}`;
+            ind.style.cssText = 'color:#7adfe6;font-size:11px;padding:4px 6px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
+            panelEl.appendChild(ind);
         } else if (status.drawModeActive) {
             const ind = document.createElement('div');
-            ind.textContent = `drawing ${status.drawModeType}`;
-            ind.style.cssText = 'color:#5fff5f;font-size:10px;text-align:center;max-width:80px;line-height:1.2;margin-top:4px';
-            toolbarEl.appendChild(ind);
+            ind.textContent = `▸ drawing ${status.drawModeType}`;
+            ind.style.cssText = 'color:#5fff5f;font-size:11px;padding:4px 6px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px';
+            panelEl.appendChild(ind);
+        } else {
+            const hint = document.createElement('div');
+            hint.textContent = 'M1 on any line to edit vertices';
+            hint.style.cssText = 'color:#888;font-size:10px;padding:4px 6px 2px;border-top:1px solid rgba(255,255,255,0.08);margin-top:2px;font-style:italic';
+            panelEl.appendChild(hint);
         }
     }
+
+    // Wrapper used by external state changes (master flip, STATUS arrival,
+    // setMaster). Same name as before so init/setMaster don't need updating.
+    function renderToolbar() { renderButtonState(); }
 
     // ------- Init -------
     function init() {
         if (IS_TOP) {
-            // TOP has no map to edit and no toolbar to render. Still set
-            // up the channels so status messages don't trigger errors.
+            // TOP has no map to edit and no .map-tools to inject into.
+            // Still set up the channels so status messages don't error.
             setupChannels();
-            console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no toolbar in this frame)`);
+            console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no UI in this frame)`);
             return;
         }
         setupChannels();
-        injectToolbarOnce();
-        watchToolbar();
+        ensureButton();
         // If the master was ON before reload, restore the click interceptor
         // and tell Map Styler to flip its edit-mode toggles back on.
         if (masterOn) {
