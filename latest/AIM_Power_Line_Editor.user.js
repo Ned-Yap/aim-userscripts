@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -43,7 +43,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.9';
+    const SCRIPT_VERSION = '0.10';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -194,20 +194,32 @@
         if (status.drawModeActive) return;
         const t = e.target;
         if (!t || !t.closest) return;
-        const path = t.closest('path[data-buffer-kind^="kml-"][data-kml-pm-idx]');
+        // v0.10: detect BOTH file-line paths (data-kml-pm-idx) and
+        // pending-add green-line paths (data-kml-added-idx). Route to
+        // the right ENTER_VERTEX_EDIT payload so Map Styler can pick
+        // the matching enterVertexEdit / enterAddedVertexEdit handler.
+        const path = t.closest('path[data-buffer-kind^="kml-"][data-kml-pm-idx], path[data-buffer-kind^="kml-"][data-kml-added-idx]');
         if (!path) return;
         const kind = path.getAttribute('data-buffer-kind') || '';
         const m = kind.match(/^kml-(distro|trans)$/);
         if (!m) return;
         const kmlType = m[1];
-        const pmIdx = parseInt(path.getAttribute('data-kml-pm-idx'), 10);
-        if (!Number.isFinite(pmIdx)) return;
+        const pmIdxAttr = path.getAttribute('data-kml-pm-idx');
+        const addedIdxAttr = path.getAttribute('data-kml-added-idx');
         const now = Date.now();
         if (now - lastClickAt < 250) return;
         lastClickAt = now;
         e.preventDefault();
         e.stopPropagation();
-        sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
+        if (addedIdxAttr !== null) {
+            const addedIdx = parseInt(addedIdxAttr, 10);
+            if (!Number.isFinite(addedIdx)) return;
+            sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
+        } else {
+            const pmIdx = parseInt(pmIdxAttr, 10);
+            if (!Number.isFinite(pmIdx)) return;
+            sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
+        }
     }
 
     function installClickInterceptor() {

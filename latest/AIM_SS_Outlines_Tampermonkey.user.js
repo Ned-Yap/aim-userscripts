@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.46
+// @version      34.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.46';
+    const SCRIPT_VERSION = '34.47';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2624,6 +2624,69 @@
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
+    // E4.1 (v34.47) — Vertex edit for a saved-but-uncommitted "green" line
+    // that lives in commitOps.added (not in the original KML). Same UX as
+    // enterVertexEdit, but reads coords from co.added[addedIdx] and writes
+    // them back there on Save (not into co.ops as a modify).
+    //
+    // Live-drag feedback: when this is active, the render loop pulls coords
+    // from vertexEditState.currentCoords instead of co.added[addedIdx].coords
+    // (see the `co.added.forEach` block in shieldingFeaturePointsInSVG —
+    // it checks vertexEditState.isAdded before reading from the array).
+    function enterAddedVertexEdit(type, addedIdx) {
+        if (vertexEditState) exitVertexEdit({ save: false, silent: true });
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const co = getCommitOps(siteID, type);
+        const added = co.added && co.added[addedIdx];
+        if (!added || !Array.isArray(added.coords) || added.coords.length < 2) {
+            showKMLToast('Pending-add line not found or invalid.', 4000);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map) { showKMLToast('Map not ready — try again in a moment.', 3000); return; }
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { L = null; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') {
+            showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
+            return;
+        }
+        // co.added stores [[lng,lat],...] (KML order). Convert to {lat,lng}
+        // for the handle math (same shape file lines use).
+        const startCoords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+        vertexEditState = {
+            type,
+            addedIdx,
+            isAdded: true,
+            addedName: added.name || '(unnamed)',
+            originalCoords: startCoords.map(c => ({ lat: c.lat, lng: c.lng })),
+            currentCoords: startCoords.map(c => ({ lat: c.lat, lng: c.lng })),
+            handles: [],
+            toolbarEl: null,
+        };
+        const icon = L.divIcon({
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
+            className: 'aim-vertex-handle',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+        });
+        vertexEditState.currentCoords.forEach((coord, vertexIdx) => {
+            const marker = L.marker([coord.lat, coord.lng], { icon, draggable: true, zIndexOffset: 1000 });
+            marker.addTo(map);
+            marker.on('drag', (e) => {
+                const ll = e.target.getLatLng();
+                if (!vertexEditState) return;
+                vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
+                if (isActive) runUpdate();
+            });
+            vertexEditState.handles.push(marker);
+        });
+        buildVertexEditToolbar();
+        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag the cyan handles · Save or Discard.`, 6000);
+        if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
+    }
+
     function buildVertexEditToolbar() {
         if (!vertexEditState) return;
         const tb = document.createElement('div');
@@ -2637,7 +2700,11 @@
             box-shadow:0 4px 16px rgba(0,0,0,0.5);
         `;
         const label = document.createElement('span');
-        label.textContent = `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+        // v34.47: handle pending-add lines too. They have addedIdx
+        // (and isAdded) instead of pmIdx — show "new <type> '<name>'".
+        label.textContent = vertexEditState.isAdded
+            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
         label.style.cssText = 'color:#7adfe6;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -2658,7 +2725,8 @@
         if (!vertexEditState) return;
         const save = !!(opts && opts.save);
         const silent = !!(opts && opts.silent);
-        const { type, pmIdx, currentCoords, originalCoords, handles, toolbarEl } = vertexEditState;
+        const { type, pmIdx, addedIdx, isAdded, addedName,
+                currentCoords, originalCoords, handles, toolbarEl } = vertexEditState;
         if (save) {
             // Skip writing a no-op modify if nothing actually moved (within
             // tolerance — float drift from drag-end serialization shouldn't
@@ -2670,13 +2738,26 @@
             if (changed) {
                 const siteID = getCurrentSiteID();
                 const co = getCommitOps(siteID, type);
-                co.ops[String(pmIdx)] = {
-                    op: 'modify',
-                    coords: currentCoords.map(c => [c.lng, c.lat]),
-                };
-                setCommitOps(siteID, type, co);
+                if (isAdded) {
+                    // v34.47: pending-add line edit → write coords back to
+                    // co.added[addedIdx]. The line stays in co.added (still
+                    // green/pending). Commit pushes the new coords to GitHub.
+                    if (co.added && co.added[addedIdx]) {
+                        co.added[addedIdx].coords = currentCoords.map(c => [c.lng, c.lat]);
+                        setCommitOps(siteID, type, co);
+                    }
+                } else {
+                    co.ops[String(pmIdx)] = {
+                        op: 'modify',
+                        coords: currentCoords.map(c => [c.lng, c.lat]),
+                    };
+                    setCommitOps(siteID, type, co);
+                }
                 const count = commitOpsCount(siteID, type);
-                if (!silent) showKMLToast(`Saved vertex edits to ${type} #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+                const targetLabel = isAdded
+                    ? `new ${type} line "${addedName}"`
+                    : `${type} #${pmIdx}`;
+                if (!silent) showKMLToast(`Saved vertex edits to ${targetLabel}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
             } else {
                 if (!silent) showKMLToast(`No vertex changes to save.`, 2500);
             }
@@ -2992,10 +3073,18 @@
                 pmIdx: f.pmIdx, visible: f.visible,
             });
         });
-        // 2. Pending-add lines from commitOps.added
+        // 2. Pending-add lines from commitOps.added. v34.47: if THIS
+        // added line is currently in vertex edit, pull coords from
+        // vertexEditState.currentCoords for live-drag visual feedback.
         co.added.forEach((added, addedIdx) => {
             if (!Array.isArray(added.coords) || added.coords.length < 2) return;
-            const coords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            let coords;
+            if (vertexEditState && vertexEditState.isAdded &&
+                vertexEditState.type === type && vertexEditState.addedIdx === addedIdx) {
+                coords = vertexEditState.currentCoords;
+            } else {
+                coords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            }
             const pts = projectCoords(coords);
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
@@ -4416,8 +4505,14 @@
             // frame that found .leaflet-map-pane) as the gate.
             if (!isActive) return;
             try {
-                if (m.type === 'ENTER_VERTEX_EDIT' && m.kmlType && Number.isFinite(m.pmIdx)) {
-                    enterVertexEdit(m.kmlType, m.pmIdx);
+                if (m.type === 'ENTER_VERTEX_EDIT' && m.kmlType) {
+                    // v34.47: addedIdx for pending-add (green) lines,
+                    // pmIdx for file lines. Mutually exclusive.
+                    if (Number.isFinite(m.addedIdx)) {
+                        enterAddedVertexEdit(m.kmlType, m.addedIdx);
+                    } else if (Number.isFinite(m.pmIdx)) {
+                        enterVertexEdit(m.kmlType, m.pmIdx);
+                    }
                 } else if (m.type === 'EXIT_VERTEX_EDIT') {
                     exitVertexEdit({ save: !!m.save });
                 } else if (m.type === 'ENTER_DRAW_MODE' && m.kmlType) {
