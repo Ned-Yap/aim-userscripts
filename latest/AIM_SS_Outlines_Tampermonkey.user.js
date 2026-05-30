@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.44
+// @version      34.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.44';
+    const SCRIPT_VERSION = '34.45';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4355,9 +4355,6 @@
     installListener();
     installAssetLockHandler();
     installKMLEditHandlers();
-    setupKmlDataResponder();
-    setupPowerLineEditorBridge();
-
     // Power Line Editor bridge — the editor lives in its own script
     // (AIM_Power_Line_Editor.user.js) and owns the floating toolbar +
     // M1 click detection. All the actual edit + commit code stays here
@@ -4380,7 +4377,15 @@
     // Status is broadcast on REQUEST_STATUS and on any state change
     // (setCommitOps, enterVertexEdit, exitVertexEdit, enterDrawMode,
     // exitDrawMode, commit success/failure).
+    //
+    // TDZ NOTE: `let powerLineEditorChannel` is declared HERE (before
+    // setupPowerLineEditorBridge() is called), not below. Function
+    // declarations hoist but `let` does NOT — without this ordering,
+    // the BroadcastChannel assignment inside the bridge fn hits TDZ.
+    // Same pattern as feedback_perf_shield_tdz_pattern memory.
     let powerLineEditorChannel = null;
+    setupKmlDataResponder();
+    setupPowerLineEditorBridge();
     function broadcastPowerLineStatus() {
         if (!powerLineEditorChannel) return;
         const siteID = getCurrentSiteID();

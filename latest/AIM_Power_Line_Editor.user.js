@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Floating left-edge toolbar to enter Power Lines edit mode. M1 click any power line → drops vertex handles via Map Styler's existing vertex-edit. Add Line / Commit / Discard buttons + dirty-count badge. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -34,7 +34,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -272,18 +272,23 @@
         if (panelEl || !buttonEl) return;
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
-        // Sub-panel positioned below the ⚡ button. Display toggled via
-        // renderButtonState() based on masterOn.
+        // v0.3: opens to the LEFT of the ⚡ button (right:calc(100%+8px))
+        // instead of below it. Previously the panel anchored top:100%
+        // right:0 which collided with the Control Panel's gear dropdown
+        // — both expand leftward from the same map-tools strip. Going
+        // left puts us in the empty map area; no sibling-panel overlap.
         panelEl.style.cssText = [
-            'position:absolute', 'top:calc(100% + 6px)', 'right:0',
+            'position:absolute',
+            'top:0',                          // align with button top
+            'right:calc(100% + 8px)',         // sit to LEFT of button
             'background:rgba(40,40,40,0.92)', 'color:#e6e6e6',
             'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
-            'border:1px solid rgba(255,255,255,0.18)', 'border-radius:6px',
+            'border:1px solid rgba(20,210,220,0.4)', 'border-radius:6px',
             'box-shadow:0 6px 22px rgba(0,0,0,0.55)',
             'z-index:100000', 'padding:6px',
             'display:none', // shown via renderButtonState
             'flex-direction:column', 'gap:5px', 'align-items:stretch',
-            'min-width:140px',
+            'min-width:160px',
             'font:12px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
             'cursor:default',
         ].join(';');
@@ -334,8 +339,13 @@
         if (!buttonEl) return;
         const icon = buttonEl.querySelector('.aim-ple-icon');
         if (icon) {
+            // The ⚡ glyph is an emoji — its native color (orange/amber) shows
+            // through regardless of `color`, so we lean into that and use the
+            // text-shadow as a cyan halo. v0.3: larger 3-layer glow per user.
             icon.style.color = masterOn ? 'rgb(20,210,220)' : '#e6e6e6';
-            icon.style.textShadow = masterOn ? '0 0 6px rgba(20,210,220,0.7)' : 'none';
+            icon.style.textShadow = masterOn
+                ? '0 0 10px rgba(20,210,220,0.95), 0 0 20px rgba(20,210,220,0.65), 0 0 30px rgba(20,210,220,0.35)'
+                : 'none';
         }
         // Dirty-count badge in the corner of the button.
         let badge = buttonEl.querySelector('.aim-ple-badge');
