@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.48
+// @version      34.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.48';
+    const SCRIPT_VERSION = '34.49';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2336,6 +2336,15 @@
     // Confirmation: a confirm() up front summarizing the batch so the
     // user knows what's about to be committed canonically.
     // ============================================================
+    // v34.49: cache of {sha, xmlText} from the most recent successful PUT
+    // per (siteID|type). Lets back-to-back commits skip the GET round-trip
+    // entirely AND avoid the api.github.com stale-SHA window that was
+    // throwing 409 Conflict on the user's "add → commit → delete → add
+    // → commit" sequence. On 409 from a cached-SHA PUT, the cache is
+    // invalidated and the user retries (which goes through the full
+    // GET → PUT path again).
+    const committedKmlCache = {};
+
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
@@ -2358,7 +2367,27 @@
             return;
         }
         showKMLToast(`Committing ${summary.text}…`, 8000);
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const k = kmlKey(siteID, type);
+
+        // Cache-fast path: if we have a recent {sha, xmlText} from this
+        // session's prior commit, skip the GET. Mutates the cached XML
+        // directly with the new ops, then PUTs with the cached SHA.
+        const cached = committedKmlCache[k];
+        if (cached && cached.sha && cached.xmlText) {
+            let mutated;
+            try { mutated = applyCommitOpsToKML(cached.xmlText, co); }
+            catch (e) {
+                showKMLToast(`Commit failed: ${e.message || 'XML mutation error'}.`, 6000);
+                console.error(`${TAG} applyCommitOpsToKML failed (cached path):`, e);
+                return;
+            }
+            console.log(`${TAG} commit-ops fast path: using cached SHA ${cached.sha.substring(0, 7)} (no GET)`);
+            putCommitOpsToGitHub(siteID, type, mutated, cached.sha, token, summary.text);
+            return;
+        }
+
+        // Slow path: GET fresh from GitHub.
+        const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -2367,6 +2396,11 @@
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Accept': 'application/vnd.github+json',
+                    // Defense in depth against any intermediate cache returning
+                    // a stale GET response — though api.github.com generally
+                    // honors these without help.
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
                 },
                 timeout: 15000,
                 onload: (resp) => {
@@ -2530,9 +2564,26 @@
                             showKMLToast(`✓ Committed ${summaryText}.`, 4000);
                         }
                         applyCommittedXmlToLocalState(siteID, type, xmlText);
+                        // v34.49: cache the new SHA + xmlText so the next
+                        // commit can skip GET entirely. The PUT response
+                        // includes content.sha (the post-write SHA).
+                        try {
+                            const respJson = JSON.parse(resp.responseText);
+                            const newSha = respJson && respJson.content && respJson.content.sha;
+                            if (newSha) {
+                                committedKmlCache[kmlKey(siteID, type)] = { sha: newSha, xmlText };
+                                console.log(`${TAG} commit-ops cached new SHA ${newSha.substring(0, 7)} for ${type}`);
+                            }
+                        } catch (e) {
+                            console.warn(`${TAG} commit-ops: could not parse PUT response for SHA cache:`, e);
+                        }
                         if (isActive) runUpdate();
                     } else if (resp.status === 409) {
-                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
+                        // v34.49: cached SHA may be stale (someone else committed
+                        // OR rare api.github.com eventual-consistency window).
+                        // Invalidate so next retry does a fresh GET.
+                        delete committedKmlCache[kmlKey(siteID, type)];
+                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — try Commit again (cache cleared, next attempt will re-fetch).', 9000);
                     } else if (resp.status === 401 || resp.status === 403) {
                         showKMLToast('GitHub denied write — your PAT needs contents:write scope on aim-userscripts-data.', 9000);
                     } else if (resp.status === 422) {
@@ -4599,6 +4650,10 @@
         // new site.
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         if (drawingState) exitDrawMode({ silent: true });
+        // v34.49: invalidate the SHA cache — it's keyed by siteID|type,
+        // so technically it's safe to keep, but better to drop on site
+        // nav so a stale entry can never apply to the wrong site.
+        Object.keys(committedKmlCache).forEach(k => { delete committedKmlCache[k]; });
         loadValidatorResults();
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);
