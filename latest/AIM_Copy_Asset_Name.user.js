@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.50
+// @version      3.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.50';
+    const SCRIPT_VERSION = '3.51';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2209,39 +2209,74 @@
     // The duplicate name meant the popup call dispatched here (because
     // function declarations get hoisted, last-wins) and the apply path
     // was getting called with an entity object instead of a name string.
-    async function findAndClickSidebarItem(name, scrollLimit = 30) {
-        const matchName = name.trim().toLowerCase();
-        const findMatch = () => findSidebarItems().find(it => {
-            const t = getSidebarItemName(it).toLowerCase();
-            return t === matchName;
-        });
-        const initial = findMatch();
-        if (initial) return initial;
-        const anyItem = findSidebarItems()[0];
-        const list = anyItem
-            ? (anyItem.el.closest('.map-entities__virtualized-list')
-                || anyItem.el.closest('[class*="virtualized"]')
-                || anyItem.el.parentElement)
-            : null;
-        if (!list) {
-            console.warn(`${TAG} apply: no sidebar list found — entity-item selector may be stale`);
+    // v3.51: switched from virtualized-list scroll walking to a search-
+    // based lookup. The scroll walk had a cap (~30 viewport-heights) and
+    // missed entities below it — explains why 3 of 4 queued asset edits
+    // failed: only the first asset's row was in initial viewport range,
+    // the rest were past the scrollLimit. The sidebar search input
+    // filters the list down to just our target, which always brings it
+    // into the (small) visible viewport regardless of the original
+    // position. Same shape returned as before: { el, doc } or null.
+    async function findAndClickSidebarItem(name, _scrollLimit) {
+        const matchLower = (name || '').trim().toLowerCase();
+        if (!matchLower) return null;
+
+        // Find the sidebar search input in whichever doc has it.
+        let inputDoc = null, input = null;
+        const docs = [document];
+        try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+        for (const d of docs) {
+            const i = d.querySelector(SIDEBAR_INPUT_SELECTOR);
+            if (i) { inputDoc = d; input = i; break; }
+        }
+        if (!input) {
+            try {
+                const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+                for (const f of frames) {
+                    try {
+                        const d = f.contentDocument;
+                        const i = d && d.querySelector(SIDEBAR_INPUT_SELECTOR);
+                        if (i) { inputDoc = d; input = i; break; }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        if (!input || !inputDoc) {
+            console.warn(`${TAG} apply: sidebar search input not found via "${SIDEBAR_INPUT_SELECTOR}"`);
             return null;
         }
-        list.scrollTop = 0;
-        await sleep(250);
-        for (let i = 0; i < scrollLimit; i++) {
-            const hit = findMatch();
-            if (hit) {
-                hit.el.scrollIntoView({ block: 'center' });
-                await sleep(150);
-                return hit;
-            }
-            const before = list.scrollTop;
-            list.scrollTop += list.clientHeight * 0.7;
-            if (list.scrollTop === before) break;
-            await sleep(200);
+
+        // Paste the name via React-aware value setter so React's onChange fires.
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(input, name);
+            else input.value = name;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e) {
+            console.warn(`${TAG} apply: failed to paste search:`, e);
+            return null;
         }
-        return null;
+
+        // Wait for the filter to apply, then find the matching item.
+        // Try includes-match first (handles "FOO" matching "FOO BAR" if
+        // names share prefixes); fall back to "the only visible row"
+        // when the filter narrowed down to exactly one entity.
+        const matched = await waitForCondition(() => {
+            const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+            for (const item of items) {
+                const txt = (item.textContent || '').trim().toLowerCase();
+                if (txt.includes(matchLower)) return { el: item, doc: inputDoc };
+            }
+            if (items.length === 1) return { el: items[0], doc: inputDoc };
+            return null;
+        }, 2000, 100);
+
+        if (!matched) {
+            console.warn(`${TAG} apply: "${name}" not in filtered sidebar after 2s`);
+        }
+        return matched;
     }
 
     // Close any open editor by clicking its Cancel button — used to
@@ -2669,6 +2704,34 @@
                 entities: auditEntries,
             };
             console.log(`${TAG} apply: audit log → window.__aim_ai_lastApplyLog`);
+            // v3.51: clear the sidebar search filter we left set from the
+            // last entity's search. Otherwise the user reopens the sidebar
+            // and sees just the last-edited entity, which is confusing.
+            try {
+                const docs = [document];
+                try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+                let sidebarInput = null;
+                for (const d of docs) {
+                    sidebarInput = d.querySelector(SIDEBAR_INPUT_SELECTOR);
+                    if (sidebarInput) break;
+                }
+                if (!sidebarInput) {
+                    const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+                    for (const f of frames) {
+                        try { sidebarInput = f.contentDocument && f.contentDocument.querySelector(SIDEBAR_INPUT_SELECTOR); }
+                        catch (e) {}
+                        if (sidebarInput) break;
+                    }
+                }
+                if (sidebarInput && sidebarInput.value) {
+                    const proto = window.HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && desc.set) desc.set.call(sidebarInput, '');
+                    else sidebarInput.value = '';
+                    sidebarInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    sidebarInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            } catch (e) {}
             onProgress(applyState);
             // AUTO-REFRESH after a live run that wrote anything. Force
             // a final fetch + re-render the SUM panel so the user sees
