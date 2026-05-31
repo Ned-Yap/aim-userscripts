@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.56
+// @version      34.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.56';
+    const SCRIPT_VERSION = '34.57';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2764,6 +2764,129 @@
     // Only one line at a time can be in vertex-edit; entering a new
     // session auto-discards any in-progress one (without saving).
     // ============================================================
+
+    // v34.57: shared vertex-handle helpers used by both enterVertexEdit
+    // and enterAddedVertexEdit, plus the in-place add/delete vertex paths.
+    //
+    // Two kinds of handles:
+    //   Real (cyan filled, 12x12): one per vertex in currentCoords.
+    //     Drag → updates that vertex. M2 (right-click) → deletes vertex.
+    //   Midpoint ghost (dim cyan, 9x9): one between each pair of adjacent
+    //     vertices. Click → inserts a new real vertex at the midpoint
+    //     position; user can then drag it where they want.
+    //
+    // rebuildVertexHandles wipes both arrays and rebuilds from
+    // currentCoords. Called from enter*, vertex-delete, midpoint-click.
+    // rebuildMidpointPositions just repositions existing midpoint markers
+    // (cheaper) — used after a real-handle drag so midpoints follow.
+    function updateVertexEditToolbarLabel() {
+        if (!vertexEditState || !vertexEditState.toolbarEl) return;
+        const label = vertexEditState.toolbarEl.querySelector('span');
+        if (!label) return;
+        label.textContent = vertexEditState.isAdded
+            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+    }
+
+    function rebuildMidpointPositions() {
+        if (!vertexEditState || !vertexEditState.midhandles) return;
+        vertexEditState.midhandles.forEach((marker, i) => {
+            const a = vertexEditState.currentCoords[i];
+            const b = vertexEditState.currentCoords[i + 1];
+            if (!a || !b) return;
+            try { marker.setLatLng([(a.lat + b.lat) / 2, (a.lng + b.lng) / 2]); } catch (e) {}
+        });
+    }
+
+    function rebuildVertexHandles() {
+        if (!vertexEditState) return;
+        const map = getLeafletMap();
+        if (!map) return;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
+
+        // Wipe current handles
+        (vertexEditState.handles || []).forEach(h => { try { h.remove(); } catch (e) {} });
+        (vertexEditState.midhandles || []).forEach(h => { try { h.remove(); } catch (e) {} });
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+
+        const realIcon = L.divIcon({
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
+            className: 'aim-vertex-handle',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+        });
+        const ghostIcon = L.divIcon({
+            html: '<div style="width:9px;height:9px;border-radius:50%;background:rgba(20,210,220,0.45);border:1.5px solid rgba(255,255,255,0.65);cursor:copy" title="Click to add a vertex here"></div>',
+            className: 'aim-vertex-midhandle',
+            iconSize: [13, 13],
+            iconAnchor: [6.5, 6.5],
+        });
+
+        // Real handles — one per vertex.
+        vertexEditState.currentCoords.forEach((coord) => {
+            const marker = L.marker([coord.lat, coord.lng], { icon: realIcon, draggable: true, zIndexOffset: 1000 });
+            marker.addTo(map);
+            marker.on('drag', (e) => {
+                if (!vertexEditState) return;
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                const ll = e.target.getLatLng();
+                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
+                if (isActive) runUpdate();
+            });
+            marker.on('dragend', () => {
+                // Midpoints adjacent to the dragged vertex are now stale —
+                // snap them back to the new midpoints. Cheaper than a full
+                // rebuild and looks instant.
+                rebuildMidpointPositions();
+            });
+            marker.on('contextmenu', () => {
+                if (!vertexEditState) return;
+                if (vertexEditState.currentCoords.length <= 2) {
+                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
+                    return;
+                }
+                const curIdx = vertexEditState.handles.indexOf(marker);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords.splice(curIdx, 1);
+                rebuildVertexHandles();
+                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left.`, 3500);
+                updateVertexEditToolbarLabel();
+                if (isActive) runUpdate();
+            });
+            vertexEditState.handles.push(marker);
+        });
+
+        // Ghost midpoint handles — one between each pair of adjacent vertices.
+        for (let i = 0; i < vertexEditState.currentCoords.length - 1; i++) {
+            const a = vertexEditState.currentCoords[i];
+            const b = vertexEditState.currentCoords[i + 1];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const marker = L.marker([mid.lat, mid.lng], { icon: ghostIcon, zIndexOffset: 800 });
+            marker.addTo(map);
+            marker.on('click', () => {
+                if (!vertexEditState) return;
+                const curIdx = vertexEditState.midhandles.indexOf(marker);
+                if (curIdx < 0) return;
+                const a2 = vertexEditState.currentCoords[curIdx];
+                const b2 = vertexEditState.currentCoords[curIdx + 1];
+                if (!a2 || !b2) return;
+                // Insert new vertex at the midpoint of segment (curIdx, curIdx+1)
+                // → goes into currentCoords at position (curIdx + 1).
+                const newVert = { lat: (a2.lat + b2.lat) / 2, lng: (a2.lng + b2.lng) / 2 };
+                vertexEditState.currentCoords.splice(curIdx + 1, 0, newVert);
+                rebuildVertexHandles();
+                showKMLToast(`Vertex inserted — ${vertexEditState.currentCoords.length} now. Drag the new cyan handle to position.`, 4500);
+                updateVertexEditToolbarLabel();
+                if (isActive) runUpdate();
+            });
+            vertexEditState.midhandles.push(marker);
+        }
+    }
+
     function enterVertexEdit(type, pmIdx) {
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
@@ -2794,63 +2917,14 @@
             handles: [],
             toolbarEl: null,
         };
-        const icon = L.divIcon({
-            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
-            className: 'aim-vertex-handle',
-            iconSize: [16, 16],
-            iconAnchor: [8, 8],
-        });
-        vertexEditState.currentCoords.forEach((coord, vertexIdx) => {
-            const marker = L.marker([coord.lat, coord.lng], { icon, draggable: true, zIndexOffset: 1000 });
-            marker.addTo(map);
-            marker.on('drag', (e) => {
-                const ll = e.target.getLatLng();
-                if (!vertexEditState) return;
-                // v34.56: look up the marker's CURRENT index via
-                // handles.indexOf — vertexIdx was captured at creation
-                // and goes stale once a prior vertex-delete shifts the
-                // array. Without this, dragging vertex 3 after deleting
-                // vertex 2 would write to the OLD index 3 (the now-
-                // missing vertex), producing a phantom vertex.
-                const curIdx = vertexEditState.handles.indexOf(e.target);
-                if (curIdx < 0) return;
-                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
-                if (isActive) runUpdate();
-            });
-            // v34.55: right-click a vertex handle to delete that vertex.
-            // The marker's own contextmenu event bypasses the document-
-            // level KML contextmenu handler (which would otherwise pop
-            // the line's Mark-for-deletion menu).
-            marker.on('contextmenu', (e) => {
-                if (!vertexEditState) return;
-                if (vertexEditState.currentCoords.length <= 2) {
-                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
-                    return;
-                }
-                // Find this marker's current index (vertexIdx is captured at
-                // creation; if prior deletes shifted the array, that closure
-                // value is stale — look up the current index instead).
-                const curIdx = vertexEditState.handles.indexOf(marker);
-                if (curIdx < 0) return;
-                vertexEditState.currentCoords.splice(curIdx, 1);
-                vertexEditState.handles.splice(curIdx, 1);
-                try { marker.remove(); } catch (e2) {}
-                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left. Save or Discard from the toolbar.`, 3500);
-                // Refresh the floating toolbar's vertex count.
-                if (vertexEditState.toolbarEl) {
-                    const label = vertexEditState.toolbarEl.querySelector('span');
-                    if (label) {
-                        label.textContent = vertexEditState.isAdded
-                            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
-                            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
-                    }
-                }
-                if (isActive) runUpdate();
-            });
-            vertexEditState.handles.push(marker);
-        });
+        // v34.57: delegate handle creation to rebuildVertexHandles
+        // (shared with enterAddedVertexEdit + add/delete-vertex paths).
+        // Builds both real cyan handles AND ghost midpoint handles.
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+        rebuildVertexHandles();
         buildVertexEditToolbar();
-        showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles, M2 a handle to delete a vertex · Save or Discard from the toolbar.`, 6000);
+        showKMLToast(`Editing ${type} line #${pmIdx} — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Save/Discard from toolbar.`, 7000);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -2895,57 +2969,12 @@
             handles: [],
             toolbarEl: null,
         };
-        const icon = L.divIcon({
-            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
-            className: 'aim-vertex-handle',
-            iconSize: [16, 16],
-            iconAnchor: [8, 8],
-        });
-        vertexEditState.currentCoords.forEach((coord, vertexIdx) => {
-            const marker = L.marker([coord.lat, coord.lng], { icon, draggable: true, zIndexOffset: 1000 });
-            marker.addTo(map);
-            marker.on('drag', (e) => {
-                const ll = e.target.getLatLng();
-                if (!vertexEditState) return;
-                // v34.56: look up the marker's CURRENT index via
-                // handles.indexOf — vertexIdx was captured at creation
-                // and goes stale once a prior vertex-delete shifts the
-                // array. Without this, dragging vertex 3 after deleting
-                // vertex 2 would write to the OLD index 3 (the now-
-                // missing vertex), producing a phantom vertex.
-                const curIdx = vertexEditState.handles.indexOf(e.target);
-                if (curIdx < 0) return;
-                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
-                if (isActive) runUpdate();
-            });
-            // v34.55: same right-click-delete-vertex behavior as
-            // enterVertexEdit. See that function for full notes.
-            marker.on('contextmenu', (e) => {
-                if (!vertexEditState) return;
-                if (vertexEditState.currentCoords.length <= 2) {
-                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
-                    return;
-                }
-                const curIdx = vertexEditState.handles.indexOf(marker);
-                if (curIdx < 0) return;
-                vertexEditState.currentCoords.splice(curIdx, 1);
-                vertexEditState.handles.splice(curIdx, 1);
-                try { marker.remove(); } catch (e2) {}
-                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left. Save or Discard from the toolbar.`, 3500);
-                if (vertexEditState.toolbarEl) {
-                    const label = vertexEditState.toolbarEl.querySelector('span');
-                    if (label) {
-                        label.textContent = vertexEditState.isAdded
-                            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
-                            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
-                    }
-                }
-                if (isActive) runUpdate();
-            });
-            vertexEditState.handles.push(marker);
-        });
+        // v34.57: delegate handle creation to rebuildVertexHandles.
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+        rebuildVertexHandles();
         buildVertexEditToolbar();
-        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag the cyan handles, M2 a handle to delete a vertex · Save or Discard.`, 6000);
+        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Save/Discard.`, 7000);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -2989,7 +3018,7 @@
         const save = !!(opts && opts.save);
         const silent = !!(opts && opts.silent);
         const { type, pmIdx, addedIdx, isAdded, addedName,
-                currentCoords, originalCoords, handles, toolbarEl } = vertexEditState;
+                currentCoords, originalCoords, handles, midhandles, toolbarEl } = vertexEditState;
         if (save) {
             // Skip writing a no-op modify if nothing actually moved (within
             // tolerance — float drift from drag-end serialization shouldn't
@@ -3028,6 +3057,8 @@
             if (!silent) showKMLToast(`Discarded vertex edits.`, 3000);
         }
         handles.forEach(h => { try { h.remove(); } catch (e) {} });
+        // v34.57: also remove ghost midpoint handles
+        (midhandles || []).forEach(h => { try { h.remove(); } catch (e) {} });
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         vertexEditState = null;
         if (isActive) runUpdate();
