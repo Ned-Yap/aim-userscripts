@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.46
+// @version      3.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.46';
+    const SCRIPT_VERSION = '3.47';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1318,6 +1318,172 @@
     }
 
     // ============================================================
+    // Visibility control (v3.47) — drive Percepto's sidebar checkboxes
+    //
+    // Per-entity visibility toggle backed by Percepto's native sidebar:
+    //   M1 on the eye → search + click that one entity's checkbox.
+    //   M2 on a visible eye → solo: uncheck + collapse every section, then
+    //     search + check just the target.
+    //   M2 on a hidden eye → unsolo: check every section, clear search.
+    //
+    // Why drive sidebar checkboxes (vs hiding Leaflet layers directly):
+    //   The sidebar is the source of truth for Percepto's per-entity
+    //   visibility state. Driving it keeps everything in sync (visual
+    //   checkbox state, map render). Bypassing it would desync.
+    //
+    // Virtualization caveat: rows not in the viewport don't exist in the
+    //   DOM. We sidestep that by using SECTION-level checkboxes (always
+    //   in DOM) for bulk on/off, then the search filter to bring the
+    //   target into view.
+    //
+    // Resync caveat: Percepto resets its per-session visibility when
+    //   editors close. Our `sumPanelState.visibility` reflects USER INTENT,
+    //   not Percepto's current state. Re-M2 between edits as needed.
+    // ============================================================
+
+    function getSidebarDoc() {
+        // Sidebar is in whichever doc has the search input.
+        if (document.querySelector(SIDEBAR_INPUT_SELECTOR)) return document;
+        try {
+            if (window.top && window.top.document.querySelector(SIDEBAR_INPUT_SELECTOR)) return window.top.document;
+            const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+            for (const f of frames) {
+                try {
+                    const d = f.contentDocument;
+                    if (d && d.querySelector(SIDEBAR_INPUT_SELECTOR)) return d;
+                } catch (e) {}
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function getSidebarSections(doc) {
+        if (!doc) return [];
+        const out = [];
+        doc.querySelectorAll('.map-entities__header-wrapper').forEach(wrap => {
+            const title = (wrap.querySelector('.map-entities__type-title')?.textContent || '').trim();
+            const checkbox = wrap.querySelector('.map-entities__type-checkbox input.ant-checkbox-input');
+            const toggleBtn = wrap.querySelector('.map-entities__toggle-button');
+            out.push({ wrap, title, checkbox, toggleBtn });
+        });
+        return out;
+    }
+
+    function pasteSidebarSearch(doc, text) {
+        if (!doc) return false;
+        const input = doc.querySelector(SIDEBAR_INPUT_SELECTOR);
+        if (!input) return false;
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(input, String(text));
+            else input.value = String(text);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function findSidebarItemByName(doc, name) {
+        if (!doc || !name) return null;
+        const lower = name.trim().toLowerCase();
+        const items = doc.querySelectorAll('.map-entities__entity-item');
+        for (const item of items) {
+            const txt = (item.textContent || '').trim().toLowerCase();
+            if (txt.includes(lower)) return item;
+        }
+        return items.length === 1 ? items[0] : null;
+    }
+
+    function getEntityCheckboxFromItem(item) {
+        return item && item.querySelector('.map-entities__entity-checkbox input.ant-checkbox-input');
+    }
+
+    function ensurePanelVisibility(siteID) {
+        if (sumPanelState.visibilitySite !== siteID) {
+            sumPanelState.visibility = new Map();
+            sumPanelState.visibilitySite = siteID;
+        }
+    }
+    function isEntityVisible(entityId) {
+        // Default to true (visible) — missing entries = "all on".
+        const v = sumPanelState.visibility.get(entityId);
+        return v === undefined ? true : !!v;
+    }
+    function setEntityVisible(entityId, on) {
+        if (on) sumPanelState.visibility.delete(entityId);
+        else sumPanelState.visibility.set(entityId, false);
+    }
+
+    // M1 toggle: search for this entity in the sidebar, click its checkbox.
+    // Leaves the search filter set (per user pref).
+    async function toggleEntityVisibility(entity) {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+        const ok = pasteSidebarSearch(doc, entity.name);
+        if (!ok) { showToast('Could not paste into sidebar search', 'rgba(255,96,96,0.55)'); return; }
+        await sleep(300);
+        const item = findSidebarItemByName(doc, entity.name);
+        if (!item) {
+            showToast(`"${entity.name}" not in sidebar after filter`, 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const cb = getEntityCheckboxFromItem(item);
+        if (!cb) { showToast('No checkbox on sidebar item', 'rgba(255,96,96,0.55)'); return; }
+        try { cb.click(); } catch (e) { return; }
+        const nowVisible = !isEntityVisible(entity.id);
+        setEntityVisible(entity.id, nowVisible);
+        showToast(`${entity.name} → ${nowVisible ? 'visible' : 'hidden'}`);
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // M2 solo: uncheck + collapse every section, then check just this one.
+    async function soloEntityVisibility(entity, allEntityIds) {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+        const sections = getSidebarSections(doc);
+        if (sections.length === 0) { showToast('No sidebar sections found', 'rgba(255,96,96,0.55)'); return; }
+        // 1. Uncheck + collapse each section
+        for (const s of sections) {
+            if (s.checkbox && s.checkbox.checked) { try { s.checkbox.click(); } catch (e) {} }
+            if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                try { s.toggleBtn.click(); } catch (e) {}
+            }
+            await sleep(40);
+        }
+        // 2. Search + check the target
+        pasteSidebarSearch(doc, entity.name);
+        await sleep(350);
+        const item = findSidebarItemByName(doc, entity.name);
+        if (item) {
+            const cb = getEntityCheckboxFromItem(item);
+            if (cb && !cb.checked) { try { cb.click(); } catch (e) {} }
+        } else {
+            showToast(`Soloed but "${entity.name}" not visible in sidebar — check name match`, 'rgba(255,180,0,0.55)');
+        }
+        // 3. Update state — everyone false except this one
+        sumPanelState.visibility = new Map();
+        (allEntityIds || []).forEach(id => { if (id !== entity.id) sumPanelState.visibility.set(id, false); });
+        showToast(`Soloed ${entity.name}`);
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // M2 unsolo: check every section, clear search.
+    async function unsoloAllVisibility() {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found', 'rgba(255,96,96,0.55)'); return; }
+        const sections = getSidebarSections(doc);
+        for (const s of sections) {
+            if (s.checkbox && !s.checkbox.checked) { try { s.checkbox.click(); } catch (e) {} }
+            await sleep(40);
+        }
+        pasteSidebarSearch(doc, '');
+        sumPanelState.visibility = new Map();
+        showToast('All entities visible');
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // ============================================================
     // Right-click handler — capture phase on window, gated to map area
     // ============================================================
     function installRightClickHandler() {
@@ -1451,7 +1617,7 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -2818,6 +2984,13 @@
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
         selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
+        // v3.47: per-entity visibility state we drive via Percepto's
+        // sidebar checkboxes. Map<entityId, boolean>. Missing entries
+        // default to visible=true. Session-only; reset on site change.
+        // Percepto resets its own state when an editor closes, so this
+        // can desync — that's accepted (user re-M2s as needed).
+        visibility: new Map(),
+        visibilitySite: null,      // siteID this Map belongs to
         // Ordered list of visible column keys. Persisted to GM_setValue
         // so it survives reloads. Hidden columns are simply absent from
         // this array. Reorder via ↑/↓ in the Columns ▾ menu.
@@ -3835,6 +4008,7 @@
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
         ensurePendingForSite(siteID);
+        ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
@@ -4940,6 +5114,7 @@
                 return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
             };
             const allColDefs = [
+                { key: 'visibility', label: '👁',            w: 28,  num: false, dataKey: '_vis' },
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
@@ -5083,7 +5258,46 @@
                     const td = document.createElement('td');
                     td.style.cursor = 'pointer';
                     td.onclick = onRowClick;
-                    if (col.key === 'typeShort') {
+                    if (col.key === 'visibility') {
+                        // v3.47: per-entity eye icon. M1 toggles, M2 solos.
+                        // Only applies to entity rows — segments inherit from
+                        // their parent FP, so segment rows show a dim em-dash.
+                        td.style.cssText = 'padding:5px 4px;text-align:center;cursor:pointer;font-size:14px;line-height:1';
+                        if (r._isSegment) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Segments inherit visibility from the parent flight path';
+                        } else {
+                            const visible = isEntityVisible(r.entity.id);
+                            td.textContent = '👁';
+                            td.style.color = visible ? '#14d2dc' : '#555';
+                            td.style.opacity = visible ? '1' : '0.35';
+                            td.style.textDecoration = visible ? 'none' : 'line-through';
+                            td.title = visible
+                                ? 'M1: hide this entity · M2: SOLO (hide all others)'
+                                : 'M1: show this entity · M2: show ALL entities again';
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                toggleEntityVisibility(r.entity);
+                            };
+                            td.oncontextmenu = (ev) => {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                if (visible) {
+                                    // Solo this one — collect all entity IDs
+                                    // from the current bucket so the state
+                                    // reflects "everyone but this one".
+                                    const siteID = getCurrentSiteID();
+                                    ensurePanelVisibility(siteID);
+                                    const bucket = siteID ? mapObjectsBySite[siteID] : null;
+                                    const allIds = bucket ? (bucket.entities || []).map(e => e.id) : [];
+                                    soloEntityVisibility(r.entity, allIds);
+                                } else {
+                                    unsoloAllVisibility();
+                                }
+                            };
+                        }
+                    } else if (col.key === 'typeShort') {
                         td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
                         td.textContent = r.typeShort;
                     } else if (col.key === 'name') {
@@ -5307,6 +5521,12 @@
                     return sumPanelState.unitsFt ? Math.round(m * 3.28084).toString() : m.toFixed(1);
                 };
                 const data = exportRows().map(r => cols.map(col => {
+                    if (col.key === 'visibility') {
+                        // Visibility is UI state, not data. Empty cell in
+                        // exports keeps the column count consistent with
+                        // the header without leaking emoji into spreadsheets.
+                        return '';
+                    }
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
