@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. SHIFT+SPACE = zoom in close at cursor (maxZoom-1). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
@@ -52,8 +52,17 @@
 //     bounds, fitBounds with padding.
 //   - blur clears state so tab-away doesn't strand a panning map.
 //
-// Leaflet detection: walks .leaflet-container elements. Prefers
-// __aim_map__ (Map Styler's hint), falls back to property scan.
+// Leaflet detection: walks .leaflet-container elements in the local
+// document AND in same-origin iframe contentDocuments. Critical for
+// the TOP frame to find the map (Percepto's map lives in an iframe).
+// Without this, keydown in TOP would no-op until the user manually
+// clicks the map (which shifts focus to the iframe). Prefers
+// __aim_map__ hint set by Map Styler, falls back to property scan.
+//
+// Cross-frame cursor: when TOP handles Shift+Space, the cursor coords
+// are in TOP viewport. We translate through the iframe's bounding
+// rect before subtracting the map container's rect to get container-
+// relative coords for map.containerPointToLatLng.
 //
 // Log tag: [AIM NAV]
 
@@ -61,7 +70,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -103,35 +112,73 @@
             && typeof v.getCenter === 'function';
     }
 
-    function getLeafletMap() {
-        if (leafletMapRef && leafletMapRef._container && document.body.contains(leafletMapRef._container)) {
-            return leafletMapRef;
-        }
-        leafletMapRef = null;
-        const containers = document.querySelectorAll('.leaflet-container');
+    function findMapInDoc(doc) {
+        if (!doc || typeof doc.querySelectorAll !== 'function') return null;
+        let containers;
+        try { containers = doc.querySelectorAll('.leaflet-container'); }
+        catch (e) { return null; }
         for (const container of containers) {
             // Prefer hints set by other AIM scripts.
             const hints = [container.__aim_map__, container._leaflet_map, container._leaflet];
             for (const c of hints) {
-                if (looksLikeLeafletMap(c)) { leafletMapRef = c; return c; }
+                if (looksLikeLeafletMap(c)) return c;
             }
-            // Enumerable property scan.
             for (const k in container) {
                 try {
                     const v = container[k];
-                    if (looksLikeLeafletMap(v)) { leafletMapRef = v; return v; }
+                    if (looksLikeLeafletMap(v)) return v;
                 } catch (e) {}
             }
-            // Non-enumerable fallback.
             try {
                 for (const k of Object.getOwnPropertyNames(container)) {
                     try {
                         const v = container[k];
-                        if (looksLikeLeafletMap(v)) { leafletMapRef = v; return v; }
+                        if (looksLikeLeafletMap(v)) return v;
                     } catch (e) {}
                 }
             } catch (e) {}
         }
+        return null;
+    }
+
+    function getLeafletMap() {
+        // Cached + still attached → reuse.
+        if (leafletMapRef && leafletMapRef._container) {
+            const c = leafletMapRef._container;
+            // Check both the local document AND any same-origin iframe doc.
+            if (document.body.contains(c)) return leafletMapRef;
+            try {
+                const iframes = document.querySelectorAll('iframe');
+                for (const f of iframes) {
+                    try {
+                        if (f.contentDocument && f.contentDocument.contains(c)) return leafletMapRef;
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        leafletMapRef = null;
+
+        // Local document first.
+        let m = findMapInDoc(document);
+        if (m) { leafletMapRef = m; return m; }
+
+        // v0.5: walk same-origin iframes too. Fixes the "WASD doesn't
+        // work until I M1-click the map" bug — when focus is on the
+        // TOP frame, keydown fires here but the map lives inside the
+        // iframe. Without this walk, getLeafletMap returns null in TOP
+        // and motion silently no-ops. Same-origin only (Percepto's
+        // iframe is same-domain so this is fine).
+        try {
+            const iframes = document.querySelectorAll('iframe');
+            for (const f of iframes) {
+                let doc = null;
+                try { doc = f.contentDocument; } catch (e) {}
+                if (!doc) continue;
+                m = findMapInDoc(doc);
+                if (m) { leafletMapRef = m; return m; }
+            }
+        } catch (e) {}
+
         return null;
     }
 
@@ -238,31 +285,61 @@
         } catch (e) { return false; }
     }
 
-    // v0.4: Shift+Space → zoom in close on whatever the cursor is over.
-    // Target zoom = maxZoom - 1 ("close but not max — leaves headroom").
-    // Floor at 18 so the result is always actually-close even on
-    // unusually low-max-zoom maps.
+    // v0.5: cursor → map-container coords. Handles cross-frame: when
+    // we're in TOP and the map is inside an iframe, translate TOP-viewport
+    // cursor coords through the iframe's bounding rect before subtracting
+    // the container rect (which is itself in iframe-viewport coords).
+    function getCursorContainerCoords(map) {
+        if (lastMouseX < 0 || lastMouseY < 0) return null;
+        const container = map.getContainer && map.getContainer();
+        if (!container) return null;
+
+        // Same-frame: container.getBoundingClientRect is in OUR viewport.
+        if (document.body.contains(container)) {
+            const rect = container.getBoundingClientRect();
+            if (lastMouseX < rect.left || lastMouseX > rect.right ||
+                lastMouseY < rect.top || lastMouseY > rect.bottom) return null;
+            return { x: lastMouseX - rect.left, y: lastMouseY - rect.top };
+        }
+
+        // Cross-frame: find the iframe element that owns this container.
+        try {
+            const iframes = document.querySelectorAll('iframe');
+            for (const f of iframes) {
+                try {
+                    if (!f.contentDocument || !f.contentDocument.contains(container)) continue;
+                    const iframeRect = f.getBoundingClientRect();
+                    // Translate TOP cursor → iframe-viewport coords.
+                    const xInIframe = lastMouseX - iframeRect.left;
+                    const yInIframe = lastMouseY - iframeRect.top;
+                    // container.getBoundingClientRect (from iframe context)
+                    // is in iframe-viewport coords.
+                    const cRect = container.getBoundingClientRect();
+                    if (xInIframe < cRect.left || xInIframe > cRect.right ||
+                        yInIframe < cRect.top || yInIframe > cRect.bottom) return null;
+                    return { x: xInIframe - cRect.left, y: yInIframe - cRect.top };
+                } catch (e) {}
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // v0.5: Shift+Space → zoom in at cursor.
+    // Target zoom = maxZoom - 3 (was maxZoom - 1 in v0.4 — user reported
+    // "WAY too close"). Floor at 17 so result is always usefully close
+    // even on low-max-zoom maps.
     function zoomInCloseAtCursor() {
         const map = getLeafletMap();
         if (!map) return false;
         try {
             const maxZoom = typeof map.getMaxZoom === 'function' ? map.getMaxZoom() : 20;
-            const targetZoom = Math.max(18, maxZoom - 1);
+            const targetZoom = Math.max(17, maxZoom - 3);
 
-            // Resolve cursor → latlng. Fall back to map center if cursor
-            // isn't currently over the map container (focus may be on a
-            // Percepto button, or mouse never moved over this iframe).
             let targetLatLng = null;
-            const container = map.getContainer ? map.getContainer() : null;
-            if (container && lastMouseX >= 0 && lastMouseY >= 0) {
-                const rect = container.getBoundingClientRect();
-                if (lastMouseX >= rect.left && lastMouseX <= rect.right &&
-                    lastMouseY >= rect.top && lastMouseY <= rect.bottom) {
-                    const x = lastMouseX - rect.left;
-                    const y = lastMouseY - rect.top;
-                    try { targetLatLng = map.containerPointToLatLng([x, y]); }
-                    catch (e) {}
-                }
+            const cc = getCursorContainerCoords(map);
+            if (cc) {
+                try { targetLatLng = map.containerPointToLatLng([cc.x, cc.y]); }
+                catch (e) {}
             }
             if (!targetLatLng) {
                 try { targetLatLng = map.getCenter(); }
