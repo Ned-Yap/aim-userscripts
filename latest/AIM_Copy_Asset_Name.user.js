@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.39
+// @version      3.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.39';
+    const SCRIPT_VERSION = '3.40';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -939,7 +939,10 @@
                 if (row) out.push(row);
             }
             if (e.custom.poi_id) out.push({ label: 'POI ID', value: e.custom.poi_id });
-            out.push({ label: 'Unshielded', value: e.is_unshielded ? 'yes' : 'no' });
+            // v3.40: Unshielded + Validated rows removed for assets — they're
+            // for other entity types (FFZ/FP/NFZ) and not meaningful here.
+            // Other entity types still get Validated via the type-agnostic
+            // push below.
         }
         if (e.type === 15) {
             const wpCount = Array.isArray(e.coords) ? e.coords.length : 0;
@@ -990,7 +993,11 @@
             const desc = String(e.description).trim();
             if (desc) out.push({ label: 'Notes', value: desc.length > 140 ? desc.slice(0, 140) + '…' : desc });
         }
-        out.push({ label: 'Validated', value: e.validated ? 'yes' : 'no' });
+        // v3.40: skip Validated for assets (the field exists on Percepto's
+        // model but isn't meaningful for assets — only FFZ/FP/NFZ care).
+        if (e.type !== 3) {
+            out.push({ label: 'Validated', value: e.validated ? 'yes' : 'no' });
+        }
         return out;
     }
 
