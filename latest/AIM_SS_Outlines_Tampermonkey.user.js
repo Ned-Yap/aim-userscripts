@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.58
+// @version      34.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.58';
+    const SCRIPT_VERSION = '34.59';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3454,13 +3454,16 @@
                     p.setAttribute('data-kml-added-idx', String(f.addedIdx));
                     p.setAttribute('stroke-opacity', '0.95');
                     p.setAttribute('stroke-width', String(thickness + 1));
-                    // Right-clickable when edit mode is on (to discard)
-                    if (editMode) {
-                        p.setAttribute('class', 'leaflet-interactive');
-                        p.setAttribute('pointer-events', 'visibleStroke');
-                    } else {
-                        p.setAttribute('pointer-events', 'none');
-                    }
+                    // v34.59: ALWAYS clickable — these are transient user-
+                    // drawn lines that haven't been committed yet. There's
+                    // no scenario where the user wants them un-interactive
+                    // (M1 = edit vertices, M2 = discard menu). Previously
+                    // gated on editMode but green lines silently lost
+                    // clickability in some setups even with edit mode on
+                    // (yellow lines worked from the same render — root
+                    // cause unclear, this is the brute-force fix).
+                    p.setAttribute('class', 'leaflet-interactive');
+                    p.setAttribute('pointer-events', 'visibleStroke');
                 } else {
                     // Drawing-in-progress preview → dashed green, no right-click
                     p.setAttribute('stroke-opacity', '0.85');
