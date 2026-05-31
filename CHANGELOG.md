@@ -6,6 +6,37 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-31 (continued — Asset Inspector v3.40 → v3.53)
+
+Massive Asset Inspector arc. All `latest/` only. The headline: end-to-end **asset subtype + name editing** via SUM table or right-click popup → queue → Apply pipeline drives Percepto's editor. Plus a new visibility eye column, M2-solo on entity-type filters, Tab/Shift+Tab navigation between inline edits, and several bug fixes in the Find-in-Sidebar + Apply path.
+
+### Subtype editing arc (the headline feature)
+- **v3.40** — drop Unshielded + Validated rows from the asset right-click popup (not meaningful for assets).
+- **v3.41** — Phase 2+3 of asset cleanup: inline subtype edit on SUM table + right-click popup; Apply queue extended with `applyAssetSubtypeChange` that drives Percepto's Ant Select dropdown.
+- **v3.42** — fix two bugs from initial subtype testing: (a) clicking the input bubbled to the cell's onclick and wiped the edit (`stopPropagation` on input mousedown+click), (b) DOM-driven Ant Select dropdown was unreliable — replaced PRIMARY path with React fiber walk per `feedback-react-fiber-walk-for-ant-actions`. DOM path kept as fallback.
+- **v3.43** — clicking a subtype cell now auto-pans the map to that asset (removes the extra click).
+- **v3.50** — Name cell is also click-to-edit (queues a rename) for non-segment entity rows. M2 always copies. Apply pipeline extended to handle name + subtype together for assets and name + altitudes for FFZ/FP/NFZ/GM.
+- **v3.51** — Apply queue Find-in-Sidebar: replaced scroll-walking the virtualized list with paste-into-search lookup. User reported 1/4 asset edits succeeded — scroll cap of ~30 viewport-heights was missing entities below it. Search filter always brings the target into the small visible window regardless of position. Bonus: clear the search at end of pipeline so the sidebar doesn't show stale state.
+- **v3.52** — keyboard-driven rhythm: (a) Subtype + Name cells get `nowrap + ellipsis` so the pending overlay doesn't double row height; (b) `tableWrap.scrollTop` preserved across redraws — every commit was dumping you to the top; (c) Tab/Shift+Tab in inline edits walks to the next/prev row's same-column cell, committing + opening edit in one keystroke. Spreadsheet-like rapid-fire edits.
+- **v3.53** — new "Bulk → Subtype" button alongside Bulk → AGL / Bulk → Delta. Same datalist autocomplete as inline editor. Scope: selected (default if any) / all assets. Free-text values get the "Enter new type" path during Apply.
+
+### Right-click popup
+- **v3.45** — fix Find in Map Entities regression. Two functions both named `findEntityInSidebar` — JS hoisting made the later (apply-queue, takes string name) shadow the earlier (popup, takes entity object). Popup silently called the wrong one. Renamed apply-side to `findAndClickSidebarItem`.
+- **v3.46** — Find in Map Entities now auto-clicks the result row after filter — no more separate manual click to open the editor.
+
+### Entity-type filter chips
+- **v3.44** — M2 on any filter chip "solos" that type (all others off). M2 again restores all. Saves 4 clicks when narrowing to a single type. M1 still toggles individually.
+
+### Per-entity visibility (NEW column)
+- **v3.47** — new 👁 column at the left of the SUM table. M1 toggles that one entity's visibility on the map (drives Percepto's sidebar checkbox). M2 solos (uncheck + collapse every section, then search + check just this one). M2 again unsolos. Architecture drives Percepto's native sidebar checkboxes via the search filter + section parent checkboxes — avoids the virtualized-list problem.
+- **v3.48** — fix M2 solo only turning off FFZ. Loop `walkSidebarSections` until stable (scroll-to-top each pass + re-query); virtualized list only renders top 1-2 section headers when sections are expanded. Diagnostic console.log per pass.
+- **v3.49** — fix M2 unsolo only restoring FFZ + speed-up. New `collapse-only` walk mode used before the `on` walk during unsolo — clicking a section's parent checkbox while collapsed auto-expands the section, filling the viewport and pushing the rest off the virtualized list. Collapse everything first → check everything second. Halved most sleeps.
+
+### Other
+Smaller scroll/scroll-tracking fixes baked into the rhythm work in v3.52.
+
+---
+
 ## 2026-05-31 (`latest/` dev work)
 
 Power Line Editor **Phase 3 SHIPPED** (was backlog at end of yesterday): branch from vertex + snap to vertex AND segments. Plus a series of modify/delete op fixes, and a brand-new **AIM Map Nav** script for keyboard navigation. All `latest/` only — coworker installs at the repo root are unchanged.
