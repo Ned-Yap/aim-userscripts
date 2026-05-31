@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.52
+// @version      34.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.52';
+    const SCRIPT_VERSION = '34.53';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1207,15 +1207,6 @@
         KML_TYPES.forEach(type => fetchOneKML(siteID, type, force));
     }
 
-    // v34.52: GitHub Raw CDN cache TTL is ~5 minutes. If we just
-    // committed a change, our local GM cache has the just-committed
-    // state but raw.githubusercontent.com may still serve the
-    // pre-commit version. The post-commit network fetch would then
-    // OVERWRITE our local state with stale content, undoing the user's
-    // commit on screen until the CDN catches up. Skip the network
-    // fetch when GM cache is within this window — trust local.
-    const CDN_FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
-
     function fetchOneKML(siteID, type, force) {
         const key = kmlKey(siteID, type);
         if (kmlFetching.has(key)) return;
@@ -1223,28 +1214,16 @@
         if (kmlFeatures[key] && !force) return;
 
         // Try cache first so we render immediately while the network fetch runs.
-        let cachedAt = 0;
+        // v34.53: removed the CDN_FRESHNESS_WINDOW_MS skip — no longer
+        // needed now that we fetch via api.github.com (always fresh,
+        // not cached at the GitHub CDN). Always do the network fetch
+        // so coworkers' changes propagate as soon as they happen.
         if (!kmlFeatures[key]) {
             const cached = gmGet(KML_CACHE_PREFIX + key, null);
             if (cached && Array.isArray(cached.features)) {
                 kmlFeatures[key] = cached.features;
                 if (cached.path) kmlResolvedPath[key] = cached.path;
-                cachedAt = Number(cached.at) || 0;
                 console.log(`${TAG} KML ${key} loaded from cache (${cached.features.length} features, path: ${cached.path || '?'})`);
-            }
-        }
-
-        // v34.52: if local cache was written within the CDN freshness
-        // window AND caller didn't force, skip the network fetch
-        // entirely. Prevents post-commit refresh from overwriting our
-        // just-committed local state with stale CDN content. Only skips
-        // when we have cached features AND a fresh `at` timestamp; if
-        // either's missing, we fall through to fetch as normal.
-        if (!force && kmlFeatures[key] && cachedAt > 0) {
-            const ageMs = Date.now() - cachedAt;
-            if (ageMs < CDN_FRESHNESS_WINDOW_MS) {
-                console.log(`${TAG} KML ${key}: skipping network fetch — local cache age ${Math.round(ageMs / 1000)}s < ${CDN_FRESHNESS_WINDOW_MS / 1000}s (avoids stale CDN overwrite)`);
-                return;
             }
         }
 
@@ -1282,6 +1261,16 @@
             { name: `${siteID}-${cap}.kmz`, ext: 'kmz' },
         ];
 
+        // v34.53: fetch via api.github.com Contents endpoint instead of
+        // raw.githubusercontent.com. The raw CDN has a ~5min cache that
+        // ignored cache-buster query strings, causing stale content to
+        // overwrite local cache after a commit. api.github.com returns
+        // fresh content every time. Rate limit: 5000/hr per PAT —
+        // realistic team usage is ~200-300/day, no concern.
+        //
+        // Response is JSON: { content: base64string, encoding: 'base64',
+        // sha, size, ... }. We decode .content to get the raw bytes,
+        // then either parse XML (for .kml) or feed to JSZip (for .kmz).
         const tryFetch = (i) => {
             if (i >= candidates.length) {
                 kmlFetching.delete(key);
@@ -1290,30 +1279,59 @@
                 return;
             }
             const c = candidates[i];
-            // Cache-bust the raw URL. raw.githubusercontent.com sends
-            // cache-control: max-age=300, so two page loads within 5 min
-            // can return stale content. Bug surfaced 2026-05-22 after a
-            // Split: the post-refresh fetch returned the pre-split file
-            // and overwrote local cache with stale features, making the
-            // split appear to "revert" on screen. Appending a unique
-            // query string forces the CDN to treat every request as a
-            // miss — the local cache layer above (line ~1210) still
-            // provides instant first-render so there's no perf hit.
-            const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${c.name}?_=${Date.now()}`;
+            const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(c.name)}?ref=${KMLS_BRANCH}`;
             const opts = {
                 method: 'GET',
                 url,
-                headers: { 'Authorization': `Bearer ${token}` },
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                },
                 timeout: 15000,
                 onload: (resp) => {
                     if (resp.status === 200) {
+                        let json;
+                        try { json = JSON.parse(resp.responseText); }
+                        catch (e) {
+                            kmlFetching.delete(key);
+                            console.error(`${TAG} ${type} KML parse-JSON failed for ${c.name}:`, e);
+                            return;
+                        }
+                        const b64 = (json && json.content) ? String(json.content).replace(/\s/g, '') : '';
+                        if (!b64) {
+                            kmlFetching.delete(key);
+                            console.warn(`${TAG} ${type} KML response missing .content for ${c.name}`);
+                            return;
+                        }
                         kmlResolvedPath[key] = c.name;
                         if (c.ext === 'kmz') {
-                            parseKMZAndStore(resp.response, key, siteID, type, c.name);
+                            // Decode base64 → ArrayBuffer for JSZip.
+                            let bin;
+                            try { bin = atob(b64); }
+                            catch (e) {
+                                kmlFetching.delete(key);
+                                console.error(`${TAG} KMZ atob failed for ${c.name}:`, e);
+                                return;
+                            }
+                            const buf = new Uint8Array(bin.length);
+                            for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+                            parseKMZAndStore(buf.buffer, key, siteID, type, c.name);
                         } else {
                             kmlFetching.delete(key);
+                            let xmlText;
                             try {
-                                const features = parseKML(resp.responseText);
+                                // Decode base64 → UTF-8 text. atob gives a binary
+                                // string; TextDecoder converts to proper UTF-8.
+                                const bin = atob(b64);
+                                const buf = new Uint8Array(bin.length);
+                                for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+                                xmlText = new TextDecoder('utf-8').decode(buf);
+                            } catch (e) {
+                                console.error(`${TAG} KML atob/decode failed for ${c.name}:`, e);
+                                return;
+                            }
+                            try {
+                                const features = parseKML(xmlText);
                                 kmlFeatures[key] = features;
                                 gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
                                 console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
@@ -1325,9 +1343,9 @@
                     } else if (resp.status === 404) {
                         // Quiet on intermediate 404s; only log the final one.
                         tryFetch(i + 1);
-                    } else if (resp.status === 401) {
+                    } else if (resp.status === 401 || resp.status === 403) {
                         kmlFetching.delete(key);
-                        console.warn(`${TAG} ${type} KML fetch unauthorized (401) — check your PAT in AIM Controls`);
+                        console.warn(`${TAG} ${type} KML fetch denied (${resp.status}) — check your PAT in AIM Controls`);
                     } else {
                         kmlFetching.delete(key);
                         console.warn(`${TAG} ${type} KML fetch HTTP ${resp.status} (candidate ${c.name})`);
@@ -1342,9 +1360,7 @@
                     console.warn(`${TAG} ${type} KML fetch timed out (candidate ${c.name})`);
                 },
             };
-            // KMZ is a ZIP archive — pull as binary so JSZip can unzip it.
-            if (c.ext === 'kmz') opts.responseType = 'arraybuffer';
-            console.log(`${TAG} fetching ${type} KML for site ${siteID} — trying ${c.name}`);
+            console.log(`${TAG} fetching ${type} KML for site ${siteID} — trying ${c.name} via api.github.com`);
             try {
                 GM_xmlhttpRequest(opts);
             } catch (e) {
