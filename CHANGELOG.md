@@ -6,6 +6,30 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.1 (NEW script, Phase 1)
+
+First slice of the **CSM-collaborative issue flagging** tool. `latest/AIM_Issues.user.js` only — coworker installs at the repo root are not affected.
+
+Phase 1 scope (this version):
+- New 🚩 button injected into `.map-tools` — inserts itself immediately **before** PLE's ⚡ so the two coexist without fighting for the LAST-child slot. Layout: gear → 🚩 → ⚡.
+- M1 toggles **flag mode** (icon glows red, crosshair cursor on map, map drag temporarily disabled to keep drag-draw clean).
+- In flag mode:
+  - **Click-drag** = rectangle. Release commits.
+  - **Shift+click** = polygon mode (sticky — subsequent clicks add vertices without holding Shift). Enter or double-click finishes; Esc cancels.
+  - Floating draw toolbar (Cancel always present; Finish + Undo shown for polygon).
+- Required **note modal** after draw completes (textarea, Ctrl/Cmd+Enter to save).
+- **localStorage** per-site persistence (`aim-issues-site-<siteID>`). Phase 2 swaps this for GitHub sync.
+- Render: dashed red `L.polygon` + ⚠ `L.divIcon` marker at centroid. Style switches by status (yellow for ready-for-review, grey for resolved, grey-blue for ignored) — Phase 1 only creates `open` issues so only the red style is exercised.
+- **M1 on issue** = session-hide (resets on page refresh per design).
+- **M2 on issue** = stub status modal showing the note + full history audit trail. Phase 3 wires the real state machine and transition buttons.
+- Hover tooltip with status, age ("3 min ago"), note, author.
+- Registered with AIM Controls under "Issues" with a single master toggle.
+- Log tag `[AIM ISSUES]`.
+
+Not in Phase 1 — Phase 2 adds GitHub sync, Phase 3 adds the multi-status state machine, Phase 5 adds SUM table integration + dedicated 🚩 panel, Phase 6 adds Mission Bank surface filtering. See `~/.claude/projects/-home-link-projects-ShortKeys/memory/project_aim_issues_design.md` for the full spec.
+
+---
+
 ## 2026-05-31 (continued — Asset Inspector v3.40 → v3.53)
 
 Massive Asset Inspector arc. All `latest/` only. The headline: end-to-end **asset subtype + name editing** via SUM table or right-click popup → queue → Apply pipeline drives Percepto's editor. Plus a new visibility eye column, M2-solo on entity-type filters, Tab/Shift+Tab navigation between inline edits, and several bug fixes in the Find-in-Sidebar + Apply path.
