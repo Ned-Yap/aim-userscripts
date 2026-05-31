@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.64
+// @version      34.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.64';
+    const SCRIPT_VERSION = '34.65';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1722,11 +1722,11 @@
         try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
         if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
         clearSnapIndicator();
-        // v34.64: bright light purple for contrast against satellite +
-        // yellow KML lines. Bigger (28px) + double-layered glow so it
-        // pops at a glance.
+        // v34.65: darker, more saturated purple (#9333ea, Tailwind
+        // purple-600) for stronger contrast against satellite + cyan
+        // handles. Double-layered glow uses the lighter tint for visibility.
         const icon = L.divIcon({
-            html: '<div style="width:28px;height:28px;border-radius:50%;border:3px solid #d49eff;background:rgba(212,158,255,0.30);box-shadow:0 0 12px rgba(212,158,255,0.95),0 0 22px rgba(212,158,255,0.55);box-sizing:border-box;pointer-events:none"></div>',
+            html: '<div style="width:28px;height:28px;border-radius:50%;border:3px solid #9333ea;background:rgba(147,51,234,0.32);box-shadow:0 0 12px rgba(192,132,252,0.95),0 0 22px rgba(147,51,234,0.65);box-sizing:border-box;pointer-events:none"></div>',
             className: 'aim-snap-indicator',
             iconSize: [34, 34],
             iconAnchor: [17, 17],
@@ -1957,37 +1957,49 @@
         const isMarkedDelete = opNow && opNow.op === 'delete';
         const isMarkedModify = opNow && opNow.op === 'modify';
 
-        // Delete row — hidden when there's a pending modify (a single
-        // placemark can only carry one op; if user wants to delete a
-        // modified line they revert first, then mark for deletion).
-        if (!isMarkedModify) {
-            const deleteAction = document.createElement('button');
-            deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
-            deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
-            deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
-            if (isMarkedDelete) {
-                deleteAction.textContent = '↩  Unmark for deletion';
-                deleteAction.onclick = (e) => {
-                    e.stopPropagation();
-                    unmarkPlacemarkOp(siteID, type, pmIdx);
-                    const count = commitOpsCount(siteID, type);
-                    showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
-                    closeKMLContextMenu();
-                    if (isActive) runUpdate();
-                };
-            } else {
-                deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
-                deleteAction.onclick = (e) => {
-                    e.stopPropagation();
-                    markPlacemarkForDelete(siteID, type, pmIdx);
-                    const count = commitOpsCount(siteID, type);
-                    showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
-                    closeKMLContextMenu();
-                    if (isActive) runUpdate();
-                };
-            }
-            menu.appendChild(deleteAction);
+        // Delete row — always shown. v34.65: previously hidden when
+        // a modify op was pending ("revert first, then delete"), but
+        // that left users stuck if they wanted to abandon their edits
+        // AND delete the line. Now Mark for Deletion is always reachable;
+        // when a modify is pending the action discards it and replaces
+        // with the delete op (mutual exclusion is preserved — one op
+        // per placemark — but the user gets there in one click).
+        const deleteAction = document.createElement('button');
+        deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
+        deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
+        deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
+        if (isMarkedDelete) {
+            deleteAction.textContent = '↩  Unmark for deletion';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                unmarkPlacemarkOp(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        } else if (isMarkedModify) {
+            deleteAction.textContent = '🗑  Mark for deletion (discards pending edits)';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                markPlacemarkForDelete(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Marked ${type} line #${pmIdx} for deletion — your pending vertex edits were discarded. ${count} pending commit${count === 1 ? '' : 's'}.`, 6000);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        } else {
+            deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                markPlacemarkForDelete(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
         }
+        menu.appendChild(deleteAction);
 
         // Vertex-edit row — hidden when marked for deletion (no point
         // editing what we're deleting). When a modify is already saved,
@@ -3197,18 +3209,26 @@
                         co.added[addedIdx].coords = currentCoords.map(c => [c.lng, c.lat]);
                         setCommitOps(siteID, type, co);
                     }
+                    const count = commitOpsCount(siteID, type);
+                    if (!silent) showKMLToast(`Saved vertex edits to new ${type} line "${addedName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
                 } else {
-                    co.ops[String(pmIdx)] = {
-                        op: 'modify',
-                        coords: currentCoords.map(c => [c.lng, c.lat]),
-                    };
-                    setCommitOps(siteID, type, co);
+                    // v34.65: don't blow away a pending delete op with a
+                    // modify. Previously this silently overwrote co.ops[pmIdx]
+                    // so a "Mark for deletion" set during the same vertex
+                    // edit session would vanish when the user hit Save.
+                    const existingOp = co.ops[String(pmIdx)];
+                    if (existingOp && existingOp.op === 'delete') {
+                        if (!silent) showKMLToast(`${type} #${pmIdx} is marked for deletion — vertex edits discarded. Unmark deletion first if you want to keep edits.`, 6500);
+                    } else {
+                        co.ops[String(pmIdx)] = {
+                            op: 'modify',
+                            coords: currentCoords.map(c => [c.lng, c.lat]),
+                        };
+                        setCommitOps(siteID, type, co);
+                        const count = commitOpsCount(siteID, type);
+                        if (!silent) showKMLToast(`Saved vertex edits to ${type} #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+                    }
                 }
-                const count = commitOpsCount(siteID, type);
-                const targetLabel = isAdded
-                    ? `new ${type} line "${addedName}"`
-                    : `${type} #${pmIdx}`;
-                if (!silent) showKMLToast(`Saved vertex edits to ${targetLabel}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
             } else {
                 if (!silent) showKMLToast(`No vertex changes to save.`, 2500);
             }
