@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.55
+// @version      34.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.55';
+    const SCRIPT_VERSION = '34.56';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1758,6 +1758,18 @@
             return;
         }
         if (!confirm(`Discard ${count} pending ${type} commit${count === 1 ? '' : 's'}?\n\nNothing will be sent to GitHub.`)) return;
+        // v34.56: if there's an active vertex edit OR draw mode on this
+        // type, tear it down before clearing ops. Otherwise the floating
+        // Save/Discard toolbar + the cyan handles would be left stranded
+        // pointing at a line that no longer exists (especially bad for
+        // added lines — the line itself is in commitOps.added and
+        // disappears when we clear it).
+        if (vertexEditState && vertexEditState.type === type) {
+            exitVertexEdit({ save: false, silent: true });
+        }
+        if (drawingState && drawingState.type === type) {
+            exitDrawMode({ silent: true });
+        }
         clearAllCommitOps(siteID, type);
         showKMLToast(`Discarded ${count} pending ${type} commit${count === 1 ? '' : 's'}.`, 3500);
         if (isActive) runUpdate();
@@ -2794,7 +2806,15 @@
             marker.on('drag', (e) => {
                 const ll = e.target.getLatLng();
                 if (!vertexEditState) return;
-                vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
+                // v34.56: look up the marker's CURRENT index via
+                // handles.indexOf — vertexIdx was captured at creation
+                // and goes stale once a prior vertex-delete shifts the
+                // array. Without this, dragging vertex 3 after deleting
+                // vertex 2 would write to the OLD index 3 (the now-
+                // missing vertex), producing a phantom vertex.
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
                 if (isActive) runUpdate();
             });
             // v34.55: right-click a vertex handle to delete that vertex.
@@ -2887,7 +2907,15 @@
             marker.on('drag', (e) => {
                 const ll = e.target.getLatLng();
                 if (!vertexEditState) return;
-                vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
+                // v34.56: look up the marker's CURRENT index via
+                // handles.indexOf — vertexIdx was captured at creation
+                // and goes stale once a prior vertex-delete shifts the
+                // array. Without this, dragging vertex 3 after deleting
+                // vertex 2 would write to the OLD index 3 (the now-
+                // missing vertex), producing a phantom vertex.
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
                 if (isActive) runUpdate();
             });
             // v34.55: same right-click-delete-vertex behavior as
