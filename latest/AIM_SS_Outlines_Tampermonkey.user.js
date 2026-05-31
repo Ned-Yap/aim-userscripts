@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.65
+// @version      34.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.65';
+    const SCRIPT_VERSION = '34.66';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1737,11 +1737,13 @@
         } catch (e) {}
     }
 
-    // Find the nearest other-line vertex within SNAP_TOLERANCE_PX of
-    // srcLatLng. Returns {lat,lng} or null.
+    // Find the nearest snap target within SNAP_TOLERANCE_PX of srcLatLng.
+    // Considers BOTH vertices and points along segments (perpendicular
+    // foot, clamped to segment). Returns {lat,lng} or null. Vertex hits
+    // win ties because the segment test excludes endpoints (t in (0,1)).
     //
     // excludeKey selects the "self" to skip:
-    //   'file:<type>:<pmIdx>'    → currently-editing this file line, skip its vertices
+    //   'file:<type>:<pmIdx>'    → currently-editing this file line, skip
     //   'added:<type>:<addedIdx>'→ currently-editing this pending-add line, skip
     //   'draw'                   → currently drawing a NEW line, skip its own coords
     //   null                     → no exclusion (rare)
@@ -1770,6 +1772,48 @@
             } catch (e) {}
         };
 
+        // v34.66: also test point-to-segment (perpendicular foot,
+        // clamped to (0,1)). Endpoints (t=0 / t=1) excluded because
+        // they're vertices and testVertex already covers them — keeps
+        // vertex snaps winning over segment snaps near endpoints.
+        const testSegment = (lat1, lng1, lat2, lng2) => {
+            if (!Number.isFinite(lat1) || !Number.isFinite(lng1)) return;
+            if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return;
+            try {
+                const pa = map.latLngToContainerPoint(L.latLng(lat1, lng1));
+                const pb = map.latLngToContainerPoint(L.latLng(lat2, lng2));
+                const dx = pb.x - pa.x, dy = pb.y - pa.y;
+                const len2 = dx * dx + dy * dy;
+                if (len2 < 1e-6) return; // degenerate — covered by vertex test
+                const t = ((srcPx.x - pa.x) * dx + (srcPx.y - pa.y) * dy) / len2;
+                if (t <= 0 || t >= 1) return; // foot outside segment
+                const fx = pa.x + t * dx, fy = pa.y + t * dy;
+                const d = Math.hypot(fx - srcPx.x, fy - srcPx.y);
+                if (d < bestDist) {
+                    bestDist = d;
+                    const ll = map.containerPointToLatLng([fx, fy]);
+                    best = { lat: ll.lat, lng: ll.lng };
+                }
+            } catch (e) {}
+        };
+
+        // Walk a line's coords once: hit every vertex AND every segment.
+        const testLine = (coords) => {
+            if (!Array.isArray(coords) || coords.length === 0) return;
+            for (let i = 0; i < coords.length; i++) {
+                const c = coords[i];
+                const lat = Array.isArray(c) ? c[1] : (c && c.lat);
+                const lng = Array.isArray(c) ? c[0] : (c && c.lng);
+                testVertex(lat, lng);
+                if (i < coords.length - 1) {
+                    const n = coords[i + 1];
+                    const nlat = Array.isArray(n) ? n[1] : (n && n.lat);
+                    const nlng = Array.isArray(n) ? n[0] : (n && n.lng);
+                    testSegment(lat, lng, nlat, nlng);
+                }
+            }
+        };
+
         ['distro', 'trans'].forEach((type) => {
             // File lines — use effective (post-modify) coords so snap
             // matches what's actually rendered.
@@ -1782,30 +1826,20 @@
                 const co0 = getCommitOps(siteID, type);
                 const op0 = co0.ops && co0.ops[String(f.pmIdx)];
                 if (op0 && op0.op === 'delete') return;
-                const coords = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
-                (coords || []).forEach(c => testVertex(c.lat, c.lng));
+                testLine(effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords));
             });
-            // Pending-add (green) lines. If one is the line currently
-            // being edited as vertexEditState.isAdded, its coords live
-            // in vertexEditState.currentCoords — but we exclude it via
-            // excludeKey anyway, so skip cleanly.
+            // Pending-add (green) lines.
             const co = getCommitOps(siteID, type);
             (co.added || []).forEach((added, i) => {
                 if (excludeKey === `added:${type}:${i}`) return;
-                (added.coords || []).forEach(c => {
-                    if (Array.isArray(c)) testVertex(c[1], c[0]);
-                    else if (c && typeof c === 'object') testVertex(c.lat, c.lng);
-                });
+                testLine(added.coords);
             });
         });
 
         // In-progress draw line — its own coords are skipped if we're
-        // the one drawing (excludeKey === 'draw'). Otherwise (very rare:
-        // vertex-edit during draw? not a real flow) include them.
+        // the one drawing (excludeKey === 'draw').
         if (drawingState && excludeKey !== 'draw') {
-            (drawingState.coords || []).forEach(c => {
-                if (Array.isArray(c)) testVertex(c[1], c[0]);
-            });
+            testLine(drawingState.coords);
         }
 
         return best;
