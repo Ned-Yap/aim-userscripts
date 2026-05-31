@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
-// @description  Keyboard nav for the Percepto map. WASD pan, Q/E zoom out/in. Hold Shift for sprint (3x), Ctrl for precise (0.3x). Always-on globally; standard input guards skip when typing. Registers with AIM Control Panel under "Map Nav" with master + pan + zoom toggles.
+// @description  Keyboard nav for the Percepto map. HOLD SPACE to engage nav mode; while held: WASD pan, Q/E zoom out/in, Shift sprint (3x), Ctrl precise (0.3x). Without Space, all keys pass through normally so Shift+D (Delete) etc. still work. Input-guarded. Registers with AIM Control Panel under "Map Nav" with master + pan + zoom toggles.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -13,38 +13,42 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// v0.1 design
+// v0.2 design
 // ===========
-// Bindings:
+// MODAL nav — HOLD SPACE to engage. Without Space, every key passes
+// through normally, so Shift+D (New Entity Macro · Delete), Shift+S,
+// Shift+A (Altitude), Shift+R (Ruler), etc. all keep working.
+//
+// While Space is held:
 //   W/A/S/D = pan up/left/down/right
 //   Q       = zoom out
 //   E       = zoom in
 //   Shift   = sprint (3x speed)
 //   Ctrl    = precise (0.3x speed)
 //
-// Always-on globally — NOT gated on edit mode. The standard input guard
-// skips when focus is in an INPUT/TEXTAREA/SELECT/contentEditable/Ant
-// input/role=textbox so typing zone names never accidentally pans.
+// v0.1 was always-on WASD which conflicted with every Shift+letter macro
+// the user has — Shift+D = sprint+pan-right AND Delete macro tried to
+// fire at the same time. The Space-modal pattern preserves macros 100%
+// while keeping nav one finger away.
 //
 // Architecture:
-//   - Runs in both TOP + IFRAME; only the frame with the Leaflet map
-//     applies motion (getLeafletMap() returns null in TOP). Keys fire
-//     in whichever frame has focus; mostly users have focus on the map
-//     iframe while panning.
-//   - Pressed keys tracked in a Set. requestAnimationFrame ticks while
-//     any motion key is held → smooth ~60fps pan. Zoom throttled to one
-//     step per 200ms (otherwise OS keydown auto-repeat at ~30Hz would
-//     burn through zoom levels in a quarter-second).
-//   - Modifiers (shift/ctrl) tracked via separate keydown/keyup on
-//     ShiftLeft/Right + ControlLeft/Right codes so a press-and-hold of
-//     Shift mid-pan changes speed without needing a fresh WASD keydown.
-//   - blur event clears all pressed state so a tab-away mid-W doesn't
-//     leave the map panning forever.
+//   - Pressed motion keys tracked in a Set, but only ADDED if spaceHeld
+//     is true. When Space is released, motion is cleared and the tick
+//     stops immediately.
+//   - requestAnimationFrame tick for smooth ~60fps pan. Zoom throttled
+//     to one step per 200ms (OS auto-repeat would otherwise burn through
+//     30 zoom levels per second).
+//   - Modifiers (shift/ctrl) tracked separately via dedicated keydown/
+//     keyup on ShiftLeft/Right + ControlLeft/Right so mid-pan modifier
+//     presses update speed instantly.
+//   - Standard input guard: typing in any INPUT/TEXTAREA/SELECT/
+//     contentEditable/Ant input/role=textbox skips Space too — you can
+//     still hit Space inside the name modal without engaging nav.
+//   - blur clears all state so tab-away doesn't strand a panning map.
 //
-// Leaflet detection: walks .leaflet-container elements for an attached
-// map object. Prefers `__aim_map__` (set by Map Styler via prototype
-// patch), falls back to property scan. Self-contained — doesn't require
-// Map Styler to be installed, but uses its hint when present.
+// Leaflet detection: walks .leaflet-container elements. Prefers
+// __aim_map__ (Map Styler's hint), falls back to property scan. Works
+// without Map Styler installed.
 //
 // Log tag: [AIM NAV]
 
@@ -52,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -75,6 +79,7 @@
     const motion = new Set();        // 'w','a','s','d','q','e'
     let shiftHeld = false;
     let ctrlHeld = false;
+    let spaceHeld = false;           // v0.2: nav only active while Space held
     let rafId = null;
     let lastZoomAt = 0;
 
@@ -199,6 +204,17 @@
         if (!masterEnabled) return;
         if (shouldGate(e)) return;
 
+        // v0.2: Space is the modal trigger. Engage nav mode only while
+        // it's held. While engaged, swallow Space + every WASDQE so they
+        // don't bubble to Percepto / other macros. When Space ISN'T held,
+        // WASDQE returns early and the macros work normally.
+        if (e.code === 'Space') {
+            spaceHeld = true;
+            try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
+            return;
+        }
+        if (!spaceHeld) return;
+
         const mapped = KEY_CODES[e.code];
         if (!mapped) return;
 
@@ -210,14 +226,20 @@
 
         motion.add(mapped);
         startTick();
-        // Stop the browser from also acting on the key (no native browser
-        // shortcut binds these, but prevents Percepto handlers from racing).
         try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
     }
 
     function onKeyUp(e) {
         if (MOD_CODES_SHIFT.has(e.code)) { shiftHeld = false; return; }
         if (MOD_CODES_CTRL.has(e.code))  { ctrlHeld = false;  return; }
+        if (e.code === 'Space') {
+            // Releasing Space disengages nav mode entirely — drop any
+            // held motion keys so they don't keep panning after release.
+            spaceHeld = false;
+            motion.clear();
+            if (rafId != null) { try { cancelAnimationFrame(rafId); } catch (err) {} rafId = null; }
+            return;
+        }
         const mapped = KEY_CODES[e.code];
         if (mapped) motion.delete(mapped);
     }
@@ -228,6 +250,7 @@
         motion.clear();
         shiftHeld = false;
         ctrlHeld = false;
+        spaceHeld = false;
         if (rafId != null) { try { cancelAnimationFrame(rafId); } catch (e) {} rafId = null; }
     }
 
@@ -265,9 +288,9 @@
                 name: 'Map Nav',
                 version: SCRIPT_VERSION,
                 toggles: [
-                    { id: 'master', label: 'Enable Map Nav (WASD pan · Q/E zoom)', type: 'boolean', default: true, master: true },
-                    { id: 'pan',    label: 'WASD pan',                              type: 'boolean', default: true },
-                    { id: 'zoom',   label: 'Q/E zoom (out/in)',                     type: 'boolean', default: true },
+                    { id: 'master', label: 'Enable Map Nav (HOLD SPACE + WASD/QE)', type: 'boolean', default: true, master: true },
+                    { id: 'pan',    label: 'Space+WASD pan',                         type: 'boolean', default: true },
+                    { id: 'zoom',   label: 'Space+Q/E zoom (out/in)',                type: 'boolean', default: true },
                 ],
                 hotkeys: [],
             });
@@ -277,5 +300,5 @@
     setupControlPanel();
     registerWithControlPanel();
 
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Shift sprint · Ctrl precise`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — HOLD SPACE + WASD pan / Q-E zoom · Shift sprint · Ctrl precise`);
 })();
