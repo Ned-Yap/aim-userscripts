@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.59
+// @version      34.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.59';
+    const SCRIPT_VERSION = '34.60';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2835,13 +2835,13 @@
                 if (curIdx < 0) return;
                 const ll = e.target.getLatLng();
                 vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
-                if (isActive) runUpdate();
-            });
-            marker.on('dragend', () => {
-                // Midpoints adjacent to the dragged vertex are now stale —
-                // snap them back to the new midpoints. Cheaper than a full
-                // rebuild and looks instant.
+                // v34.60: reposition midpoints DURING drag, not just on
+                // dragend. Otherwise the adjacent ghost handles appear
+                // "stuck" at the old midpoints and snap into place when
+                // you drop the vertex. Just setLatLng per midhandle —
+                // no marker recreation, cheap enough for 60fps drag.
                 rebuildMidpointPositions();
+                if (isActive) runUpdate();
             });
             marker.on('contextmenu', () => {
                 if (!vertexEditState) return;
