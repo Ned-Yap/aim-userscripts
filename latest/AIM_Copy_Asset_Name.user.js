@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.42
+// @version      3.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.42';
+    const SCRIPT_VERSION = '3.43';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -5458,6 +5458,10 @@
     //   redraws via window.__aim_ai_redrawTable).
     function startInlineSubtypeEdit(td, entity, onCommit) {
         if (!entity || entity.type !== 3) return;
+        // v3.43: starting an edit implicitly means "I'm focused on this
+        // asset" — pan the map to it so the user can see the entity
+        // they're about to relabel without an extra click on the row.
+        try { panToEntity(entity); } catch (e) {}
         const eff = effectiveSubtype(entity);
         const startVal = eff.value;
 
