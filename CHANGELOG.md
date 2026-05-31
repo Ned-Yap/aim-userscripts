@@ -6,6 +6,54 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-30 (continued — `latest/` dev work)
+
+These versions live in `latest/` only and are NOT yet promoted to prod. They form the first complete arc of the **AIM Power Line Editor** — a new dev-only userscript paired with major Map Styler bridge + commit-pipeline improvements. Coworker installs at the repo root are unchanged.
+
+### NEW DEV SCRIPT — `latest/AIM_Power_Line_Editor.user.js`
+
+**Power Line Editor v0.1 → v0.13** — discoverable UX layer on top of Map Styler's existing KML edit infrastructure. Floating ⚡ button at the bottom of `.map-tools` (below the gear). M1 click toggles a small persistent icon strip below it. M2 (right-click) toggles edit mode (bolt glows neon green when on, greyscales when off). Inside the strip:
+- `[+D]` / `[+T]` — add new distribution / transmission line (click map to add vertices, Esc cancels, Save in the green floating toolbar)
+- `[🗑]` — toggle delete-line mode. While armed, M1 on any power line marks the whole line for deletion (instead of entering vertex edit). Crosshair cursor over lines when armed. Session-only, never persists across reloads.
+- `[✓]` — commit all pending changes to GitHub (only appears when dirty)
+- `[✗]` — discard ALL pending (only appears when dirty)
+
+Also registers with AIM Controls as a "Power Lines" section (master toggle + edit mode toggle there too, both kept in sync with ⚡).
+
+**Phase 1 complete**: enter edit on M1 click of any power line, drag vertex handles, Save/Discard, Commit pipeline. Pending changes survive across reloads in GM storage.
+
+**Phase 1.5 complete**: edit saved-but-uncommitted (green) lines. M1 a green line → cyan handles drop, drag → edits write back to `commitOps.added[addedIdx]`. Line stays green/pending until Commit pushes the modified coords to GitHub.
+
+**Phase 2 complete**: delete individual vertices (M2 right-click any handle — refuses if it would leave <2 vertices), add new vertices on existing segments (click any dim midpoint ghost handle — inserts a new vertex at that position), delete entire lines (delete-line mode toggle).
+
+### Map Styler bridge + commit improvements paired with PLE
+
+- **v34.44** — initial PLE bridge over `AIM_POWER_LINE_EDIT` channel + status broadcast.
+- **v34.45** — fix TDZ on `powerLineEditorChannel` (was declared after first use).
+- **v34.46** — fix commit bridge: was calling legacy `commitKMLChanges` (hides only); now calls `commitPendingOps` (modify/delete/added). Also dropped the redundant draw-mode showKMLToast (the floating green draw toolbar already tells the user what to do).
+- **v34.47** — Phase 1.5 backend: `enterAddedVertexEdit(type, addedIdx)` for green pending-add lines. Live-drag feedback via `vertexEditState.currentCoords` check in the render loop.
+- **v34.48** — fix double-fire on PLE bridge. `isActive` was true in BOTH TOP + IFRAME (auto-activation timer); added `getLeafletMap()` check so only the iframe-with-the-map actually fires commands. Previously caused duplicate PUTs → first succeeded, second 409'd.
+- **v34.49** — cache post-PUT SHA + xmlText, skip GET on subsequent commits. Fixes "add → commit → delete-something → commit → 409 Conflict" caused by api.github.com eventual-consistency. Invalidates cache on 409 so a retry does a fresh GET.
+- **v34.50, v34.51** — diagnostic logging for commit pipeline.
+- **v34.52** — added a 5-min trust window for local cache (skip network fetch if just-committed) to avoid stale CDN content overwriting local. **Removed in v34.53.**
+- **v34.53** — switch KML fetches from `raw.githubusercontent.com` (5-min CDN cache, ignores cache-busters) to `api.github.com/repos/.../contents/...` (always fresh, rate-limited to 5000/hr per PAT — way more than our usage). Eliminates staleness entirely; coworker commits visible on any refresh.
+- **v34.54** — prune stale commitOps with out-of-bounds pmIdx on every KML load + every commit attempt. Fixes "delete a line, commit, line still there" caused by a stale pmIdx (from a previous session) referencing a line that no longer exists post-other-deletes. Toast tells user when stale marks were dropped.
+- **v34.55** — Phase 2 backend: right-click a vertex handle in vertex-edit to delete that vertex (refuses if <2 left). New `MARK_LINE_FOR_DELETE` bridge message for PLE's delete-line mode.
+- **v34.56** — fix vertex drag closure bug (`vertexIdx` captured at creation went stale after a delete shifted the array; now uses `handles.indexOf(e.target)`). Also: `discardCommitOps` now cleanly exits any active vertex-edit / draw-mode session so floating toolbars + handles tear down together.
+- **v34.57** — Phase 2 ghost midpoint handles: between every pair of adjacent vertex handles, render a smaller dim cyan ghost. Click → inserts a new vertex at the midpoint. Refactored into shared `rebuildVertexHandles()` helper for enterVertexEdit + enterAddedVertexEdit.
+- **v34.58** — diagnostic logging for PLE click → bridge chain.
+- **v34.59** — make pending-add (green) lines always clickable regardless of edit-mode. Root cause unclear — `editMode` flag should have gated yellow and green the same way but only yellow was clickable. Brute-force fix: green lines never need the gate (they're transient user-drawn content).
+- **v34.60** — midpoint handles follow vertex during drag (was snap-on-drop). `rebuildMidpointPositions()` now fires per drag event instead of just dragend.
+
+### Control Panel v1.25
+- Shifted the dropdown's right anchor from `0` to `35px` so the new PLE icon strip below ⚡ doesn't get covered by the AIM Controls panel.
+
+### latest/ folder housekeeping
+- New `latest/AIM_Power_Line_Editor.user.js` added to the install list in `latest/README.md`.
+- Updated `latest/README.md` to call out that the GitHub PAT is per-`@name` GM storage and needs to be re-pasted into the Latest Control Panel when first installing the `latest/` set.
+
+---
+
 ## 2026-05-30
 
 - **AIM Control Panel v1.24** — **STABILITY FIX: hide-satellite checkbox unresponsive + several inputs need multiple clicks before they accept edits.** Both bugs shared one root cause. When you opened the panel, the broadcast `REQUEST_REGISTRATIONS` made every script in both TOP and IFRAME (~28 contexts) re-register. Each REGISTER triggered a full `renderPanel()` that wiped the panel's innerHTML, plus echoed N `SET_TOGGLE` messages — and each echo bounced back through the cross-context panel triggering ANOTHER renderPanel. The panel was re-rendering dozens of times in the first ~500ms after open. If you clicked a checkbox or input during that burst, the element was destroyed mid-click and the change event was lost. Three coordinated fixes:
