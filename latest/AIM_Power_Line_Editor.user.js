@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -43,7 +43,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.13';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -214,10 +214,26 @@
     let lastClickAt = 0;
 
     function onLineClick(e) {
-        if (!editEnabled || !masterEnabled) return;
+        if (!editEnabled || !masterEnabled) {
+            // Don't spam — only log if user clicked a power-line path
+            if (e.target && e.target.closest && e.target.closest('path[data-buffer-kind^="kml-"]')) {
+                console.log(`${TAG} onLineClick gated: editEnabled=${editEnabled} masterEnabled=${masterEnabled}`);
+            }
+            return;
+        }
         if (e.button !== 0) return;
-        if (status.vertexEditActive) return;
-        if (status.drawModeActive) return;
+        if (status.vertexEditActive) {
+            if (e.target && e.target.closest && e.target.closest('path[data-buffer-kind^="kml-"]')) {
+                console.log(`${TAG} onLineClick gated: vertexEditActive=true (already editing — exit current edit first)`);
+            }
+            return;
+        }
+        if (status.drawModeActive) {
+            if (e.target && e.target.closest && e.target.closest('path[data-buffer-kind^="kml-"]')) {
+                console.log(`${TAG} onLineClick gated: drawModeActive=true`);
+            }
+            return;
+        }
         const t = e.target;
         if (!t || !t.closest) return;
         // v0.10: detect BOTH file-line paths (data-kml-pm-idx) and
@@ -225,7 +241,18 @@
         // the right ENTER_VERTEX_EDIT payload so Map Styler can pick
         // the matching enterVertexEdit / enterAddedVertexEdit handler.
         const path = t.closest('path[data-buffer-kind^="kml-"][data-kml-pm-idx], path[data-buffer-kind^="kml-"][data-kml-added-idx]');
-        if (!path) return;
+        if (!path) {
+            // Only log if click was on a power-line-adjacent path without the right attrs
+            const anyKmlPath = t.closest && t.closest('path[data-buffer-kind^="kml-"]');
+            if (anyKmlPath) {
+                console.log(`${TAG} onLineClick: matched kml path but missing pm-idx/added-idx attrs:`, {
+                    bufferKind: anyKmlPath.getAttribute('data-buffer-kind'),
+                    pmIdx: anyKmlPath.getAttribute('data-kml-pm-idx'),
+                    addedIdx: anyKmlPath.getAttribute('data-kml-added-idx'),
+                });
+            }
+            return;
+        }
         const kind = path.getAttribute('data-buffer-kind') || '';
         const m = kind.match(/^kml-(distro|trans)$/);
         if (!m) return;
@@ -240,17 +267,16 @@
         if (addedIdxAttr !== null) {
             const addedIdx = parseInt(addedIdxAttr, 10);
             if (!Number.isFinite(addedIdx)) return;
-            // v0.12: delete-line-mode doesn't apply to pending-add lines —
-            // those should be discarded via M2 right-click → Discard, not
-            // committed as a delete to GitHub (they're not on GitHub yet).
-            // Always route added lines to vertex-edit.
+            console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT (added) kmlType=${kmlType} addedIdx=${addedIdx}`);
             sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
         } else {
             const pmIdx = parseInt(pmIdxAttr, 10);
             if (!Number.isFinite(pmIdx)) return;
             if (deleteLineMode) {
+                console.log(`${TAG} onLineClick → MARK_LINE_FOR_DELETE kmlType=${kmlType} pmIdx=${pmIdx}`);
                 sendPle({ type: 'MARK_LINE_FOR_DELETE', kmlType, pmIdx });
             } else {
+                console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT kmlType=${kmlType} pmIdx=${pmIdx}`);
                 sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
             }
         }

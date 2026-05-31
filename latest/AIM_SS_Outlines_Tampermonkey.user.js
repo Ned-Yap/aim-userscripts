@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.57
+// @version      34.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.57';
+    const SCRIPT_VERSION = '34.58';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4796,14 +4796,17 @@
             // Only the frame that actually has the Leaflet map should act
             // on commands. v34.48 fix: `isActive` is NOT a sufficient
             // gate — TOP frame auto-activates via the 1.5s safety timer
-            // even though it has no map-pane. Result was both TOP +
-            // IFRAME firing commitPendingOps → double GitHub PUT → first
-            // succeeds, second hits 409 conflict → user sees BOTH a
-            // success and a conflict toast for one click.
-            // The real gate is `getLeafletMap()` returning non-null —
-            // that's only ever true in the iframe where the map lives.
-            if (!isActive) return;
-            if (!getLeafletMap()) return;
+            // even though it has no map-pane. The real gate is
+            // `getLeafletMap()` returning non-null — only true in iframe.
+            if (!isActive) {
+                if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: dropping ${m.type} (isActive=false)`);
+                return;
+            }
+            if (!getLeafletMap()) {
+                if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: dropping ${m.type} (no Leaflet map — likely TOP frame)`);
+                return;
+            }
+            if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: handling ${m.type}`, m);
             try {
                 if (m.type === 'ENTER_VERTEX_EDIT' && m.kmlType) {
                     // v34.47: addedIdx for pending-add (green) lines,
