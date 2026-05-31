@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.51
+// @version      34.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.51';
+    const SCRIPT_VERSION = '34.52';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1207,6 +1207,15 @@
         KML_TYPES.forEach(type => fetchOneKML(siteID, type, force));
     }
 
+    // v34.52: GitHub Raw CDN cache TTL is ~5 minutes. If we just
+    // committed a change, our local GM cache has the just-committed
+    // state but raw.githubusercontent.com may still serve the
+    // pre-commit version. The post-commit network fetch would then
+    // OVERWRITE our local state with stale content, undoing the user's
+    // commit on screen until the CDN catches up. Skip the network
+    // fetch when GM cache is within this window — trust local.
+    const CDN_FRESHNESS_WINDOW_MS = 5 * 60 * 1000;
+
     function fetchOneKML(siteID, type, force) {
         const key = kmlKey(siteID, type);
         if (kmlFetching.has(key)) return;
@@ -1214,12 +1223,28 @@
         if (kmlFeatures[key] && !force) return;
 
         // Try cache first so we render immediately while the network fetch runs.
+        let cachedAt = 0;
         if (!kmlFeatures[key]) {
             const cached = gmGet(KML_CACHE_PREFIX + key, null);
             if (cached && Array.isArray(cached.features)) {
                 kmlFeatures[key] = cached.features;
                 if (cached.path) kmlResolvedPath[key] = cached.path;
+                cachedAt = Number(cached.at) || 0;
                 console.log(`${TAG} KML ${key} loaded from cache (${cached.features.length} features, path: ${cached.path || '?'})`);
+            }
+        }
+
+        // v34.52: if local cache was written within the CDN freshness
+        // window AND caller didn't force, skip the network fetch
+        // entirely. Prevents post-commit refresh from overwriting our
+        // just-committed local state with stale CDN content. Only skips
+        // when we have cached features AND a fresh `at` timestamp; if
+        // either's missing, we fall through to fetch as normal.
+        if (!force && kmlFeatures[key] && cachedAt > 0) {
+            const ageMs = Date.now() - cachedAt;
+            if (ageMs < CDN_FRESHNESS_WINDOW_MS) {
+                console.log(`${TAG} KML ${key}: skipping network fetch — local cache age ${Math.round(ageMs / 1000)}s < ${CDN_FRESHNESS_WINDOW_MS / 1000}s (avoids stale CDN overwrite)`);
+                return;
             }
         }
 
