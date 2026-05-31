@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.45
+// @version      3.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.45';
+    const SCRIPT_VERSION = '3.46';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1289,7 +1289,28 @@
             // Also focus the input so the user can immediately keyboard-arrow
             // through results if they want.
             try { input.focus(); } catch (e) {}
-            showToast(`Filtered Map Entities to "${name}" — click the result to open`);
+            // v3.46: after the filter settles, auto-click the matching
+            // result row so the user lands directly in the entity editor
+            // instead of having to do an extra M1 on the result.
+            const inputDoc = input.ownerDocument || document;
+            const matchLower = name.trim().toLowerCase();
+            setTimeout(() => {
+                let target = null;
+                const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+                // Prefer an exact name match. Fall back to "the only visible row"
+                // after the filter (if there's just one, it's our target).
+                for (const item of items) {
+                    const txt = (item.textContent || '').trim().toLowerCase();
+                    if (txt.includes(matchLower)) { target = item; break; }
+                }
+                if (!target && items.length === 1) target = items[0];
+                if (target) {
+                    try { clickElDispatch(target, inputDoc); } catch (e) {}
+                    showToast(`Opened ${name}`);
+                } else {
+                    showToast(`Filtered Map Entities to "${name}" — click the result to open`);
+                }
+            }, 300);
         } catch (e) {
             console.warn(`${TAG} sidebar paste failed, falling back to clipboard:`, e);
             copyToClipboard(name, `Copied "${name}" — paste in Map Entities sidebar`);
