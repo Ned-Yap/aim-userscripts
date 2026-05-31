@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.47
+// @version      3.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.47';
+    const SCRIPT_VERSION = '3.48';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1437,20 +1437,69 @@
         if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
     }
 
+    // v3.48: scroll the virtualized sidebar list to top so subsequent
+    // section walks start from the first header. Walk for the inner
+    // scrollable container — the .map-entities__autosizer wraps the
+    // virtualized list and is the actual scroll surface in Ant.
+    function scrollSidebarToTop(doc) {
+        if (!doc) return;
+        const candidates = doc.querySelectorAll('.map-entities__list, .map-entities__autosizer, .map-entities__virtualized-list');
+        candidates.forEach(el => { try { el.scrollTop = 0; } catch (e) {} });
+    }
+
+    // v3.48: walk + act on sidebar sections REPEATEDLY until none satisfy
+    // the predicate (i.e. nothing left to do). The sidebar is virtualized:
+    // when sections are expanded with many children, only the top 1-2
+    // section headers exist in the DOM. After unchecking + collapsing
+    // those, the remaining sections come into view and we can act on
+    // them. wantState='off' means uncheck + collapse; 'on' means check
+    // (don't touch collapse state on the way back).
+    async function walkSidebarSections(doc, wantState, maxPasses = 8) {
+        let pass = 0;
+        while (pass < maxPasses) {
+            scrollSidebarToTop(doc);
+            await sleep(60);
+            const sections = getSidebarSections(doc);
+            if (sections.length === 0) {
+                console.log(`${TAG} walkSidebarSections pass ${pass}: 0 sections in DOM — bailing`);
+                break;
+            }
+            let didWork = false;
+            const titles = [];
+            for (const s of sections) {
+                titles.push(s.title);
+                if (wantState === 'off') {
+                    if (s.checkbox && s.checkbox.checked) {
+                        try { s.checkbox.click(); didWork = true; } catch (e) {}
+                    }
+                    if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                        try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    }
+                } else if (wantState === 'on') {
+                    if (s.checkbox && !s.checkbox.checked) {
+                        try { s.checkbox.click(); didWork = true; } catch (e) {}
+                    }
+                }
+                await sleep(60);
+            }
+            console.log(`${TAG} walkSidebarSections pass ${pass}: [${titles.join(', ')}] didWork=${didWork}`);
+            if (!didWork) break;
+            pass++;
+            // Wait for the virtualized list to re-layout (sections below
+            // shift up into view as the ones above collapse).
+            await sleep(200);
+        }
+    }
+
     // M2 solo: uncheck + collapse every section, then check just this one.
     async function soloEntityVisibility(entity, allEntityIds) {
         const doc = getSidebarDoc();
         if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
-        const sections = getSidebarSections(doc);
-        if (sections.length === 0) { showToast('No sidebar sections found', 'rgba(255,96,96,0.55)'); return; }
-        // 1. Uncheck + collapse each section
-        for (const s of sections) {
-            if (s.checkbox && s.checkbox.checked) { try { s.checkbox.click(); } catch (e) {} }
-            if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
-                try { s.toggleBtn.click(); } catch (e) {}
-            }
-            await sleep(40);
-        }
+        // 1. Uncheck + collapse all sections (loops until stable to
+        // handle the virtualized list — top-most sections get acted on
+        // first, then their children disappear and the next sections
+        // come into view).
+        await walkSidebarSections(doc, 'off');
         // 2. Search + check the target
         pasteSidebarSearch(doc, entity.name);
         await sleep(350);
@@ -1472,12 +1521,11 @@
     async function unsoloAllVisibility() {
         const doc = getSidebarDoc();
         if (!doc) { showToast('Sidebar not found', 'rgba(255,96,96,0.55)'); return; }
-        const sections = getSidebarSections(doc);
-        for (const s of sections) {
-            if (s.checkbox && !s.checkbox.checked) { try { s.checkbox.click(); } catch (e) {} }
-            await sleep(40);
-        }
+        // Clear search first so the section headers are all in the
+        // virtualized list (the search filter hides them otherwise).
         pasteSidebarSearch(doc, '');
+        await sleep(200);
+        await walkSidebarSections(doc, 'on');
         sumPanelState.visibility = new Map();
         showToast('All entities visible');
         if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
