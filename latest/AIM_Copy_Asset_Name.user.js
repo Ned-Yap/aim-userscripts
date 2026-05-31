@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.51
+// @version      3.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.51';
+    const SCRIPT_VERSION = '3.52';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -5352,7 +5352,15 @@
             redrawTable();
         };
         function redrawTable() {
+            // v3.52: preserve scroll position across redraws. Without
+            // this, every inline-edit commit wiped tableWrap.scrollTop
+            // and dumped the user at the top of the table — exactly
+            // what they complained about ruining the Tab-down rhythm.
+            const prevScrollTop = tableWrap.scrollTop;
             const rows = filterAndSortRows(allRows, sumPanelState);
+            // v3.52: expose current visible rows in display order so
+            // Tab-navigation in inline edits can find next/prev row.
+            window.__aim_ai_visibleRows = rows;
             tableWrap.innerHTML = '';
             const table = document.createElement('table');
             table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:auto';
@@ -5456,6 +5464,10 @@
             const tbody = document.createElement('tbody');
             rows.forEach((r) => {
                 const tr = document.createElement('tr');
+                // v3.52: data-row-key enables Tab-navigation between
+                // inline edits — startInlineSubtypeEdit/NameEdit finds
+                // the next row's cell via querySelector after commit.
+                tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
                 tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
                 tr.onmouseleave = () => { tr.style.background = 'transparent'; };
@@ -5520,6 +5532,7 @@
                     const td = document.createElement('td');
                     td.style.cursor = 'pointer';
                     td.onclick = onRowClick;
+                    td.setAttribute('data-col-key', col.key);
                     if (col.key === 'visibility') {
                         // v3.47: per-entity eye icon. M1 toggles, M2 solos.
                         // Only applies to entity rows — segments inherit from
@@ -5570,8 +5583,10 @@
                         const isEditable = !r._isSegment && r.entity;
                         const nameColor = r._isSegment ? '#a8c8d2' : '#e6e6e6';
                         const eff = isEditable ? effectiveName(r.entity) : { value: r.name || '', pending: false };
+                        // v3.52: nowrap so the pending overlay doesn't double row height.
+                        const nameNowrap = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px';
                         if (eff.pending && eff.oldValue) {
-                            td.style.cssText = `padding:5px 8px;cursor:pointer;border-bottom:1px dotted rgba(122,223,230,0.30)`;
+                            td.style.cssText = `padding:5px 8px;cursor:pointer;border-bottom:1px dotted rgba(122,223,230,0.30);${nameNowrap}`;
                             const oldSpan = document.createElement('span');
                             oldSpan.textContent = eff.oldValue;
                             oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px';
@@ -5582,7 +5597,7 @@
                             td.appendChild(newSpan);
                             td.title = `Was "${eff.oldValue}", will be "${eff.value}". M1: re-edit · M2: copy original.`;
                         } else {
-                            td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer${isEditable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                            td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer${isEditable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''};${nameNowrap}`;
                             td.textContent = eff.value || '(unnamed)';
                             td.title = isEditable
                                 ? 'M1: edit name (queues) · M2: copy to clipboard'
@@ -5624,10 +5639,13 @@
                     } else if (col.key === 'subtype') {
                         // v3.41: asset subtype cells are inline-editable.
                         // Non-asset rows (FP/FFZ/NFZ/markers) stay plain text.
+                        // v3.52: force single-line via nowrap+ellipsis so the
+                        // pending overlay (old strikethrough + new) doesn't
+                        // double row height and ruin the Tab-down rhythm.
                         const isAsset = r.type === 3 && r.entity;
                         const eff = isAsset ? effectiveSubtype(r.entity) : { value: r.subtype || '', pending: false };
                         const baseColor = eff.pending ? '#ffd54f' : '#bbb';
-                        td.style.cssText = `padding:5px 8px;color:${baseColor};font-size:11px;cursor:pointer${isAsset ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                        td.style.cssText = `padding:5px 8px;color:${baseColor};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px${isAsset ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
                         if (eff.pending && eff.oldValue) {
                             const oldSpan = document.createElement('span');
                             oldSpan.textContent = eff.oldValue;
@@ -5790,6 +5808,11 @@
             });
             table.appendChild(tbody);
             tableWrap.appendChild(table);
+            // v3.52: restore the scroll position we saved at the top of
+            // redrawTable. Inline-edit commits trigger a full redraw;
+            // keeping the user in the same vertical position is what
+            // makes Tab-to-next-row feel like a continuous edit flow.
+            try { tableWrap.scrollTop = prevScrollTop; } catch (e) {}
 
             countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
             refreshQueueUi();
@@ -6018,6 +6041,31 @@
     //
     // td: the cell element to swap in the input
     // entity: the asset entity (must be type === 3)
+    // v3.52: Tab navigation in inline edits. Given the currently-edited
+    // row's _rowKey, find the next/prev row in display order that has an
+    // editable cell for this column. After a commit + table redraw,
+    // openInlineForRow opens an inline editor on the resolved cell.
+    //
+    // Filter: subtype edits only walk to asset rows (type === 3). Name
+    // edits walk to any non-segment entity row.
+    function findNextRowForCol(currentRowKey, direction, filter) {
+        const rows = window.__aim_ai_visibleRows || [];
+        const idx = rows.findIndex(r => r._rowKey === currentRowKey);
+        if (idx < 0) return null;
+        for (let i = 1; i <= rows.length; i++) {
+            const ci = idx + i * direction;
+            if (ci < 0 || ci >= rows.length) return null; // don't wrap
+            const cand = rows[ci];
+            if (filter(cand)) return cand;
+        }
+        return null;
+    }
+    // Finds the cell in the rendered table for a given rowKey + colKey.
+    // Called inside requestAnimationFrame after a commit-triggered redraw.
+    function findCellAfterRedraw(rowKey, colKey) {
+        return document.querySelector(`tr[data-row-key="${CSS.escape(rowKey)}"] td[data-col-key="${colKey}"]`);
+    }
+
     // onCommit: optional callback fired AFTER successful queue (used
     //   for the popup path so it can close itself; the SUM table path
     //   redraws via window.__aim_ai_redrawTable).
@@ -6091,7 +6139,24 @@
         };
         input.onblur = commit;
         input.onkeydown = (e) => {
-            if (e.key === 'Enter' || e.key === 'Tab') {
+            if (e.key === 'Tab') {
+                // v3.52: Tab → next asset row's Subtype cell; Shift+Tab → prev.
+                // Commits current edit + opens edit on the next cell so the
+                // user never leaves the keyboard.
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                const next = findNextRowForCol(String(entity.id), dir, r => r.type === 3 && !r._isSegment);
+                input.blur(); // triggers commit + redraw
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, 'subtype');
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineSubtypeEdit(nextTd, next.entity);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             } else if (e.key === 'Escape') {
@@ -6149,7 +6214,22 @@
         };
         input.onblur = commit;
         input.onkeydown = (e) => {
-            if (e.key === 'Enter' || e.key === 'Tab') {
+            if (e.key === 'Tab') {
+                // v3.52: Tab → next non-segment entity row's Name cell.
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                const next = findNextRowForCol(String(entity.id), dir, r => !r._isSegment && r.entity);
+                input.blur();
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, 'name');
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineNameEdit(nextTd, next.entity);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             } else if (e.key === 'Escape') {
