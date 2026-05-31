@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.49
+// @version      3.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.49';
+    const SCRIPT_VERSION = '3.50';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1887,6 +1887,48 @@
         return true;
     }
 
+    // v3.50: name editing for all non-segment entity rows.
+    function getPendingName(entityId) {
+        return getPendingEdit(entityId, null, 'name');
+    }
+    function queueNameEdit(entity, newRaw) {
+        if (!entity) return false;
+        const newValue = String(newRaw || '').trim();
+        if (!newValue) return false;
+        const current = entity.name || '';
+        if (newValue === current) {
+            if (getPendingName(entity.id)) {
+                discardPendingEdit(entity.id, null, 'name');
+                return false;
+            }
+            return false;
+        }
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: entity.type === 16,
+            isAsset: entity.type === 3,
+            field: 'name',
+            oldValue: current,
+            newValue,
+            // For Apply pipeline lookup + display. Mirrors fpName/segmentName
+            // shape from FP/FFZ edits — uses the CURRENT name so sidebar
+            // lookups succeed (Percepto's data hasn't been renamed yet).
+            fpName: current,
+            entityName: current,
+            segmentName: current,
+        });
+        return true;
+    }
+    function effectiveName(entity) {
+        const orig = (entity && entity.name) || '';
+        if (!entity) return { value: orig, pending: false };
+        const p = getPendingName(entity.id);
+        if (!p) return { value: orig, pending: false };
+        return { value: p.newValue, pending: true, oldValue: orig };
+    }
+
     // Returns the EFFECTIVE subtype value for an entity, honoring any
     // pending edit. { value, pending, isNew } — pending=true means a
     // queued subtype edit overrides the original; isNew=true means the
@@ -2487,6 +2529,14 @@
                 }
                 return;
             }
+            // v3.50: name path is also string-valued.
+            if (e.field === 'name') {
+                const cur = ent.name || '';
+                if (cur !== e.oldValue) {
+                    result.warnings.push(`"${e.oldValue}" name: queued rename to "${e.newValue}" but current name is "${cur}" (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
             let currentM = null;
             if (e.isFfz) {
                 if (ent.restrictions) {
@@ -2578,7 +2628,7 @@
                     reason: outcome.reason || '',
                     verified: outcome.verified === true,
                     durationMs,
-                    edits: g.edits.map(e => e.field === 'subtype' ? ({
+                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name') ? ({
                         field: e.field,
                         oldValue: e.oldValue,
                         newValue: e.newValue,
@@ -2688,15 +2738,19 @@
     async function applyAssetSubtypeChange(group, opts) {
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
-        const edit = group.edits[0];
-        if (!edit || edit.field !== 'subtype') {
-            return { ok: false, reason: 'no subtype edit in group', appliedCount: 0 };
+        // v3.50: support both 'subtype' and 'name' edits on the same asset
+        // in one editor session.
+        const subtypeEdit = group.edits.find(e => e.field === 'subtype');
+        const nameEdit = group.edits.find(e => e.field === 'name');
+        if (!subtypeEdit && !nameEdit) {
+            return { ok: false, reason: 'no actionable edits in group', appliedCount: 0 };
         }
-        const targetSubtype = String(edit.newValue || '').trim();
-        if (!targetSubtype) {
-            return { ok: false, reason: 'empty target subtype', appliedCount: 0 };
-        }
-        console.log(`${TAG} apply: starting asset "${label}" subtype → "${targetSubtype}"${edit.isNewSubtype ? ' (NEW type)' : ''}${dryRun ? ' [DRY RUN]' : ''}`);
+        const targetSubtype = subtypeEdit ? String(subtypeEdit.newValue || '').trim() : null;
+        const targetName = nameEdit ? String(nameEdit.newValue || '').trim() : null;
+        const fields = [];
+        if (targetName) fields.push(`name → "${targetName}"`);
+        if (targetSubtype) fields.push(`subtype → "${targetSubtype}"${subtypeEdit.isNewSubtype ? ' (NEW)' : ''}`);
+        console.log(`${TAG} apply: starting asset "${label}" ${fields.join(', ')}${dryRun ? ' [DRY RUN]' : ''}`);
 
         await closeEditor();
         const hit = await findAndClickSidebarItem(label);
@@ -2726,6 +2780,50 @@
             return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
         }
         const panelDoc = finalEditor.doc;
+        let appliedCount = 0;
+
+        // v3.50: set the entity name first if it's pending. Doing this
+        // before subtype keeps the same editor session for both edits.
+        if (targetName) {
+            const nameInput = panelDoc.getElementById('upsert-entity-form-name');
+            if (nameInput) {
+                console.log(`${TAG} apply: ${label} — setting name → "${targetName}"`);
+                setReactInputValue(nameInput, targetName);
+                await sleep(180);
+                appliedCount++;
+            } else {
+                applyState.errors.push({ entityName: label, reason: 'name input not found (#upsert-entity-form-name)' });
+                // Don't bail — subtype may still succeed.
+            }
+        }
+
+        // No subtype edit → skip the dropdown driving + go straight to save.
+        if (!targetSubtype) {
+            if (appliedCount === 0) {
+                applyState.errors.push({ entityName: label, reason: 'no edits applied (name input missing?)' });
+                await closeEditor();
+                return { ok: false, reason: 'no edits applied', appliedCount: 0 };
+            }
+            if (dryRun) {
+                await sleep(400);
+                await closeEditor();
+                return { ok: true, reason: '[DRY RUN] name set + cancelled', appliedCount, verified: false };
+            }
+            await sleep(250);
+            const saved = await saveCurrentEditor();
+            const valErr = findValidationError();
+            if (valErr) {
+                applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
+                await closeEditor();
+                return { ok: false, reason: `validation: ${valErr}`, appliedCount };
+            }
+            if (!saved) {
+                applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
+                return { ok: false, reason: 'save timed out', appliedCount };
+            }
+            console.log(`${TAG} apply: ${label} — name saved`);
+            return { ok: true, reason: 'saved', appliedCount, verified: false };
+        }
 
         // Find the Type combobox. ID 'asset-form-type' is the input
         // inside Percepto's Ant Select trigger.
@@ -2733,7 +2831,7 @@
         if (!combo) {
             applyState.errors.push({ entityName: label, reason: 'Type input not found (#asset-form-type)' });
             await closeEditor();
-            return { ok: false, reason: 'Type input not found', appliedCount: 0 };
+            return { ok: false, reason: 'Type input not found', appliedCount };
         }
 
         // v3.42: PRIMARY PATH — React fiber walk. Find the Ant Select's
@@ -2797,7 +2895,7 @@
             if (!dd) {
                 applyState.errors.push({ entityName: label, reason: 'Type dropdown did not open (DOM fallback)' });
                 await closeEditor();
-                return { ok: false, reason: 'Type dropdown did not open', appliedCount: 0 };
+                return { ok: false, reason: 'Type dropdown did not open', appliedCount };
             }
             await sleep(150);
             const findOption = (root) => {
@@ -2816,7 +2914,7 @@
                 if (!newInput || !addBtn) {
                     applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" not found and no creatable footer` });
                     await closeEditor();
-                    return { ok: false, reason: 'no creatable footer', appliedCount: 0 };
+                    return { ok: false, reason: 'no creatable footer', appliedCount };
                 }
                 setReactInputValue(newInput, targetSubtype);
                 await sleep(200);
@@ -2824,14 +2922,14 @@
                 if (addBtn.disabled) {
                     applyState.errors.push({ entityName: label, reason: 'Add button never enabled' });
                     await closeEditor();
-                    return { ok: false, reason: 'Add button disabled', appliedCount: 0 };
+                    return { ok: false, reason: 'Add button disabled', appliedCount };
                 }
                 clickElDispatch(addBtn, dd.doc);
                 optEl = await waitForCondition(() => findOption(dd.dropdown), 4000, 100);
                 if (!optEl) {
                     applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" never appeared after Add` });
                     await closeEditor();
-                    return { ok: false, reason: 'new option never appeared', appliedCount: 0 };
+                    return { ok: false, reason: 'new option never appeared', appliedCount };
                 }
                 await sleep(100);
             }
@@ -2852,13 +2950,14 @@
         if (selectedText && selectedText !== targetSubtype) {
             applyState.errors.push({ entityName: label, reason: `selection-item reads "${selectedText}" not "${targetSubtype}" — onChange may not have stuck` });
             await closeEditor();
-            return { ok: false, reason: `value not applied (shows "${selectedText}")`, appliedCount: 0 };
+            return { ok: false, reason: `value not applied (shows "${selectedText}")`, appliedCount };
         }
+        appliedCount++;
 
         if (dryRun) {
             await sleep(500);
             await closeEditor();
-            return { ok: true, reason: '[DRY RUN] subtype set + cancelled', appliedCount: 1, verified: false };
+            return { ok: true, reason: '[DRY RUN] edits applied + cancelled', appliedCount, verified: false };
         }
 
         // Save.
@@ -2868,14 +2967,14 @@
         if (valErr) {
             applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
             await closeEditor();
-            return { ok: false, reason: `validation: ${valErr}`, appliedCount: 1 };
+            return { ok: false, reason: `validation: ${valErr}`, appliedCount };
         }
         if (!saved) {
             applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
-            return { ok: false, reason: 'save timed out', appliedCount: 1 };
+            return { ok: false, reason: 'save timed out', appliedCount };
         }
-        console.log(`${TAG} apply: ${label} — subtype saved`);
-        return { ok: true, reason: 'saved', appliedCount: 1, verified: false };
+        console.log(`${TAG} apply: ${label} — saved (${appliedCount} edit${appliedCount === 1 ? '' : 's'})`);
+        return { ok: true, reason: 'saved', appliedCount, verified: false };
     }
 
     async function applyOneEntity(group, opts) {
@@ -2931,14 +3030,35 @@
             return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — editor open, name="${openedName}"`);
-        // 4. Find the inputs.
-        const { minInputs, maxInputs } = findEditorInputs(finalEditor.doc);
-        console.log(`${TAG} apply: ${label} — found ${minInputs.length} Min input(s), ${maxInputs.length} Max input(s)`);
-        if (minInputs.length === 0 && maxInputs.length === 0) {
-            applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
-            console.warn(`${TAG} apply: no inputs found for ${label}`);
-            await closeEditor();
-            return { ok: false, reason: 'no Min/Max inputs found', appliedCount: 0 };
+        // v3.50: split edits by field. Name + altitudes can coexist; for
+        // NFZ/GM there may only be a name edit (no Min/Max inputs exist).
+        const altEdits = group.edits.filter(e => e.field === 'min_alt' || e.field === 'max_alt');
+        const nameEdit = group.edits.find(e => e.field === 'name');
+        let appliedCount = 0;
+        // 4a. Apply name edit if present.
+        if (nameEdit) {
+            const nameInput = finalEditor.doc.getElementById('upsert-entity-form-name');
+            if (nameInput) {
+                console.log(`${TAG} apply: ${label} — setting name → "${nameEdit.newValue}"`);
+                setReactInputValue(nameInput, nameEdit.newValue);
+                await sleep(180);
+                appliedCount++;
+            } else {
+                applyState.errors.push({ entityName: label, reason: 'name input not found (#upsert-entity-form-name)' });
+                // Continue — altitudes may still succeed.
+            }
+        }
+        // 4b. Find the alt inputs (only needed if there are alt edits).
+        let minInputs = [], maxInputs = [];
+        if (altEdits.length > 0) {
+            ({ minInputs, maxInputs } = findEditorInputs(finalEditor.doc));
+            console.log(`${TAG} apply: ${label} — found ${minInputs.length} Min input(s), ${maxInputs.length} Max input(s)`);
+            if (minInputs.length === 0 && maxInputs.length === 0) {
+                applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
+                console.warn(`${TAG} apply: no inputs found for ${label}`);
+                await closeEditor();
+                return { ok: false, reason: 'no Min/Max inputs found', appliedCount };
+            }
         }
         // 5. Set values. For FP segment edits, index = arc order in
         //    the buildSummaryRows pass. We re-resolve from the
@@ -2948,9 +3068,8 @@
             const bucket = siteID ? mapObjectsBySite[siteID] : null;
             return bucket ? (bucket.entities || []).find(en => en.id === group.entityId) : null;
         })();
-        // Convert each edit into an input mutation.
-        let appliedCount = 0;
-        for (const ed of group.edits) {
+        // Convert each alt edit into an input mutation.
+        for (const ed of altEdits) {
             const valFt = Math.round(ed.newValueM * 3.28084); // Percepto's inputs are feet
             const isMin = ed.field === 'min_alt';
             // FFZ: single Min/Max inputs (use index 0).
@@ -2983,9 +3102,9 @@
             await sleep(80);
         }
         if (appliedCount === 0) {
-            applyState.errors.push({ entityName: label, reason: 'no inputs matched any edit' });
+            applyState.errors.push({ entityName: label, reason: 'no edits applied (no name input + no matching alt inputs)' });
             await closeEditor();
-            return { ok: false, reason: 'no inputs matched any edit', appliedCount: 0 };
+            return { ok: false, reason: 'no edits applied', appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — set ${appliedCount} input value(s)${dryRun ? ' [DRY RUN — skipping save]' : ', saving…'}`);
         // DRY RUN — don't click save. Cancel out instead so the
@@ -5019,6 +5138,20 @@
                 return aRank - bRank;
             });
             sorted.forEach(e => {
+                // v3.50: name is a string field — Old/New hold the names; Δ empty.
+                if (e.field === 'name') {
+                    const typeLabel = e.isAsset ? 'Asset' : e.isFfz ? 'FFZ' : 'Entity';
+                    lines.push([
+                        typeLabel,
+                        e.oldValue || '',
+                        '(entity)',
+                        'Name',
+                        e.oldValue || '',
+                        e.newValue || '',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
                 // v3.41: subtype is a string field, not numeric. The Old/New
                 // columns hold the raw subtype text; Δ is empty.
                 if (e.isAsset && e.field === 'subtype') {
@@ -5367,11 +5500,46 @@
                         td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
                         td.textContent = r.typeShort;
                     } else if (col.key === 'name') {
-                        // Segment names get the parent FP color tinted
-                        // slightly dimmer so the eye groups them visually.
+                        // v3.50: Name cell is click-to-EDIT (queues rename)
+                        // for non-segment entity rows. M2 always copies the
+                        // current name to clipboard.
+                        // Segment rows stay click-to-pan/inspect (row default).
+                        const isEditable = !r._isSegment && r.entity;
                         const nameColor = r._isSegment ? '#a8c8d2' : '#e6e6e6';
-                        td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer`;
-                        td.textContent = r.name || '(unnamed)';
+                        const eff = isEditable ? effectiveName(r.entity) : { value: r.name || '', pending: false };
+                        if (eff.pending && eff.oldValue) {
+                            td.style.cssText = `padding:5px 8px;cursor:pointer;border-bottom:1px dotted rgba(122,223,230,0.30)`;
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = eff.oldValue;
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = eff.value;
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `Was "${eff.oldValue}", will be "${eff.value}". M1: re-edit · M2: copy original.`;
+                        } else {
+                            td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer${isEditable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                            td.textContent = eff.value || '(unnamed)';
+                            td.title = isEditable
+                                ? 'M1: edit name (queues) · M2: copy to clipboard'
+                                : 'M2: copy to clipboard';
+                        }
+                        if (isEditable) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineNameEdit(td, r.entity);
+                            };
+                        }
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            // Copy the EFFECTIVE (pending if any, else current)
+                            // name. Matches the subtype cell's pattern.
+                            const txt = (eff && eff.value) || r.name || '';
+                            if (!txt) return;
+                            copyToClipboard(txt, `Copied "${txt}"`);
+                        };
                     } else if (col.key === 'segId') {
                         // FP segment rows show the arc's ID from Percepto's
                         // JSON. NOT stable across saves — Percepto
@@ -5871,6 +6039,61 @@
                 if (typeof onCommit === 'function') {
                     try { onCommit(false); } catch (e2) {}
                 }
+            }
+        };
+    }
+
+    // v3.50: inline editor for entity name. Plain text input (no datalist
+    // — names are unique-by-intent, no autocomplete needed). Same click-
+    // propagation guards as subtype edit. Auto-pans to entity on edit.
+    function startInlineNameEdit(td, entity, onCommit) {
+        if (!entity) return;
+        try { panToEntity(entity); } catch (e) {}
+        const eff = effectiveName(entity);
+        const startVal = eff.value || '';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = startVal;
+        input.title = 'Enter new name. Enter = queue · Esc = cancel.';
+        input.style.cssText = 'width:220px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:12px';
+        input.onmousedown = (e) => e.stopPropagation();
+        input.onclick = (e) => e.stopPropagation();
+
+        td.innerHTML = '';
+        td.appendChild(input);
+        input.focus();
+        input.select();
+
+        let cancelled = false;
+        const commit = () => {
+            if (cancelled) return;
+            const newVal = String(input.value || '').trim();
+            if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            const queued = queueNameEdit(entity, newVal);
+            if (queued) {
+                showToast(`Queued: rename "${entity.name}" → "${newVal}"`, 'rgba(255,213,79,0.7)');
+            } else if (newVal === (entity.name || '')) {
+                if (eff.pending) showToast('Reverted to original name');
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            if (typeof onCommit === 'function') {
+                try { onCommit(queued); } catch (e) {}
+            }
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelled = true;
+                input.onblur = null;
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
             }
         };
     }
