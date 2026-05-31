@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.41
+// @version      3.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.41';
+    const SCRIPT_VERSION = '3.42';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2390,14 +2390,37 @@
     // Process one entity group: open editor, set all values, save.
     // Returns true if save succeeded, false otherwise (with the
     // failure recorded in applyState.errors).
-    // v3.41: Apply automation for asset subtype changes. Drives Percepto's
-    // Ant Select component (Type field on the asset edit panel):
-    //   1. Open the Type dropdown by clicking the combobox
-    //   2. If the target value already exists → click that option
-    //      If not → type into "Enter new type" + click Add + click the
-    //      newly-appeared option
-    //   3. Wait for aria-selected="true" / dropdown to close
-    //   4. Save the editor
+    // v3.42: walk React fiber from an element looking for a props
+    // object that matches the predicate. Stops at first match. Returns
+    // the props object (so caller can grab the handler). Same primitive
+    // as feedback-react-fiber-walk-for-ant-actions — fiber walks beat
+    // DOM-driven Ant dropdown opens (which corrupt hover state and have
+    // bad mousedown timing).
+    function findReactPropsByPredicate(el, predicate, maxDepth = 30) {
+        if (!el) return null;
+        const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (!fiberKey) return null;
+        let fiber = el[fiberKey];
+        let depth = 0;
+        while (fiber && depth < maxDepth) {
+            const props = fiber.memoizedProps || (fiber.stateNode && fiber.stateNode.props);
+            if (props && predicate(props)) return props;
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
+    // v3.42: Apply automation for asset subtype changes via React fiber.
+    // Instead of clicking the Ant Select dropdown open (which had click-
+    // timing + portal-mount issues), walk the fiber from #asset-form-type
+    // to find the Ant Select's onChange handler and call it directly.
+    // Works for both existing and new subtypes — Ant Form accepts any
+    // value via onChange; Percepto's save persists it regardless of
+    // whether it was in the options list.
+    //
+    // If fiber walk fails (Percepto markup changed), falls back to DOM-
+    // driving the dropdown (the v3.41 path, less reliable).
     //
     // Only the first edit in the group is applied — subtype is entity-
     // level (one value per asset). Multiple queued subtype edits on the
@@ -2453,103 +2476,130 @@
             await closeEditor();
             return { ok: false, reason: 'Type input not found', appliedCount: 0 };
         }
-        // Click the .ant-select trigger (parent of the input) to open
-        // the dropdown.
-        const selectTrigger = combo.closest('.ant-select') || combo;
-        clickElDispatch(selectTrigger, panelDoc);
-        // Some Ant Select versions need a focus before the dropdown
-        // mounts — explicitly focus then click again as a safety.
-        try { combo.focus(); } catch (e) {}
 
-        // Wait for the dropdown to render. The popup mounts on document.body
-        // (or a portal root), NOT inside .upsert-entity. Scan both the
-        // panel doc AND the parent doc for `.pr-creatable-dropdown`.
-        const findDropdown = () => {
-            const docs = [panelDoc, document];
-            try { if (panelDoc.defaultView && panelDoc.defaultView.top) docs.push(panelDoc.defaultView.top.document); } catch (e) {}
-            for (const d of docs) {
-                if (!d) continue;
-                // Must be a VISIBLE dropdown (Ant adds .ant-select-dropdown-hidden when closed)
-                const list = d.querySelector('.pr-creatable-dropdown, .ant-select-dropdown:not(.ant-select-dropdown-hidden) .rc-virtual-list');
-                if (list) {
-                    // Return the closest creatable-dropdown wrapper so we
-                    // get the footer too. If none, walk up to a common
-                    // dropdown root.
-                    const cd = list.closest('.pr-creatable-dropdown') || list.closest('.ant-select-dropdown') || list;
-                    return { dropdown: cd, doc: d };
-                }
+        // v3.42: PRIMARY PATH — React fiber walk. Find the Ant Select's
+        // onChange handler and call it directly. No dropdown opening, no
+        // mousedown timing games, no portal scanning. The Ant Form Item
+        // (parent component) picks up the change via its onChange context
+        // and persists when the user (us) clicks Save.
+        const selectProps = findReactPropsByPredicate(combo, (p) => {
+            // Ant Select v5: onChange + optionFilterProp or options/children.
+            // We want the Select that controls Type, not some other ancestor.
+            // Heuristic: must have onChange + a typeof string value (current
+            // subtype is a string).
+            return typeof p.onChange === 'function'
+                && (typeof p.value === 'string' || p.value == null)
+                && !!p.options !== false; // options is array OR options derived from children — allow both
+        });
+        let fiberSucceeded = false;
+        if (selectProps && typeof selectProps.onChange === 'function') {
+            console.log(`${TAG} apply: ${label} — calling Ant Select onChange via fiber (value="${targetSubtype}")`);
+            try {
+                // Build a minimal option object that matches Ant's contract.
+                // For unknown values, Ant tends to accept { label, value }.
+                const opt = { label: targetSubtype, value: targetSubtype, key: targetSubtype };
+                selectProps.onChange(targetSubtype, opt);
+                fiberSucceeded = true;
+            } catch (e) {
+                console.warn(`${TAG} apply: ${label} — fiber onChange threw, falling back to DOM path:`, e);
             }
-            return null;
-        };
-        let dd = await waitForCondition(findDropdown, 4000, 100);
-        if (!dd) {
-            // Retry the click — Ant sometimes ignores the first
-            clickElDispatch(selectTrigger, panelDoc);
-            dd = await waitForCondition(findDropdown, 3000, 100);
-        }
-        if (!dd) {
-            applyState.errors.push({ entityName: label, reason: 'Type dropdown did not open' });
-            await closeEditor();
-            return { ok: false, reason: 'Type dropdown did not open', appliedCount: 0 };
-        }
-        await sleep(150);
-
-        // Look for the target option among existing entries.
-        const findOption = (root) => {
-            const opts = root.querySelectorAll('.ant-select-item-option');
-            for (const o of opts) {
-                const title = o.getAttribute('title') || '';
-                const txt = (o.querySelector('.ant-select-item-option-content')?.textContent || '').trim();
-                if (title === targetSubtype || txt === targetSubtype) return o;
-            }
-            return null;
-        };
-
-        let optEl = findOption(dd.dropdown);
-        if (!optEl) {
-            // Need to add via "Enter new type" + Add
-            const newInput = dd.dropdown.querySelector('.pr-creatable-dropdown__input');
-            const addBtn = dd.dropdown.querySelector('.pr-creatable-dropdown__button');
-            if (!newInput || !addBtn) {
-                applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" not found and no creatable footer` });
-                await closeEditor();
-                return { ok: false, reason: 'no creatable footer', appliedCount: 0 };
-            }
-            console.log(`${TAG} apply: ${label} — adding new subtype "${targetSubtype}"`);
-            setReactInputValue(newInput, targetSubtype);
+            // Brief settle for React to flush + Form context to update.
             await sleep(200);
-            // Add button starts disabled (empty input). Wait for it to enable.
-            await waitForCondition(() => !addBtn.disabled, 1500, 50);
-            if (addBtn.disabled) {
-                applyState.errors.push({ entityName: label, reason: 'Add button never enabled after typing new subtype' });
-                await closeEditor();
-                return { ok: false, reason: 'Add button disabled', appliedCount: 0 };
-            }
-            clickElDispatch(addBtn, dd.doc);
-            // After Add, the option appears in the list. Re-poll.
-            optEl = await waitForCondition(() => findOption(dd.dropdown), 4000, 100);
-            if (!optEl) {
-                applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" never appeared in dropdown after Add` });
-                await closeEditor();
-                return { ok: false, reason: 'new option never appeared', appliedCount: 0 };
-            }
-            await sleep(100);
+        } else {
+            console.log(`${TAG} apply: ${label} — fiber walk found no Select onChange, falling back to DOM path`);
         }
 
-        // Click the target option.
-        console.log(`${TAG} apply: ${label} — selecting subtype option`);
-        clickElDispatch(optEl, dd.doc);
-        // Confirm selection happened — wait briefly for aria-selected.
-        await waitForCondition(
-            () => optEl.getAttribute('aria-selected') === 'true' || (combo.value && combo.value.includes(targetSubtype)),
-            1500, 100,
-        );
-        await sleep(200);
+        // FALLBACK: DOM-driven dropdown (v3.41 path). Only runs if the
+        // fiber walk didn't find onChange. Kept for robustness in case
+        // Percepto reshapes the Select wrapper.
+        if (!fiberSucceeded) {
+            const selectWrap = combo.closest('.ant-select');
+            const selectorEl = (selectWrap && selectWrap.querySelector('.ant-select-selector')) || selectWrap || combo;
+            try { combo.focus(); } catch (e) {}
+            // Mousedown is what Ant Select listens for to toggle open.
+            selectorEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+            selectorEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+            selectorEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+
+            const findDropdown = () => {
+                const docs = [panelDoc, document];
+                try { if (panelDoc.defaultView && panelDoc.defaultView.top) docs.push(panelDoc.defaultView.top.document); } catch (e) {}
+                for (const d of docs) {
+                    if (!d) continue;
+                    const list = d.querySelector('.pr-creatable-dropdown, .ant-select-dropdown:not(.ant-select-dropdown-hidden) .rc-virtual-list');
+                    if (list) {
+                        const cd = list.closest('.pr-creatable-dropdown') || list.closest('.ant-select-dropdown') || list;
+                        return { dropdown: cd, doc: d };
+                    }
+                }
+                return null;
+            };
+            let dd = await waitForCondition(findDropdown, 4000, 100);
+            if (!dd) {
+                applyState.errors.push({ entityName: label, reason: 'Type dropdown did not open (DOM fallback)' });
+                await closeEditor();
+                return { ok: false, reason: 'Type dropdown did not open', appliedCount: 0 };
+            }
+            await sleep(150);
+            const findOption = (root) => {
+                const opts = root.querySelectorAll('.ant-select-item-option');
+                for (const o of opts) {
+                    const title = o.getAttribute('title') || '';
+                    const txt = (o.querySelector('.ant-select-item-option-content')?.textContent || '').trim();
+                    if (title === targetSubtype || txt === targetSubtype) return o;
+                }
+                return null;
+            };
+            let optEl = findOption(dd.dropdown);
+            if (!optEl) {
+                const newInput = dd.dropdown.querySelector('.pr-creatable-dropdown__input');
+                const addBtn = dd.dropdown.querySelector('.pr-creatable-dropdown__button');
+                if (!newInput || !addBtn) {
+                    applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" not found and no creatable footer` });
+                    await closeEditor();
+                    return { ok: false, reason: 'no creatable footer', appliedCount: 0 };
+                }
+                setReactInputValue(newInput, targetSubtype);
+                await sleep(200);
+                await waitForCondition(() => !addBtn.disabled, 1500, 50);
+                if (addBtn.disabled) {
+                    applyState.errors.push({ entityName: label, reason: 'Add button never enabled' });
+                    await closeEditor();
+                    return { ok: false, reason: 'Add button disabled', appliedCount: 0 };
+                }
+                clickElDispatch(addBtn, dd.doc);
+                optEl = await waitForCondition(() => findOption(dd.dropdown), 4000, 100);
+                if (!optEl) {
+                    applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" never appeared after Add` });
+                    await closeEditor();
+                    return { ok: false, reason: 'new option never appeared', appliedCount: 0 };
+                }
+                await sleep(100);
+            }
+            clickElDispatch(optEl, dd.doc);
+            await waitForCondition(
+                () => optEl.getAttribute('aria-selected') === 'true' || (combo.value && combo.value.includes(targetSubtype)),
+                1500, 100,
+            );
+            await sleep(200);
+        }
+
+        // Verify the form picked up the new value before saving.
+        // combo.value is the search-input's text; Ant Select shows the
+        // selected label in .ant-select-selection-item.
+        const selectedItem = (combo.closest('.ant-select') || panelDoc).querySelector('.ant-select-selection-item');
+        const selectedText = selectedItem ? (selectedItem.getAttribute('title') || selectedItem.textContent || '').trim() : '';
+        console.log(`${TAG} apply: ${label} — selection-item now reads "${selectedText}" (target was "${targetSubtype}")`);
+        if (selectedText && selectedText !== targetSubtype) {
+            applyState.errors.push({ entityName: label, reason: `selection-item reads "${selectedText}" not "${targetSubtype}" — onChange may not have stuck` });
+            await closeEditor();
+            return { ok: false, reason: `value not applied (shows "${selectedText}")`, appliedCount: 0 };
+        }
 
         if (dryRun) {
             await sleep(500);
             await closeEditor();
-            return { ok: true, reason: '[DRY RUN] subtype selected + cancelled', appliedCount: 1, verified: false };
+            return { ok: true, reason: '[DRY RUN] subtype set + cancelled', appliedCount: 1, verified: false };
         }
 
         // Save.
@@ -5428,6 +5478,12 @@
         input.setAttribute('list', dlId);
         input.title = 'Pick from list OR type a new subtype. Enter = queue · Esc = cancel.';
         input.style.cssText = 'width:160px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px';
+        // v3.42: critical — stop click/mousedown propagation. Without
+        // this, clicking the input bubbles to the cell's onclick which
+        // re-runs startInlineSubtypeEdit and wipes the input mid-edit
+        // (looks like "dropdown opens then immediately closes").
+        input.onmousedown = (e) => e.stopPropagation();
+        input.onclick = (e) => e.stopPropagation();
 
         td.innerHTML = '';
         td.appendChild(input);
