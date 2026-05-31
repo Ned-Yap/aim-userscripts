@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.61
+// @version      34.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.61';
+    const SCRIPT_VERSION = '34.62';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1936,8 +1936,11 @@
         const toast = document.createElement('div');
         toast.id = KML_TOAST_ID;
         toast.textContent = text;
+        // v34.62: bottom:170px (was 80px) so the toast clears the draw
+        // and vertex-edit toolbars (both at bottom:100px, ~55px tall).
+        // Previously the toast stacked directly behind/over them on enter.
         toast.style.cssText = `
-            position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+            position:fixed;bottom:170px;left:50%;transform:translateX(-50%);
             background:rgba(15,18,22,0.95);color:#e6e6e6;
             padding:10px 18px;border-radius:6px;
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
