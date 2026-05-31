@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.44
+// @version      3.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.44';
+    const SCRIPT_VERSION = '3.45';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1908,7 +1908,13 @@
         if (nm && nm.textContent) return nm.textContent.trim();
         return (item.el.textContent || '').trim();
     }
-    async function findEntityInSidebar(name, scrollLimit = 30) {
+    // v3.45: renamed from findEntityInSidebar — the popup's "Find in
+    // Map Entities" button has its OWN findEntityInSidebar(entity) at
+    // line ~1254 that pastes the name into the sidebar search input.
+    // The duplicate name meant the popup call dispatched here (because
+    // function declarations get hoisted, last-wins) and the apply path
+    // was getting called with an entity object instead of a name string.
+    async function findAndClickSidebarItem(name, scrollLimit = 30) {
         const matchName = name.trim().toLowerCase();
         const findMatch = () => findSidebarItems().find(it => {
             const t = getSidebarItemName(it).toLowerCase();
@@ -2440,7 +2446,7 @@
         console.log(`${TAG} apply: starting asset "${label}" subtype → "${targetSubtype}"${edit.isNewSubtype ? ' (NEW type)' : ''}${dryRun ? ' [DRY RUN]' : ''}`);
 
         await closeEditor();
-        const hit = await findEntityInSidebar(label);
+        const hit = await findAndClickSidebarItem(label);
         if (!hit) {
             applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
             return { ok: false, reason: 'not found in sidebar', appliedCount: 0 };
@@ -2634,7 +2640,7 @@
         //    wrong one from a previous step).
         await closeEditor();
         // 2. Find + click the entity in the sidebar.
-        const hit = await findEntityInSidebar(label);
+        const hit = await findAndClickSidebarItem(label);
         if (!hit) {
             applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
             console.warn(`${TAG} apply: ${label} — entity not in sidebar`);
