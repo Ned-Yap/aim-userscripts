@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.62
+// @version      34.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.62';
+    const SCRIPT_VERSION = '34.63';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1695,6 +1695,119 @@
     // ============================================================
     let drawingState = null;
 
+    // ============================================================
+    // Snap-to-vertex (Phase 3b, v34.63)
+    //
+    // While dragging a vertex (in vertex-edit) or clicking to place a
+    // vertex (in draw mode), if the candidate position is within
+    // SNAP_TOLERANCE_PX of an EXISTING power-line vertex (any type,
+    // file or pending-add, EXCEPT the line being edited / drawn),
+    // override to that vertex's exact coord and show a yellow ring
+    // marker at the snap target so the user knows it's locked in.
+    //
+    // Cleared on dragend / click / exit / explicit clearSnapIndicator.
+    // ============================================================
+    const SNAP_TOLERANCE_PX = 10;
+    let snapIndicator = null;
+
+    function clearSnapIndicator() {
+        if (!snapIndicator) return;
+        try { snapIndicator.remove(); } catch (e) {}
+        snapIndicator = null;
+    }
+
+    function showSnapIndicator(map, latlng) {
+        if (!map || !latlng) return;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
+        clearSnapIndicator();
+        const icon = L.divIcon({
+            html: '<div style="width:22px;height:22px;border-radius:50%;border:2.5px solid #ffd84a;background:rgba(255,216,74,0.22);box-shadow:0 0 10px rgba(255,216,74,0.8);box-sizing:border-box;pointer-events:none"></div>',
+            className: 'aim-snap-indicator',
+            iconSize: [26, 26],
+            iconAnchor: [13, 13],
+        });
+        try {
+            snapIndicator = L.marker([latlng.lat, latlng.lng], { icon, interactive: false, zIndexOffset: 2000, keyboard: false });
+            snapIndicator.addTo(map);
+        } catch (e) {}
+    }
+
+    // Find the nearest other-line vertex within SNAP_TOLERANCE_PX of
+    // srcLatLng. Returns {lat,lng} or null.
+    //
+    // excludeKey selects the "self" to skip:
+    //   'file:<type>:<pmIdx>'    → currently-editing this file line, skip its vertices
+    //   'added:<type>:<addedIdx>'→ currently-editing this pending-add line, skip
+    //   'draw'                   → currently drawing a NEW line, skip its own coords
+    //   null                     → no exclusion (rare)
+    function findSnapCandidate(srcLatLng, excludeKey) {
+        const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return null;
+        const siteID = getCurrentSiteID();
+        if (!siteID) return null;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return null; }
+        if (!L || typeof L.latLng !== 'function') return null;
+
+        let srcPx;
+        try { srcPx = map.latLngToContainerPoint(L.latLng(srcLatLng.lat, srcLatLng.lng)); }
+        catch (e) { return null; }
+
+        let best = null;
+        let bestDist = SNAP_TOLERANCE_PX + 0.0001;
+
+        const testVertex = (lat, lng) => {
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+            try {
+                const px = map.latLngToContainerPoint(L.latLng(lat, lng));
+                const d = Math.hypot(px.x - srcPx.x, px.y - srcPx.y);
+                if (d < bestDist) { bestDist = d; best = { lat, lng }; }
+            } catch (e) {}
+        };
+
+        ['distro', 'trans'].forEach((type) => {
+            // File lines — use effective (post-modify) coords so snap
+            // matches what's actually rendered.
+            const features = kmlFeatures[kmlKey(siteID, type)] || [];
+            features.forEach((f) => {
+                if (!f || f.type !== 'line') return;
+                if (excludeKey === `file:${type}:${f.pmIdx}`) return;
+                // Skip file lines marked for deletion — they're being
+                // removed; snapping to them creates orphaned references.
+                const co0 = getCommitOps(siteID, type);
+                const op0 = co0.ops && co0.ops[String(f.pmIdx)];
+                if (op0 && op0.op === 'delete') return;
+                const coords = effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords);
+                (coords || []).forEach(c => testVertex(c.lat, c.lng));
+            });
+            // Pending-add (green) lines. If one is the line currently
+            // being edited as vertexEditState.isAdded, its coords live
+            // in vertexEditState.currentCoords — but we exclude it via
+            // excludeKey anyway, so skip cleanly.
+            const co = getCommitOps(siteID, type);
+            (co.added || []).forEach((added, i) => {
+                if (excludeKey === `added:${type}:${i}`) return;
+                (added.coords || []).forEach(c => {
+                    if (Array.isArray(c)) testVertex(c[1], c[0]);
+                    else if (c && typeof c === 'object') testVertex(c.lat, c.lng);
+                });
+            });
+        });
+
+        // In-progress draw line — its own coords are skipped if we're
+        // the one drawing (excludeKey === 'draw'). Otherwise (very rare:
+        // vertex-edit during draw? not a real flow) include them.
+        if (drawingState && excludeKey !== 'draw') {
+            (drawingState.coords || []).forEach(c => {
+                if (Array.isArray(c)) testVertex(c[1], c[0]);
+            });
+        }
+
+        return best;
+    }
+
     function markPlacemarkForDelete(siteID, type, pmIdx) {
         const co = getCommitOps(siteID, type);
         co.ops[String(pmIdx)] = { op: 'delete' };
@@ -2837,7 +2950,23 @@
                 const curIdx = vertexEditState.handles.indexOf(e.target);
                 if (curIdx < 0) return;
                 const ll = e.target.getLatLng();
-                vertexEditState.currentCoords[curIdx] = { lat: ll.lat, lng: ll.lng };
+                let lat = ll.lat, lng = ll.lng;
+                // v34.63 Phase 3b: snap to nearby other-line vertex.
+                // Self-line excluded so a vertex can't snap to a different
+                // vertex of the same line being edited.
+                const excludeKey = vertexEditState.isAdded
+                    ? `added:${vertexEditState.type}:${vertexEditState.addedIdx}`
+                    : `file:${vertexEditState.type}:${vertexEditState.pmIdx}`;
+                const snap = findSnapCandidate({ lat, lng }, excludeKey);
+                const map = getLeafletMap();
+                if (snap) {
+                    lat = snap.lat; lng = snap.lng;
+                    try { e.target.setLatLng([lat, lng]); } catch (err) {}
+                    if (map) showSnapIndicator(map, snap);
+                } else {
+                    clearSnapIndicator();
+                }
+                vertexEditState.currentCoords[curIdx] = { lat, lng };
                 // v34.60: reposition midpoints DURING drag, not just on
                 // dragend. Otherwise the adjacent ghost handles appear
                 // "stuck" at the old midpoints and snap into place when
@@ -2846,6 +2975,7 @@
                 rebuildMidpointPositions();
                 if (isActive) runUpdate();
             });
+            marker.on('dragend', () => { clearSnapIndicator(); });
             marker.on('contextmenu', () => {
                 if (!vertexEditState) return;
                 if (vertexEditState.currentCoords.length <= 2) {
@@ -3087,6 +3217,7 @@
         (midhandles || []).forEach(h => { try { h.remove(); } catch (e) {} });
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         vertexEditState = null;
+        clearSnapIndicator();
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -3127,12 +3258,32 @@
             if (!drawingState) return;
             const ll = e.latlng;
             if (!ll) return;
-            drawingState.coords.push([ll.lng, ll.lat]);
+            let lat = ll.lat, lng = ll.lng;
+            // v34.63 Phase 3b: snap click placement to nearby vertex.
+            // Excludes our own in-progress draw line.
+            const snap = findSnapCandidate({ lat, lng }, 'draw');
+            if (snap) { lat = snap.lat; lng = snap.lng; }
+            clearSnapIndicator();
+            drawingState.coords.push([lng, lat]);
             updateDrawToolbar();
             if (isActive) runUpdate();
         };
         try { map.on('click', onClick); } catch (e) {}
         drawingState.clickHandler = onClick;
+        // v34.63 Phase 3b: live snap-preview during draw — show the
+        // yellow ring under the cursor when within tolerance so the
+        // user knows their next click will snap.
+        const onMove = (e) => {
+            if (!drawingState) return;
+            const ll = e.latlng;
+            if (!ll) return;
+            const snap = findSnapCandidate({ lat: ll.lat, lng: ll.lng }, 'draw');
+            const m = getLeafletMap();
+            if (snap && m) showSnapIndicator(m, snap);
+            else clearSnapIndicator();
+        };
+        try { map.on('mousemove', onMove); } catch (e) {}
+        drawingState.moveHandler = onMove;
         const onEsc = (e) => { if (e.key === 'Escape') exitDrawMode({ silent: false }); };
         window.addEventListener('keydown', onEsc, true);
         drawingState.escHandler = onEsc;
@@ -3231,15 +3382,17 @@
     function exitDrawMode(opts) {
         if (!drawingState) return;
         const silent = !!(opts && opts.silent);
-        const { clickHandler, escHandler, toolbarEl } = drawingState;
+        const { clickHandler, moveHandler, escHandler, toolbarEl } = drawingState;
         const map = getLeafletMap();
         if (map && clickHandler) { try { map.off('click', clickHandler); } catch (e) {} }
+        if (map && moveHandler) { try { map.off('mousemove', moveHandler); } catch (e) {} }
         if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         const container = map && map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = '';
         if (!silent) showKMLToast('Drawing cancelled.', 2500);
         drawingState = null;
+        clearSnapIndicator();
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
