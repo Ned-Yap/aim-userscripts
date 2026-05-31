@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. SHIFT+SPACE = zoom in close at cursor (maxZoom-1). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
@@ -70,7 +70,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -324,16 +324,16 @@
         return null;
     }
 
-    // v0.5: Shift+Space → zoom in at cursor.
-    // Target zoom = maxZoom - 3 (was maxZoom - 1 in v0.4 — user reported
-    // "WAY too close"). Floor at 17 so result is always usefully close
+    // v0.6: Shift+Space → zoom in at cursor.
+    // Target zoom = maxZoom - 6 (v0.4 was -1, v0.5 was -3, both reported
+    // too close). Floor at 15 so the result is still a "close-up" zoom
     // even on low-max-zoom maps.
     function zoomInCloseAtCursor() {
         const map = getLeafletMap();
         if (!map) return false;
         try {
             const maxZoom = typeof map.getMaxZoom === 'function' ? map.getMaxZoom() : 20;
-            const targetZoom = Math.max(17, maxZoom - 3);
+            const targetZoom = Math.max(15, maxZoom - 6);
 
             let targetLatLng = null;
             const cc = getCursorContainerCoords(map);
@@ -382,12 +382,17 @@
         // v0.4: Shift+Space → zoom in close at cursor. Checked BEFORE
         // the generic shift-bypass below so it doesn't fall through to
         // "pass to macros". Always preventDefault since the user pressed
-        // a deliberate nav-style chord — even if zoom didn't happen
-        // (e.g. no map yet), suppress browser's Shift+Space scroll-up.
+        // a deliberate nav-style chord.
+        // v0.6: when invoked from TOP, forward to iframe so iframe's
+        // (fresh) cursor is used instead of TOP's stale one.
         if (e.code === 'Space' && e.shiftKey && !e.ctrlKey && !e.metaKey) {
             if (!spaceEnabled) return;
             try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
-            zoomInCloseAtCursor();
+            if (IS_TOP && navChannel) {
+                try { navChannel.postMessage({ type: 'SHIFT_SPACE' }); } catch (err) {}
+            } else {
+                zoomInCloseAtCursor();
+            }
             return;
         }
 
@@ -397,14 +402,16 @@
         if (e.shiftKey || e.ctrlKey || e.metaKey) return;
 
         // Space → zoom-to-fit entire site setup. One-shot, not held.
+        // v0.6: forward from TOP to iframe for consistency (also avoids
+        // any iframe-vs-TOP state divergence on which layers are present).
         if (e.code === 'Space') {
             if (!spaceEnabled) return;
-            const did = fitMapToSiteSetup();
-            // Only swallow Space when we actually had a map to act on,
-            // otherwise let it pass through (might be a real user
-            // intention elsewhere). preventDefault prevents browser
-            // page-scroll-down on Space.
-            if (did) { try { e.preventDefault(); e.stopPropagation(); } catch (err) {} }
+            try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
+            if (IS_TOP && navChannel) {
+                try { navChannel.postMessage({ type: 'SPACE_FIT' }); } catch (err) {}
+            } else {
+                fitMapToSiteSetup();
+            }
             return;
         }
 
@@ -483,6 +490,28 @@
 
     setupControlPanel();
     registerWithControlPanel();
+
+    // ------- Cross-frame forwarding -------
+    // v0.6: Shift+Space was sometimes jumping randomly when invoked
+    // from the TOP frame. Root cause: once the cursor enters the
+    // iframe area, the OS stops dispatching mousemove to TOP — TOP's
+    // lastMouseX/Y goes stale at whatever it was when the cursor last
+    // crossed the iframe boundary. Iframe's tracker has the actual
+    // current position. Fix: when TOP catches Shift+Space, FORWARD to
+    // iframe via this channel and let iframe handle with its own
+    // (fresh) cursor. Same applies to plain Space (zoom-to-fit) so
+    // it consistently uses iframe state.
+    const NAV_FORWARD_CHANNEL = 'AIM_MAP_NAV_FORWARD';
+    let navChannel = null;
+    try { navChannel = new BroadcastChannel(NAV_FORWARD_CHANNEL); }
+    catch (e) { console.warn(`${TAG} nav forward channel unavailable:`, e); }
+    if (navChannel && !IS_TOP) {
+        navChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'SHIFT_SPACE') zoomInCloseAtCursor();
+            else if (m.type === 'SPACE_FIT') fitMapToSiteSetup();
+        };
+    }
 
     console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift+Space = zoom in at cursor · Shift/Ctrl + others pass through`);
 })();
