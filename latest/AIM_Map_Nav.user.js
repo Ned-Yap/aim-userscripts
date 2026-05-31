@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
-// @description  Keyboard nav for the Percepto map. HOLD SPACE to engage nav mode; while held: WASD pan, Q/E zoom out/in, Shift sprint (3x), Ctrl precise (0.3x). Without Space, all keys pass through normally so Shift+D (Delete) etc. still work. Input-guarded. Registers with AIM Control Panel under "Map Nav" with master + pan + zoom toggles.
+// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -13,42 +13,47 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// v0.2 design
+// v0.3 design
 // ===========
-// MODAL nav — HOLD SPACE to engage. Without Space, every key passes
-// through normally, so Shift+D (New Entity Macro · Delete), Shift+S,
-// Shift+A (Altitude), Shift+R (Ruler), etc. all keep working.
+// Bindings (always-on, NOT modal):
+//   W/A/S/D       = pan up/left/down/right
+//   Q             = zoom out
+//   E             = zoom in
+//   Alt + WASD/QE = sprint (3x pan, 1.0 zoom-levels)
+//   Space         = zoom-to-fit entire site setup
 //
-// While Space is held:
-//   W/A/S/D = pan up/left/down/right
-//   Q       = zoom out
-//   E       = zoom in
-//   Shift   = sprint (3x speed)
-//   Ctrl    = precise (0.3x speed)
+// IMPORTANT: Shift + ANY nav key bypasses Map Nav and falls through to
+// the existing macros (Shift+D Delete, Shift+S/A/R/B/C, etc.). Ctrl +
+// ANY nav key also falls through — Ctrl+W close-tab, Ctrl+S save,
+// Ctrl+D bookmark, Ctrl+Q close-window are all browser-level and we
+// must NOT intercept them.
 //
-// v0.1 was always-on WASD which conflicted with every Shift+letter macro
-// the user has — Shift+D = sprint+pan-right AND Delete macro tried to
-// fire at the same time. The Space-modal pattern preserves macros 100%
-// while keeping nav one finger away.
+// History: v0.1 was always-on WASD with Shift sprint — Shift+letter
+// macros all broke. v0.2 was hold-Space-to-engage modal — user found it
+// awkward (holding Space + Shift + WASD ergonomically painful, slip-off
+// triggered the old Shift+letter macros anyway). v0.3 keeps WASD/QE
+// always-on but routes Shift/Ctrl out of Map Nav so the macros never
+// collide. Sprint moves to Alt, which doesn't collide with anything
+// the user has bound.
 //
 // Architecture:
-//   - Pressed motion keys tracked in a Set, but only ADDED if spaceHeld
-//     is true. When Space is released, motion is cleared and the tick
-//     stops immediately.
-//   - requestAnimationFrame tick for smooth ~60fps pan. Zoom throttled
-//     to one step per 200ms (OS auto-repeat would otherwise burn through
-//     30 zoom levels per second).
-//   - Modifiers (shift/ctrl) tracked separately via dedicated keydown/
-//     keyup on ShiftLeft/Right + ControlLeft/Right so mid-pan modifier
-//     presses update speed instantly.
-//   - Standard input guard: typing in any INPUT/TEXTAREA/SELECT/
-//     contentEditable/Ant input/role=textbox skips Space too — you can
-//     still hit Space inside the name modal without engaging nav.
-//   - blur clears all state so tab-away doesn't strand a panning map.
+//   - Motion keys (WASD/QE) added to a Set on keydown, removed on
+//     keyup. requestAnimationFrame tick while any held → smooth ~60fps
+//     pan. Zoom throttled to one step per 200ms (OS auto-repeat at
+//     ~30Hz would otherwise burn 30 levels/sec).
+//   - Alt modifier tracked via AltLeft/AltRight keydown/keyup so the
+//     speed multiplier updates instantly mid-pan.
+//   - Shift/Ctrl checked PER EVENT (e.shiftKey / e.ctrlKey) — if true
+//     on a motion-key event, we return early without preventDefault,
+//     leaving the macro / browser shortcut path untouched.
+//   - Space → fitMapToSiteSetup: walks map.eachLayer for any layer with
+//     getLatLng or getLatLngs (Percepto's markers + polygons + our
+//     KML SVG paths if they happen to be Leaflet layers), unions
+//     bounds, fitBounds with padding.
+//   - blur clears state so tab-away doesn't strand a panning map.
 //
 // Leaflet detection: walks .leaflet-container elements. Prefers
-// __aim_map__ (Map Styler's hint), falls back to property scan. Works
-// without Map Styler installed.
+// __aim_map__ (Map Styler's hint), falls back to property scan.
 //
 // Log tag: [AIM NAV]
 
@@ -56,7 +61,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -66,20 +71,18 @@
     const PAN_SPEED = 8;             // px per frame at base (60fps → ~480 px/s)
     const ZOOM_STEP_BASE = 0.5;      // Leaflet zoom levels per tick at base
     const ZOOM_STEP_SPRINT = 1.0;
-    const ZOOM_STEP_PRECISE = 0.25;
     const SPRINT_MULT = 3;
-    const PRECISE_MULT = 0.3;
     const ZOOM_INTERVAL_MS = 200;    // throttle zoom to 5/sec at base
+    const FIT_PADDING_PX = 60;
 
     // ------- State -------
     let masterEnabled = true;
     let panEnabled = true;
     let zoomEnabled = true;
+    let spaceEnabled = true;
 
     const motion = new Set();        // 'w','a','s','d','q','e'
-    let shiftHeld = false;
-    let ctrlHeld = false;
-    let spaceHeld = false;           // v0.2: nav only active while Space held
+    let altHeld = false;             // v0.3: Alt = sprint (no Shift/Ctrl)
     let rafId = null;
     let lastZoomAt = 0;
 
@@ -148,7 +151,7 @@
         if (!motion.size) { rafId = null; return; }
         const map = getLeafletMap();
         if (map) {
-            const mult = shiftHeld ? SPRINT_MULT : (ctrlHeld ? PRECISE_MULT : 1);
+            const mult = altHeld ? SPRINT_MULT : 1;
 
             // Pan
             if (panEnabled) {
@@ -167,8 +170,7 @@
             if (zoomEnabled) {
                 const now = performance.now();
                 if (now - lastZoomAt >= ZOOM_INTERVAL_MS) {
-                    const step = shiftHeld ? ZOOM_STEP_SPRINT
-                                : (ctrlHeld ? ZOOM_STEP_PRECISE : ZOOM_STEP_BASE);
+                    const step = altHeld ? ZOOM_STEP_SPRINT : ZOOM_STEP_BASE;
                     if (motion.has('e')) {
                         try { map.zoomIn(step, { animate: false }); lastZoomAt = now; }
                         catch (e) {}
@@ -182,6 +184,55 @@
         rafId = requestAnimationFrame(tick);
     }
 
+    // ------- Zoom-to-fit (Space) -------
+    // Walk every Leaflet layer with location data; union their bounds;
+    // fitBounds with padding. Skips tile layers (no getLatLng/getLatLngs).
+    // KML lines rendered as raw SVG (Map Styler does this) won't show up
+    // here — Percepto's own markers/polygons usually cover the site
+    // extent though, so this is a reasonable proxy for "entire site setup".
+    function fitMapToSiteSetup() {
+        const map = getLeafletMap();
+        if (!map) return false;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; }
+        catch (e) { return false; }
+        if (!L || typeof L.latLngBounds !== 'function') return false;
+
+        const bounds = L.latLngBounds([]);
+        const flattenLatLngs = (arr, out) => {
+            if (!arr) return;
+            if (Array.isArray(arr)) { arr.forEach(x => flattenLatLngs(x, out)); return; }
+            if (arr && typeof arr.lat === 'number' && typeof arr.lng === 'number') out.push(arr);
+        };
+
+        try {
+            map.eachLayer(layer => {
+                try {
+                    if (typeof layer.getLatLng === 'function') {
+                        const ll = layer.getLatLng();
+                        if (ll && typeof ll.lat === 'number') bounds.extend(ll);
+                    } else if (typeof layer.getLatLngs === 'function') {
+                        const out = [];
+                        flattenLatLngs(layer.getLatLngs(), out);
+                        out.forEach(p => bounds.extend(p));
+                    }
+                } catch (e) {}
+            });
+        } catch (e) {
+            console.warn(`${TAG} fitMapToSiteSetup: eachLayer failed:`, e);
+            return false;
+        }
+
+        if (!bounds.isValid()) {
+            console.log(`${TAG} fitMapToSiteSetup: no valid bounds (no markers/polygons on map yet?)`);
+            return false;
+        }
+        try {
+            map.fitBounds(bounds, { padding: [FIT_PADDING_PX, FIT_PADDING_PX], animate: true, maxZoom: 20 });
+            return true;
+        } catch (e) { return false; }
+    }
+
     function startTick() {
         if (rafId != null) return;
         rafId = requestAnimationFrame(tick);
@@ -192,28 +243,31 @@
         'KeyW': 'w', 'KeyA': 'a', 'KeyS': 's', 'KeyD': 'd',
         'KeyQ': 'q', 'KeyE': 'e',
     };
-    const MOD_CODES_SHIFT = new Set(['ShiftLeft', 'ShiftRight']);
-    const MOD_CODES_CTRL = new Set(['ControlLeft', 'ControlRight']);
+    const MOD_CODES_ALT = new Set(['AltLeft', 'AltRight']);
 
     function onKeyDown(e) {
-        // Track modifiers regardless of master/gate state so the speed
-        // multiplier updates instantly when user holds Shift mid-pan.
-        if (MOD_CODES_SHIFT.has(e.code)) { shiftHeld = true; return; }
-        if (MOD_CODES_CTRL.has(e.code))  { ctrlHeld = true;  return; }
+        // Track Alt (sprint modifier) regardless of master/gate state.
+        if (MOD_CODES_ALT.has(e.code)) { altHeld = true; return; }
 
         if (!masterEnabled) return;
         if (shouldGate(e)) return;
 
-        // v0.2: Space is the modal trigger. Engage nav mode only while
-        // it's held. While engaged, swallow Space + every WASDQE so they
-        // don't bubble to Percepto / other macros. When Space ISN'T held,
-        // WASDQE returns early and the macros work normally.
+        // v0.3: Shift + ANY nav key → pass through to existing macros.
+        // Ctrl + ANY nav key → pass through to browser shortcuts. Never
+        // preventDefault when these modifiers are held.
+        if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+
+        // Space → zoom-to-fit entire site setup. One-shot, not held.
         if (e.code === 'Space') {
-            spaceHeld = true;
-            try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
+            if (!spaceEnabled) return;
+            const did = fitMapToSiteSetup();
+            // Only swallow Space when we actually had a map to act on,
+            // otherwise let it pass through (might be a real user
+            // intention elsewhere). preventDefault prevents browser
+            // page-scroll-down on Space.
+            if (did) { try { e.preventDefault(); e.stopPropagation(); } catch (err) {} }
             return;
         }
-        if (!spaceHeld) return;
 
         const mapped = KEY_CODES[e.code];
         if (!mapped) return;
@@ -230,16 +284,7 @@
     }
 
     function onKeyUp(e) {
-        if (MOD_CODES_SHIFT.has(e.code)) { shiftHeld = false; return; }
-        if (MOD_CODES_CTRL.has(e.code))  { ctrlHeld = false;  return; }
-        if (e.code === 'Space') {
-            // Releasing Space disengages nav mode entirely — drop any
-            // held motion keys so they don't keep panning after release.
-            spaceHeld = false;
-            motion.clear();
-            if (rafId != null) { try { cancelAnimationFrame(rafId); } catch (err) {} rafId = null; }
-            return;
-        }
+        if (MOD_CODES_ALT.has(e.code)) { altHeld = false; return; }
         const mapped = KEY_CODES[e.code];
         if (mapped) motion.delete(mapped);
     }
@@ -248,9 +293,7 @@
         // Tab-away mid-W → no keyup fires. Clear everything so the map
         // doesn't keep panning when focus returns.
         motion.clear();
-        shiftHeld = false;
-        ctrlHeld = false;
-        spaceHeld = false;
+        altHeld = false;
         if (rafId != null) { try { cancelAnimationFrame(rafId); } catch (e) {} rafId = null; }
     }
 
@@ -272,9 +315,10 @@
                 registerWithControlPanel();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 const v = msg.value !== undefined ? msg.value : msg.enabled;
-                if (msg.toggleId === 'master')  masterEnabled = !!v;
-                else if (msg.toggleId === 'pan')  panEnabled  = !!v;
-                else if (msg.toggleId === 'zoom') zoomEnabled = !!v;
+                if (msg.toggleId === 'master')      masterEnabled = !!v;
+                else if (msg.toggleId === 'pan')    panEnabled    = !!v;
+                else if (msg.toggleId === 'zoom')   zoomEnabled   = !!v;
+                else if (msg.toggleId === 'space')  spaceEnabled  = !!v;
             }
         };
     }
@@ -288,9 +332,10 @@
                 name: 'Map Nav',
                 version: SCRIPT_VERSION,
                 toggles: [
-                    { id: 'master', label: 'Enable Map Nav (HOLD SPACE + WASD/QE)', type: 'boolean', default: true, master: true },
-                    { id: 'pan',    label: 'Space+WASD pan',                         type: 'boolean', default: true },
-                    { id: 'zoom',   label: 'Space+Q/E zoom (out/in)',                type: 'boolean', default: true },
+                    { id: 'master', label: 'Enable Map Nav', type: 'boolean', default: true, master: true },
+                    { id: 'pan',    label: 'WASD pan (Alt for sprint)',     type: 'boolean', default: true },
+                    { id: 'zoom',   label: 'Q/E zoom (Alt for sprint)',     type: 'boolean', default: true },
+                    { id: 'space',  label: 'Space = zoom-to-fit site',      type: 'boolean', default: true },
                 ],
                 hotkeys: [],
             });
@@ -300,5 +345,5 @@
     setupControlPanel();
     registerWithControlPanel();
 
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — HOLD SPACE + WASD pan / Q-E zoom · Shift sprint · Ctrl precise`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift/Ctrl pass through`);
 })();
