@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
-// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. SHIFT+SPACE = zoom in close at cursor (maxZoom-1). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
+// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -13,7 +13,7 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// v0.3 design
+// v0.7 design
 // ===========
 // Bindings (always-on, NOT modal):
 //   W/A/S/D       = pan up/left/down/right
@@ -22,19 +22,15 @@
 //   Alt + WASD/QE = sprint (3x pan, 1.0 zoom-levels)
 //   Space         = zoom-to-fit entire site setup
 //
+// For zoom-into-an-area use Leaflet's native Shift+drag box-zoom.
+// Map Nav used to have a Shift+Space cursor-zoom (v0.4-v0.6) but the
+// native box-zoom is strictly better — drop in v0.7.
+//
 // IMPORTANT: Shift + ANY nav key bypasses Map Nav and falls through to
 // the existing macros (Shift+D Delete, Shift+S/A/R/B/C, etc.). Ctrl +
 // ANY nav key also falls through — Ctrl+W close-tab, Ctrl+S save,
 // Ctrl+D bookmark, Ctrl+Q close-window are all browser-level and we
 // must NOT intercept them.
-//
-// History: v0.1 was always-on WASD with Shift sprint — Shift+letter
-// macros all broke. v0.2 was hold-Space-to-engage modal — user found it
-// awkward (holding Space + Shift + WASD ergonomically painful, slip-off
-// triggered the old Shift+letter macros anyway). v0.3 keeps WASD/QE
-// always-on but routes Shift/Ctrl out of Map Nav so the macros never
-// collide. Sprint moves to Alt, which doesn't collide with anything
-// the user has bound.
 //
 // Architecture:
 //   - Motion keys (WASD/QE) added to a Set on keydown, removed on
@@ -47,9 +43,9 @@
 //     on a motion-key event, we return early without preventDefault,
 //     leaving the macro / browser shortcut path untouched.
 //   - Space → fitMapToSiteSetup: walks map.eachLayer for any layer with
-//     getLatLng or getLatLngs (Percepto's markers + polygons + our
-//     KML SVG paths if they happen to be Leaflet layers), unions
-//     bounds, fitBounds with padding.
+//     getLatLng or getLatLngs (Percepto's markers + polygons), unions
+//     bounds, fitBounds with padding. When invoked from TOP, forwarded
+//     to iframe via AIM_MAP_NAV_FORWARD channel for state consistency.
 //   - blur clears state so tab-away doesn't strand a panning map.
 //
 // Leaflet detection: walks .leaflet-container elements in the local
@@ -59,18 +55,13 @@
 // clicks the map (which shifts focus to the iframe). Prefers
 // __aim_map__ hint set by Map Styler, falls back to property scan.
 //
-// Cross-frame cursor: when TOP handles Shift+Space, the cursor coords
-// are in TOP viewport. We translate through the iframe's bounding
-// rect before subtracting the map container's rect to get container-
-// relative coords for map.containerPointToLatLng.
-//
 // Log tag: [AIM NAV]
 
 (function () {
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -94,11 +85,6 @@
     let altHeld = false;             // v0.3: Alt = sprint (no Shift/Ctrl)
     let rafId = null;
     let lastZoomAt = 0;
-    // v0.4: track cursor for Shift+Space (zoom-in-at-cursor). Stored in
-    // viewport coords (clientX/clientY) so we can re-project against the
-    // map container's bounding rect at use-time without trusting stale
-    // map state.
-    let lastMouseX = -1, lastMouseY = -1;
 
     // ------- Leaflet map detection -------
     let leafletMapRef = null;
@@ -285,80 +271,8 @@
         } catch (e) { return false; }
     }
 
-    // v0.5: cursor → map-container coords. Handles cross-frame: when
-    // we're in TOP and the map is inside an iframe, translate TOP-viewport
-    // cursor coords through the iframe's bounding rect before subtracting
-    // the container rect (which is itself in iframe-viewport coords).
-    function getCursorContainerCoords(map) {
-        if (lastMouseX < 0 || lastMouseY < 0) return null;
-        const container = map.getContainer && map.getContainer();
-        if (!container) return null;
-
-        // Same-frame: container.getBoundingClientRect is in OUR viewport.
-        if (document.body.contains(container)) {
-            const rect = container.getBoundingClientRect();
-            if (lastMouseX < rect.left || lastMouseX > rect.right ||
-                lastMouseY < rect.top || lastMouseY > rect.bottom) return null;
-            return { x: lastMouseX - rect.left, y: lastMouseY - rect.top };
-        }
-
-        // Cross-frame: find the iframe element that owns this container.
-        try {
-            const iframes = document.querySelectorAll('iframe');
-            for (const f of iframes) {
-                try {
-                    if (!f.contentDocument || !f.contentDocument.contains(container)) continue;
-                    const iframeRect = f.getBoundingClientRect();
-                    // Translate TOP cursor → iframe-viewport coords.
-                    const xInIframe = lastMouseX - iframeRect.left;
-                    const yInIframe = lastMouseY - iframeRect.top;
-                    // container.getBoundingClientRect (from iframe context)
-                    // is in iframe-viewport coords.
-                    const cRect = container.getBoundingClientRect();
-                    if (xInIframe < cRect.left || xInIframe > cRect.right ||
-                        yInIframe < cRect.top || yInIframe > cRect.bottom) return null;
-                    return { x: xInIframe - cRect.left, y: yInIframe - cRect.top };
-                } catch (e) {}
-            }
-        } catch (e) {}
-        return null;
-    }
-
-    // v0.6: Shift+Space → zoom in at cursor.
-    // Target zoom = maxZoom - 6 (v0.4 was -1, v0.5 was -3, both reported
-    // too close). Floor at 15 so the result is still a "close-up" zoom
-    // even on low-max-zoom maps.
-    function zoomInCloseAtCursor() {
-        const map = getLeafletMap();
-        if (!map) return false;
-        try {
-            const maxZoom = typeof map.getMaxZoom === 'function' ? map.getMaxZoom() : 20;
-            const targetZoom = Math.max(15, maxZoom - 6);
-
-            let targetLatLng = null;
-            const cc = getCursorContainerCoords(map);
-            if (cc) {
-                try { targetLatLng = map.containerPointToLatLng([cc.x, cc.y]); }
-                catch (e) {}
-            }
-            if (!targetLatLng) {
-                try { targetLatLng = map.getCenter(); }
-                catch (e) { return false; }
-            }
-
-            map.setView(targetLatLng, targetZoom, { animate: true });
-            return true;
-        } catch (e) { return false; }
-    }
-
-    // Cursor tracker — capture phase so it sees moves even when Percepto
-    // overlays stop propagation. Passive (no preventDefault) so it never
-    // interferes with anything.
-    function onMouseMove(e) {
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
-    }
-    document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true });
+    // v0.7: zoomInCloseAtCursor + cursor tracking removed. Use Leaflet's
+    // built-in Shift+drag box-zoom instead (strictly better UX).
 
     function startTick() {
         if (rafId != null) return;
@@ -379,26 +293,11 @@
         if (!masterEnabled) return;
         if (shouldGate(e)) return;
 
-        // v0.4: Shift+Space → zoom in close at cursor. Checked BEFORE
-        // the generic shift-bypass below so it doesn't fall through to
-        // "pass to macros". Always preventDefault since the user pressed
-        // a deliberate nav-style chord.
-        // v0.6: when invoked from TOP, forward to iframe so iframe's
-        // (fresh) cursor is used instead of TOP's stale one.
-        if (e.code === 'Space' && e.shiftKey && !e.ctrlKey && !e.metaKey) {
-            if (!spaceEnabled) return;
-            try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
-            if (IS_TOP && navChannel) {
-                try { navChannel.postMessage({ type: 'SHIFT_SPACE' }); } catch (err) {}
-            } else {
-                zoomInCloseAtCursor();
-            }
-            return;
-        }
-
-        // v0.3: Shift + ANY OTHER nav key → pass through to existing
-        // macros. Ctrl + ANY nav key → pass through to browser shortcuts.
-        // Never preventDefault when these modifiers are held.
+        // v0.3: Shift + ANY nav key → pass through to existing macros
+        // (Shift+D Delete, Shift+A Altitude, …) and Leaflet's native
+        // Shift+drag box-zoom. Ctrl + ANY nav key → pass through to
+        // browser shortcuts (Ctrl+W close-tab, Ctrl+S save, …). Never
+        // preventDefault when these modifiers are held.
         if (e.shiftKey || e.ctrlKey || e.metaKey) return;
 
         // Space → zoom-to-fit entire site setup. One-shot, not held.
@@ -481,7 +380,7 @@
                     { id: 'master', label: 'Enable Map Nav', type: 'boolean', default: true, master: true },
                     { id: 'pan',    label: 'WASD pan (Alt for sprint)',     type: 'boolean', default: true },
                     { id: 'zoom',   label: 'Q/E zoom (Alt for sprint)',     type: 'boolean', default: true },
-                    { id: 'space',  label: 'Space = fit site · Shift+Space = zoom in at cursor', type: 'boolean', default: true },
+                    { id: 'space',  label: 'Space = zoom-to-fit site',     type: 'boolean', default: true },
                 ],
                 hotkeys: [],
             });
@@ -492,15 +391,13 @@
     registerWithControlPanel();
 
     // ------- Cross-frame forwarding -------
-    // v0.6: Shift+Space was sometimes jumping randomly when invoked
-    // from the TOP frame. Root cause: once the cursor enters the
-    // iframe area, the OS stops dispatching mousemove to TOP — TOP's
-    // lastMouseX/Y goes stale at whatever it was when the cursor last
-    // crossed the iframe boundary. Iframe's tracker has the actual
-    // current position. Fix: when TOP catches Shift+Space, FORWARD to
-    // iframe via this channel and let iframe handle with its own
-    // (fresh) cursor. Same applies to plain Space (zoom-to-fit) so
-    // it consistently uses iframe state.
+    // When TOP catches Space (zoom-to-fit), forward to iframe so the
+    // iframe handles using its own map state. v0.6 originally added
+    // this for Shift+Space's cursor-zoom (TOP's cursor tracker goes
+    // stale once the cursor enters the iframe area). v0.7 dropped
+    // Shift+Space entirely in favor of Leaflet's native Shift+drag
+    // box-zoom, but kept the channel for plain Space to keep behavior
+    // consistent regardless of which frame has focus.
     const NAV_FORWARD_CHANNEL = 'AIM_MAP_NAV_FORWARD';
     let navChannel = null;
     try { navChannel = new BroadcastChannel(NAV_FORWARD_CHANNEL); }
@@ -508,10 +405,9 @@
     if (navChannel && !IS_TOP) {
         navChannel.onmessage = (ev) => {
             const m = ev.data || {};
-            if (m.type === 'SHIFT_SPACE') zoomInCloseAtCursor();
-            else if (m.type === 'SPACE_FIT') fitMapToSiteSetup();
+            if (m.type === 'SPACE_FIT') fitMapToSiteSetup();
         };
     }
 
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift+Space = zoom in at cursor · Shift/Ctrl + others pass through`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift/Ctrl pass through (use Shift+drag for box-zoom)`);
 })();
