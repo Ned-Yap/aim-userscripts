@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -43,7 +43,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -267,8 +267,19 @@
         if (addedIdxAttr !== null) {
             const addedIdx = parseInt(addedIdxAttr, 10);
             if (!Number.isFinite(addedIdx)) return;
-            console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT (added) kmlType=${kmlType} addedIdx=${addedIdx}`);
-            sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
+            // v0.14: in delete-mode, discard the pending-add line outright
+            // (it doesn't exist on disk yet — no "mark for deletion" stage
+            // makes sense). Previously this branch ignored deleteLineMode
+            // and routed every green-line click to vertex-edit, which
+            // re-rendered handles at the saved coords and looked like a
+            // revert when the user expected delete.
+            if (deleteLineMode) {
+                console.log(`${TAG} onLineClick → DISCARD_ADDED_LINE kmlType=${kmlType} addedIdx=${addedIdx}`);
+                sendPle({ type: 'DISCARD_ADDED_LINE', kmlType, addedIdx });
+            } else {
+                console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT (added) kmlType=${kmlType} addedIdx=${addedIdx}`);
+                sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
+            }
         } else {
             const pmIdx = parseInt(pmIdxAttr, 10);
             if (!Number.isFinite(pmIdx)) return;

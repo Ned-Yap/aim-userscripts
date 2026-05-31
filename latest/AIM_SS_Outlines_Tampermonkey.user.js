@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.63
+// @version      34.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.63';
+    const SCRIPT_VERSION = '34.64';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1722,11 +1722,14 @@
         try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
         if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
         clearSnapIndicator();
+        // v34.64: bright light purple for contrast against satellite +
+        // yellow KML lines. Bigger (28px) + double-layered glow so it
+        // pops at a glance.
         const icon = L.divIcon({
-            html: '<div style="width:22px;height:22px;border-radius:50%;border:2.5px solid #ffd84a;background:rgba(255,216,74,0.22);box-shadow:0 0 10px rgba(255,216,74,0.8);box-sizing:border-box;pointer-events:none"></div>',
+            html: '<div style="width:28px;height:28px;border-radius:50%;border:3px solid #d49eff;background:rgba(212,158,255,0.30);box-shadow:0 0 12px rgba(212,158,255,0.95),0 0 22px rgba(212,158,255,0.55);box-sizing:border-box;pointer-events:none"></div>',
             className: 'aim-snap-indicator',
-            iconSize: [26, 26],
-            iconAnchor: [13, 13],
+            iconSize: [34, 34],
+            iconAnchor: [17, 17],
         });
         try {
             snapIndicator = L.marker([latlng.lat, latlng.lng], { icon, interactive: false, zIndexOffset: 2000, keyboard: false });
@@ -5027,6 +5030,34 @@
                     commitPendingOps(m.kmlType);
                 } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
                     discardCommitOps(m.kmlType);
+                } else if (m.type === 'DISCARD_ADDED_LINE' && m.kmlType && Number.isFinite(m.addedIdx)) {
+                    // v34.64: PLE delete-mode + click on a green pending-add
+                    // line. Discard outright (splice from co.added) — there's
+                    // no "mark for deletion" stage for pending-adds.
+                    //
+                    // CRITICAL: exit ANY active added-line vertex edit first
+                    // because the splice shifts subsequent indices and a
+                    // stale vertexEditState.addedIdx would point to the
+                    // wrong line on the next interaction.
+                    const siteID = getCurrentSiteID();
+                    if (siteID) {
+                        if (vertexEditState && vertexEditState.isAdded) {
+                            exitVertexEdit({ save: false, silent: true });
+                        }
+                        const co = getCommitOps(siteID, m.kmlType);
+                        const target = co.added && co.added[m.addedIdx];
+                        if (target) {
+                            const name = target.name || '(unnamed)';
+                            co.added.splice(m.addedIdx, 1);
+                            setCommitOps(siteID, m.kmlType, co);
+                            const count = commitOpsCount(siteID, m.kmlType);
+                            showKMLToast(`Discarded pending ${m.kmlType} line "${name}". ${count} pending commit${count === 1 ? '' : 's'}.`, 4500);
+                            if (isActive) runUpdate();
+                            try { broadcastPowerLineStatus(); } catch (e2) {}
+                        } else {
+                            showKMLToast(`Pending ${m.kmlType} line at index ${m.addedIdx} not found — may have already been discarded.`, 4000);
+                        }
+                    }
                 } else if (m.type === 'MARK_LINE_FOR_DELETE' && m.kmlType && Number.isFinite(m.pmIdx)) {
                     // v34.55: PLE's delete-line-mode → M1 on a power
                     // line dispatches this instead of ENTER_VERTEX_EDIT.
