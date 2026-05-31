@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.48
+// @version      3.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.48';
+    const SCRIPT_VERSION = '3.49';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1422,7 +1422,7 @@
         if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
         const ok = pasteSidebarSearch(doc, entity.name);
         if (!ok) { showToast('Could not paste into sidebar search', 'rgba(255,96,96,0.55)'); return; }
-        await sleep(300);
+        await sleep(200);
         const item = findSidebarItemByName(doc, entity.name);
         if (!item) {
             showToast(`"${entity.name}" not in sidebar after filter`, 'rgba(255,180,0,0.55)');
@@ -1454,14 +1454,21 @@
     // those, the remaining sections come into view and we can act on
     // them. wantState='off' means uncheck + collapse; 'on' means check
     // (don't touch collapse state on the way back).
+    // wantState modes:
+    //   'off'           — uncheck section + collapse it (M2 solo)
+    //   'on'            — check section parent (M2 unsolo, after collapse-only)
+    //   'collapse-only' — JUST collapse, don't touch checkbox (used before 'on'
+    //                     so 6 collapsed headers all fit in viewport before we
+    //                     start checking — otherwise checking the first section
+    //                     expands it and pushes the rest off-screen)
     async function walkSidebarSections(doc, wantState, maxPasses = 8) {
         let pass = 0;
         while (pass < maxPasses) {
             scrollSidebarToTop(doc);
-            await sleep(60);
+            await sleep(25);
             const sections = getSidebarSections(doc);
             if (sections.length === 0) {
-                console.log(`${TAG} walkSidebarSections pass ${pass}: 0 sections in DOM — bailing`);
+                console.log(`${TAG} walkSidebarSections(${wantState}) pass ${pass}: 0 sections in DOM — bailing`);
                 break;
             }
             let didWork = false;
@@ -1479,15 +1486,19 @@
                     if (s.checkbox && !s.checkbox.checked) {
                         try { s.checkbox.click(); didWork = true; } catch (e) {}
                     }
+                } else if (wantState === 'collapse-only') {
+                    if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                        try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    }
                 }
-                await sleep(60);
+                await sleep(25);
             }
-            console.log(`${TAG} walkSidebarSections pass ${pass}: [${titles.join(', ')}] didWork=${didWork}`);
+            console.log(`${TAG} walkSidebarSections(${wantState}) pass ${pass}: [${titles.join(', ')}] didWork=${didWork}`);
             if (!didWork) break;
             pass++;
             // Wait for the virtualized list to re-layout (sections below
             // shift up into view as the ones above collapse).
-            await sleep(200);
+            await sleep(120);
         }
     }
 
@@ -1502,7 +1513,7 @@
         await walkSidebarSections(doc, 'off');
         // 2. Search + check the target
         pasteSidebarSearch(doc, entity.name);
-        await sleep(350);
+        await sleep(220);
         const item = findSidebarItemByName(doc, entity.name);
         if (item) {
             const cb = getEntityCheckboxFromItem(item);
@@ -1524,7 +1535,14 @@
         // Clear search first so the section headers are all in the
         // virtualized list (the search filter hides them otherwise).
         pasteSidebarSearch(doc, '');
-        await sleep(200);
+        await sleep(120);
+        // v3.49: COLLAPSE first, then CHECK. Checking a section's
+        // parent checkbox while the section is collapsed auto-expands
+        // it (Percepto's behavior), and the expanded section fills the
+        // viewport — the next sections get pushed off the virtualized
+        // list. By ensuring everything is collapsed first, the 6
+        // section headers all stay in the DOM during the check pass.
+        await walkSidebarSections(doc, 'collapse-only');
         await walkSidebarSections(doc, 'on');
         sumPanelState.visibility = new Map();
         showToast('All entities visible');
