@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.40
+// @version      3.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.40';
+    const SCRIPT_VERSION = '3.41';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1074,24 +1074,57 @@
                 return;
             }
             // Single-value rows — whole row click-to-copy as before.
+            // v3.41 exception: the Subtype row for assets is click-to-EDIT
+            // (opens inline editor), pencil icon instead of copy icon.
             if (value === '' || value === null || value === undefined) return;
+            const isSubtypeEditable = (label === 'Subtype' && entity.type === 3);
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;padding:5px 12px;cursor:pointer;align-items:flex-start;gap:8px';
             row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.12)'; };
             row.onmouseleave = () => { row.style.background = 'transparent'; };
-            row.onclick = (ev) => {
-                ev.stopPropagation();
-                copyToClipboard(String(value), `Copied ${label}`);
-            };
             const lbl = document.createElement('span');
             lbl.style.cssText = 'flex:0 0 75px;color:#888;font-size:11px;line-height:1.4';
             lbl.textContent = label;
             const val = document.createElement('span');
             val.style.cssText = 'flex:1;color:#e6e6e6;font-size:12px;word-break:break-word;line-height:1.4';
-            val.textContent = String(value);
             const icon = document.createElement('span');
             icon.style.cssText = 'flex:0 0 14px;color:#7adfe6;font-size:11px;text-align:right;opacity:0.55';
-            icon.textContent = '⧉';
+            if (isSubtypeEditable) {
+                // Show effective value + pending visual; click to edit.
+                const eff = effectiveSubtype(entity);
+                if (eff.pending && eff.oldValue) {
+                    const oldSpan = document.createElement('span');
+                    oldSpan.textContent = eff.oldValue;
+                    oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px';
+                    const newSpan = document.createElement('span');
+                    newSpan.textContent = eff.value + (eff.isNew ? ' ✨' : '');
+                    newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                    val.appendChild(oldSpan);
+                    val.appendChild(newSpan);
+                } else {
+                    val.textContent = String(eff.value || '');
+                }
+                icon.textContent = '✎';
+                icon.title = 'Click to edit subtype';
+                row.title = 'Click: edit subtype · queues to apply';
+                row.onclick = (ev) => {
+                    ev.stopPropagation();
+                    startInlineSubtypeEdit(val, entity, (queued) => {
+                        // Refresh just this row's display by closing +
+                        // re-opening would also work, but we already have
+                        // the popup state; the next click on the entity
+                        // will re-build from the freshly-queued data.
+                        if (queued) closeInspector();
+                    });
+                };
+            } else {
+                val.textContent = String(value);
+                icon.textContent = '⧉';
+                row.onclick = (ev) => {
+                    ev.stopPropagation();
+                    copyToClipboard(String(value), `Copied ${label}`);
+                };
+            }
             row.appendChild(lbl);
             row.appendChild(val);
             row.appendChild(icon);
@@ -1534,6 +1567,84 @@
         if (r.type === 16) return true;
         return false;
     }
+
+    // v3.41: assets are editable for SUBTYPE only via a separate
+    // Percepto editor path (Ant Select dropdown with creatable input,
+    // not number inputs). Branches off in startInlineSubtypeEdit +
+    // applyAssetSubtypeChange.
+    function isAssetEditableForSubtype(r) {
+        return !!(r && r.type === 3 && r.entity);
+    }
+
+    // Distinct subtype strings currently observed across all loaded
+    // assets on the given site. Used to populate the inline editor's
+    // datalist (autocomplete) AND to decide whether a queued subtype
+    // is "existing" (just-select in the Percepto dropdown) or "new"
+    // (needs the "Enter new type" + Add path during apply).
+    function observedSubtypesForSite(siteID) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        if (!bucket) return [];
+        const set = new Set();
+        (bucket.entities || []).forEach(en => {
+            if (en.type === 3 && en.custom && en.custom.poi_type_str) {
+                const s = String(en.custom.poi_type_str).trim();
+                if (s) set.add(s);
+            }
+        });
+        return Array.from(set).sort((a, b) => a.localeCompare(b));
+    }
+
+    // Queue entry for subtype changes. arcId=null, field='subtype'.
+    // Stores plain strings rather than meter values; the Apply pipeline
+    // branches on field === 'subtype' to use the Ant Select path.
+    function getPendingSubtype(entityId) {
+        return getPendingEdit(entityId, null, 'subtype');
+    }
+    function queueSubtypeEdit(entity, newValueRaw) {
+        if (!entity || entity.type !== 3) return false;
+        const newValue = String(newValueRaw || '').trim();
+        if (!newValue) return false;
+        const current = (entity.custom && entity.custom.poi_type_str) || '';
+        if (newValue === current) {
+            // No-op — if there was a pending edit for this entity,
+            // clear it (user typed back to original).
+            if (getPendingSubtype(entity.id)) {
+                discardPendingEdit(entity.id, null, 'subtype');
+                return false;
+            }
+            return false;
+        }
+        const siteID = getCurrentSiteID();
+        const observed = new Set(observedSubtypesForSite(siteID));
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: false,
+            isAsset: true,
+            field: 'subtype',
+            oldValue: current,
+            newValue,
+            isNewSubtype: !observed.has(newValue),
+            // For grouping + display. Mirrors fpName for FP/FFZ edits.
+            fpName: entity.name || '(unnamed)',
+            entityName: entity.name || '(unnamed)',
+            segmentName: entity.name || '(unnamed)',
+        });
+        return true;
+    }
+
+    // Returns the EFFECTIVE subtype value for an entity, honoring any
+    // pending edit. { value, pending, isNew } — pending=true means a
+    // queued subtype edit overrides the original; isNew=true means the
+    // queued value isn't yet in the existing dropdown list.
+    function effectiveSubtype(entity) {
+        const orig = (entity && entity.custom && entity.custom.poi_type_str) || '';
+        if (!entity) return { value: orig, pending: false, isNew: false };
+        const p = getPendingSubtype(entity.id);
+        if (!p) return { value: orig, pending: false, isNew: false };
+        return { value: p.newValue, pending: true, isNew: !!p.isNewSubtype, oldValue: orig };
+    }
     // Helper: pull the arcId for the queue entry shape (null for FFZ).
     function rowArcId(r) {
         return (r._isSegment && r.arc) ? r.arc.id : null;
@@ -1914,12 +2025,14 @@
     function groupPendingByEntity() {
         const byKey = new Map();
         Object.values(pendingSegmentEdits).forEach(e => {
-            const key = `${e.isFfz ? 'ffz' : 'fp'}:${e.entityId}`;
+            const kind = e.isAsset ? 'ast' : (e.isFfz ? 'ffz' : 'fp');
+            const key = `${kind}:${e.entityId}`;
             if (!byKey.has(key)) {
                 byKey.set(key, {
-                    entityName: e.fpName || '',
+                    entityName: e.entityName || e.fpName || '',
                     entityId: e.entityId,
                     isFfz: !!e.isFfz,
+                    isAsset: !!e.isAsset,
                     edits: [],
                 });
             }
@@ -1933,8 +2046,12 @@
                 return ra - rb;
             });
         });
+        // Order: FFZs first (FP altitude safety), then FPs, then Assets
+        // (subtype changes). Within each kind, alpha by entity name.
         groups.sort((a, b) => {
-            if (a.isFfz !== b.isFfz) return a.isFfz ? -1 : 1;
+            const aRank = a.isFfz ? 0 : a.isAsset ? 2 : 1;
+            const bRank = b.isFfz ? 0 : b.isAsset ? 2 : 1;
+            if (aRank !== bRank) return aRank - bRank;
             return String(a.entityName).localeCompare(String(b.entityName));
         });
         return groups;
@@ -1947,7 +2064,7 @@
     const APPLY_LAUNCHER_ID = 'aim-ai-apply-launcher';
     function openApplyLauncher(cfg) {
         closeApplyLauncher();
-        const { editCount, groupCount, fpCount, ffzCount, warnings, onLaunch } = cfg;
+        const { editCount, groupCount, fpCount, ffzCount, astCount = 0, warnings, onLaunch } = cfg;
         const m = document.createElement('div');
         m.id = APPLY_LAUNCHER_ID;
         m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
@@ -1966,7 +2083,7 @@
             <div style="color:#888;font-size:11px;margin-bottom:12px">FFZs first, then FP segments. Per-entity ~3-6 s.</div>
             <div style="color:#cfd6dc;font-size:13px;line-height:1.7">
                 <strong>${editCount}</strong> edit${editCount === 1 ? '' : 's'} across <strong>${groupCount}</strong> entit${groupCount === 1 ? 'y' : 'ies'}<br>
-                Order: <strong style="color:#5fff5f">${ffzCount}</strong> FFZ${ffzCount === 1 ? '' : 's'}, then <strong style="color:#7adfe6">${fpCount}</strong> FP${fpCount === 1 ? '' : 's'}<br>
+                Order: <strong style="color:#5fff5f">${ffzCount}</strong> FFZ${ffzCount === 1 ? '' : 's'}, then <strong style="color:#7adfe6">${fpCount}</strong> FP${fpCount === 1 ? '' : 's'}${astCount > 0 ? `, then <strong style="color:#ffffff">${astCount}</strong> Asset${astCount === 1 ? '' : 's'}` : ''}<br>
                 Estimated total: ~<strong>${etaMin}</strong> min
             </div>
             ${warnHtml}
@@ -2103,6 +2220,14 @@
         Object.values(pendingSegmentEdits).forEach(e => {
             const ent = entities.find(en => en.id === e.entityId);
             if (!ent) return; // already caught above
+            // v3.41: subtype path is string-valued, not numeric.
+            if (e.isAsset && e.field === 'subtype') {
+                const cur = (ent.custom && ent.custom.poi_type_str) || '';
+                if (cur && cur !== e.oldValue) {
+                    result.warnings.push(`${e.entityName} subtype: queued from "${e.oldValue}" but current value is "${cur}" (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
             let currentM = null;
             if (e.isFfz) {
                 if (ent.restrictions) {
@@ -2187,13 +2312,19 @@
                     entityName: g.entityName,
                     entityId: g.entityId,
                     isFfz: g.isFfz,
+                    isAsset: !!g.isAsset,
                     editsAttempted: g.edits.length,
                     editsApplied: outcome.appliedCount || 0,
                     success: !!outcome.ok,
                     reason: outcome.reason || '',
                     verified: outcome.verified === true,
                     durationMs,
-                    edits: g.edits.map(e => ({
+                    edits: g.edits.map(e => e.field === 'subtype' ? ({
+                        field: e.field,
+                        oldValue: e.oldValue,
+                        newValue: e.newValue,
+                        isNewSubtype: !!e.isNewSubtype,
+                    }) : ({
                         field: e.field,
                         arcId: e.arcId,
                         oldValueM: e.oldValueM,
@@ -2259,10 +2390,196 @@
     // Process one entity group: open editor, set all values, save.
     // Returns true if save succeeded, false otherwise (with the
     // failure recorded in applyState.errors).
+    // v3.41: Apply automation for asset subtype changes. Drives Percepto's
+    // Ant Select component (Type field on the asset edit panel):
+    //   1. Open the Type dropdown by clicking the combobox
+    //   2. If the target value already exists → click that option
+    //      If not → type into "Enter new type" + click Add + click the
+    //      newly-appeared option
+    //   3. Wait for aria-selected="true" / dropdown to close
+    //   4. Save the editor
+    //
+    // Only the first edit in the group is applied — subtype is entity-
+    // level (one value per asset). Multiple queued subtype edits on the
+    // same entity collapse to the latest by virtue of the queue's
+    // pendingEditKey shape (entityId:'':subtype).
+    async function applyAssetSubtypeChange(group, opts) {
+        const { dryRun } = opts || {};
+        const label = group.entityName || '(unnamed)';
+        const edit = group.edits[0];
+        if (!edit || edit.field !== 'subtype') {
+            return { ok: false, reason: 'no subtype edit in group', appliedCount: 0 };
+        }
+        const targetSubtype = String(edit.newValue || '').trim();
+        if (!targetSubtype) {
+            return { ok: false, reason: 'empty target subtype', appliedCount: 0 };
+        }
+        console.log(`${TAG} apply: starting asset "${label}" subtype → "${targetSubtype}"${edit.isNewSubtype ? ' (NEW type)' : ''}${dryRun ? ' [DRY RUN]' : ''}`);
+
+        await closeEditor();
+        const hit = await findEntityInSidebar(label);
+        if (!hit) {
+            applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
+            return { ok: false, reason: 'not found in sidebar', appliedCount: 0 };
+        }
+        clickElDispatch(hit.el, hit.doc);
+        const editor = await waitForCondition(() => findOpenEditorWithName(), 15000, 250);
+        if (!editor) {
+            // One retry — same pattern as FP/FFZ path
+            clickElDispatch(hit.el, hit.doc);
+            const retry = await waitForCondition(() => findOpenEditorWithName(), 10000, 250);
+            if (!retry) {
+                applyState.errors.push({ entityName: label, reason: 'editor did not open (after retry)' });
+                return { ok: false, reason: 'editor did not open', appliedCount: 0 };
+            }
+        }
+        const finalEditor = findOpenEditorWithName();
+        if (!finalEditor) {
+            applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
+            return { ok: false, reason: 'editor lost', appliedCount: 0 };
+        }
+        const openedName = getEditorTitle(finalEditor.doc);
+        if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
+            applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
+            return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
+        }
+        const panelDoc = finalEditor.doc;
+
+        // Find the Type combobox. ID 'asset-form-type' is the input
+        // inside Percepto's Ant Select trigger.
+        const combo = panelDoc.getElementById('asset-form-type');
+        if (!combo) {
+            applyState.errors.push({ entityName: label, reason: 'Type input not found (#asset-form-type)' });
+            await closeEditor();
+            return { ok: false, reason: 'Type input not found', appliedCount: 0 };
+        }
+        // Click the .ant-select trigger (parent of the input) to open
+        // the dropdown.
+        const selectTrigger = combo.closest('.ant-select') || combo;
+        clickElDispatch(selectTrigger, panelDoc);
+        // Some Ant Select versions need a focus before the dropdown
+        // mounts — explicitly focus then click again as a safety.
+        try { combo.focus(); } catch (e) {}
+
+        // Wait for the dropdown to render. The popup mounts on document.body
+        // (or a portal root), NOT inside .upsert-entity. Scan both the
+        // panel doc AND the parent doc for `.pr-creatable-dropdown`.
+        const findDropdown = () => {
+            const docs = [panelDoc, document];
+            try { if (panelDoc.defaultView && panelDoc.defaultView.top) docs.push(panelDoc.defaultView.top.document); } catch (e) {}
+            for (const d of docs) {
+                if (!d) continue;
+                // Must be a VISIBLE dropdown (Ant adds .ant-select-dropdown-hidden when closed)
+                const list = d.querySelector('.pr-creatable-dropdown, .ant-select-dropdown:not(.ant-select-dropdown-hidden) .rc-virtual-list');
+                if (list) {
+                    // Return the closest creatable-dropdown wrapper so we
+                    // get the footer too. If none, walk up to a common
+                    // dropdown root.
+                    const cd = list.closest('.pr-creatable-dropdown') || list.closest('.ant-select-dropdown') || list;
+                    return { dropdown: cd, doc: d };
+                }
+            }
+            return null;
+        };
+        let dd = await waitForCondition(findDropdown, 4000, 100);
+        if (!dd) {
+            // Retry the click — Ant sometimes ignores the first
+            clickElDispatch(selectTrigger, panelDoc);
+            dd = await waitForCondition(findDropdown, 3000, 100);
+        }
+        if (!dd) {
+            applyState.errors.push({ entityName: label, reason: 'Type dropdown did not open' });
+            await closeEditor();
+            return { ok: false, reason: 'Type dropdown did not open', appliedCount: 0 };
+        }
+        await sleep(150);
+
+        // Look for the target option among existing entries.
+        const findOption = (root) => {
+            const opts = root.querySelectorAll('.ant-select-item-option');
+            for (const o of opts) {
+                const title = o.getAttribute('title') || '';
+                const txt = (o.querySelector('.ant-select-item-option-content')?.textContent || '').trim();
+                if (title === targetSubtype || txt === targetSubtype) return o;
+            }
+            return null;
+        };
+
+        let optEl = findOption(dd.dropdown);
+        if (!optEl) {
+            // Need to add via "Enter new type" + Add
+            const newInput = dd.dropdown.querySelector('.pr-creatable-dropdown__input');
+            const addBtn = dd.dropdown.querySelector('.pr-creatable-dropdown__button');
+            if (!newInput || !addBtn) {
+                applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" not found and no creatable footer` });
+                await closeEditor();
+                return { ok: false, reason: 'no creatable footer', appliedCount: 0 };
+            }
+            console.log(`${TAG} apply: ${label} — adding new subtype "${targetSubtype}"`);
+            setReactInputValue(newInput, targetSubtype);
+            await sleep(200);
+            // Add button starts disabled (empty input). Wait for it to enable.
+            await waitForCondition(() => !addBtn.disabled, 1500, 50);
+            if (addBtn.disabled) {
+                applyState.errors.push({ entityName: label, reason: 'Add button never enabled after typing new subtype' });
+                await closeEditor();
+                return { ok: false, reason: 'Add button disabled', appliedCount: 0 };
+            }
+            clickElDispatch(addBtn, dd.doc);
+            // After Add, the option appears in the list. Re-poll.
+            optEl = await waitForCondition(() => findOption(dd.dropdown), 4000, 100);
+            if (!optEl) {
+                applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" never appeared in dropdown after Add` });
+                await closeEditor();
+                return { ok: false, reason: 'new option never appeared', appliedCount: 0 };
+            }
+            await sleep(100);
+        }
+
+        // Click the target option.
+        console.log(`${TAG} apply: ${label} — selecting subtype option`);
+        clickElDispatch(optEl, dd.doc);
+        // Confirm selection happened — wait briefly for aria-selected.
+        await waitForCondition(
+            () => optEl.getAttribute('aria-selected') === 'true' || (combo.value && combo.value.includes(targetSubtype)),
+            1500, 100,
+        );
+        await sleep(200);
+
+        if (dryRun) {
+            await sleep(500);
+            await closeEditor();
+            return { ok: true, reason: '[DRY RUN] subtype selected + cancelled', appliedCount: 1, verified: false };
+        }
+
+        // Save.
+        await sleep(300);
+        const saved = await saveCurrentEditor();
+        const valErr = findValidationError();
+        if (valErr) {
+            applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
+            await closeEditor();
+            return { ok: false, reason: `validation: ${valErr}`, appliedCount: 1 };
+        }
+        if (!saved) {
+            applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
+            return { ok: false, reason: 'save timed out', appliedCount: 1 };
+        }
+        console.log(`${TAG} apply: ${label} — subtype saved`);
+        return { ok: true, reason: 'saved', appliedCount: 1, verified: false };
+    }
+
     async function applyOneEntity(group, opts) {
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
-        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${group.isFfz ? ', FFZ' : ', FP'})${dryRun ? ' [DRY RUN]' : ''}`);
+        // v3.41: branch to the asset path for subtype-only edits. The
+        // FP/FFZ path operates on number inputs; assets need the Ant
+        // Select dropdown ("Type" field with creatable footer).
+        if (group.isAsset) {
+            return applyAssetSubtypeChange(group, opts);
+        }
+        const kindLabel = group.isFfz ? 'FFZ' : 'FP';
+        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}, ${kindLabel})${dryRun ? ' [DRY RUN]' : ''}`);
         // 1. Close any existing editor (we may have landed in the
         //    wrong one from a previous step).
         await closeEditor();
@@ -4356,15 +4673,28 @@
             const unit = useFt ? 'ft' : 'm';
             const header = ['Type', 'Entity', 'Segment', 'Field', `Old (${unit})`, `New (${unit})`, `Δ (${unit})`];
             const lines = [header.join('\t')];
-            // Sort: FFZs first (entity-level edits), then FP segments.
-            // This matches the v3.19 commit-order rule baked in for the
-            // automated Apply path (AIM's overlap/steepness checks
-            // block FP saves when FFZ endpoints haven't moved yet).
+            // Sort: FFZs first (FP-safety order), then FPs, then Assets
+            // (subtype changes). Matches the Apply queue commit order.
             const sorted = Object.values(pendingSegmentEdits).sort((a, b) => {
-                if (a.isFfz !== b.isFfz) return a.isFfz ? -1 : 1;
-                return 0;
+                const aRank = a.isFfz ? 0 : a.isAsset ? 2 : 1;
+                const bRank = b.isFfz ? 0 : b.isAsset ? 2 : 1;
+                return aRank - bRank;
             });
             sorted.forEach(e => {
+                // v3.41: subtype is a string field, not numeric. The Old/New
+                // columns hold the raw subtype text; Δ is empty.
+                if (e.isAsset && e.field === 'subtype') {
+                    lines.push([
+                        'Asset',
+                        e.entityName || e.fpName || '',
+                        '(entity)',
+                        'Subtype' + (e.isNewSubtype ? ' (NEW)' : ''),
+                        e.oldValue || '',
+                        e.newValue || '',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
                 const oldV = conv(e.oldValueM);
                 const newV = conv(e.newValueM);
                 const delta = newV - oldV;
@@ -4406,8 +4736,9 @@
                 return;
             }
             const groups = groupPendingByEntity();
-            const fpCount = groups.filter(g => !g.isFfz).length;
             const ffzCount = groups.filter(g => g.isFfz).length;
+            const astCount = groups.filter(g => g.isAsset).length;
+            const fpCount = groups.length - ffzCount - astCount;
             // Open the launcher modal — picks dry-run vs live + shows
             // warnings before any action. Replaces the bare confirm()
             // dialog so the user can see drift warnings.
@@ -4416,6 +4747,7 @@
                 groupCount: groups.length,
                 fpCount,
                 ffzCount,
+                astCount,
                 warnings: pre.warnings,
                 onLaunch: (opts) => {
                     openApplyProgressModal(groups);
@@ -4681,8 +5013,41 @@
                             copyToClipboard(String(r._segId), `Copied ${r._segId}`);
                         };
                     } else if (col.key === 'subtype') {
-                        td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
-                        td.textContent = r.subtype || '—';
+                        // v3.41: asset subtype cells are inline-editable.
+                        // Non-asset rows (FP/FFZ/NFZ/markers) stay plain text.
+                        const isAsset = r.type === 3 && r.entity;
+                        const eff = isAsset ? effectiveSubtype(r.entity) : { value: r.subtype || '', pending: false };
+                        const baseColor = eff.pending ? '#ffd54f' : '#bbb';
+                        td.style.cssText = `padding:5px 8px;color:${baseColor};font-size:11px;cursor:pointer${isAsset ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                        if (eff.pending && eff.oldValue) {
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = eff.oldValue;
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px;font-weight:normal';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = eff.value + (eff.isNew ? ' ✨' : '');
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `Was "${eff.oldValue}", will be "${eff.value}"${eff.isNew ? ' (NEW type — will be added to Percepto)' : ''}. Click to re-edit · Right-click: copy current value.`;
+                        } else {
+                            td.textContent = eff.value || '—';
+                            td.title = isAsset
+                                ? 'Click: edit subtype · Right-click: copy'
+                                : (r.subtype ? 'Right-click: copy' : 'No subtype');
+                        }
+                        if (isAsset) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineSubtypeEdit(td, r.entity);
+                            };
+                        }
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const txt = eff.value || r.subtype || '';
+                            if (!txt) return;
+                            copyToClipboard(txt, `Copied "${txt}"`);
+                        };
                     } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
                         // Min, Max, and Delta cells. Min/Max on FP segment
                         // rows are inline-editable. Delta is derived; never
@@ -5024,6 +5389,94 @@
                 cancelled = true;
                 input.onblur = null;
                 if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            }
+        };
+    }
+
+    // v3.41: open an inline editor on an asset's Subtype cell — either
+    // the SUM table column or the right-click popup row. Replaces the
+    // cell content with a text input pre-filled with the current (or
+    // pending-derived) value, with a datalist of observed subtypes for
+    // autocomplete. Enter/Tab/blur commits to the pending queue; Esc
+    // cancels. Free-text values not in the list get isNewSubtype=true
+    // and apply via the "Enter new type" + Add path in Percepto's editor.
+    //
+    // td: the cell element to swap in the input
+    // entity: the asset entity (must be type === 3)
+    // onCommit: optional callback fired AFTER successful queue (used
+    //   for the popup path so it can close itself; the SUM table path
+    //   redraws via window.__aim_ai_redrawTable).
+    function startInlineSubtypeEdit(td, entity, onCommit) {
+        if (!entity || entity.type !== 3) return;
+        const eff = effectiveSubtype(entity);
+        const startVal = eff.value;
+
+        // Build a unique datalist id so multiple cells don't collide.
+        const dlId = `aim-subtype-dl-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const dl = document.createElement('datalist');
+        dl.id = dlId;
+        const siteID = getCurrentSiteID();
+        observedSubtypesForSite(siteID).forEach(s => {
+            const o = document.createElement('option');
+            o.value = s;
+            dl.appendChild(o);
+        });
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = startVal || '';
+        input.setAttribute('list', dlId);
+        input.title = 'Pick from list OR type a new subtype. Enter = queue · Esc = cancel.';
+        input.style.cssText = 'width:160px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px';
+
+        td.innerHTML = '';
+        td.appendChild(input);
+        td.appendChild(dl);
+        input.focus();
+        input.select();
+
+        let cancelled = false;
+        const commit = () => {
+            if (cancelled) return;
+            const raw = input.value;
+            const newVal = String(raw || '').trim();
+            if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            const queued = queueSubtypeEdit(entity, newVal);
+            if (queued) {
+                const observed = new Set(observedSubtypesForSite(siteID));
+                const isNew = !observed.has(newVal);
+                showToast(
+                    `Queued: ${entity.name || 'asset'} subtype → ${newVal}${isNew ? ' (will be added as new type)' : ''}`,
+                    'rgba(255,213,79,0.7)'
+                );
+            } else if (newVal === ((entity.custom && entity.custom.poi_type_str) || '')) {
+                // No-op — either typed back to original, or never changed
+                if (getPendingSubtype(entity.id) === undefined && eff.pending) {
+                    // (eff.pending was true at start but cleared above by no-op)
+                    showToast('Reverted to original subtype');
+                }
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            if (typeof onCommit === 'function') {
+                try { onCommit(queued); } catch (e) {}
+            }
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelled = true;
+                input.onblur = null;
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                if (typeof onCommit === 'function') {
+                    try { onCommit(false); } catch (e2) {}
+                }
             }
         };
     }
