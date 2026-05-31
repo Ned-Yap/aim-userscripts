@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.53
+// @version      34.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.53';
+    const SCRIPT_VERSION = '34.54';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1335,6 +1335,14 @@
                                 kmlFeatures[key] = features;
                                 gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
                                 console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
+                                // v34.54: drop any stale commitOps entries from GM
+                                // storage whose pmIdx no longer references a real
+                                // line. Prevents the next commit from silently
+                                // no-op'ing on a stale mark from a previous session.
+                                const pruned = pruneStaleOps(siteID, type);
+                                if (pruned.dropped > 0) {
+                                    showKMLToast(`Dropped ${pruned.dropped} stale pending ${type} mark${pruned.dropped === 1 ? '' : 's'} on load (line${pruned.dropped === 1 ? '' : 's'} no longer exist${pruned.dropped === 1 ? 's' : ''}).`, 6000);
+                                }
                                 if (isActive) runUpdate();
                             } catch (e) {
                                 console.error(`${TAG} KML parse failed for ${key}:`, e);
@@ -2388,9 +2396,45 @@
     // GET → PUT path again).
     const committedKmlCache = {};
 
+    // v34.54: prune stale ops with pmIdx out of range for the current
+    // file. commitOps persists across sessions in GM storage; if user
+    // marked a line for delete in session A, then another commit (by
+    // them or a coworker) reduced the placemark count below that pmIdx,
+    // session B's commit attempt would silently no-op (out-of-bounds
+    // skip in applyCommitOpsToKML). Validate up front + drop stale,
+    // tell the user what happened.
+    function pruneStaleOps(siteID, type) {
+        const co = getCommitOps(siteID, type);
+        const features = kmlFeatures[kmlKey(siteID, type)];
+        if (!features) return { dropped: 0 }; // can't validate without features
+        // Highest valid pmIdx is the largest pmIdx present in features
+        // (NOT features.length-1, because a Placemark with no LineString /
+        // Polygon contributes no feature even though it occupies an index).
+        let maxPmIdx = -1;
+        features.forEach(f => { if (typeof f.pmIdx === 'number' && f.pmIdx > maxPmIdx) maxPmIdx = f.pmIdx; });
+        let dropped = 0;
+        Object.keys(co.ops).forEach(k => {
+            const idx = parseInt(k, 10);
+            if (isNaN(idx) || idx > maxPmIdx) {
+                console.warn(`${TAG} dropping stale pending op for ${type} pmIdx=${k} (max valid=${maxPmIdx})`);
+                delete co.ops[k];
+                dropped++;
+            }
+        });
+        if (dropped > 0) setCommitOps(siteID, type, co);
+        return { dropped, maxPmIdx };
+    }
+
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+
+        // v34.54: prune stale ops first.
+        const pruned = pruneStaleOps(siteID, type);
+        if (pruned.dropped > 0) {
+            showKMLToast(`Dropped ${pruned.dropped} stale pending ${type} mark${pruned.dropped === 1 ? '' : 's'} (line${pruned.dropped === 1 ? '' : 's'} no longer exist${pruned.dropped === 1 ? 's' : ''} — file changed since marked). Mark again to retry.`, 8000);
+        }
+
         const co = getCommitOps(siteID, type);
         const summary = summarizeCommitOps(co);
         if (summary.total === 0) {
