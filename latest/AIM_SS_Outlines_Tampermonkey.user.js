@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.54
+// @version      34.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.54';
+    const SCRIPT_VERSION = '34.55';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2797,10 +2797,40 @@
                 vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
                 if (isActive) runUpdate();
             });
+            // v34.55: right-click a vertex handle to delete that vertex.
+            // The marker's own contextmenu event bypasses the document-
+            // level KML contextmenu handler (which would otherwise pop
+            // the line's Mark-for-deletion menu).
+            marker.on('contextmenu', (e) => {
+                if (!vertexEditState) return;
+                if (vertexEditState.currentCoords.length <= 2) {
+                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
+                    return;
+                }
+                // Find this marker's current index (vertexIdx is captured at
+                // creation; if prior deletes shifted the array, that closure
+                // value is stale — look up the current index instead).
+                const curIdx = vertexEditState.handles.indexOf(marker);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords.splice(curIdx, 1);
+                vertexEditState.handles.splice(curIdx, 1);
+                try { marker.remove(); } catch (e2) {}
+                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left. Save or Discard from the toolbar.`, 3500);
+                // Refresh the floating toolbar's vertex count.
+                if (vertexEditState.toolbarEl) {
+                    const label = vertexEditState.toolbarEl.querySelector('span');
+                    if (label) {
+                        label.textContent = vertexEditState.isAdded
+                            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+                            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+                    }
+                }
+                if (isActive) runUpdate();
+            });
             vertexEditState.handles.push(marker);
         });
         buildVertexEditToolbar();
-        showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles · Save or Discard from the toolbar.`, 6000);
+        showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles, M2 a handle to delete a vertex · Save or Discard from the toolbar.`, 6000);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -2860,10 +2890,34 @@
                 vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
                 if (isActive) runUpdate();
             });
+            // v34.55: same right-click-delete-vertex behavior as
+            // enterVertexEdit. See that function for full notes.
+            marker.on('contextmenu', (e) => {
+                if (!vertexEditState) return;
+                if (vertexEditState.currentCoords.length <= 2) {
+                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
+                    return;
+                }
+                const curIdx = vertexEditState.handles.indexOf(marker);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords.splice(curIdx, 1);
+                vertexEditState.handles.splice(curIdx, 1);
+                try { marker.remove(); } catch (e2) {}
+                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left. Save or Discard from the toolbar.`, 3500);
+                if (vertexEditState.toolbarEl) {
+                    const label = vertexEditState.toolbarEl.querySelector('span');
+                    if (label) {
+                        label.textContent = vertexEditState.isAdded
+                            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+                            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+                    }
+                }
+                if (isActive) runUpdate();
+            });
             vertexEditState.handles.push(marker);
         });
         buildVertexEditToolbar();
-        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag the cyan handles · Save or Discard.`, 6000);
+        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag the cyan handles, M2 a handle to delete a vertex · Save or Discard.`, 6000);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -4712,6 +4766,19 @@
                     commitPendingOps(m.kmlType);
                 } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
                     discardCommitOps(m.kmlType);
+                } else if (m.type === 'MARK_LINE_FOR_DELETE' && m.kmlType && Number.isFinite(m.pmIdx)) {
+                    // v34.55: PLE's delete-line-mode → M1 on a power
+                    // line dispatches this instead of ENTER_VERTEX_EDIT.
+                    // Calls the existing markPlacemarkForDelete which
+                    // queues an op + flips render to red dashed.
+                    const siteID = getCurrentSiteID();
+                    if (siteID) {
+                        markPlacemarkForDelete(siteID, m.kmlType, m.pmIdx);
+                        const count = commitOpsCount(siteID, m.kmlType);
+                        showKMLToast(`Marked ${m.kmlType} #${m.pmIdx} for deletion. ${count} pending — click ✓ in the strip to commit.`, 4500);
+                        if (isActive) runUpdate();
+                        try { broadcastPowerLineStatus(); } catch (e2) {}
+                    }
                 }
             } catch (e) {
                 console.warn(`${TAG} PLE command failed (${m.type}):`, e);

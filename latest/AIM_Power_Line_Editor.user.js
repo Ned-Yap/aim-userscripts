@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js
 // @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
@@ -43,7 +43,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -127,6 +127,13 @@
     let masterEnabled = true;
     let editEnabled = readBool(EDIT_STORAGE_KEY);
     let stripOpen = readBool(STRIP_STORAGE_KEY);
+    // v0.12: delete-line-mode is session-only (not localStorage). When ON,
+    // M1 on a power line marks the WHOLE LINE for deletion via
+    // MARK_LINE_FOR_DELETE instead of entering vertex edit. Persisting
+    // this across reloads would be dangerous — the user might forget
+    // it's armed and accidentally mark lines for deletion. Always
+    // resets to OFF on page load.
+    let deleteLineMode = false;
 
     function setEditEnabled(on, opts) {
         opts = opts || {};
@@ -158,6 +165,17 @@
         stripOpen = on;
         writeBool(STRIP_STORAGE_KEY, on);
         renderUI();
+    }
+
+    function setDeleteLineMode(on) {
+        if (on === deleteLineMode) return;
+        deleteLineMode = on;
+        renderUI();
+        // Body class so the line cursor changes when armed (CSS in injectStyles).
+        try {
+            if (on) document.body.classList.add('aim-ple-delete-mode');
+            else document.body.classList.remove('aim-ple-delete-mode');
+        } catch (e) {}
     }
 
     // ------- Control Panel -------
@@ -222,11 +240,19 @@
         if (addedIdxAttr !== null) {
             const addedIdx = parseInt(addedIdxAttr, 10);
             if (!Number.isFinite(addedIdx)) return;
+            // v0.12: delete-line-mode doesn't apply to pending-add lines —
+            // those should be discarded via M2 right-click → Discard, not
+            // committed as a delete to GitHub (they're not on GitHub yet).
+            // Always route added lines to vertex-edit.
             sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
         } else {
             const pmIdx = parseInt(pmIdxAttr, 10);
             if (!Number.isFinite(pmIdx)) return;
-            sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
+            if (deleteLineMode) {
+                sendPle({ type: 'MARK_LINE_FOR_DELETE', kmlType, pmIdx });
+            } else {
+                sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
+            }
         }
     }
 
@@ -455,6 +481,21 @@
             { border: 'rgba(255,133,133,0.55)' }
         ));
 
+        // 🗑 Delete-line mode toggle. When armed, M1 on a power line marks
+        // it for deletion instead of entering vertex edit. Session-only —
+        // never persists across reloads (dangerous if forgotten on).
+        const deleteBtnTitle = deleteLineMode
+            ? 'Delete-line mode ARMED — M1 on any line marks it for deletion. Click again to disarm. ✓ commit to push deletes to GitHub.'
+            : 'Toggle Delete-line mode — when ON, M1 on a line marks the whole line for deletion (instead of editing its vertices). Right-click a line still works too.';
+        stripEl.appendChild(iconBtn(
+            '🗑',
+            deleteBtnTitle,
+            () => setDeleteLineMode(!deleteLineMode),
+            deleteLineMode
+                ? { bg: 'rgba(120,40,40,0.95)', hoverBg: 'rgba(160,60,60,0.95)', border: '#ff5050', color: '#fff' }
+                : { border: 'rgba(255,133,133,0.35)' }
+        ));
+
         // ✓ Commit all and ✗ Discard all — ONLY when there's something pending
         if (totalDirty > 0) {
             const parts = [];
@@ -482,6 +523,21 @@
         }
     }
 
+    // v0.12: visual cue when delete-line-mode is armed — change cursor to
+    // crosshair over power-line paths so the user sees "this click will
+    // delete this line". Class is toggled on body by setDeleteLineMode.
+    function injectStyles() {
+        if (document.getElementById('aim-ple-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'aim-ple-styles';
+        style.textContent = `
+            body.aim-ple-delete-mode path[data-buffer-kind^="kml-"] {
+                cursor: crosshair !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
     // ------- Init -------
     function init() {
         setupChannels();
@@ -490,6 +546,7 @@
             console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no ⚡ in this frame)`);
             return;
         }
+        injectStyles();
         ensureButton();
         if (editEnabled) {
             setStylerEditMode(true);
