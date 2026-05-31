@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.60
+// @version      34.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.60';
+    const SCRIPT_VERSION = '34.61';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2857,6 +2857,29 @@
                 updateVertexEditToolbarLabel();
                 if (isActive) runUpdate();
             });
+            // v34.61 Phase 3a: Ctrl+click a handle → branch a new line
+            // starting at this vertex. Saves any current edits to the
+            // parent line first, then enters draw mode seeded at the
+            // vertex's current position. Same kmlType as parent (user
+            // can change later if needed — usually they're branching
+            // distro-from-distro or trans-from-trans).
+            marker.on('click', (e) => {
+                if (!vertexEditState) return;
+                const oe = e && e.originalEvent;
+                if (!oe || !oe.ctrlKey) return;
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                const src = vertexEditState.currentCoords[curIdx];
+                if (!src || !Number.isFinite(src.lat) || !Number.isFinite(src.lng)) return;
+                const seedCoord = { lat: src.lat, lng: src.lng };
+                const parentType = vertexEditState.type;
+                try { if (L.DomEvent) L.DomEvent.stop(oe); } catch (err) {}
+                // Save current line's edits before branching out so the
+                // user doesn't lose any drag/insert work they did.
+                exitVertexEdit({ save: true, silent: true });
+                enterDrawMode(parentType, seedCoord);
+                showKMLToast(`Branching new ${parentType} line from vertex ${curIdx + 1}. Click to add vertices, then ✓ Save.`, 5000);
+            });
             vertexEditState.handles.push(marker);
         });
 
@@ -2924,7 +2947,7 @@
         vertexEditState.midhandles = [];
         rebuildVertexHandles();
         buildVertexEditToolbar();
-        showKMLToast(`Editing ${type} line #${pmIdx} — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Save/Discard from toolbar.`, 7000);
+        showKMLToast(`Editing ${type} line #${pmIdx} — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Ctrl+click a handle to branch a new line · Save/Discard from toolbar.`, 7500);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -2974,7 +2997,7 @@
         vertexEditState.midhandles = [];
         rebuildVertexHandles();
         buildVertexEditToolbar();
-        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Save/Discard.`, 7000);
+        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Ctrl+click a handle to branch a new line · Save/Discard.`, 7500);
         if (isActive) runUpdate();
         try { broadcastPowerLineStatus(); } catch (e) {}
     }
@@ -3081,14 +3104,22 @@
     // Saved-but-pending added lines render solid green.
     // Only one drawing session at a time across both types.
     // ============================================================
-    function enterDrawMode(type) {
+    function enterDrawMode(type, seedCoord) {
         if (drawingState) exitDrawMode({ silent: true });
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
-        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null };
+        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        // v34.61 Phase 3a: branch-from-vertex. If a seedCoord is provided,
+        // push it as the first vertex of the new line so the line starts
+        // attached to the source vertex. drawingState.seeded marks the
+        // branch flavor for the toolbar label.
+        if (seedCoord && Number.isFinite(seedCoord.lat) && Number.isFinite(seedCoord.lng)) {
+            drawingState.coords.push([seedCoord.lng, seedCoord.lat]);
+            drawingState.seeded = true;
+        }
         const onClick = (e) => {
             if (!drawingState) return;
             const ll = e.latlng;
@@ -3106,6 +3137,7 @@
         const container = map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = 'crosshair';
         buildDrawToolbar();
+        if (drawingState.seeded && isActive) runUpdate();
         // v34.46: removed the showKMLToast announcement — the floating
         // green draw-toolbar (with vertex count + Save/Undo/Cancel) is
         // already on-screen and tells the user the same thing without
@@ -3127,7 +3159,10 @@
         `;
         const label = document.createElement('span');
         label.id = 'aim-draw-label';
-        label.textContent = `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
+        const initN = drawingState.coords.length;
+        label.textContent = drawingState.seeded
+            ? `Branching new ${drawingState.type} line · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < 2 ? ' (need ≥2 — click to add)' : ''}`
+            : `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
         label.style.cssText = 'color:#5fff5f;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -3161,7 +3196,8 @@
         const n = drawingState.coords.length;
         const label = drawingState.toolbarEl.querySelector('#aim-draw-label');
         if (label) {
-            label.textContent = `Drawing ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
+            const verb = drawingState.seeded ? 'Branching new' : 'Drawing';
+            label.textContent = `${verb} ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
         }
         const saveBtn = drawingState.toolbarEl.querySelector('button[data-role="save"]');
         if (saveBtn) {
@@ -4822,7 +4858,11 @@
                 } else if (m.type === 'EXIT_VERTEX_EDIT') {
                     exitVertexEdit({ save: !!m.save });
                 } else if (m.type === 'ENTER_DRAW_MODE' && m.kmlType) {
-                    enterDrawMode(m.kmlType);
+                    // v34.61: optional seedCoord {lat,lng} for branching
+                    // (Phase 3a). When present, draw mode pre-seeds
+                    // vertex 0 at that coord so the new line starts
+                    // attached to the source vertex.
+                    enterDrawMode(m.kmlType, m.seedCoord || null);
                 } else if (m.type === 'COMMIT_KML' && m.kmlType) {
                     // v34.46: was commitKMLChanges (legacy hide-only path);
                     // commitPendingOps is the ops-aware fn that handles
