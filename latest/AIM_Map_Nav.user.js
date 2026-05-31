@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js
-// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
+// @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. SHIFT+SPACE = zoom in close at cursor (maxZoom-1). Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. Input-guarded so typing is unaffected. Control Panel: master + pan + zoom + space toggles.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -61,7 +61,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -85,6 +85,11 @@
     let altHeld = false;             // v0.3: Alt = sprint (no Shift/Ctrl)
     let rafId = null;
     let lastZoomAt = 0;
+    // v0.4: track cursor for Shift+Space (zoom-in-at-cursor). Stored in
+    // viewport coords (clientX/clientY) so we can re-project against the
+    // map container's bounding rect at use-time without trusting stale
+    // map state.
+    let lastMouseX = -1, lastMouseY = -1;
 
     // ------- Leaflet map detection -------
     let leafletMapRef = null;
@@ -233,6 +238,51 @@
         } catch (e) { return false; }
     }
 
+    // v0.4: Shift+Space → zoom in close on whatever the cursor is over.
+    // Target zoom = maxZoom - 1 ("close but not max — leaves headroom").
+    // Floor at 18 so the result is always actually-close even on
+    // unusually low-max-zoom maps.
+    function zoomInCloseAtCursor() {
+        const map = getLeafletMap();
+        if (!map) return false;
+        try {
+            const maxZoom = typeof map.getMaxZoom === 'function' ? map.getMaxZoom() : 20;
+            const targetZoom = Math.max(18, maxZoom - 1);
+
+            // Resolve cursor → latlng. Fall back to map center if cursor
+            // isn't currently over the map container (focus may be on a
+            // Percepto button, or mouse never moved over this iframe).
+            let targetLatLng = null;
+            const container = map.getContainer ? map.getContainer() : null;
+            if (container && lastMouseX >= 0 && lastMouseY >= 0) {
+                const rect = container.getBoundingClientRect();
+                if (lastMouseX >= rect.left && lastMouseX <= rect.right &&
+                    lastMouseY >= rect.top && lastMouseY <= rect.bottom) {
+                    const x = lastMouseX - rect.left;
+                    const y = lastMouseY - rect.top;
+                    try { targetLatLng = map.containerPointToLatLng([x, y]); }
+                    catch (e) {}
+                }
+            }
+            if (!targetLatLng) {
+                try { targetLatLng = map.getCenter(); }
+                catch (e) { return false; }
+            }
+
+            map.setView(targetLatLng, targetZoom, { animate: true });
+            return true;
+        } catch (e) { return false; }
+    }
+
+    // Cursor tracker — capture phase so it sees moves even when Percepto
+    // overlays stop propagation. Passive (no preventDefault) so it never
+    // interferes with anything.
+    function onMouseMove(e) {
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+    }
+    document.addEventListener('mousemove', onMouseMove, { capture: true, passive: true });
+
     function startTick() {
         if (rafId != null) return;
         rafId = requestAnimationFrame(tick);
@@ -252,9 +302,21 @@
         if (!masterEnabled) return;
         if (shouldGate(e)) return;
 
-        // v0.3: Shift + ANY nav key → pass through to existing macros.
-        // Ctrl + ANY nav key → pass through to browser shortcuts. Never
-        // preventDefault when these modifiers are held.
+        // v0.4: Shift+Space → zoom in close at cursor. Checked BEFORE
+        // the generic shift-bypass below so it doesn't fall through to
+        // "pass to macros". Always preventDefault since the user pressed
+        // a deliberate nav-style chord — even if zoom didn't happen
+        // (e.g. no map yet), suppress browser's Shift+Space scroll-up.
+        if (e.code === 'Space' && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            if (!spaceEnabled) return;
+            try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
+            zoomInCloseAtCursor();
+            return;
+        }
+
+        // v0.3: Shift + ANY OTHER nav key → pass through to existing
+        // macros. Ctrl + ANY nav key → pass through to browser shortcuts.
+        // Never preventDefault when these modifiers are held.
         if (e.shiftKey || e.ctrlKey || e.metaKey) return;
 
         // Space → zoom-to-fit entire site setup. One-shot, not held.
@@ -335,7 +397,7 @@
                     { id: 'master', label: 'Enable Map Nav', type: 'boolean', default: true, master: true },
                     { id: 'pan',    label: 'WASD pan (Alt for sprint)',     type: 'boolean', default: true },
                     { id: 'zoom',   label: 'Q/E zoom (Alt for sprint)',     type: 'boolean', default: true },
-                    { id: 'space',  label: 'Space = zoom-to-fit site',      type: 'boolean', default: true },
+                    { id: 'space',  label: 'Space = fit site · Shift+Space = zoom in at cursor', type: 'boolean', default: true },
                 ],
                 hotkeys: [],
             });
@@ -345,5 +407,5 @@
     setupControlPanel();
     registerWithControlPanel();
 
-    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift/Ctrl pass through`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — WASD pan · Q/E zoom · Alt sprint · Space = fit site · Shift+Space = zoom in at cursor · Shift/Ctrl + others pass through`);
 })();
