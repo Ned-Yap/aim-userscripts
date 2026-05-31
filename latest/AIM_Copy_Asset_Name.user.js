@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.52
+// @version      3.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.52';
+    const SCRIPT_VERSION = '3.53';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -4766,6 +4766,164 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(deltaBtn);
+
+        // --- v3.53: Bulk → Subtype button ---
+        // Queues a subtype edit for every selected asset row (or all asset
+        // rows if none selected). Uses the same datalist of observed
+        // subtypes as the inline editor. Free-text values not in the list
+        // flow through the same "Enter new type" path during Apply.
+        const subBtn = document.createElement('button');
+        subBtn.type = 'button';
+        subBtn.textContent = 'Bulk → Subtype';
+        subBtn.title = 'Queue subtype edits across selected assets (or all assets)';
+        subBtn.style.cssText = 'background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        let subPopEl = null;
+        subBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (subPopEl) { subPopEl.remove(); subPopEl = null; return; }
+            subPopEl = buildBulkSubtypePopover(subBtn, () => {
+                if (subPopEl) { subPopEl.remove(); subPopEl = null; }
+            });
+            document.body.appendChild(subPopEl);
+            const r = subBtn.getBoundingClientRect();
+            subPopEl.style.left = r.left + 'px';
+            subPopEl.style.top = (r.bottom + 4) + 'px';
+            const rect = subPopEl.getBoundingClientRect();
+            if (rect.right > window.innerWidth - 8) {
+                subPopEl.style.left = (window.innerWidth - rect.width - 8) + 'px';
+            }
+            const onDocClick = (e) => {
+                if (subPopEl && !subPopEl.contains(e.target) && e.target !== subBtn) {
+                    subPopEl.remove(); subPopEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(subBtn);
+
+        function buildBulkSubtypePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:340px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🏷  Bulk Set Asset Subtype';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Queues a subtype change for every targeted asset. Pick from the list or type a new value — new values get added via the "Enter new type" path during Apply.';
+            pop.appendChild(help);
+
+            // Target subtype input — datalist of observed subtypes
+            const siteIDLocal = getCurrentSiteID();
+            const dlId = `aim-bulk-sub-dl-${Date.now()}`;
+            const dl = document.createElement('datalist');
+            dl.id = dlId;
+            observedSubtypesForSite(siteIDLocal).forEach(s => {
+                const o = document.createElement('option');
+                o.value = s;
+                dl.appendChild(o);
+            });
+            pop.appendChild(dl);
+
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px';
+            const lbl1 = document.createElement('label');
+            lbl1.textContent = 'Target subtype:';
+            lbl1.style.cssText = 'flex:0 0 110px;color:#cfd6dc';
+            row1.appendChild(lbl1);
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.setAttribute('list', dlId);
+            inp.placeholder = 'e.g. v-well - empty';
+            inp.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:12px';
+            row1.appendChild(inp);
+            pop.appendChild(row1);
+
+            // Scope radio
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:10px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = 'aim-ai-bulk-sub-scope';
+                r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r);
+                l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All assets on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true;
+            else allScope.r.checked = true;
+            row2.appendChild(allScope.l);
+            row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            const computeEligible = () => {
+                const target = String(inp.value || '').trim();
+                if (!target) return { eligible: [], target: '', candidates: [] };
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const candidates = allRows.filter(r => {
+                    if (r.type !== 3 || !r.entity) return false; // assets only
+                    if (r._isSegment) return false;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return false;
+                    return true;
+                });
+                const eligible = candidates.filter(r => {
+                    const cur = (r.entity.custom && r.entity.custom.poi_type_str) || '';
+                    return cur !== target;
+                });
+                return { eligible, target, candidates };
+            };
+            const refreshPreview = () => {
+                const { eligible, target, candidates } = computeEligible();
+                if (!target) { preview.textContent = '⚠️ Type or pick a target subtype'; return; }
+                if (candidates.length === 0) { preview.textContent = '⚠️ No eligible assets in scope'; return; }
+                const observed = new Set(observedSubtypesForSite(siteIDLocal));
+                const isNew = !observed.has(target);
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> edit${eligible.length === 1 ? '' : 's'} · skipping ${candidates.length - eligible.length} already at "${target}"${isNew ? ' · <span style="color:#c4b5fd">NEW type</span>' : ''}`;
+            };
+            refreshPreview();
+            inp.oninput = refreshPreview;
+            allScope.r.onchange = refreshPreview;
+            selScope.r.onchange = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, target } = computeEligible();
+                if (!target) { showToast('Pick a target subtype first', 'rgba(255,82,82,0.6)'); return; }
+                if (eligible.length === 0) { showToast('Nothing to queue — all eligible assets already at target'); return; }
+                let queued = 0;
+                eligible.forEach(r => { if (queueSubtypeEdit(r.entity, target)) queued++; });
+                showToast(`Queued ${queued} subtype edit${queued === 1 ? '' : 's'} → "${target}"`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
 
         // Builds the Bulk → Delta popover. Separate inputs for FP (20)
         // and FFZ (30) defaults — different SOPs per the user. One
