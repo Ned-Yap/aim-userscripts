@@ -6,6 +6,52 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-05-31 (`latest/` dev work)
+
+Power Line Editor **Phase 3 SHIPPED** (was backlog at end of yesterday): branch from vertex + snap to vertex AND segments. Plus a series of modify/delete op fixes, and a brand-new **AIM Map Nav** script for keyboard navigation. All `latest/` only — coworker installs at the repo root are unchanged.
+
+### Power Line Editor Phase 3 — branch + snap
+
+- **Map Styler v34.61** — Phase 3a: **branch from vertex**. Ctrl+click any cyan vertex handle during vertex-edit → saves current line's edits, then enters draw mode with vertex 0 seeded at the source vertex's coords. New line is same kmlType as parent. `enterDrawMode(type, seedCoord?)` extended with optional seedCoord; `ENTER_DRAW_MODE` bridge message accepts optional `seedCoord {lat,lng}`. Draw toolbar label becomes "Branching new …" when seeded.
+- **Map Styler v34.62** — toast positioning fix. `showKMLToast` bottom moved 80px → 170px so it sits ABOVE the draw / vertex-edit toolbars (both at bottom:100px) instead of stacking behind them.
+- **Map Styler v34.63** — Phase 3b: **snap to vertex**. While dragging a vertex (vertex-edit) or clicking to place one (draw mode), if the candidate position is within 10px of an existing power-line vertex (file or pending-add, distro or trans, except the line being edited/drawn), coord snaps to that vertex's exact lat/lng. Yellow ring marker shows the snap target.
+- **Map Styler v34.64 + PLE v0.14** — purple snap glow + green-line delete fix. Snap indicator switched from yellow → bright light purple (`#d49eff`), 22px → 28px circle with double-layered glow. PLE bug: `deleteLineMode` was only checked in the file-line branch of onLineClick; green pending-add line clicks fell through to vertex-edit. Now PLE sends `DISCARD_ADDED_LINE`; Map Styler splices `co.added[addedIdx]` (after exiting any active added-line vertex edit to avoid a stale `addedIdx` after the array shift).
+- **Map Styler v34.65** — modify/delete op clobber fix. Two related bugs around `co.ops[pmIdx]` mutual exclusion: (a) `exitVertexEdit({save:true})` unconditionally wrote 'modify', silently overwriting a pending 'delete' → line "turned back to yellow" after save. Now checks existing op; if 'delete', refuses save and toasts "vertex edits discarded — unmark deletion first if you want to keep edits". (b) Right-click menu hid "Mark for deletion" entirely when a 'modify' was pending. Now always shown; with a modify the label becomes "🗑 Mark for deletion (discards pending edits)" and clicking replaces modify with delete in one step. Also: darker snap purple (`#9333ea`, purple-600).
+- **Map Styler v34.66** — **snap to segments**. `findSnapCandidate` now also tests perpendicular foot onto every line segment (clamped to `t in (0,1)` so endpoints stay vertex-test territory — vertex snap still wins when near a corner). Unified `testLine()` walks coords once, hitting every vertex + every segment in a single pass. Result: snap latches onto any point along another power line, not just at vertex endpoints.
+
+### NEW DEV SCRIPT — `latest/AIM_Map_Nav.user.js` (Phase 4)
+
+**Map Nav v0.7** (after a ton of iteration: v0.1 → v0.7). Keyboard nav for the Percepto map.
+
+Final bindings:
+- **WASD** = pan up/left/down/right (always-on)
+- **Q/E** = zoom out/in (always-on)
+- **Alt** + any nav key = sprint (3x pan, 1.0 zoom-levels)
+- **Space** = zoom-to-fit entire site setup
+- **Shift+drag** = native Leaflet box-zoom (built-in, not us)
+
+Critical design rule: **Shift + ANY nav key passes through to the existing macros** (Shift+D Delete, Shift+A Altitude, Shift+R Ruler, Shift+B Bulk, Shift+C Clear, etc.). **Ctrl + ANY nav key passes through to browser shortcuts** (Ctrl+W close tab, Ctrl+S save, …). Map Nav never preventDefaults when those modifiers are held.
+
+Iteration history:
+- **v0.1** — always-on WASD with Shift sprint. Broke every Shift+letter macro on the user's system (Shift+D Delete most painful).
+- **v0.2** — hold-Space modal. User found it ergonomically awkward; slip-off still triggered macros.
+- **v0.3** — current architecture. WASD/QE always-on, Alt for sprint, Space for fit-to-site. Shift/Ctrl bypass via early-return.
+- **v0.4** — added Shift+Space → zoom in close at cursor.
+- **v0.5** — cross-frame map lookup. Critical fix: when focus is on TOP frame, keydown fires there but the map lives in the iframe. `getLeafletMap` now walks same-origin iframe `contentDocument`s so TOP can find and operate on the iframe's map directly. Fixed "WASD doesn't work until M1 click" bug.
+- **v0.6** — reduced Shift+Space target zoom + added `AIM_MAP_NAV_FORWARD` channel. When the cursor enters the iframe area, the OS stops sending mousemove events to TOP — TOP's cursor tracker froze at the boundary. Iframe always has fresh cursor. TOP now forwards Space chords to iframe.
+- **v0.7** — dropped Shift+Space entirely. User discovered Leaflet's built-in Shift+drag box-zoom. Strictly better. Net -132 lines.
+
+Registers with AIM Controls as "Map Nav" section: master + WASD pan + Q/E zoom + Space toggles.
+
+Architecture notes:
+- rAF tick while any motion key held → smooth ~60fps pan
+- Zoom throttled to one step per 200ms (OS auto-repeat at ~30Hz would otherwise burn 30 zoom levels per second)
+- Alt tracked via dedicated AltLeft/AltRight keydown/keyup so speed multiplier updates instantly mid-pan
+- blur clears all state so tab-away doesn't strand a panning map
+- Self-contained Leaflet detection — works without Map Styler installed, but uses `__aim_map__` hint when present
+
+---
+
 ## 2026-05-30 (continued — `latest/` dev work)
 
 These versions live in `latest/` only and are NOT yet promoted to prod. They form the first complete arc of the **AIM Power Line Editor** — a new dev-only userscript paired with major Map Styler bridge + commit-pipeline improvements. Coworker installs at the repo root are unchanged.
