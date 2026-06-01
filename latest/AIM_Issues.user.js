@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.9';
+    const SCRIPT_VERSION = '0.10';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1951,13 +1951,13 @@
                 padding: 9px 12px !important;
                 border-radius: 6px !important;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-                /* v0.9: unset Leaflet's white-space:nowrap so text wraps; force
-                   widescreen shape via min/max-width. v0.8 used overflow-wrap:
-                   break-word which let the browser break at any character and
-                   shrink the box to a narrow column. Removed — words now wrap
-                   at word boundaries and width stays in the 320–420px band. */
+                /* v0.10: dynamic sizing. white-space:normal lets long text
+                   wrap; max-width caps it; no min-width so short notes get a
+                   compact tooltip. The browser's shrink-to-fit on absolute
+                   elements + word-boundary wrapping (NOT overflow-wrap:
+                   break-word, which v0.8 had wrong) gives us the right shape
+                   for any content length. */
                 white-space: normal !important;
-                min-width: 320px !important;
                 max-width: 420px !important;
             }
             .leaflet-tooltip-top.aim-issues-tooltip::before    { border-top-color:    rgba(15,18,22,0.96) !important; }

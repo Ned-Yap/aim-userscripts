@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.10 (tooltip dynamic sizing)
+
+v0.9's `min-width: 320px` was forcing every tooltip to that width, even for short notes. v0.10 drops `min-width` entirely. The browser's shrink-to-fit on absolute-positioned elements + word-boundary wrapping (which v0.8's removal of `overflow-wrap:break-word` enabled) gives the right shape for any content length: short notes compact, long notes wrap to the 420px max.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.9 (tooltip widescreen)
 
 Tooltip was rendering as a narrow column at low zoom after v0.8 — `overflow-wrap: break-word !important` let the browser break words at any character, so it shrank the tooltip to fit the narrowest possible layout. Removed `overflow-wrap` and `word-wrap`; words now wrap at word boundaries normally. Added `min-width: 320px !important` so the tooltip stays a reasonable widescreen shape regardless of content length, with `max-width: 420px !important` as the upper cap. Inner div lost its own `max-width:320px` (the outer rule drives it now).
