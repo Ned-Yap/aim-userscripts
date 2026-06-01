@@ -6,6 +6,19 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.13 (per-transition note prompts)
+
+Note textarea placeholder was a generic "Required — what was fixed / why ignoring / etc." regardless of which transition you picked, which read oddly on Re-open. v0.13 adds a `notePrompt` field per transition so each one asks the right question:
+
+- Open → Ready for Review: `What was fixed? e.g. "Added missing H-Well to Site Setup"`
+- Open → Ignore: `Why are you ignoring this? e.g. "Not within our scope"`
+- Ready for Review → Resolve: `Optional acceptance comment (e.g. "Verified, looks good")`
+- Ready for Review → Reject: `Why is this being rejected? What still needs to be done?`
+- Resolved → Re-open: `Why is this being re-opened? What came back or what was missed?`
+- Ignored → Un-ignore: `Why are you un-ignoring this? What changed?`
+
+---
+
 ## 2026-06-01 — AIM Issues v0.12 (re-open resolved)
 
 Resolved is no longer terminal. Adds a `re-open` transition from Resolved back to Open — anyone can do it (trust-based, like every other transition), note required for the audit log.

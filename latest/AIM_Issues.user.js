@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.13';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1617,23 +1617,32 @@
     //
     // Each transition: target status, button label, whether note is required,
     // and a button color matching the destination's render color.
+    // v0.13: notePrompt drives the textarea placeholder so the prompt
+    // matches what we're asking the user about. Was a single generic line
+    // before — confusing on transitions like Re-open.
     const STATUS_TRANSITIONS = {
         'open': [
-            { to: 'ready-for-review', label: '→ Ready for Review', noteRequired: true,  color: '#ffd54f', textColor: '#000' },
-            { to: 'ignored',          label: '→ Ignore',            noteRequired: true,  color: '#788cb4', textColor: '#fff' },
+            { to: 'ready-for-review', label: '→ Ready for Review', noteRequired: true,  color: '#ffd54f', textColor: '#000',
+              notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"' },
+            { to: 'ignored',          label: '→ Ignore',            noteRequired: true,  color: '#788cb4', textColor: '#fff',
+              notePrompt: 'Why are you ignoring this? e.g. "Not within our scope" or "Duplicate of #..."' },
         ],
         'ready-for-review': [
-            { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000' },
-            { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff' },
+            { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional acceptance comment (e.g. "Verified, looks good")' },
+            { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being rejected? What still needs to be done?' },
         ],
         // v0.12: resolved is no longer terminal. Trust-based — anyone can
         // re-open a resolved issue if something comes back. Note required
         // (why it's being re-opened) for the audit log.
         'resolved': [
-            { to: 'open',     label: '↺ Re-open',                  noteRequired: true, color: '#ff4d4d', textColor: '#fff' },
+            { to: 'open',     label: '↺ Re-open',                  noteRequired: true, color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being re-opened? What came back or what was missed?' },
         ],
         'ignored': [
-            { to: 'open',     label: '↺ Un-ignore (back to Open)', noteRequired: true, color: '#ff4d4d', textColor: '#fff' },
+            { to: 'open',     label: '↺ Un-ignore (back to Open)', noteRequired: true, color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why are you un-ignoring this? What changed?' },
         ],
     };
 
@@ -1758,7 +1767,7 @@
                         </div>
                         <div style="color:#aaa;font-size:11px;margin-bottom:4px">Note ${reqText}</div>
                         <textarea id="aim-issues-modal-note"
-                            placeholder="${armed.noteRequired ? 'Required — what was fixed / why ignoring / etc.' : 'Optional acceptance comment'}"
+                            placeholder="${escHtml(armed.notePrompt || (armed.noteRequired ? 'Required note' : 'Optional note'))}"
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
                         <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
