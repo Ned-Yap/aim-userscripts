@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.17';
+    const SCRIPT_VERSION = '0.18';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1540,6 +1540,107 @@
         return out;
     }
 
+    // ------- v0.18: entity-pill helpers (copy + find-in-sidebar) -------
+    //
+    // Same sidebar-paste mechanic Asset Inspector uses (latest/, line 1254).
+    // Duplicated here so Issues works even when Asset Inspector isn't
+    // installed — Issues stands on its own. The React-aware value setter
+    // is required because Percepto's sidebar input is a controlled React
+    // component; plain input.value = ... doesn't fire onChange.
+
+    const SIDEBAR_INPUT_SELECTOR = 'input.ant-input[placeholder="Search entity"]';
+
+    function copyTextToClipboard(text) {
+        if (!text) return Promise.reject(new Error('empty'));
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text);
+            }
+        } catch (e) {}
+        // Fallback for non-clipboard browsers
+        return new Promise((resolve, reject) => {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.focus(); ta.select();
+                const ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                ok ? resolve() : reject(new Error('execCommand failed'));
+            } catch (e) { reject(e); }
+        });
+    }
+
+    function findSidebarInput() {
+        let input = document.querySelector(SIDEBAR_INPUT_SELECTOR);
+        if (input) return input;
+        try {
+            input = window.top && window.top.document
+                ? window.top.document.querySelector(SIDEBAR_INPUT_SELECTOR)
+                : null;
+            if (input) return input;
+            const frames = Array.from((window.top && window.top.document) ? window.top.document.querySelectorAll('iframe') : []);
+            for (const f of frames) {
+                try {
+                    const fi = f.contentDocument && f.contentDocument.querySelector(SIDEBAR_INPUT_SELECTOR);
+                    if (fi) return fi;
+                } catch (e) {}
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function findEntityInSidebar(name) {
+        if (!name) return false;
+        const input = findSidebarInput();
+        if (!input) {
+            showToast('Map Entities search input not found — open the sidebar first.', 4500);
+            return false;
+        }
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (descriptor && descriptor.set) descriptor.set.call(input, name);
+            else input.value = name;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            try { input.focus(); } catch (e) {}
+            const inputDoc = input.ownerDocument || document;
+            const matchLower = name.trim().toLowerCase();
+            setTimeout(() => {
+                let target = null;
+                const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+                for (const item of items) {
+                    const txt = (item.textContent || '').trim().toLowerCase();
+                    if (txt.includes(matchLower)) { target = item; break; }
+                }
+                if (!target && items.length === 1) target = items[0];
+                if (target) {
+                    try {
+                        // Dispatch a real-looking pointerdown+up+click so React
+                        // sees it. Plain .click() works for most but not all
+                        // virtualized rows.
+                        const rect = target.getBoundingClientRect();
+                        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => {
+                            target.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+                        });
+                    } catch (e) { try { target.click(); } catch (e2) {} }
+                    showToast(`Opened "${name}" in sidebar.`, 2500);
+                } else {
+                    showToast(`Sidebar filtered to "${name}" — click the result to open.`, 4000);
+                }
+            }, 300);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} findEntityInSidebar failed:`, e);
+            return false;
+        }
+    }
+
+    // v0.18: per-issue expansion state for the panel's affected-entities list
+    const expandedIssueIds = new Set();
+
     function styleForStatus(status) {
         // Phase 1 only renders 'open'; the rest are stubs for Phase 3.
         switch (status) {
@@ -2039,9 +2140,14 @@
             // type with color coding. Show even when empty so the user knows
             // we ran the detection.
             const affected = affectedEntitiesFor(liveIssue);
+            // v0.18: pills are interactive — M1 copy name, M2 find-in-sidebar.
+            // data-entity-name carries the value for the wireHandlers pass.
             const entitiesPillsHtml = affected.map(a => `
-                <div style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;margin:2px 4px 2px 0;
-                            background:#0e1115;border:1px solid ${a.typeColor}55;border-radius:12px;font-size:11px">
+                <div class="aim-issues-entity-pill" data-entity-name="${escHtml(a.name)}"
+                    title="M1 copy name · M2 open in Map Entities sidebar"
+                    style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;margin:2px 4px 2px 0;
+                           background:#0e1115;border:1px solid ${a.typeColor}55;border-radius:12px;font-size:11px;
+                           cursor:pointer;user-select:none">
                     <span style="color:${a.typeColor};font-weight:700;font-size:9px;letter-spacing:0.5px">${a.typeShort}</span>
                     <span style="color:#e6e6e6">${escHtml(a.name)}</span>
                     ${a.subtype ? `<span style="color:#888;font-size:9px">(${escHtml(a.subtype)})</span>` : ''}
@@ -2054,10 +2160,11 @@
                     : entitiesPillsHtml);
             const entitiesSectionHtml = `
                 <div style="margin-top:12px">
-                    <div style="color:#888;font-size:11px;margin-bottom:4px">
-                        Affected entities ${affected.length > 0 ? `(${affected.length})` : ''}
+                    <div style="color:#888;font-size:11px;margin-bottom:4px;display:flex;align-items:center;gap:6px">
+                        <span>Affected entities ${affected.length > 0 ? `(${affected.length})` : ''}</span>
+                        ${affected.length > 0 ? '<span style="color:#666">· M1 copy · M2 sidebar</span>' : ''}
                     </div>
-                    <div style="max-height:140px;overflow:auto;border:1px solid rgba(255,255,255,0.10);
+                    <div style="max-height:160px;overflow:auto;border:1px solid rgba(255,255,255,0.10);
                                 border-radius:4px;background:#14171b;padding:6px 8px">
                         ${entitiesNote}
                     </div>
@@ -2086,6 +2193,24 @@
 
         function wireHandlers(liveIssue, transitions) {
             card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+
+            // v0.18: entity pills — M1 copy, M2 find-in-sidebar
+            card.querySelectorAll('.aim-issues-entity-pill').forEach(pill => {
+                const name = pill.dataset.entityName;
+                pill.onclick = (e) => {
+                    e.stopPropagation();
+                    if (!name) return;
+                    copyTextToClipboard(name)
+                        .then(() => showToast(`Copied "${name}"`, 2000))
+                        .catch(() => showToast('Copy failed.', 2500));
+                };
+                pill.oncontextmenu = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!name) return;
+                    findEntityInSidebar(name);
+                };
+            });
 
             // Transition buttons
             card.querySelectorAll('.aim-issues-modal-transbtn').forEach(btn => {
@@ -2313,8 +2438,9 @@
                 const sessionHidden = hiddenIds.has(issue.id);
                 const dimmed = (issue.status === 'resolved' || issue.status === 'ignored');
                 const rowOpacity = (sessionHidden || dimmed) ? 0.55 : 1;
-                // v0.17: per-type tally under the note. Empty when no entities
-                // detected; "loading…" while the fetch is in flight.
+                // v0.17 + v0.18: per-type tally under the note, with an
+                // expand arrow to stack the affected entities vertically.
+                // Expansion state persists per issue id in expandedIssueIds.
                 const affected = affectedEntitiesFor(issue);
                 let affectsHtml;
                 if (!mapObjects) {
@@ -2328,8 +2454,36 @@
                         const m = Object.values(ENTITY_TYPE_META).find(mm => mm.short === t) || { color: '#aaa' };
                         return `<span style="color:${m.color};font-weight:700">${byType[t]}&nbsp;${t}</span>`;
                     }).join(' &middot; ');
+                    const expanded = expandedIssueIds.has(issue.id);
+                    const arrow = expanded ? '▼' : '▶';
+                    // Stacked entity list when expanded — same shape as the
+                    // modal pills, including M1/M2 behavior. Single column.
+                    const stackedHtml = expanded ? `
+                        <div style="margin-top:5px;display:flex;flex-direction:column;gap:3px;
+                                    padding:6px;background:rgba(0,0,0,0.25);border-radius:4px;
+                                    border:1px solid rgba(255,255,255,0.06)">
+                            <div style="color:#666;font-size:9px;font-style:italic;margin-bottom:2px">
+                                M1 copy · M2 open in sidebar
+                            </div>
+                            ${affected.map(a => `
+                                <div class="aim-issues-entity-pill" data-entity-name="${escHtml(a.name)}"
+                                    title="M1 copy name · M2 open in Map Entities sidebar"
+                                    style="display:flex;align-items:center;gap:5px;padding:3px 6px;
+                                           background:#0e1115;border:1px solid ${a.typeColor}55;border-radius:4px;font-size:11px;
+                                           cursor:pointer;user-select:none">
+                                    <span style="color:${a.typeColor};font-weight:700;font-size:9px;letter-spacing:0.5px;min-width:24px">${a.typeShort}</span>
+                                    <span style="color:#e6e6e6;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(a.name)}</span>
+                                    ${a.subtype ? `<span style="color:#888;font-size:9px;flex-shrink:0">(${escHtml(a.subtype)})</span>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : '';
                     affectsHtml = `<div style="font-size:10px;margin-top:3px">
+                        <span class="aim-issues-row-expand" data-issue-id="${issue.id}"
+                            title="${expanded ? 'Collapse' : 'Expand'} affected entities"
+                            style="color:#ffd54f;cursor:pointer;user-select:none;display:inline-block;min-width:10px;margin-right:2px">${arrow}</span>
                         <span style="color:#ffd54f;font-weight:700">Affects ${affected.length}:</span> ${parts}
+                        ${stackedHtml}
                     </div>`;
                 }
                 return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
@@ -2411,7 +2565,7 @@
             <div style="padding:0;overflow:auto;flex:1;min-height:120px">${rowsHtml}</div>
             <div style="padding:6px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
                         color:#666;font-size:10px;font-style:italic">
-                Click row: zoom to issue + open status modal · M1 chip: toggle filter · M2 chip: solo
+                Row: zoom + open modal · M1 chip: toggle · M2 chip: solo · ▶ expand entities · M1 pill: copy · M2 pill: sidebar
             </div>
             <div id="aim-issues-panel-resize"
                  title="Drag to resize"
@@ -2474,12 +2628,43 @@
             };
         });
         panelEl.querySelectorAll('.aim-issues-panel-row').forEach(row => {
-            row.onclick = () => {
+            row.onclick = (e) => {
+                // v0.18: don't fire row-click when user clicked the expand
+                // arrow or an entity pill inside the row.
+                if (e.target.closest('.aim-issues-row-expand, .aim-issues-entity-pill')) return;
                 const id = row.dataset.issueId;
                 const issue = currentSiteIssues.find(i => i.id === id);
                 if (!issue) return;
                 zoomToIssue(issue);
                 openStatusModal(issue);
+            };
+        });
+        // v0.18: expand/collapse arrows
+        panelEl.querySelectorAll('.aim-issues-row-expand').forEach(arrow => {
+            arrow.onclick = (e) => {
+                e.stopPropagation();
+                const id = arrow.dataset.issueId;
+                if (!id) return;
+                if (expandedIssueIds.has(id)) expandedIssueIds.delete(id);
+                else expandedIssueIds.add(id);
+                renderIssuesPanel();
+            };
+        });
+        // v0.18: panel entity pills — same M1 copy / M2 sidebar as modal
+        panelEl.querySelectorAll('.aim-issues-entity-pill').forEach(pill => {
+            const name = pill.dataset.entityName;
+            pill.onclick = (e) => {
+                e.stopPropagation();
+                if (!name) return;
+                copyTextToClipboard(name)
+                    .then(() => showToast(`Copied "${name}"`, 2000))
+                    .catch(() => showToast('Copy failed.', 2500));
+            };
+            pill.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!name) return;
+                findEntityInSidebar(name);
             };
         });
         // v0.16: drag-to-move + drag-to-resize

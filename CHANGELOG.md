@@ -6,6 +6,30 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.18 (entity pill interactivity + panel expansion)
+
+Affected-entity pills are now interactive in both the status modal and the panel, and the panel rows have an expand/collapse arrow for the entity list.
+
+### Modal entity pills (status modal)
+- **M1** on a pill → copy the entity name to clipboard with `navigator.clipboard.writeText` (fallback to `execCommand('copy')` for older browsers). Toast confirms.
+- **M2** on a pill → paste the name into Percepto's `input.ant-input[placeholder="Search entity"]` via the React-aware value setter, then auto-click the matching result in the filtered sidebar. Same trick Asset Inspector uses (duplicated into Issues so it works standalone — doesn't depend on AI being installed).
+- Section header now hints: `· M1 copy · M2 sidebar`
+
+### Panel rows — expand/collapse affected entities
+- **▶ arrow** (yellow) next to the `Affects N:` tally → click to expand a stacked list of entity pills below the tally. ▼ when expanded; ▶ when collapsed.
+- Expansion state per-issue, tracked in `expandedIssueIds` Set (session-only — resets on page refresh).
+- Expanded pills are single-column with full width, type short-code chip + name + subtype. Same M1 copy / M2 sidebar behavior as the modal pills.
+- Row-click handler now ignores clicks on the arrow or any entity pill (prevents the row from zooming + opening the modal when the user actually wanted to copy a name).
+- Footer hint updated: `Row: zoom + open modal · M1 chip: toggle · M2 chip: solo · ▶ expand entities · M1 pill: copy · M2 pill: sidebar`.
+
+### Internal
+- `copyTextToClipboard(text)` helper with navigator/execCommand fallback
+- `findSidebarInput()` walks current doc + top doc + same-origin iframes
+- `findEntityInSidebar(name)` does the React-aware paste + dispatchEvent + auto-click
+- `expandedIssueIds` Set tracks panel expansion state
+
+---
+
 ## 2026-06-01 — AIM Issues v0.17 (Phase 5b — affected-entities detection)
 
 Each issue now knows which Percepto entities (assets / FFZs / NFZs / flight paths / general markers) sit underneath it.
