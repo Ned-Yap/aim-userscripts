@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.14';
+    const SCRIPT_VERSION = '0.15';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -177,6 +177,11 @@
     let drawToolbarEl = null;
     let noteModalEl = null;
     let statusModalEl = null;
+    // v0.15: dedicated 🚩 panel (M2 on the toolbar 🚩 button opens it)
+    let panelEl = null;
+    // Filter chips — Set of allowed statuses. Empty == all hidden (rare).
+    const panelFilters = new Set(['open', 'ready-for-review', 'resolved', 'ignored']);
+    let panelSearch = '';
     let buttonEl = null;
     let controlChannel = null;
     let leafletMapRef = null;
@@ -682,7 +687,11 @@
         buttonEl.addEventListener('contextmenu', (e) => {
             e.preventDefault(); e.stopPropagation();
             if (!masterEnabled) return;
-            unhideAllNonResolved();
+            // v0.15: M2 now opens the dedicated Issues panel. The
+            // "Un-hide all non-resolved" action moved into a button
+            // inside the panel header.
+            if (panelEl) closeIssuesPanel();
+            else openIssuesPanel();
         });
         renderButtonState();
         console.log(`${TAG} v${SCRIPT_VERSION} button injected into .map-tools`);
@@ -729,7 +738,7 @@
             }
         }
         const hiddenCount = hiddenIds.size;
-        const hiddenSuffix = hiddenCount > 0 ? ` · ${hiddenCount} hidden — M2 un-hides non-resolved` : '';
+        const hiddenSuffix = hiddenCount > 0 ? ` · ${hiddenCount} hidden` : '';
         const syncLabel = ({
             'no-token': 'no GitHub token (local-only)',
             'syncing':  'syncing with GitHub…',
@@ -742,7 +751,7 @@
             ? 'Issues: disabled in AIM Controls'
             : flagModeActive
                 ? `Issues: FLAG MODE armed — click-drag rect, Shift+click polygon, Esc to exit${hiddenSuffix}${syncSuffix}`
-                : `Issues · M1 toggle flag mode · M2 un-hide all non-resolved${hiddenSuffix}${syncSuffix}`;
+                : `Issues · M1 toggle flag mode · M2 open Issues panel${hiddenSuffix}${syncSuffix}`;
 
         // Badge: count for current site (top-right corner)
         let badge = buttonEl.querySelector('.aim-issues-badge');
@@ -794,6 +803,13 @@
         dot.style.boxShadow = (syncStatus === 'syncing')
             ? '0 0 6px rgba(255,179,71,0.9)'
             : (syncStatus === 'error' ? '0 0 6px rgba(255,77,77,0.9)' : 'none');
+        // v0.15: every renderButtonState call follows a data mutation
+        // (create/delete/transition/hide/sync), so it's the right pinch
+        // point to refresh the panel. Cheap (panel re-renders only if
+        // it's open).
+        if (panelEl) {
+            try { renderIssuesPanel(); } catch (e) { console.warn(`${TAG} panel refresh threw:`, e); }
+        }
     }
 
     // ------- Flag mode + draw -------
@@ -1947,6 +1963,279 @@
     function closeStatusModal() {
         if (statusModalEl) { try { statusModalEl.remove(); } catch (e) {} }
         statusModalEl = null;
+    }
+
+    // ------- Issues panel (v0.15 — Phase 5 floating panel) -------
+    //
+    // Triggered by M2 on the 🚩 toolbar button. Floating top-right pane
+    // listing every issue on the current site. Status filter chips +
+    // search + click-row-to-pan-and-open-modal. Un-hide All + Refresh
+    // buttons live in the header (un-hide used to be M2 on the toolbar
+    // button — moved here in v0.15).
+    function openIssuesPanel() {
+        if (panelEl) { renderIssuesPanel(); return; }
+        const panel = document.createElement('div');
+        panel.id = 'aim-issues-panel';
+        panel.style.cssText = `
+            position:fixed;top:60px;right:20px;width:540px;max-width:calc(100vw - 40px);
+            max-height:calc(100vh - 80px);
+            background:#1f2228;border:1px solid rgba(255,77,77,0.55);border-radius:10px;
+            box-shadow:0 8px 32px rgba(0,0,0,0.6);
+            z-index:99000;
+            color:#e6e6e6;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
+            display:flex;flex-direction:column;overflow:hidden;
+        `;
+        // Block Leaflet drag/zoom from intercepting clicks/wheel on the panel.
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => {
+            panel.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
+        document.body.appendChild(panel);
+        panelEl = panel;
+        renderIssuesPanel();
+        console.log(`${TAG} panel opened`);
+    }
+
+    function closeIssuesPanel() {
+        if (panelEl) { try { panelEl.remove(); } catch (e) {} }
+        panelEl = null;
+    }
+
+    // Status meta — extends STATUS_LABEL with chip-color hints. Resolved
+    // is "dim" by status so its chip is faded too.
+    const PANEL_STATUS_ORDER = ['open', 'ready-for-review', 'resolved', 'ignored'];
+
+    function panelMatchesIssue(issue) {
+        const st = issue.status || 'open';
+        if (!panelFilters.has(st)) return false;
+        const q = panelSearch.trim().toLowerCase();
+        if (!q) return true;
+        const note = (issue.note || '').toLowerCase();
+        const by = (issue.createdBy || '').toLowerCase();
+        if (note.includes(q) || by.includes(q)) return true;
+        // also match against any history note
+        return (issue.history || []).some(h => (h.note || '').toLowerCase().includes(q));
+    }
+
+    function renderIssuesPanel() {
+        if (!panelEl) return;
+        // Preserve search input focus + cursor across re-render. Without
+        // this, each renderButtonState-triggered re-render kicks the user
+        // out of the search box mid-keystroke.
+        const ae = document.activeElement;
+        const wasSearchFocused = ae && ae.id === 'aim-issues-panel-search';
+        const prevSelStart = wasSearchFocused ? ae.selectionStart : null;
+        const prevSelEnd   = wasSearchFocused ? ae.selectionEnd   : null;
+        const issuesSorted = currentSiteIssues
+            .slice()
+            .sort((a, b) => new Date(lastEventAt(b)).getTime() - new Date(lastEventAt(a)).getTime());
+        const visibleIssues = issuesSorted.filter(panelMatchesIssue);
+
+        // Per-status counts (always all issues, ignoring search — counts
+        // tell the user how many are in each bucket)
+        const countsByStatus = { open: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
+        currentSiteIssues.forEach(i => {
+            const s = i.status || 'open';
+            if (countsByStatus[s] !== undefined) countsByStatus[s]++;
+        });
+
+        const safeSearch = escHtml(panelSearch);
+        const syncDot = ({
+            'no-token': '#777', 'syncing': '#ffb347', 'ok': '#5fff5f',
+            'pending': '#ffb347', 'error': '#ff4d4d',
+        })[syncStatus] || '#777';
+        const syncWord = ({
+            'no-token': 'local-only', 'syncing': 'syncing…',
+            'ok': cachedUsername ? `@${cachedUsername}` : 'synced',
+            'pending': 'pending', 'error': 'error',
+        })[syncStatus] || '';
+
+        // Chips row
+        const chipsHtml = PANEL_STATUS_ORDER.map(st => {
+            const meta = STATUS_LABEL[st] || { text: st.toUpperCase(), color: '#888' };
+            const active = panelFilters.has(st);
+            const n = countsByStatus[st];
+            return `<button class="aim-issues-panel-chip" data-status="${st}"
+                title="${active ? 'Click to hide' : 'Click to show'} ${meta.text.toLowerCase()} issues"
+                style="
+                    padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                    border:1.5px solid ${meta.color};
+                    background:${active ? meta.color : 'transparent'};
+                    color:${active ? (st === 'ready-for-review' || st === 'resolved' ? '#000' : '#fff') : meta.color};
+                    cursor:pointer;opacity:${active ? 1 : 0.55};
+                    display:inline-flex;align-items:center;gap:6px">
+                <span>${meta.text}</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${n}</span>
+            </button>`;
+        }).join('');
+
+        // Rows
+        let rowsHtml;
+        if (currentSiteIssues.length === 0) {
+            rowsHtml = `<div style="padding:30px 12px;color:#888;text-align:center;font-style:italic">
+                No issues on this site yet. Toggle 🚩 → flag mode → click-drag to create one.
+            </div>`;
+        } else if (visibleIssues.length === 0) {
+            rowsHtml = `<div style="padding:30px 12px;color:#888;text-align:center;font-style:italic">
+                No issues match the current filters / search.
+            </div>`;
+        } else {
+            rowsHtml = visibleIssues.map(issue => {
+                const meta = STATUS_LABEL[issue.status || 'open'] || { text: 'OPEN', color: '#ff4d4d' };
+                const headerLabel = lastEventLabel(issue);
+                const age = relativeAge(lastEventAt(issue));
+                const safeNote = escHtml(issue.note);
+                const safeBy = escHtml(issue.createdBy || '?');
+                const sessionHidden = hiddenIds.has(issue.id);
+                const dimmed = (issue.status === 'resolved' || issue.status === 'ignored');
+                const rowOpacity = (sessionHidden || dimmed) ? 0.55 : 1;
+                return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
+                    style="padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);
+                           cursor:pointer;opacity:${rowOpacity};
+                           display:grid;grid-template-columns:90px 110px 1fr 80px;gap:8px;align-items:start"
+                    title="Click to pan + open status modal">
+                    <div>
+                        <span style="display:inline-block;padding:2px 6px;border-radius:8px;
+                                     background:${meta.color};color:${(issue.status === 'ready-for-review' || issue.status === 'resolved') ? '#000' : '#fff'};
+                                     font-size:10px;font-weight:700">${meta.text}</span>
+                        ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
+                    </div>
+                    <div style="color:#a8c4ff;font-size:11px;font-weight:600">
+                        ${escHtml(headerLabel)}
+                        <div style="color:#888;font-weight:400;font-size:10px;margin-top:1px">${age}</div>
+                    </div>
+                    <div style="color:#e6e6e6;font-size:12px;line-height:1.35;
+                                overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
+                                -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
+                    <div style="color:#a8c4ff;font-size:11px;text-align:right">@${safeBy}</div>
+                </div>`;
+            }).join('');
+        }
+
+        panelEl.innerHTML = `
+            <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
+                        display:flex;align-items:center;gap:10px">
+                <span style="font-size:16px">🚩</span>
+                <span style="font-weight:700;color:#ff8585">Issues</span>
+                <span style="color:#888;font-size:11px">·</span>
+                <span style="color:#888;font-size:11px">Site ${escHtml(siteID || '—')}</span>
+                <span style="color:#888;font-size:11px">·</span>
+                <span style="color:#aaa;font-size:11px">${currentSiteIssues.length} total</span>
+                <span style="color:#888;font-size:11px">·</span>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
+                    <span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${syncDot}"></span>
+                    <span style="color:#aaa">${escHtml(syncWord)}</span>
+                </span>
+                <button id="aim-issues-panel-close" title="Close panel"
+                    style="margin-left:auto;padding:4px 10px;background:#3a3f48;color:#e6e6e6;
+                           border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                    ✕
+                </button>
+            </div>
+            <div style="padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+                        border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                ${chipsHtml}
+                <div style="margin-left:auto;display:flex;gap:6px">
+                    ${hiddenIds.size > 0
+                        ? `<button id="aim-issues-panel-unhide"
+                               title="Un-hide all session-hidden issues (except resolved + ignored)"
+                               style="padding:5px 10px;background:#3a3f48;color:#5fff5f;
+                                      border:1px solid rgba(95,255,95,0.4);border-radius:4px;
+                                      cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                               ↺ Un-hide all (${hiddenIds.size})
+                           </button>`
+                        : ''}
+                    <button id="aim-issues-panel-refresh"
+                        title="Re-fetch issues from GitHub"
+                        style="padding:5px 10px;background:#3a3f48;color:#a8c4ff;
+                               border:1px solid rgba(168,196,255,0.3);border-radius:4px;
+                               cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                        ↻ Refresh
+                    </button>
+                </div>
+            </div>
+            <div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                <input id="aim-issues-panel-search" type="text"
+                    placeholder="Search notes / authors / history…"
+                    value="${safeSearch}"
+                    style="width:100%;padding:6px 10px;background:#0e1115;color:#fff;
+                           border:1px solid rgba(255,255,255,0.15);border-radius:4px;font:inherit;font-size:12px;box-sizing:border-box">
+            </div>
+            <div style="padding:0;overflow:auto;flex:1;min-height:120px">${rowsHtml}</div>
+            <div style="padding:6px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
+                        color:#666;font-size:10px;font-style:italic">
+                Click row: pan map + open status modal · M2 on map icon: status modal · Hover icon: tooltip
+            </div>
+        `;
+
+        // Wire handlers
+        panelEl.querySelector('#aim-issues-panel-close').onclick = closeIssuesPanel;
+
+        const unhideBtn = panelEl.querySelector('#aim-issues-panel-unhide');
+        if (unhideBtn) {
+            unhideBtn.onclick = () => {
+                unhideAllNonResolved();
+                renderIssuesPanel();
+            };
+        }
+        const refreshBtn = panelEl.querySelector('#aim-issues-panel-refresh');
+        if (refreshBtn) {
+            refreshBtn.onclick = async () => {
+                refreshBtn.textContent = '⏳ Refreshing…';
+                refreshBtn.disabled = true;
+                try { await refetchIssues(); }
+                catch (e) {}
+                renderIssuesPanel();
+            };
+        }
+        const searchInput = panelEl.querySelector('#aim-issues-panel-search');
+        if (searchInput) {
+            // Debounced re-render on every keystroke
+            let t = null;
+            searchInput.oninput = () => {
+                panelSearch = searchInput.value;
+                clearTimeout(t);
+                t = setTimeout(() => { if (panelEl) renderIssuesPanel(); }, 150);
+            };
+        }
+        panelEl.querySelectorAll('.aim-issues-panel-chip').forEach(chip => {
+            chip.onclick = () => {
+                const st = chip.dataset.status;
+                if (panelFilters.has(st)) panelFilters.delete(st);
+                else panelFilters.add(st);
+                renderIssuesPanel();
+            };
+        });
+        panelEl.querySelectorAll('.aim-issues-panel-row').forEach(row => {
+            row.onclick = () => {
+                const id = row.dataset.issueId;
+                const issue = currentSiteIssues.find(i => i.id === id);
+                if (!issue) return;
+                panToIssue(issue);
+                openStatusModal(issue);
+            };
+        });
+        // Restore search input focus after re-render
+        if (wasSearchFocused) {
+            const newSearch = panelEl.querySelector('#aim-issues-panel-search');
+            if (newSearch) {
+                newSearch.focus();
+                if (prevSelStart !== null) {
+                    try { newSearch.setSelectionRange(prevSelStart, prevSelEnd); } catch (e) {}
+                }
+            }
+        }
+    }
+
+    function panToIssue(issue) {
+        const map = getLeafletMap();
+        if (!map || !issue || !issue.polygon || !issue.polygon.length) return;
+        const c = centroidOfLatLngs(issue.polygon);
+        if (!c) return;
+        try {
+            // Don't zoom — just pan. Keep the user's current zoom.
+            map.panTo(c, { animate: true, duration: 0.4 });
+        } catch (e) {}
     }
 
     // ------- Toast -------

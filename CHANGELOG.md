@@ -6,6 +6,28 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.15 (Phase 5a — dedicated panel)
+
+First half of Phase 5: a floating 🚩 panel listing every issue on the current site. Triggered by **M2 on the 🚩 toolbar button** (was "un-hide all" before — that action moved into a button inside the panel header). Panel includes:
+
+- **Header**: site ID, total count, sync-status dot (green/orange/red) + author tag, close button
+- **Status chips** with live counts: Open / Ready for Review / Resolved / Ignored. Click a chip to toggle that status in/out of the list. Chip color follows the status color.
+- **Action buttons** (header right): `↺ Un-hide all (N)` (only shown when N > 0), `↻ Refresh` (re-fetches from GitHub)
+- **Search box**: filters by note text, by author, AND by any history-entry note. 150ms debounced. Focus + cursor position preserved across re-renders.
+- **Issue rows** sorted by last-event-at descending: status pill / last-transition label + age / note (clamped to 2 lines) / @author. Resolved + ignored + session-hidden rows render with reduced opacity.
+- **Click a row** → pans the map to the issue centroid (no zoom change) + opens its status modal.
+
+Side touches:
+- Panel re-renders automatically after any data mutation (create, delete, transition, hide/un-hide, sync) — wired into `renderButtonState` since that's already called from every mutation site.
+- Mouse events on the panel `stopPropagation` so Leaflet doesn't try to pan/zoom underneath.
+- Toolbar 🚩 button title text updated: "M2 open Issues panel" (was "M2 un-hide all").
+
+What's still ahead in Phase 5b:
+- Affected-entities detection (per-issue list of Percepto entities under the polygon). Next ship — v0.16.
+- SUM-table integration (issues as rows in Asset Inspector's table). Deferred pending Asset Inspector changes.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.14 (tooltip header describes last transition)
 
 Tooltip header was always "Open · 1h ago" (or whatever the current status is) — didn't reflect that the issue had just been re-opened or rejected. v0.14 swaps in the last-event label + age:
