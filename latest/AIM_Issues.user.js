@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.8';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -176,7 +176,7 @@
     let drawingState = null;
     let drawToolbarEl = null;
     let noteModalEl = null;
-    let stubModalEl = null;
+    let statusModalEl = null;
     let buttonEl = null;
     let controlChannel = null;
     let leafletMapRef = null;
@@ -1294,10 +1294,33 @@
         if (attempt > 0) {
             console.log(`${TAG} renderAllIssues: map ready after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`);
         }
+        ensureCustomPanes(map);
         currentSiteIssues.forEach((issue) => {
-            const isHidden = hiddenIds.has(issue.id);
-            renderOneIssue(issue, { isHidden });
+            renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
         });
+    }
+
+    // v0.8: create high-z-index panes so issue shapes + markers sit on top
+    // of Percepto's own markers (entities, FFZs, etc.). Without this, M2 on
+    // an issue marker positioned over an asset triggers Percepto's M2 menu
+    // instead. Default Leaflet pane z-indexes: overlayPane=400, markerPane=600,
+    // tooltipPane=650, popupPane=700. We use 750/800 to sit above all of
+    // them. Idempotent — gated by a per-map flag.
+    function ensureCustomPanes(map) {
+        if (!map || map._aim_issues_panes_created) return;
+        try {
+            if (typeof map.createPane !== 'function') return;
+            const polyPane = map.createPane('aim-issues-polygons');
+            if (polyPane) { polyPane.style.zIndex = 750; polyPane.style.pointerEvents = 'auto'; }
+            const markerPane = map.createPane('aim-issues-markers');
+            if (markerPane) { markerPane.style.zIndex = 800; markerPane.style.pointerEvents = 'auto'; }
+            const tooltipPane = map.createPane('aim-issues-tooltips');
+            if (tooltipPane) { tooltipPane.style.zIndex = 850; tooltipPane.style.pointerEvents = 'none'; }
+            map._aim_issues_panes_created = true;
+            console.log(`${TAG} created custom panes (polygons z750, markers z800, tooltips z850)`);
+        } catch (e) {
+            console.warn(`${TAG} ensureCustomPanes failed:`, e);
+        }
     }
 
     function unhideAllNonResolved() {
@@ -1383,6 +1406,11 @@
         const hOpacity = Number(getT('render.hidden-opacity'))  || 0.25;
         const hFill    = Number(getT('render.hidden-fill'))     || 0.04;
         const hWeight  = Number(getT('render.hidden-weight'))   || 1.5;
+        // v0.8: pane: 'aim-issues-polygons' (z-index 750) makes the SVG
+        // sit above Percepto's overlay layers but below issue markers.
+        // Falls back to default overlayPane if our custom pane wasn't
+        // created (unlikely but defensive).
+        const polyPane = (map.getPane && map.getPane('aim-issues-polygons')) ? 'aim-issues-polygons' : undefined;
         const polygonOpts = isHidden ? {
             color: st.color,
             weight: hWeight,
@@ -1392,6 +1420,7 @@
             fillOpacity: hFill,
             interactive: false,
             bubblingMouseEvents: false,
+            pane: polyPane,
         } : {
             color: st.color,
             weight: vWeight,
@@ -1401,6 +1430,7 @@
             fillOpacity: vFill,
             interactive: true,
             bubblingMouseEvents: false,
+            pane: polyPane,
         };
         // v0.6 diagnostic: log polygon shape once per render so we can
         // confirm the data + style are what we expect.
@@ -1408,12 +1438,14 @@
             console.log(`${TAG} render ${issue.id} (${issue.status}, hidden=${isHidden}) — polygon=${Array.isArray(issue.polygon) ? `[${issue.polygon.length} pts]` : typeof issue.polygon}, opts=`, polygonOpts);
         } catch (e) {}
         const polygon = L.polygon(issue.polygon, polygonOpts);
+        const ttPane = (map.getPane && map.getPane('aim-issues-tooltips')) ? 'aim-issues-tooltips' : undefined;
         if (!isHidden) {
             polygon.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
                 direction: 'top',
                 offset: L.point(0, -8),
                 sticky: true,
                 className: 'aim-issues-tooltip',
+                pane: ttPane,
             });
             polygon.on('click', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
@@ -1422,7 +1454,7 @@
             polygon.on('contextmenu', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
                 try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
-                openStubStatusModal(issue);
+                openStatusModal(issue);
             });
         }
         polygon.addTo(map);
@@ -1460,11 +1492,13 @@
                 iconSize: [markerSize, markerSize],
                 iconAnchor: [markerSize / 2, markerSize / 2],
             });
-            marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false });
+            const markerPane = (map.getPane && map.getPane('aim-issues-markers')) ? 'aim-issues-markers' : undefined;
+            marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false, pane: markerPane });
             marker.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
                 direction: 'top',
                 offset: L.point(0, -8),
                 className: 'aim-issues-tooltip',
+                pane: ttPane,
             });
             marker.on('click', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
@@ -1473,7 +1507,7 @@
             marker.on('contextmenu', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
                 try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
-                openStubStatusModal(issue);
+                openStatusModal(issue);
             });
             marker.addTo(map);
         }
@@ -1487,8 +1521,8 @@
         const safeBy = (issue.createdBy || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
         const statusLabel = (issue.status || 'open').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
         const hideHint = opts.isHidden
-            ? '<span style="color:#5fff5f;font-weight:700">HIDDEN</span> &middot; M1 to un-hide &middot; M2 = status (stub)'
-            : 'M1 = hide &middot; M2 = status (stub)';
+            ? '<span style="color:#5fff5f;font-weight:700">HIDDEN</span> &middot; M1 to un-hide &middot; M2 = change status'
+            : 'M1 = hide &middot; M2 = change status';
         // v0.3: dark-background tooltip via .aim-issues-tooltip class (CSS
         // injected once at init). Note text is now bold #ffffff for max
         // contrast against the dark bg.
@@ -1543,9 +1577,25 @@
         } catch (e) { return iso; }
     }
 
+    // v0.8: combined check — issue renders dimmed if it's session-hidden
+    // OR if its status is meant to be background (resolved / ignored).
+    function isIssueDimmed(issue) {
+        if (!issue) return false;
+        if (hiddenIds.has(issue.id)) return true;
+        if (issue.status === 'resolved' || issue.status === 'ignored') return true;
+        return false;
+    }
+
     function toggleSessionHide(id) {
         const issue = currentSiteIssues.find(i => i.id === id);
         if (!issue) return;
+        // v0.8: resolved/ignored are background by status — M1 is a no-op
+        // on those (toggling session-hide wouldn't change anything visually
+        // and would just confuse the user).
+        if (issue.status === 'resolved' || issue.status === 'ignored') {
+            showToast(`Already in background (${issue.status}).`, 2500);
+            return;
+        }
         const willHide = !hiddenIds.has(id);
         if (willHide) hiddenIds.add(id);
         else hiddenIds.delete(id);
@@ -1558,9 +1608,97 @@
         }
     }
 
-    // ------- Stub status modal (Phase 1) -------
-    function openStubStatusModal(issue) {
-        closeStubModal();
+    // ------- Phase 3: status state machine -------
+    //
+    // Per design doc (project_aim_issues_design.md):
+    //
+    //   [create]
+    //     ↓                                                  (Ignored stays
+    //   Open ──→ Ready-for-Review ──→ Resolved (terminal)     hidden by
+    //     ↑      │                                            design)
+    //     ├──────┘ (Rejected — note required)
+    //     ↑
+    //   Ignored ──→ Open (un-ignore — note required)
+    //
+    // Trust-based: anyone can do any transition. Audit log shows everything.
+    // No `delete` transition — delete lives separately (creator-only).
+    //
+    // Each transition: target status, button label, whether note is required,
+    // and a button color matching the destination's render color.
+    const STATUS_TRANSITIONS = {
+        'open': [
+            { to: 'ready-for-review', label: '→ Ready for Review', noteRequired: true,  color: '#ffd54f', textColor: '#000' },
+            { to: 'ignored',          label: '→ Ignore',            noteRequired: true,  color: '#788cb4', textColor: '#fff' },
+        ],
+        'ready-for-review': [
+            { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000' },
+            { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff' },
+        ],
+        'resolved': [],
+        'ignored': [
+            { to: 'open',     label: '↺ Un-ignore (back to Open)', noteRequired: true, color: '#ff4d4d', textColor: '#fff' },
+        ],
+    };
+
+    const STATUS_LABEL = {
+        'open':              { text: 'OPEN',              color: '#ff4d4d' },
+        'ready-for-review':  { text: 'READY FOR REVIEW',  color: '#ffd54f' },
+        'resolved':          { text: 'RESOLVED',          color: '#888'    },
+        'ignored':           { text: 'IGNORED',           color: '#788cb4' },
+    };
+
+    function applyTransition(issueId, transition, note) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const fromStatus = issue.status;
+        if (!STATUS_TRANSITIONS[fromStatus] || !STATUS_TRANSITIONS[fromStatus].some(t => t.to === transition.to)) {
+            console.warn(`${TAG} illegal transition ${fromStatus} → ${transition.to}`);
+            return false;
+        }
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        const trimmedNote = (note || '').trim();
+        if (transition.noteRequired && !trimmedNote) {
+            return false;
+        }
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus,
+            toStatus: transition.to,
+            note: trimmedNote,
+        });
+        issue.status = transition.to;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        console.log(`${TAG} transition ${issueId}: ${fromStatus} → ${transition.to} by @${by}${trimmedNote ? ` (note: ${trimmedNote.slice(0, 80)})` : ''}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        const targetLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
+        if (cachedToken && !wasLocalOnly) {
+            showToast(`Status → ${targetLabel} — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`@${by}: ${fromStatus} → ${transition.to}`);
+        } else {
+            showToast(`Status → ${targetLabel} (local only).`, 2500);
+        }
+        return true;
+    }
+
+    function escHtml(s) {
+        return (s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    }
+
+    // ------- Real status modal (Phase 3) -------
+    //
+    // Two visual states:
+    //   1. Initial — header + history + transition buttons + Delete/Close
+    //   2. Armed (after user clicks a transition button) — note input
+    //      + Confirm/Cancel; transition buttons row hidden
+    //
+    // re-renders the modal innerHTML on state change.
+    function openStatusModal(issue) {
+        closeStatusModal();
         const overlay = document.createElement('div');
         overlay.id = 'aim-issues-status-modal-overlay';
         overlay.style.cssText = `
@@ -1571,91 +1709,205 @@
         const card = document.createElement('div');
         card.style.cssText = `
             background:#1f2228;border:1px solid rgba(255,77,77,0.45);
-            border-radius:10px;padding:18px 22px;width:520px;max-width:92vw;
+            border-radius:10px;padding:18px 22px;width:540px;max-width:94vw;
             color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
         `;
-        const safeNote = (issue.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-        // v0.6: history rows use fmtDateTime — was raw ISO before.
-        const histRows = (issue.history || []).map(h => {
-            const safeHistNote = (h.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-            const safeBy = (h.by || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-            const trans = h.fromStatus ? `${h.fromStatus} → ${h.toStatus}` : `created (${h.toStatus})`;
-            return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
-                <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
-                <div style="color:#e6e6e6;margin-top:2px">${trans}</div>
-                ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
-            </div>`;
-        }).join('');
-        // v0.6: creator-only delete. Compares cachedUsername (GitHub login)
-        // against issue.createdBy. local-only issues (no token) are
-        // delete-able when cachedUsername is also empty — that handles
-        // the offline / pre-Phase-2 testing case.
-        const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
-        // v0.7: anyone can delete a local-only issue regardless of token
-        // state — they're throwaway entries with no real owner.
-        const isLocalOnly = (issue.createdBy === 'local-only');
-        const canDelete = isCreator || isLocalOnly;
-        const deleteBtnHtml = canDelete
-            ? `<button id="aim-issues-stub-delete"
-                   style="padding:7px 14px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;margin-right:auto">
-                   🗑 Delete (you created this)
-               </button>`
-            : '';
-        card.innerHTML = `
-            <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:6px">
-                Issue · ${(issue.status || 'open').toUpperCase()}
-            </div>
-            <div style="color:#e6e6e6;font-size:13px;margin-bottom:10px">${safeNote}</div>
-            <div style="color:#888;font-size:11px;margin-bottom:4px">History</div>
-            <div style="max-height:220px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
-            <div style="color:#666;font-size:11px;margin-top:10px;font-style:italic">
-                Phase 1 stub — status transitions arrive in Phase 3.
-            </div>
-            <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
-                ${deleteBtnHtml}
-                <button id="aim-issues-stub-close"
-                    style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
-                    Close
-                </button>
-            </div>
-        `;
         overlay.appendChild(card);
-        document.body.appendChild(overlay);
-        stubModalEl = overlay;
-        card.querySelector('#aim-issues-stub-close').onclick = closeStubModal;
-        const deleteBtn = card.querySelector('#aim-issues-stub-delete');
-        if (deleteBtn) {
-            deleteBtn.onclick = () => {
-                // Two-stage confirm: first click flips the button to a
-                // red "CONFIRM DELETE" label that the user has to click
-                // again within 5s. Defends against typo / muscle-memory.
-                if (deleteBtn.dataset.armed === '1') {
-                    deleteIssue(issue.id);
-                    closeStubModal();
-                    return;
-                }
-                deleteBtn.dataset.armed = '1';
-                deleteBtn.textContent = '⚠ Click again to confirm delete';
-                deleteBtn.style.background = '#ff4d4d';
-                deleteBtn.style.color = '#fff';
-                deleteBtn.style.borderColor = '#ff4d4d';
-                setTimeout(() => {
-                    if (!deleteBtn || deleteBtn.dataset.armed !== '1') return;
-                    deleteBtn.dataset.armed = '0';
-                    deleteBtn.textContent = '🗑 Delete (you created this)';
-                    deleteBtn.style.background = '#5a2222';
-                    deleteBtn.style.color = '#ff8585';
-                    deleteBtn.style.borderColor = '#ff4d4d';
-                }, 5000);
-            };
+
+        // Local UI state — armed transition (null = pick a transition;
+        // non-null = note prompt for that transition).
+        let armed = null;
+        let pendingNote = '';     // preserved across re-renders if user typed something
+
+        function render() {
+            // Re-resolve issue from current state in case it changed
+            const liveIssue = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            const safeNote = escHtml(liveIssue.note);
+            const status = liveIssue.status || 'open';
+            const statusMeta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#ff8585' };
+            const transitions = STATUS_TRANSITIONS[status] || [];
+            const histRows = (liveIssue.history || []).map(h => {
+                const safeHistNote = escHtml(h.note);
+                const safeBy = escHtml(h.by || '?');
+                const trans = h.fromStatus
+                    ? `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`
+                    : `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
+                    <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
+                    <div style="color:#e6e6e6;margin-top:2px">${trans}</div>
+                    ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
+                </div>`;
+            }).join('');
+
+            const isCreator = !!(liveIssue.createdBy && cachedUsername && liveIssue.createdBy === cachedUsername);
+            const isLocalOnly = (liveIssue.createdBy === 'local-only');
+            const canDelete = isCreator || isLocalOnly;
+            const deleteBtnHtml = canDelete
+                ? `<button id="aim-issues-modal-delete"
+                       style="padding:7px 14px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;margin-right:auto">
+                       🗑 Delete${isCreator ? ' (you created this)' : ' (local-only)'}
+                   </button>`
+                : '';
+
+            // Transitions section OR armed-note section
+            let actionSectionHtml = '';
+            if (armed) {
+                const tgtLabel = (STATUS_LABEL[armed.to] || { text: armed.to.toUpperCase() }).text;
+                const reqText = armed.noteRequired ? '<span style="color:#ff8585">(required)</span>' : '<span style="color:#888">(optional)</span>';
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid rgba(255,255,255,0.10);border-radius:6px">
+                        <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
+                            Transitioning to <span style="color:${armed.color};font-weight:700">${tgtLabel}</span>
+                        </div>
+                        <div style="color:#aaa;font-size:11px;margin-bottom:4px">Note ${reqText}</div>
+                        <textarea id="aim-issues-modal-note"
+                            placeholder="${armed.noteRequired ? 'Required — what was fixed / why ignoring / etc.' : 'Optional acceptance comment'}"
+                            style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
+                        <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+                            <button id="aim-issues-modal-cancel-transition"
+                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                                Cancel
+                            </button>
+                            <button id="aim-issues-modal-confirm-transition"
+                                style="padding:6px 12px;background:${armed.color};color:${armed.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                                Confirm → ${tgtLabel}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (transitions.length === 0) {
+                actionSectionHtml = `
+                    <div style="margin-top:14px;color:#888;font-size:11px;font-style:italic">
+                        Terminal status — no further transitions.
+                    </div>
+                `;
+            } else {
+                const btns = transitions.map((t, i) => `
+                    <button data-tidx="${i}"
+                        class="aim-issues-modal-transbtn"
+                        style="padding:7px 12px;background:${t.color};color:${t.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                        ${t.label}
+                    </button>
+                `).join('');
+                actionSectionHtml = `
+                    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                        <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
+                        ${btns}
+                    </div>
+                `;
+            }
+
+            card.innerHTML = `
+                <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:baseline;gap:8px">
+                    <span style="color:#aaa">Issue ·</span>
+                    <span style="color:${statusMeta.color};font-weight:700">${statusMeta.text}</span>
+                </div>
+                <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
+                <div style="color:#888;font-size:11px;margin-bottom:4px">History</div>
+                <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
+                ${actionSectionHtml}
+                <div style="display:flex;gap:8px;align-items:center;margin-top:14px">
+                    ${deleteBtnHtml}
+                    <button id="aim-issues-modal-close"
+                        style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
+                        Close
+                    </button>
+                </div>
+            `;
+            wireHandlers(liveIssue, transitions);
         }
-        const keyH = (e) => { if (e.key === 'Escape') closeStubModal(); };
+
+        function wireHandlers(liveIssue, transitions) {
+            card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+
+            // Transition buttons
+            card.querySelectorAll('.aim-issues-modal-transbtn').forEach(btn => {
+                btn.onclick = () => {
+                    const idx = parseInt(btn.dataset.tidx, 10);
+                    const t = transitions[idx];
+                    if (!t) return;
+                    armed = t;
+                    pendingNote = '';
+                    render();
+                    setTimeout(() => {
+                        const ta = card.querySelector('#aim-issues-modal-note');
+                        if (ta) ta.focus();
+                    }, 30);
+                };
+            });
+
+            // Armed-mode buttons
+            const cancelBtn = card.querySelector('#aim-issues-modal-cancel-transition');
+            if (cancelBtn) {
+                cancelBtn.onclick = () => { armed = null; pendingNote = ''; render(); };
+            }
+            const noteInput = card.querySelector('#aim-issues-modal-note');
+            if (noteInput) {
+                noteInput.oninput = () => { pendingNote = noteInput.value; };
+                noteInput.onkeydown = (e) => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        e.preventDefault();
+                        confirmBtn && confirmBtn.click();
+                    }
+                };
+            }
+            const confirmBtn = card.querySelector('#aim-issues-modal-confirm-transition');
+            if (confirmBtn) {
+                confirmBtn.onclick = () => {
+                    if (!armed) return;
+                    const note = (noteInput ? noteInput.value : pendingNote).trim();
+                    if (armed.noteRequired && !note) {
+                        const err = card.querySelector('#aim-issues-modal-noteerr');
+                        if (err) err.textContent = 'Note required for this transition.';
+                        if (noteInput) noteInput.focus();
+                        return;
+                    }
+                    const ok = applyTransition(liveIssue.id, armed, note);
+                    if (ok) closeStatusModal();
+                };
+            }
+
+            // Delete (two-stage confirm — preserved from v0.6)
+            const deleteBtn = card.querySelector('#aim-issues-modal-delete');
+            if (deleteBtn) {
+                deleteBtn.onclick = () => {
+                    if (deleteBtn.dataset.armed === '1') {
+                        deleteIssue(liveIssue.id);
+                        closeStatusModal();
+                        return;
+                    }
+                    deleteBtn.dataset.armed = '1';
+                    deleteBtn.textContent = '⚠ Click again to confirm delete';
+                    deleteBtn.style.background = '#ff4d4d';
+                    deleteBtn.style.color = '#fff';
+                    setTimeout(() => {
+                        if (!deleteBtn || deleteBtn.dataset.armed !== '1') return;
+                        deleteBtn.dataset.armed = '0';
+                        // Restore original label via a re-render — safer than
+                        // string-matching the original creator/local label.
+                        render();
+                    }, 5000);
+                };
+            }
+        }
+
+        render();
+        document.body.appendChild(overlay);
+        statusModalEl = overlay;
+        const keyH = (e) => {
+            if (e.key !== 'Escape') return;
+            // Escape during armed cancels back to transition list; from
+            // transition list it closes the modal.
+            if (armed) { armed = null; pendingNote = ''; render(); }
+            else closeStatusModal();
+        };
         overlay.addEventListener('keydown', keyH, true);
     }
 
-    function closeStubModal() {
-        if (stubModalEl) { try { stubModalEl.remove(); } catch (e) {} }
-        stubModalEl = null;
+    function closeStatusModal() {
+        if (statusModalEl) { try { statusModalEl.remove(); } catch (e) {} }
+        statusModalEl = null;
     }
 
     // ------- Toast -------
@@ -1697,6 +1949,14 @@
                 padding: 9px 12px !important;
                 border-radius: 6px !important;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+                /* v0.8: Leaflet's .leaflet-tooltip default is white-space:nowrap,
+                   which let long notes blow past the container. Force wrap +
+                   cap width here so the inner div's max-width:320px actually
+                   constrains the rendered box. */
+                white-space: normal !important;
+                max-width: 340px !important;
+                word-wrap: break-word !important;
+                overflow-wrap: break-word !important;
             }
             .leaflet-tooltip-top.aim-issues-tooltip::before    { border-top-color:    rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-bottom.aim-issues-tooltip::before { border-bottom-color: rgba(15,18,22,0.96) !important; }

@@ -6,6 +6,40 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.8 (Phase 3 — real status state machine + 2 bug fixes)
+
+Two bug fixes from v0.7 testing plus Phase 3 (status workflow).
+
+### Bug fixes
+- **Tooltip text not wrapping.** Leaflet's default `.leaflet-tooltip` has `white-space:nowrap` — my v0.3 override didn't unset it, so long notes blew past the container at low zoom. v0.8 adds `white-space:normal !important`, `max-width:340px !important`, and `overflow-wrap:break-word` to the `.aim-issues-tooltip` rule.
+- **Issue icons sitting underneath Percepto markers.** When an issue marker overlapped an asset, M2 on the icon hit Percepto's asset M2 menu instead of the status modal. Fix: create three custom Leaflet panes at startup — `aim-issues-polygons` (z-index 750), `aim-issues-markers` (800), and `aim-issues-tooltips` (850) — well above the default `markerPane` (600) and `popupPane` (700). Polygon/marker/tooltip create calls now pass `pane:` to use them.
+
+### Phase 3 — status state machine
+M2 now opens a real status modal (was a stub showing only history). Full workflow per the design doc:
+
+- **Open** → `→ Ready for Review` (note required) or `→ Ignore` (note required)
+- **Ready-for-Review** → `→ Resolve` (note optional, acceptance comment) or `↺ Reject (back to Open)` (note required, rejection reason)
+- **Resolved** → terminal (no further transitions)
+- **Ignored** → `↺ Un-ignore (back to Open)` (note required)
+
+UX:
+- Modal opens with history + transition buttons colored to match the target status (yellow for ready, green for resolve, etc.).
+- Clicking a transition button arms it — note input slides in below with required/optional label + Confirm/Cancel buttons.
+- Confirm appends a history entry `{at, by, fromStatus, toStatus, note}`, updates `issue.status`, saves locally, re-renders the issue with the new color/dim, and (with token) commits to GitHub with message `@user: open → ready-for-review`.
+- Esc on armed view → cancels back to transition list; Esc on transition list → closes modal.
+- Ctrl/Cmd+Enter in the note textarea = confirm.
+- Trust-based per design: anyone can do any transition. Audit log shows everything.
+- Creator-only delete (from v0.6) preserved in the modal footer.
+
+### Status-driven render
+- **Resolved + Ignored** now render dimmed automatically (per design — those statuses are meant to be background). Combines with session-hide via a new `isIssueDimmed(issue)` helper.
+- M1 on resolved/ignored issues is a no-op now (was creating ghost hidden-ids that wouldn't change anything visually); toast says "Already in background (resolved)".
+
+### Tooltip hint text
+- "M2 = status (stub)" → "M2 = change status".
+
+---
+
 ## 2026-06-01 — AIM Issues v0.7 (local-only is truly local)
 
 Local-only issues (those created with no GitHub token cached) now have clean semantics:
