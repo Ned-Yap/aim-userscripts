@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -453,15 +453,55 @@
         return new Date(issue.createdAt || 0).getTime() || 0;
     }
 
-    // Union by ID — pick whichever copy has the later history tail.
+    // v0.24: merge history arrays so concurrent transitions on the SAME
+    // issue both survive. Bug: two CSMs each open the same issue from
+    // stale views, both ignore it with different notes; A's PUT lands
+    // first, B's PUT hits 409 → re-fetch + merge. Old logic picked whichever
+    // whole-issue object had a later history-tail timestamp → A's
+    // transition got discarded entirely. Now we union the histories and
+    // recompute status from history[last].
+    function mergeHistoryArrays(a, b) {
+        const all = [...(a || []), ...(b || [])];
+        // Dedupe: identical (at|by|fromStatus|toStatus|note) = same entry.
+        // No tolerance window — exact match. Browser clocks drifting a
+        // few seconds is acceptable in the audit log.
+        const seen = new Set();
+        const out = [];
+        for (const h of all) {
+            if (!h || typeof h !== 'object') continue;
+            const key = `${h.at}|${h.by}|${h.fromStatus}|${h.toStatus}|${h.note || ''}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push(h);
+        }
+        out.sort((x, y) => {
+            const tx = new Date(x.at).getTime();
+            const ty = new Date(y.at).getTime();
+            return (isNaN(tx) ? 0 : tx) - (isNaN(ty) ? 0 : ty);
+        });
+        return out;
+    }
+
+    function mergeIssueObjects(a, b) {
+        const history = mergeHistoryArrays(a.history, b.history);
+        const status = history.length
+            ? history[history.length - 1].toStatus
+            : (a.status || b.status || 'open');
+        // Immutable fields (polygon / note / surface / shape / createdAt /
+        // createdBy / id) don't change after creation, so both copies hold
+        // the same values — taking from either side is fine. Use spread
+        // with `a` first for stable ordering of fields.
+        return { ...a, ...b, history, status };
+    }
+
     function mergeIssueLists(localList, remoteList) {
         const byId = new Map();
-        const stamp = (issue) => byId.set(issue.id, issue);
-        (remoteList || []).forEach(stamp);
+        (remoteList || []).forEach(r => { if (r && r.id) byId.set(r.id, r); });
         (localList || []).forEach(l => {
+            if (!l || !l.id) return;
             const r = byId.get(l.id);
             if (!r) { byId.set(l.id, l); return; }
-            byId.set(l.id, lastHistAt(l) >= lastHistAt(r) ? l : r);
+            byId.set(l.id, mergeIssueObjects(l, r));
         });
         return Array.from(byId.values());
     }

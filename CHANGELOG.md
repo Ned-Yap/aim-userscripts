@@ -6,6 +6,22 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.24 — concurrent transitions both kept
+
+Two CSMs each opened the same issue from stale views and ignored it with different notes. One transition was kept, the other discarded.
+
+Root cause: `mergeIssueLists` picked whichever WHOLE issue object had the later `history[last].at` — so A's whole copy (including A's history entries) was thrown away in favor of B's whole copy. Meant the audit log lost A's transition entirely.
+
+Fix: for same-id issues, **merge histories** instead of picking one whole object.
+
+- `mergeHistoryArrays(a, b)` unions both histories, dedupes by `at|by|fromStatus|toStatus|note`, sorts chronologically
+- `mergeIssueObjects(a, b)` merges histories + recomputes current `status` from `history[last].toStatus`. Immutable fields (polygon, note, surface, shape, createdAt, createdBy, id) are identical in both copies so taking either is fine
+- Result: A's `[created, ignored-by-A]` + B's `[created, ignored-by-B]` → `[created, ignored-by-A, ignored-by-B]`. Both transitions preserved in audit log. Final status = ignored (whichever was last by timestamp).
+
+Edge: if two CSMs reach DIFFERENT terminal states on the same issue (one resolves, one ignores), the merged status is whichever happened last by browser clock. Audit log shows both — user can re-open from either terminal state to re-arbitrate.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.23 — icon always inside the polygon
 
 For L-shaped, C-shaped, or any concave polygon, the arithmetic centroid can fall OUTSIDE the polygon (the empty corner of the L). User reported the ⚠ icon landing outside the dashed outline. Fixed with `bestInteriorPoint()`:
