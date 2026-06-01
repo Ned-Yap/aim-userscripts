@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.4 (Phase 1 startup-race fix)
+
+Bug: on page refresh, issues didn't render. Only way to see them was to toggle Enable off/on or move any Issue Rendering slider — both of those re-fire `renderAllIssues` after Leaflet has mounted, hiding the underlying race.
+
+Root cause: `setCurrentSite` (called from init) fired `renderAllIssues` before Leaflet had constructed the iframe map. `getLeafletMap()` returned null, `renderOneIssue` silently no-op'd, and nothing reached the map.
+
+Fix: `renderAllIssues` now retries every 500ms (up to ~15s) until `getLeafletMap()` returns a real map, then renders. Any new explicit call (toggle change, site nav, M2 un-hide) resets the retry budget. Removed the old `setTimeout(renderAllIssues, 1500)` fallback in init — superseded by the retry loop.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.3 (Phase 1 polish)
 
 Second round of v0.1 testing fixes:

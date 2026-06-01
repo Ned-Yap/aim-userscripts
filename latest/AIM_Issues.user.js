@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -41,7 +41,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -833,14 +833,42 @@
         issueLayers.clear();
     }
 
+    // v0.4: render-retry loop. Without this, the first render kicked off
+    // by setCurrentSite-from-init runs BEFORE Leaflet mounts the iframe map.
+    // getLeafletMap returns null, renderOneIssue silently no-ops, and
+    // nothing appears until the user toggles a Control Panel setting (which
+    // re-fires renderAllIssues after the map is ready). With retries baked
+    // in, the first explicit call polls every 500ms (up to ~15s) until the
+    // map appears, then renders. Any new explicit call resets the budget.
+    let renderRetryTimer = null;
+    const RENDER_MAX_RETRIES = 30;
+    const RENDER_RETRY_MS = 500;
+
     function renderAllIssues() {
+        if (renderRetryTimer) { clearTimeout(renderRetryTimer); renderRetryTimer = null; }
+        renderAllIssuesAttempt(0);
+    }
+
+    function renderAllIssuesAttempt(attempt) {
+        renderRetryTimer = null;
         clearIssueLayers();
         if (!masterEnabled) return;
+        if (currentSiteIssues.length === 0) return;
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) {
+            if (attempt < RENDER_MAX_RETRIES) {
+                renderRetryTimer = setTimeout(() => renderAllIssuesAttempt(attempt + 1), RENDER_RETRY_MS);
+            } else {
+                console.warn(`${TAG} renderAllIssues gave up — Leaflet map never appeared after ${attempt} tries`);
+            }
+            return;
+        }
+        if (attempt > 0) {
+            console.log(`${TAG} renderAllIssues: map ready after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`);
+        }
         currentSiteIssues.forEach((issue) => {
             const isHidden = hiddenIds.has(issue.id);
-            // Hidden issues ALWAYS render dimmed (polygon click-through,
-            // marker still clickable to un-hide). M2 on the 🚩 button
-            // un-hides all non-resolved at once.
             renderOneIssue(issue, { isHidden });
         });
     }
@@ -1197,9 +1225,8 @@
         setCurrentSite(readSiteIdFromHash());
         attachHashListener();
         ensureButton();
-        // First render attempt after a short delay so Leaflet has time to
-        // mount the map for the current site.
-        setTimeout(renderAllIssues, 1500);
+        // First render fires from setCurrentSite above; renderAllIssues
+        // now has built-in retry-until-map-ready (v0.4).
         console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — site ${siteID || '(none)'}`);
     }
 
