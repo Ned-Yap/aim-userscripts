@@ -6,6 +6,24 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.16 (panel polish — drag/resize/solo/zoom)
+
+Four UX upgrades to the v0.15 panel:
+
+- **Drag to move.** Header bar is a drag handle (`cursor:move`). Mousedown on the bar (avoiding inner buttons/inputs) → drag. Position persists to `localStorage` key `aim-issues-panel-layout` so it reopens where you left it across refreshes.
+- **Resize from the bottom-right corner.** Red striped handle in the corner (`cursor:nwse-resize`). Min size 360×240; clamped to viewport. Saves alongside position.
+- **M2 on a status chip = solo.** Audio-mixer pattern (matches Asset Inspector). M2 on a chip turns off all other statuses and keeps only that one active. M2 again on the same chip restores all statuses. M1 still toggles individual chips.
+- **Row click now zoom-to-fit, not just pan.** Uses `map.fitBounds(L.latLngBounds(issue.polygon), {padding:[80,80], maxZoom:19})` so the polygon fills a comfortable area with context around it. The `maxZoom:19` cap prevents a tiny issue from snapping to building-level zoom.
+
+Internal:
+- New `panelDragInFlight` flag suppresses panel re-renders while the user is dragging or resizing (would re-wire stale handlers mid-drag).
+- `clampPanelLayout` keeps position+size inside the viewport with min-visible constraints.
+- Footer hint text updated to mention the chip solo + zoom-to-issue behavior.
+
+Next up — v0.17 = affected-entities detection (per-issue list of Percepto entities under the polygon, shown in tooltip + modal + as a panel column). Then v0.18 = Google Sheets export from the panel.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.15 (Phase 5a — dedicated panel)
 
 First half of Phase 5: a floating 🚩 panel listing every issue on the current site. Triggered by **M2 on the 🚩 toolbar button** (was "un-hide all" before — that action moved into a button inside the panel header). Panel includes:

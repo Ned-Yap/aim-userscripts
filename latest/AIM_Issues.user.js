@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.15';
+    const SCRIPT_VERSION = '0.16';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -182,6 +182,37 @@
     // Filter chips — Set of allowed statuses. Empty == all hidden (rare).
     const panelFilters = new Set(['open', 'ready-for-review', 'resolved', 'ignored']);
     let panelSearch = '';
+    // v0.16: persisted size + position. Loaded from localStorage on open,
+    // saved on drag/resize release. Use viewport-anchored top/left so the
+    // panel sticks wherever the user left it across reloads.
+    const PANEL_LAYOUT_KEY = 'aim-issues-panel-layout';
+    let panelLayout = null;            // { left, top, width, height } in px
+    let panelDragInFlight = false;     // suppresses re-renders during drag
+    function loadPanelLayout() {
+        try {
+            const raw = localStorage.getItem(PANEL_LAYOUT_KEY);
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== 'object') return null;
+            return obj;
+        } catch (e) { return null; }
+    }
+    function savePanelLayout(layout) {
+        try { localStorage.setItem(PANEL_LAYOUT_KEY, JSON.stringify(layout)); }
+        catch (e) {}
+    }
+    function clampPanelLayout(l) {
+        // Clamp into viewport, with minimum size + at-least-partly-visible.
+        const minW = 360, minH = 240;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const out = { ...l };
+        out.width  = Math.max(minW, Math.min(out.width  || 560, vw - 20));
+        out.height = Math.max(minH, Math.min(out.height || 520, vh - 20));
+        const titleBar = 40; // leave at least the header on-screen
+        out.left = Math.max(10 - out.width + 80, Math.min(out.left, vw - 80));
+        out.top  = Math.max(10, Math.min(out.top, vh - titleBar));
+        return out;
+    }
     let buttonEl = null;
     let controlChannel = null;
     let leafletMapRef = null;
@@ -1976,9 +2007,20 @@
         if (panelEl) { renderIssuesPanel(); return; }
         const panel = document.createElement('div');
         panel.id = 'aim-issues-panel';
+        // v0.16: position + size driven by panelLayout (persisted). Defaults
+        // place us top-right-ish; if user has moved/resized, restore that.
+        const stored = loadPanelLayout();
+        if (stored) panelLayout = clampPanelLayout(stored);
+        else panelLayout = clampPanelLayout({
+            left: window.innerWidth - 580,
+            top: 60,
+            width: 560,
+            height: Math.min(620, window.innerHeight - 100),
+        });
         panel.style.cssText = `
-            position:fixed;top:60px;right:20px;width:540px;max-width:calc(100vw - 40px);
-            max-height:calc(100vh - 80px);
+            position:fixed;
+            left:${panelLayout.left}px;top:${panelLayout.top}px;
+            width:${panelLayout.width}px;height:${panelLayout.height}px;
             background:#1f2228;border:1px solid rgba(255,77,77,0.55);border-radius:10px;
             box-shadow:0 8px 32px rgba(0,0,0,0.6);
             z-index:99000;
@@ -2019,6 +2061,8 @@
 
     function renderIssuesPanel() {
         if (!panelEl) return;
+        // v0.16: don't re-render mid-drag — would re-wire stale handlers.
+        if (panelDragInFlight) return;
         // Preserve search input focus + cursor across re-render. Without
         // this, each renderButtonState-triggered re-render kicks the user
         // out of the search box mid-keystroke.
@@ -2113,8 +2157,9 @@
         }
 
         panelEl.innerHTML = `
-            <div style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
-                        display:flex;align-items:center;gap:10px">
+            <div id="aim-issues-panel-header" style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
+                        display:flex;align-items:center;gap:10px;cursor:move;user-select:none"
+                 title="Drag to move the panel">
                 <span style="font-size:16px">🚩</span>
                 <span style="font-weight:700;color:#ff8585">Issues</span>
                 <span style="color:#888;font-size:11px">·</span>
@@ -2164,7 +2209,12 @@
             <div style="padding:0;overflow:auto;flex:1;min-height:120px">${rowsHtml}</div>
             <div style="padding:6px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
                         color:#666;font-size:10px;font-style:italic">
-                Click row: pan map + open status modal · M2 on map icon: status modal · Hover icon: tooltip
+                Click row: zoom to issue + open status modal · M1 chip: toggle filter · M2 chip: solo
+            </div>
+            <div id="aim-issues-panel-resize"
+                 title="Drag to resize"
+                 style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
+                        background:linear-gradient(135deg,transparent 0%,transparent 45%,rgba(255,77,77,0.55) 45%,rgba(255,77,77,0.55) 60%,transparent 60%,transparent 75%,rgba(255,77,77,0.55) 75%,rgba(255,77,77,0.55) 90%,transparent 90%);">
             </div>
         `;
 
@@ -2205,16 +2255,33 @@
                 else panelFilters.add(st);
                 renderIssuesPanel();
             };
+            // v0.16: M2 on a chip "solos" that status (audio-mixer pattern,
+            // matches Asset Inspector). M2 again → restore all.
+            chip.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const st = chip.dataset.status;
+                const isCurrentlySolo = (panelFilters.size === 1 && panelFilters.has(st));
+                panelFilters.clear();
+                if (isCurrentlySolo) {
+                    PANEL_STATUS_ORDER.forEach(s => panelFilters.add(s));
+                } else {
+                    panelFilters.add(st);
+                }
+                renderIssuesPanel();
+            };
         });
         panelEl.querySelectorAll('.aim-issues-panel-row').forEach(row => {
             row.onclick = () => {
                 const id = row.dataset.issueId;
                 const issue = currentSiteIssues.find(i => i.id === id);
                 if (!issue) return;
-                panToIssue(issue);
+                zoomToIssue(issue);
                 openStatusModal(issue);
             };
         });
+        // v0.16: drag-to-move + drag-to-resize
+        wirePanelDragAndResize();
         // Restore search input focus after re-render
         if (wasSearchFocused) {
             const newSearch = panelEl.querySelector('#aim-issues-panel-search');
@@ -2227,15 +2294,86 @@
         }
     }
 
-    function panToIssue(issue) {
+    // v0.16: zoom + pan so the polygon fills a comfortable portion of
+    // the map, with padding so we see context around it. Caps maxZoom
+    // so a tiny issue doesn't zoom in to building-level.
+    function zoomToIssue(issue) {
         const map = getLeafletMap();
-        if (!map || !issue || !issue.polygon || !issue.polygon.length) return;
-        const c = centroidOfLatLngs(issue.polygon);
-        if (!c) return;
+        const L = getL();
+        if (!map || !L || !issue || !issue.polygon || !issue.polygon.length) return;
         try {
-            // Don't zoom — just pan. Keep the user's current zoom.
-            map.panTo(c, { animate: true, duration: 0.4 });
-        } catch (e) {}
+            const bounds = L.latLngBounds(issue.polygon);
+            map.fitBounds(bounds, { padding: [80, 80], maxZoom: 19, animate: true, duration: 0.4 });
+        } catch (e) {
+            // Fallback to plain pan
+            const c = centroidOfLatLngs(issue.polygon);
+            if (c) { try { map.panTo(c, { animate: true, duration: 0.4 }); } catch (e2) {} }
+        }
+    }
+
+    // v0.16: panel drag/resize. Header drag → move; corner handle → resize.
+    // Both persist to localStorage on release.
+    function wirePanelDragAndResize() {
+        if (!panelEl) return;
+        const header = panelEl.querySelector('#aim-issues-panel-header');
+        const handle = panelEl.querySelector('#aim-issues-panel-resize');
+
+        if (header) {
+            header.addEventListener('mousedown', (e) => {
+                // Don't start a drag when mousing down on a button/input inside the header
+                if (e.target.closest('button, input')) return;
+                if (e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                startPanelDrag(e, 'move');
+            });
+        }
+        if (handle) {
+            handle.addEventListener('mousedown', (e) => {
+                if (e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                startPanelDrag(e, 'resize');
+            });
+        }
+    }
+
+    function startPanelDrag(downEvent, mode) {
+        if (!panelEl || !panelLayout) return;
+        panelDragInFlight = true;
+        const startX = downEvent.clientX;
+        const startY = downEvent.clientY;
+        const startLeft = panelLayout.left;
+        const startTop = panelLayout.top;
+        const startWidth = panelLayout.width;
+        const startHeight = panelLayout.height;
+
+        const onMove = (e) => {
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            let next;
+            if (mode === 'move') {
+                next = { ...panelLayout, left: startLeft + dx, top: startTop + dy };
+            } else {
+                next = { ...panelLayout, width: startWidth + dx, height: startHeight + dy };
+            }
+            const clamped = clampPanelLayout(next);
+            panelLayout = clamped;
+            panelEl.style.left   = `${clamped.left}px`;
+            panelEl.style.top    = `${clamped.top}px`;
+            panelEl.style.width  = `${clamped.width}px`;
+            panelEl.style.height = `${clamped.height}px`;
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove, true);
+            document.removeEventListener('mouseup', onUp, true);
+            panelDragInFlight = false;
+            savePanelLayout(panelLayout);
+            // Re-render once so any data changes during drag flow in
+            renderIssuesPanel();
+        };
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
     }
 
     // ------- Toast -------
