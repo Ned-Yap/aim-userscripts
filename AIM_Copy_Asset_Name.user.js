@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.57
+// @version      3.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -27,10 +27,13 @@
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
-    console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.57';
+    const SCRIPT_VERSION = '3.58';
+    // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
+    // are visible in the console (was stuck reading "v2.0 loading" for
+    // ~50 versions, which made auto-update verification impossible).
+    console.log(`${TAG} v${SCRIPT_VERSION} loading`);
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -7482,5 +7485,5 @@
         });
     }
 
-    console.log(`${TAG} v2.0 ready`);
+    console.log(`${TAG} v${SCRIPT_VERSION} ready`);
 })();
