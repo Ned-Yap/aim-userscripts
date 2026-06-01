@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1504,23 +1504,56 @@
         issueLayers.set(issue.id, { polygon, marker });
     }
 
+    // v0.14: describe the LAST event in the issue's history, not the
+    // current status. So a resolved issue that was just re-opened says
+    // "Re-opened" not "Open", and a freshly-created issue says "Open"
+    // (its creation). Color matches the destination status so the header
+    // reflects what state the issue is now in.
+    function lastEventLabel(issue) {
+        const hist = (issue && issue.history) || [];
+        if (hist.length === 0) {
+            return (STATUS_LABEL[issue.status || 'open'] || { text: 'OPEN' }).text;
+        }
+        const last = hist[hist.length - 1];
+        if (!last.fromStatus) {
+            // Creation entry
+            return (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || 'open').toUpperCase() }).text;
+        }
+        // Transition — describe semantically
+        const key = `${last.fromStatus}|${last.toStatus}`;
+        const map = {
+            'open|ready-for-review':    'Ready for Review',
+            'open|ignored':             'Ignored',
+            'ready-for-review|resolved': 'Resolved',
+            'ready-for-review|open':    'Rejected',
+            'resolved|open':            'Re-opened',
+            'ignored|open':             'Un-ignored',
+        };
+        return map[key] || (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || '').toUpperCase() }).text;
+    }
+
+    function lastEventAt(issue) {
+        const hist = (issue && issue.history) || [];
+        if (hist.length === 0) return issue.createdAt;
+        return hist[hist.length - 1].at;
+    }
+
     function buildTooltipHtml(issue, opts) {
         opts = opts || {};
-        const age = relativeAge(issue.createdAt);
         const safeNote = (issue.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
         const safeBy = (issue.createdBy || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-        const statusLabel = (issue.status || 'open').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+        // v0.14: header text + age describe the LAST transition, not
+        // current status. Color reflects the destination status so the
+        // tooltip header matches the icon color.
+        const headerLabel = lastEventLabel(issue);
+        const age = relativeAge(lastEventAt(issue));
+        const headerColor = (STATUS_LABEL[issue.status || 'open'] || { color: '#ff8585' }).color;
         const hideHint = opts.isHidden
             ? '<span style="color:#5fff5f;font-weight:700">HIDDEN</span> &middot; M1 to un-hide &middot; M2 = change status'
             : 'M1 = hide &middot; M2 = change status';
-        // v0.3: dark-background tooltip via .aim-issues-tooltip class (CSS
-        // injected once at init). Note text is now bold #ffffff for max
-        // contrast against the dark bg.
-        // v0.9: width is driven by .aim-issues-tooltip's min/max-width
-        // (320–420px band). Inner div fills it so the layout is consistent.
         return `
             <div style="line-height:1.35">
-                <div style="font-weight:700;color:#ff8585;font-size:13px;margin-bottom:6px">${statusLabel} &middot; ${age}</div>
+                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
                 <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>

@@ -6,6 +6,24 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.14 (tooltip header describes last transition)
+
+Tooltip header was always "Open · 1h ago" (or whatever the current status is) — didn't reflect that the issue had just been re-opened or rejected. v0.14 swaps in the last-event label + age:
+
+- Creation: status label (Open / Ready for Review / etc.)
+- `open → ready-for-review`: **Ready for Review**
+- `open → ignored`: **Ignored**
+- `ready-for-review → resolved`: **Resolved**
+- `ready-for-review → open`: **Rejected**
+- `resolved → open`: **Re-opened**
+- `ignored → open`: **Un-ignored**
+
+Age now counts from the last history entry's timestamp, not the original `createdAt`. So a 3-day-old issue that was re-opened 2 minutes ago shows "Re-opened · 2 min ago" instead of "Open · 3d ago" — much more useful at a glance.
+
+Header text color also follows the destination status (red/yellow/grey/grey-blue) so it matches the icon.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.13 (per-transition note prompts)
 
 Note textarea placeholder was a generic "Required — what was fixed / why ignoring / etc." regardless of which transition you picked, which read oddly on Re-open. v0.13 adds a `notePrompt` field per transition so each one asks the right question:
