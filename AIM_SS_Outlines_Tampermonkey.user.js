@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.43
+// @version      34.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.43';
+    const SCRIPT_VERSION = '34.66';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1214,6 +1214,10 @@
         if (kmlFeatures[key] && !force) return;
 
         // Try cache first so we render immediately while the network fetch runs.
+        // v34.53: removed the CDN_FRESHNESS_WINDOW_MS skip — no longer
+        // needed now that we fetch via api.github.com (always fresh,
+        // not cached at the GitHub CDN). Always do the network fetch
+        // so coworkers' changes propagate as soon as they happen.
         if (!kmlFeatures[key]) {
             const cached = gmGet(KML_CACHE_PREFIX + key, null);
             if (cached && Array.isArray(cached.features)) {
@@ -1257,6 +1261,16 @@
             { name: `${siteID}-${cap}.kmz`, ext: 'kmz' },
         ];
 
+        // v34.53: fetch via api.github.com Contents endpoint instead of
+        // raw.githubusercontent.com. The raw CDN has a ~5min cache that
+        // ignored cache-buster query strings, causing stale content to
+        // overwrite local cache after a commit. api.github.com returns
+        // fresh content every time. Rate limit: 5000/hr per PAT —
+        // realistic team usage is ~200-300/day, no concern.
+        //
+        // Response is JSON: { content: base64string, encoding: 'base64',
+        // sha, size, ... }. We decode .content to get the raw bytes,
+        // then either parse XML (for .kml) or feed to JSZip (for .kmz).
         const tryFetch = (i) => {
             if (i >= candidates.length) {
                 kmlFetching.delete(key);
@@ -1265,33 +1279,70 @@
                 return;
             }
             const c = candidates[i];
-            // Cache-bust the raw URL. raw.githubusercontent.com sends
-            // cache-control: max-age=300, so two page loads within 5 min
-            // can return stale content. Bug surfaced 2026-05-22 after a
-            // Split: the post-refresh fetch returned the pre-split file
-            // and overwrote local cache with stale features, making the
-            // split appear to "revert" on screen. Appending a unique
-            // query string forces the CDN to treat every request as a
-            // miss — the local cache layer above (line ~1210) still
-            // provides instant first-render so there's no perf hit.
-            const url = `https://raw.githubusercontent.com/${KMLS_REPO}/${KMLS_BRANCH}/${c.name}?_=${Date.now()}`;
+            const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(c.name)}?ref=${KMLS_BRANCH}`;
             const opts = {
                 method: 'GET',
                 url,
-                headers: { 'Authorization': `Bearer ${token}` },
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                },
                 timeout: 15000,
                 onload: (resp) => {
                     if (resp.status === 200) {
+                        let json;
+                        try { json = JSON.parse(resp.responseText); }
+                        catch (e) {
+                            kmlFetching.delete(key);
+                            console.error(`${TAG} ${type} KML parse-JSON failed for ${c.name}:`, e);
+                            return;
+                        }
+                        const b64 = (json && json.content) ? String(json.content).replace(/\s/g, '') : '';
+                        if (!b64) {
+                            kmlFetching.delete(key);
+                            console.warn(`${TAG} ${type} KML response missing .content for ${c.name}`);
+                            return;
+                        }
                         kmlResolvedPath[key] = c.name;
                         if (c.ext === 'kmz') {
-                            parseKMZAndStore(resp.response, key, siteID, type, c.name);
+                            // Decode base64 → ArrayBuffer for JSZip.
+                            let bin;
+                            try { bin = atob(b64); }
+                            catch (e) {
+                                kmlFetching.delete(key);
+                                console.error(`${TAG} KMZ atob failed for ${c.name}:`, e);
+                                return;
+                            }
+                            const buf = new Uint8Array(bin.length);
+                            for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+                            parseKMZAndStore(buf.buffer, key, siteID, type, c.name);
                         } else {
                             kmlFetching.delete(key);
+                            let xmlText;
                             try {
-                                const features = parseKML(resp.responseText);
+                                // Decode base64 → UTF-8 text. atob gives a binary
+                                // string; TextDecoder converts to proper UTF-8.
+                                const bin = atob(b64);
+                                const buf = new Uint8Array(bin.length);
+                                for (let j = 0; j < bin.length; j++) buf[j] = bin.charCodeAt(j);
+                                xmlText = new TextDecoder('utf-8').decode(buf);
+                            } catch (e) {
+                                console.error(`${TAG} KML atob/decode failed for ${c.name}:`, e);
+                                return;
+                            }
+                            try {
+                                const features = parseKML(xmlText);
                                 kmlFeatures[key] = features;
                                 gmSet(KML_CACHE_PREFIX + key, { features, at: Date.now(), path: c.name });
                                 console.log(`${TAG} ${type} KML for site ${siteID} loaded (${features.length} features, source: ${c.name})`);
+                                // v34.54: drop any stale commitOps entries from GM
+                                // storage whose pmIdx no longer references a real
+                                // line. Prevents the next commit from silently
+                                // no-op'ing on a stale mark from a previous session.
+                                const pruned = pruneStaleOps(siteID, type);
+                                if (pruned.dropped > 0) {
+                                    showKMLToast(`Dropped ${pruned.dropped} stale pending ${type} mark${pruned.dropped === 1 ? '' : 's'} on load (line${pruned.dropped === 1 ? '' : 's'} no longer exist${pruned.dropped === 1 ? 's' : ''}).`, 6000);
+                                }
                                 if (isActive) runUpdate();
                             } catch (e) {
                                 console.error(`${TAG} KML parse failed for ${key}:`, e);
@@ -1300,9 +1351,9 @@
                     } else if (resp.status === 404) {
                         // Quiet on intermediate 404s; only log the final one.
                         tryFetch(i + 1);
-                    } else if (resp.status === 401) {
+                    } else if (resp.status === 401 || resp.status === 403) {
                         kmlFetching.delete(key);
-                        console.warn(`${TAG} ${type} KML fetch unauthorized (401) — check your PAT in AIM Controls`);
+                        console.warn(`${TAG} ${type} KML fetch denied (${resp.status}) — check your PAT in AIM Controls`);
                     } else {
                         kmlFetching.delete(key);
                         console.warn(`${TAG} ${type} KML fetch HTTP ${resp.status} (candidate ${c.name})`);
@@ -1317,9 +1368,7 @@
                     console.warn(`${TAG} ${type} KML fetch timed out (candidate ${c.name})`);
                 },
             };
-            // KMZ is a ZIP archive — pull as binary so JSZip can unzip it.
-            if (c.ext === 'kmz') opts.responseType = 'arraybuffer';
-            console.log(`${TAG} fetching ${type} KML for site ${siteID} — trying ${c.name}`);
+            console.log(`${TAG} fetching ${type} KML for site ${siteID} — trying ${c.name} via api.github.com`);
             try {
                 GM_xmlhttpRequest(opts);
             } catch (e) {
@@ -1577,6 +1626,10 @@
     function setCommitOps(siteID, type, obj) {
         if (!siteID) return;
         gmSet(commitOpsKey(siteID, type), obj || emptyCommitOps());
+        // Notify Power Line Editor so its dirty-count badge stays current.
+        // Wrapped in try/catch because broadcastPowerLineStatus is hoisted
+        // but the channel may not be set up yet during very early calls.
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function commitOpsCount(siteID, type) {
@@ -1642,6 +1695,156 @@
     // ============================================================
     let drawingState = null;
 
+    // ============================================================
+    // Snap-to-vertex (Phase 3b, v34.63)
+    //
+    // While dragging a vertex (in vertex-edit) or clicking to place a
+    // vertex (in draw mode), if the candidate position is within
+    // SNAP_TOLERANCE_PX of an EXISTING power-line vertex (any type,
+    // file or pending-add, EXCEPT the line being edited / drawn),
+    // override to that vertex's exact coord and show a yellow ring
+    // marker at the snap target so the user knows it's locked in.
+    //
+    // Cleared on dragend / click / exit / explicit clearSnapIndicator.
+    // ============================================================
+    const SNAP_TOLERANCE_PX = 10;
+    let snapIndicator = null;
+
+    function clearSnapIndicator() {
+        if (!snapIndicator) return;
+        try { snapIndicator.remove(); } catch (e) {}
+        snapIndicator = null;
+    }
+
+    function showSnapIndicator(map, latlng) {
+        if (!map || !latlng) return;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
+        clearSnapIndicator();
+        // v34.65: darker, more saturated purple (#9333ea, Tailwind
+        // purple-600) for stronger contrast against satellite + cyan
+        // handles. Double-layered glow uses the lighter tint for visibility.
+        const icon = L.divIcon({
+            html: '<div style="width:28px;height:28px;border-radius:50%;border:3px solid #9333ea;background:rgba(147,51,234,0.32);box-shadow:0 0 12px rgba(192,132,252,0.95),0 0 22px rgba(147,51,234,0.65);box-sizing:border-box;pointer-events:none"></div>',
+            className: 'aim-snap-indicator',
+            iconSize: [34, 34],
+            iconAnchor: [17, 17],
+        });
+        try {
+            snapIndicator = L.marker([latlng.lat, latlng.lng], { icon, interactive: false, zIndexOffset: 2000, keyboard: false });
+            snapIndicator.addTo(map);
+        } catch (e) {}
+    }
+
+    // Find the nearest snap target within SNAP_TOLERANCE_PX of srcLatLng.
+    // Considers BOTH vertices and points along segments (perpendicular
+    // foot, clamped to segment). Returns {lat,lng} or null. Vertex hits
+    // win ties because the segment test excludes endpoints (t in (0,1)).
+    //
+    // excludeKey selects the "self" to skip:
+    //   'file:<type>:<pmIdx>'    → currently-editing this file line, skip
+    //   'added:<type>:<addedIdx>'→ currently-editing this pending-add line, skip
+    //   'draw'                   → currently drawing a NEW line, skip its own coords
+    //   null                     → no exclusion (rare)
+    function findSnapCandidate(srcLatLng, excludeKey) {
+        const map = getLeafletMap();
+        if (!map || typeof map.latLngToContainerPoint !== 'function') return null;
+        const siteID = getCurrentSiteID();
+        if (!siteID) return null;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return null; }
+        if (!L || typeof L.latLng !== 'function') return null;
+
+        let srcPx;
+        try { srcPx = map.latLngToContainerPoint(L.latLng(srcLatLng.lat, srcLatLng.lng)); }
+        catch (e) { return null; }
+
+        let best = null;
+        let bestDist = SNAP_TOLERANCE_PX + 0.0001;
+
+        const testVertex = (lat, lng) => {
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+            try {
+                const px = map.latLngToContainerPoint(L.latLng(lat, lng));
+                const d = Math.hypot(px.x - srcPx.x, px.y - srcPx.y);
+                if (d < bestDist) { bestDist = d; best = { lat, lng }; }
+            } catch (e) {}
+        };
+
+        // v34.66: also test point-to-segment (perpendicular foot,
+        // clamped to (0,1)). Endpoints (t=0 / t=1) excluded because
+        // they're vertices and testVertex already covers them — keeps
+        // vertex snaps winning over segment snaps near endpoints.
+        const testSegment = (lat1, lng1, lat2, lng2) => {
+            if (!Number.isFinite(lat1) || !Number.isFinite(lng1)) return;
+            if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return;
+            try {
+                const pa = map.latLngToContainerPoint(L.latLng(lat1, lng1));
+                const pb = map.latLngToContainerPoint(L.latLng(lat2, lng2));
+                const dx = pb.x - pa.x, dy = pb.y - pa.y;
+                const len2 = dx * dx + dy * dy;
+                if (len2 < 1e-6) return; // degenerate — covered by vertex test
+                const t = ((srcPx.x - pa.x) * dx + (srcPx.y - pa.y) * dy) / len2;
+                if (t <= 0 || t >= 1) return; // foot outside segment
+                const fx = pa.x + t * dx, fy = pa.y + t * dy;
+                const d = Math.hypot(fx - srcPx.x, fy - srcPx.y);
+                if (d < bestDist) {
+                    bestDist = d;
+                    const ll = map.containerPointToLatLng([fx, fy]);
+                    best = { lat: ll.lat, lng: ll.lng };
+                }
+            } catch (e) {}
+        };
+
+        // Walk a line's coords once: hit every vertex AND every segment.
+        const testLine = (coords) => {
+            if (!Array.isArray(coords) || coords.length === 0) return;
+            for (let i = 0; i < coords.length; i++) {
+                const c = coords[i];
+                const lat = Array.isArray(c) ? c[1] : (c && c.lat);
+                const lng = Array.isArray(c) ? c[0] : (c && c.lng);
+                testVertex(lat, lng);
+                if (i < coords.length - 1) {
+                    const n = coords[i + 1];
+                    const nlat = Array.isArray(n) ? n[1] : (n && n.lat);
+                    const nlng = Array.isArray(n) ? n[0] : (n && n.lng);
+                    testSegment(lat, lng, nlat, nlng);
+                }
+            }
+        };
+
+        ['distro', 'trans'].forEach((type) => {
+            // File lines — use effective (post-modify) coords so snap
+            // matches what's actually rendered.
+            const features = kmlFeatures[kmlKey(siteID, type)] || [];
+            features.forEach((f) => {
+                if (!f || f.type !== 'line') return;
+                if (excludeKey === `file:${type}:${f.pmIdx}`) return;
+                // Skip file lines marked for deletion — they're being
+                // removed; snapping to them creates orphaned references.
+                const co0 = getCommitOps(siteID, type);
+                const op0 = co0.ops && co0.ops[String(f.pmIdx)];
+                if (op0 && op0.op === 'delete') return;
+                testLine(effectiveCoordsForFeature(siteID, type, f.pmIdx, f.coords));
+            });
+            // Pending-add (green) lines.
+            const co = getCommitOps(siteID, type);
+            (co.added || []).forEach((added, i) => {
+                if (excludeKey === `added:${type}:${i}`) return;
+                testLine(added.coords);
+            });
+        });
+
+        // In-progress draw line — its own coords are skipped if we're
+        // the one drawing (excludeKey === 'draw').
+        if (drawingState && excludeKey !== 'draw') {
+            testLine(drawingState.coords);
+        }
+
+        return best;
+    }
+
     function markPlacemarkForDelete(siteID, type, pmIdx) {
         const co = getCommitOps(siteID, type);
         co.ops[String(pmIdx)] = { op: 'delete' };
@@ -1674,12 +1877,14 @@
     // we can't fix from a userscript.
     function applyCommittedXmlToLocalState(siteID, type, xmlText) {
         const k = kmlKey(siteID, type);
+        const beforeCount = (kmlFeatures[k] || []).length;
         try {
             const features = parseKML(xmlText);
             kmlFeatures[k] = features;
             const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
             gmSet(KML_CACHE_PREFIX + k, { features, at: Date.now(), path });
             kmlMissing.delete(k);
+            console.log(`${TAG} applyCommittedXmlToLocalState[${k}]: features ${beforeCount} → ${features.length}`);
             return true;
         } catch (e) {
             // Shouldn't happen — we just built this XML ourselves. Fall
@@ -1703,6 +1908,18 @@
             return;
         }
         if (!confirm(`Discard ${count} pending ${type} commit${count === 1 ? '' : 's'}?\n\nNothing will be sent to GitHub.`)) return;
+        // v34.56: if there's an active vertex edit OR draw mode on this
+        // type, tear it down before clearing ops. Otherwise the floating
+        // Save/Discard toolbar + the cyan handles would be left stranded
+        // pointing at a line that no longer exists (especially bad for
+        // added lines — the line itself is in commitOps.added and
+        // disappears when we clear it).
+        if (vertexEditState && vertexEditState.type === type) {
+            exitVertexEdit({ save: false, silent: true });
+        }
+        if (drawingState && drawingState.type === type) {
+            exitDrawMode({ silent: true });
+        }
         clearAllCommitOps(siteID, type);
         showKMLToast(`Discarded ${count} pending ${type} commit${count === 1 ? '' : 's'}.`, 3500);
         if (isActive) runUpdate();
@@ -1774,37 +1991,49 @@
         const isMarkedDelete = opNow && opNow.op === 'delete';
         const isMarkedModify = opNow && opNow.op === 'modify';
 
-        // Delete row — hidden when there's a pending modify (a single
-        // placemark can only carry one op; if user wants to delete a
-        // modified line they revert first, then mark for deletion).
-        if (!isMarkedModify) {
-            const deleteAction = document.createElement('button');
-            deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
-            deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
-            deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
-            if (isMarkedDelete) {
-                deleteAction.textContent = '↩  Unmark for deletion';
-                deleteAction.onclick = (e) => {
-                    e.stopPropagation();
-                    unmarkPlacemarkOp(siteID, type, pmIdx);
-                    const count = commitOpsCount(siteID, type);
-                    showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
-                    closeKMLContextMenu();
-                    if (isActive) runUpdate();
-                };
-            } else {
-                deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
-                deleteAction.onclick = (e) => {
-                    e.stopPropagation();
-                    markPlacemarkForDelete(siteID, type, pmIdx);
-                    const count = commitOpsCount(siteID, type);
-                    showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
-                    closeKMLContextMenu();
-                    if (isActive) runUpdate();
-                };
-            }
-            menu.appendChild(deleteAction);
+        // Delete row — always shown. v34.65: previously hidden when
+        // a modify op was pending ("revert first, then delete"), but
+        // that left users stuck if they wanted to abandon their edits
+        // AND delete the line. Now Mark for Deletion is always reachable;
+        // when a modify is pending the action discards it and replaces
+        // with the delete op (mutual exclusion is preserved — one op
+        // per placemark — but the user gets there in one click).
+        const deleteAction = document.createElement('button');
+        deleteAction.style.cssText = 'display:block;width:100%;text-align:left;padding:7px 12px;background:transparent;border:none;color:#ff8585;cursor:pointer;font:inherit';
+        deleteAction.onmouseenter = () => { deleteAction.style.background = 'rgba(255,80,80,0.18)'; };
+        deleteAction.onmouseleave = () => { deleteAction.style.background = 'transparent'; };
+        if (isMarkedDelete) {
+            deleteAction.textContent = '↩  Unmark for deletion';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                unmarkPlacemarkOp(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Unmarked ${type} line #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'}.`, 3500);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        } else if (isMarkedModify) {
+            deleteAction.textContent = '🗑  Mark for deletion (discards pending edits)';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                markPlacemarkForDelete(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Marked ${type} line #${pmIdx} for deletion — your pending vertex edits were discarded. ${count} pending commit${count === 1 ? '' : 's'}.`, 6000);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
+        } else {
+            deleteAction.textContent = '🗑  Mark for deletion (commits to GitHub)';
+            deleteAction.onclick = (e) => {
+                e.stopPropagation();
+                markPlacemarkForDelete(siteID, type, pmIdx);
+                const count = commitOpsCount(siteID, type);
+                showKMLToast(`Marked ${type} line #${pmIdx} for deletion. ${count} pending commit${count === 1 ? '' : 's'} — review and commit from the panel.`, 5000);
+                closeKMLContextMenu();
+                if (isActive) runUpdate();
+            };
         }
+        menu.appendChild(deleteAction);
 
         // Vertex-edit row — hidden when marked for deletion (no point
         // editing what we're deleting). When a modify is already saved,
@@ -1869,8 +2098,11 @@
         const toast = document.createElement('div');
         toast.id = KML_TOAST_ID;
         toast.textContent = text;
+        // v34.62: bottom:170px (was 80px) so the toast clears the draw
+        // and vertex-edit toolbars (both at bottom:100px, ~55px tall).
+        // Previously the toast stacked directly behind/over them on enter.
         toast.style.cssText = `
-            position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+            position:fixed;bottom:170px;left:50%;transform:translateX(-50%);
             background:rgba(15,18,22,0.95);color:#e6e6e6;
             padding:10px 18px;border-radius:6px;
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
@@ -2332,9 +2564,54 @@
     // Confirmation: a confirm() up front summarizing the batch so the
     // user knows what's about to be committed canonically.
     // ============================================================
+    // v34.49: cache of {sha, xmlText} from the most recent successful PUT
+    // per (siteID|type). Lets back-to-back commits skip the GET round-trip
+    // entirely AND avoid the api.github.com stale-SHA window that was
+    // throwing 409 Conflict on the user's "add → commit → delete → add
+    // → commit" sequence. On 409 from a cached-SHA PUT, the cache is
+    // invalidated and the user retries (which goes through the full
+    // GET → PUT path again).
+    const committedKmlCache = {};
+
+    // v34.54: prune stale ops with pmIdx out of range for the current
+    // file. commitOps persists across sessions in GM storage; if user
+    // marked a line for delete in session A, then another commit (by
+    // them or a coworker) reduced the placemark count below that pmIdx,
+    // session B's commit attempt would silently no-op (out-of-bounds
+    // skip in applyCommitOpsToKML). Validate up front + drop stale,
+    // tell the user what happened.
+    function pruneStaleOps(siteID, type) {
+        const co = getCommitOps(siteID, type);
+        const features = kmlFeatures[kmlKey(siteID, type)];
+        if (!features) return { dropped: 0 }; // can't validate without features
+        // Highest valid pmIdx is the largest pmIdx present in features
+        // (NOT features.length-1, because a Placemark with no LineString /
+        // Polygon contributes no feature even though it occupies an index).
+        let maxPmIdx = -1;
+        features.forEach(f => { if (typeof f.pmIdx === 'number' && f.pmIdx > maxPmIdx) maxPmIdx = f.pmIdx; });
+        let dropped = 0;
+        Object.keys(co.ops).forEach(k => {
+            const idx = parseInt(k, 10);
+            if (isNaN(idx) || idx > maxPmIdx) {
+                console.warn(`${TAG} dropping stale pending op for ${type} pmIdx=${k} (max valid=${maxPmIdx})`);
+                delete co.ops[k];
+                dropped++;
+            }
+        });
+        if (dropped > 0) setCommitOps(siteID, type, co);
+        return { dropped, maxPmIdx };
+    }
+
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+
+        // v34.54: prune stale ops first.
+        const pruned = pruneStaleOps(siteID, type);
+        if (pruned.dropped > 0) {
+            showKMLToast(`Dropped ${pruned.dropped} stale pending ${type} mark${pruned.dropped === 1 ? '' : 's'} (line${pruned.dropped === 1 ? '' : 's'} no longer exist${pruned.dropped === 1 ? 's' : ''} — file changed since marked). Mark again to retry.`, 8000);
+        }
+
         const co = getCommitOps(siteID, type);
         const summary = summarizeCommitOps(co);
         if (summary.total === 0) {
@@ -2354,7 +2631,27 @@
             return;
         }
         showKMLToast(`Committing ${summary.text}…`, 8000);
-        const path = kmlResolvedPath[kmlKey(siteID, type)] || `${siteID}-${type}.kml`;
+        const k = kmlKey(siteID, type);
+
+        // Cache-fast path: if we have a recent {sha, xmlText} from this
+        // session's prior commit, skip the GET. Mutates the cached XML
+        // directly with the new ops, then PUTs with the cached SHA.
+        const cached = committedKmlCache[k];
+        if (cached && cached.sha && cached.xmlText) {
+            let mutated;
+            try { mutated = applyCommitOpsToKML(cached.xmlText, co); }
+            catch (e) {
+                showKMLToast(`Commit failed: ${e.message || 'XML mutation error'}.`, 6000);
+                console.error(`${TAG} applyCommitOpsToKML failed (cached path):`, e);
+                return;
+            }
+            console.log(`${TAG} commit-ops fast path: using cached SHA ${cached.sha.substring(0, 7)} (no GET)`);
+            putCommitOpsToGitHub(siteID, type, mutated, cached.sha, token, summary.text);
+            return;
+        }
+
+        // Slow path: GET fresh from GitHub.
+        const path = kmlResolvedPath[k] || `${siteID}-${type}.kml`;
         const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}?ref=${KMLS_BRANCH}`;
         try {
             GM_xmlhttpRequest({
@@ -2363,6 +2660,11 @@
                 headers: {
                     'Authorization': `Bearer ${token}`,
                     'Accept': 'application/vnd.github+json',
+                    // Defense in depth against any intermediate cache returning
+                    // a stale GET response — though api.github.com generally
+                    // honors these without help.
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
                 },
                 timeout: 15000,
                 onload: (resp) => {
@@ -2426,6 +2728,9 @@
         const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
         if (doc.querySelector('parsererror')) throw new Error('XML parse error');
         const placemarks = Array.from(doc.querySelectorAll('Placemark'));
+        const beforeCount = placemarks.length;
+        const beforeLen = xmlText.length;
+        console.log(`${TAG} applyCommitOpsToKML: ${beforeCount} placemarks, ${beforeLen} chars, ops=`, JSON.parse(JSON.stringify(co)));
 
         // 1. Apply modify ops first (before deletes shift the indices).
         Object.keys(co.ops).forEach(key => {
@@ -2435,13 +2740,17 @@
             if (isNaN(idx) || idx < 0 || idx >= placemarks.length) return;
             const pm = placemarks[idx];
             const coordsEl = pm.querySelector('LineString > coordinates');
-            if (!coordsEl) return;
+            if (!coordsEl) {
+                console.warn(`${TAG} modify pmIdx=${idx}: no LineString>coordinates found, skipping`);
+                return;
+            }
             const text = (op.coords || []).map(c => {
                 const lng = Number(c[0]), lat = Number(c[1]);
                 const alt = (c[2] !== undefined && c[2] !== null) ? Number(c[2]) : null;
                 return alt !== null ? `${lng},${lat},${alt}` : `${lng},${lat}`;
             }).join(' ');
             coordsEl.textContent = text;
+            console.log(`${TAG} modify pmIdx=${idx}: ${op.coords.length} verts written`);
         });
 
         // 2. Apply delete ops, descending order so live placemarks
@@ -2451,10 +2760,27 @@
             .map(k => parseInt(k, 10))
             .filter(n => !isNaN(n) && n >= 0 && n < placemarks.length)
             .sort((a, b) => b - a);
+        const droppedIdxs = Object.keys(co.ops)
+            .filter(k => co.ops[k].op === 'delete')
+            .map(k => parseInt(k, 10))
+            .filter(n => isNaN(n) || n < 0 || n >= placemarks.length);
+        if (droppedIdxs.length > 0) {
+            console.warn(`${TAG} delete: ${droppedIdxs.length} pmIdx values out of bounds (max=${placemarks.length - 1}):`, droppedIdxs);
+        }
+        let removed = 0;
         deleteIdxs.forEach(idx => {
             const pm = placemarks[idx];
-            if (pm && pm.parentNode) pm.parentNode.removeChild(pm);
+            if (pm && pm.parentNode) {
+                pm.parentNode.removeChild(pm);
+                removed++;
+                console.log(`${TAG} delete pmIdx=${idx}: removed (parent=${pm.parentNode && pm.parentNode.nodeName})`);
+            } else {
+                console.warn(`${TAG} delete pmIdx=${idx}: SKIPPED (pm=${!!pm}, hasParent=${!!(pm && pm.parentNode)})`);
+            }
         });
+        if (removed !== deleteIdxs.length) {
+            console.warn(`${TAG} delete: requested ${deleteIdxs.length} removals, actually removed ${removed}`);
+        }
 
         // 3. Apply added placemarks — append into the first Document
         //    (or Folder, or root kml element if no container).
@@ -2482,7 +2808,10 @@
             });
         }
 
-        return new XMLSerializer().serializeToString(doc);
+        const out = new XMLSerializer().serializeToString(doc);
+        const afterCount = (out.match(/<Placemark[\s>]/g) || []).length;
+        console.log(`${TAG} applyCommitOpsToKML: serialized ${out.length} chars, ${afterCount} Placemarks (was ${beforeCount}, delta ${afterCount - beforeCount})`);
+        return out;
     }
 
     function putCommitOpsToGitHub(siteID, type, xmlText, sha, token, summaryText) {
@@ -2526,9 +2855,42 @@
                             showKMLToast(`✓ Committed ${summaryText}.`, 4000);
                         }
                         applyCommittedXmlToLocalState(siteID, type, xmlText);
-                        if (isActive) runUpdate();
+                        // v34.49: cache the new SHA + xmlText so the next
+                        // commit can skip GET entirely. The PUT response
+                        // includes content.sha (the post-write SHA).
+                        try {
+                            const respJson = JSON.parse(resp.responseText);
+                            const newSha = respJson && respJson.content && respJson.content.sha;
+                            if (newSha) {
+                                committedKmlCache[kmlKey(siteID, type)] = { sha: newSha, xmlText };
+                                console.log(`${TAG} commit-ops cached new SHA ${newSha.substring(0, 7)} for ${type}`);
+                            }
+                        } catch (e) {
+                            console.warn(`${TAG} commit-ops: could not parse PUT response for SHA cache:`, e);
+                        }
+                        // v34.51: fire runUpdate immediately AND a second
+                        // one after 250ms. The render uses a debounced
+                        // MutationObserver — a single runUpdate sometimes
+                        // gets coalesced with Leaflet's own SVG updates
+                        // and the wipe-rebuild misses the stale deleted
+                        // path. A second pass guarantees the user-visible
+                        // state catches up to kmlFeatures.
+                        if (isActive) {
+                            console.log(`${TAG} commit-ops: firing runUpdate (isActive=${isActive})`);
+                            runUpdate();
+                            setTimeout(() => {
+                                console.log(`${TAG} commit-ops: firing safety-net runUpdate`);
+                                if (isActive) runUpdate();
+                            }, 250);
+                        } else {
+                            console.warn(`${TAG} commit-ops: NOT firing runUpdate, isActive=false`);
+                        }
                     } else if (resp.status === 409) {
-                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — refresh the page and try Commit again.', 9000);
+                        // v34.49: cached SHA may be stale (someone else committed
+                        // OR rare api.github.com eventual-consistency window).
+                        // Invalidate so next retry does a fresh GET.
+                        delete committedKmlCache[kmlKey(siteID, type)];
+                        showKMLToast('Conflict: file changed on GitHub since you opened it. Your pending changes are kept — try Commit again (cache cleared, next attempt will re-fetch).', 9000);
                     } else if (resp.status === 401 || resp.status === 403) {
                         showKMLToast('GitHub denied write — your PAT needs contents:write scope on aim-userscripts-data.', 9000);
                     } else if (resp.status === 422) {
@@ -2567,6 +2929,169 @@
     // Only one line at a time can be in vertex-edit; entering a new
     // session auto-discards any in-progress one (without saving).
     // ============================================================
+
+    // v34.57: shared vertex-handle helpers used by both enterVertexEdit
+    // and enterAddedVertexEdit, plus the in-place add/delete vertex paths.
+    //
+    // Two kinds of handles:
+    //   Real (cyan filled, 12x12): one per vertex in currentCoords.
+    //     Drag → updates that vertex. M2 (right-click) → deletes vertex.
+    //   Midpoint ghost (dim cyan, 9x9): one between each pair of adjacent
+    //     vertices. Click → inserts a new real vertex at the midpoint
+    //     position; user can then drag it where they want.
+    //
+    // rebuildVertexHandles wipes both arrays and rebuilds from
+    // currentCoords. Called from enter*, vertex-delete, midpoint-click.
+    // rebuildMidpointPositions just repositions existing midpoint markers
+    // (cheaper) — used after a real-handle drag so midpoints follow.
+    function updateVertexEditToolbarLabel() {
+        if (!vertexEditState || !vertexEditState.toolbarEl) return;
+        const label = vertexEditState.toolbarEl.querySelector('span');
+        if (!label) return;
+        label.textContent = vertexEditState.isAdded
+            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+    }
+
+    function rebuildMidpointPositions() {
+        if (!vertexEditState || !vertexEditState.midhandles) return;
+        vertexEditState.midhandles.forEach((marker, i) => {
+            const a = vertexEditState.currentCoords[i];
+            const b = vertexEditState.currentCoords[i + 1];
+            if (!a || !b) return;
+            try { marker.setLatLng([(a.lat + b.lat) / 2, (a.lng + b.lng) / 2]); } catch (e) {}
+        });
+    }
+
+    function rebuildVertexHandles() {
+        if (!vertexEditState) return;
+        const map = getLeafletMap();
+        if (!map) return;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { return; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') return;
+
+        // Wipe current handles
+        (vertexEditState.handles || []).forEach(h => { try { h.remove(); } catch (e) {} });
+        (vertexEditState.midhandles || []).forEach(h => { try { h.remove(); } catch (e) {} });
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+
+        const realIcon = L.divIcon({
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
+            className: 'aim-vertex-handle',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+        });
+        const ghostIcon = L.divIcon({
+            html: '<div style="width:9px;height:9px;border-radius:50%;background:rgba(20,210,220,0.45);border:1.5px solid rgba(255,255,255,0.65);cursor:copy" title="Click to add a vertex here"></div>',
+            className: 'aim-vertex-midhandle',
+            iconSize: [13, 13],
+            iconAnchor: [6.5, 6.5],
+        });
+
+        // Real handles — one per vertex.
+        vertexEditState.currentCoords.forEach((coord) => {
+            const marker = L.marker([coord.lat, coord.lng], { icon: realIcon, draggable: true, zIndexOffset: 1000 });
+            marker.addTo(map);
+            marker.on('drag', (e) => {
+                if (!vertexEditState) return;
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                const ll = e.target.getLatLng();
+                let lat = ll.lat, lng = ll.lng;
+                // v34.63 Phase 3b: snap to nearby other-line vertex.
+                // Self-line excluded so a vertex can't snap to a different
+                // vertex of the same line being edited.
+                const excludeKey = vertexEditState.isAdded
+                    ? `added:${vertexEditState.type}:${vertexEditState.addedIdx}`
+                    : `file:${vertexEditState.type}:${vertexEditState.pmIdx}`;
+                const snap = findSnapCandidate({ lat, lng }, excludeKey);
+                const map = getLeafletMap();
+                if (snap) {
+                    lat = snap.lat; lng = snap.lng;
+                    try { e.target.setLatLng([lat, lng]); } catch (err) {}
+                    if (map) showSnapIndicator(map, snap);
+                } else {
+                    clearSnapIndicator();
+                }
+                vertexEditState.currentCoords[curIdx] = { lat, lng };
+                // v34.60: reposition midpoints DURING drag, not just on
+                // dragend. Otherwise the adjacent ghost handles appear
+                // "stuck" at the old midpoints and snap into place when
+                // you drop the vertex. Just setLatLng per midhandle —
+                // no marker recreation, cheap enough for 60fps drag.
+                rebuildMidpointPositions();
+                if (isActive) runUpdate();
+            });
+            marker.on('dragend', () => { clearSnapIndicator(); });
+            marker.on('contextmenu', () => {
+                if (!vertexEditState) return;
+                if (vertexEditState.currentCoords.length <= 2) {
+                    showKMLToast('Cannot delete vertex — a line needs at least 2 vertices. Discard the whole line instead.', 5000);
+                    return;
+                }
+                const curIdx = vertexEditState.handles.indexOf(marker);
+                if (curIdx < 0) return;
+                vertexEditState.currentCoords.splice(curIdx, 1);
+                rebuildVertexHandles();
+                showKMLToast(`Vertex deleted — ${vertexEditState.currentCoords.length} left.`, 3500);
+                updateVertexEditToolbarLabel();
+                if (isActive) runUpdate();
+            });
+            // v34.61 Phase 3a: Ctrl+click a handle → branch a new line
+            // starting at this vertex. Saves any current edits to the
+            // parent line first, then enters draw mode seeded at the
+            // vertex's current position. Same kmlType as parent (user
+            // can change later if needed — usually they're branching
+            // distro-from-distro or trans-from-trans).
+            marker.on('click', (e) => {
+                if (!vertexEditState) return;
+                const oe = e && e.originalEvent;
+                if (!oe || !oe.ctrlKey) return;
+                const curIdx = vertexEditState.handles.indexOf(e.target);
+                if (curIdx < 0) return;
+                const src = vertexEditState.currentCoords[curIdx];
+                if (!src || !Number.isFinite(src.lat) || !Number.isFinite(src.lng)) return;
+                const seedCoord = { lat: src.lat, lng: src.lng };
+                const parentType = vertexEditState.type;
+                try { if (L.DomEvent) L.DomEvent.stop(oe); } catch (err) {}
+                // Save current line's edits before branching out so the
+                // user doesn't lose any drag/insert work they did.
+                exitVertexEdit({ save: true, silent: true });
+                enterDrawMode(parentType, seedCoord);
+                showKMLToast(`Branching new ${parentType} line from vertex ${curIdx + 1}. Click to add vertices, then ✓ Save.`, 5000);
+            });
+            vertexEditState.handles.push(marker);
+        });
+
+        // Ghost midpoint handles — one between each pair of adjacent vertices.
+        for (let i = 0; i < vertexEditState.currentCoords.length - 1; i++) {
+            const a = vertexEditState.currentCoords[i];
+            const b = vertexEditState.currentCoords[i + 1];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const marker = L.marker([mid.lat, mid.lng], { icon: ghostIcon, zIndexOffset: 800 });
+            marker.addTo(map);
+            marker.on('click', () => {
+                if (!vertexEditState) return;
+                const curIdx = vertexEditState.midhandles.indexOf(marker);
+                if (curIdx < 0) return;
+                const a2 = vertexEditState.currentCoords[curIdx];
+                const b2 = vertexEditState.currentCoords[curIdx + 1];
+                if (!a2 || !b2) return;
+                // Insert new vertex at the midpoint of segment (curIdx, curIdx+1)
+                // → goes into currentCoords at position (curIdx + 1).
+                const newVert = { lat: (a2.lat + b2.lat) / 2, lng: (a2.lng + b2.lng) / 2 };
+                vertexEditState.currentCoords.splice(curIdx + 1, 0, newVert);
+                rebuildVertexHandles();
+                showKMLToast(`Vertex inserted — ${vertexEditState.currentCoords.length} now. Drag the new cyan handle to position.`, 4500);
+                updateVertexEditToolbarLabel();
+                if (isActive) runUpdate();
+            });
+            vertexEditState.midhandles.push(marker);
+        }
+    }
+
     function enterVertexEdit(type, pmIdx) {
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
@@ -2597,26 +3122,66 @@
             handles: [],
             toolbarEl: null,
         };
-        const icon = L.divIcon({
-            html: '<div style="width:12px;height:12px;border-radius:50%;background:#14d2dc;border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,0.6);cursor:move"></div>',
-            className: 'aim-vertex-handle',
-            iconSize: [16, 16],
-            iconAnchor: [8, 8],
-        });
-        vertexEditState.currentCoords.forEach((coord, vertexIdx) => {
-            const marker = L.marker([coord.lat, coord.lng], { icon, draggable: true, zIndexOffset: 1000 });
-            marker.addTo(map);
-            marker.on('drag', (e) => {
-                const ll = e.target.getLatLng();
-                if (!vertexEditState) return;
-                vertexEditState.currentCoords[vertexIdx] = { lat: ll.lat, lng: ll.lng };
-                if (isActive) runUpdate();
-            });
-            vertexEditState.handles.push(marker);
-        });
+        // v34.57: delegate handle creation to rebuildVertexHandles
+        // (shared with enterAddedVertexEdit + add/delete-vertex paths).
+        // Builds both real cyan handles AND ghost midpoint handles.
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+        rebuildVertexHandles();
         buildVertexEditToolbar();
-        showKMLToast(`Editing ${type} line #${pmIdx} — drag the cyan handles · Save or Discard from the toolbar.`, 6000);
+        showKMLToast(`Editing ${type} line #${pmIdx} — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Ctrl+click a handle to branch a new line · Save/Discard from toolbar.`, 7500);
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
+    }
+
+    // E4.1 (v34.47) — Vertex edit for a saved-but-uncommitted "green" line
+    // that lives in commitOps.added (not in the original KML). Same UX as
+    // enterVertexEdit, but reads coords from co.added[addedIdx] and writes
+    // them back there on Save (not into co.ops as a modify).
+    //
+    // Live-drag feedback: when this is active, the render loop pulls coords
+    // from vertexEditState.currentCoords instead of co.added[addedIdx].coords
+    // (see the `co.added.forEach` block in shieldingFeaturePointsInSVG —
+    // it checks vertexEditState.isAdded before reading from the array).
+    function enterAddedVertexEdit(type, addedIdx) {
+        if (vertexEditState) exitVertexEdit({ save: false, silent: true });
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const co = getCommitOps(siteID, type);
+        const added = co.added && co.added[addedIdx];
+        if (!added || !Array.isArray(added.coords) || added.coords.length < 2) {
+            showKMLToast('Pending-add line not found or invalid.', 4000);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map) { showKMLToast('Map not ready — try again in a moment.', 3000); return; }
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { L = null; }
+        if (!L || typeof L.marker !== 'function' || typeof L.divIcon !== 'function') {
+            showKMLToast('Leaflet not available — cannot add drag handles.', 4000);
+            return;
+        }
+        // co.added stores [[lng,lat],...] (KML order). Convert to {lat,lng}
+        // for the handle math (same shape file lines use).
+        const startCoords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+        vertexEditState = {
+            type,
+            addedIdx,
+            isAdded: true,
+            addedName: added.name || '(unnamed)',
+            originalCoords: startCoords.map(c => ({ lat: c.lat, lng: c.lng })),
+            currentCoords: startCoords.map(c => ({ lat: c.lat, lng: c.lng })),
+            handles: [],
+            toolbarEl: null,
+        };
+        // v34.57: delegate handle creation to rebuildVertexHandles.
+        vertexEditState.handles = [];
+        vertexEditState.midhandles = [];
+        rebuildVertexHandles();
+        buildVertexEditToolbar();
+        showKMLToast(`Editing new ${type} line "${vertexEditState.addedName}" — drag handles · click a dim midpoint to add vertex · M2 a handle to delete · Ctrl+click a handle to branch a new line · Save/Discard.`, 7500);
+        if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function buildVertexEditToolbar() {
@@ -2632,7 +3197,11 @@
             box-shadow:0 4px 16px rgba(0,0,0,0.5);
         `;
         const label = document.createElement('span');
-        label.textContent = `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
+        // v34.47: handle pending-add lines too. They have addedIdx
+        // (and isAdded) instead of pmIdx — show "new <type> '<name>'".
+        label.textContent = vertexEditState.isAdded
+            ? `Editing new ${vertexEditState.type} line "${vertexEditState.addedName}" · ${vertexEditState.currentCoords.length} vertices`
+            : `Editing ${vertexEditState.type} #${vertexEditState.pmIdx} · ${vertexEditState.currentCoords.length} vertices`;
         label.style.cssText = 'color:#7adfe6;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -2653,7 +3222,8 @@
         if (!vertexEditState) return;
         const save = !!(opts && opts.save);
         const silent = !!(opts && opts.silent);
-        const { type, pmIdx, currentCoords, originalCoords, handles, toolbarEl } = vertexEditState;
+        const { type, pmIdx, addedIdx, isAdded, addedName,
+                currentCoords, originalCoords, handles, midhandles, toolbarEl } = vertexEditState;
         if (save) {
             // Skip writing a no-op modify if nothing actually moved (within
             // tolerance — float drift from drag-end serialization shouldn't
@@ -2665,13 +3235,34 @@
             if (changed) {
                 const siteID = getCurrentSiteID();
                 const co = getCommitOps(siteID, type);
-                co.ops[String(pmIdx)] = {
-                    op: 'modify',
-                    coords: currentCoords.map(c => [c.lng, c.lat]),
-                };
-                setCommitOps(siteID, type, co);
-                const count = commitOpsCount(siteID, type);
-                if (!silent) showKMLToast(`Saved vertex edits to ${type} #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+                if (isAdded) {
+                    // v34.47: pending-add line edit → write coords back to
+                    // co.added[addedIdx]. The line stays in co.added (still
+                    // green/pending). Commit pushes the new coords to GitHub.
+                    if (co.added && co.added[addedIdx]) {
+                        co.added[addedIdx].coords = currentCoords.map(c => [c.lng, c.lat]);
+                        setCommitOps(siteID, type, co);
+                    }
+                    const count = commitOpsCount(siteID, type);
+                    if (!silent) showKMLToast(`Saved vertex edits to new ${type} line "${addedName}". ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+                } else {
+                    // v34.65: don't blow away a pending delete op with a
+                    // modify. Previously this silently overwrote co.ops[pmIdx]
+                    // so a "Mark for deletion" set during the same vertex
+                    // edit session would vanish when the user hit Save.
+                    const existingOp = co.ops[String(pmIdx)];
+                    if (existingOp && existingOp.op === 'delete') {
+                        if (!silent) showKMLToast(`${type} #${pmIdx} is marked for deletion — vertex edits discarded. Unmark deletion first if you want to keep edits.`, 6500);
+                    } else {
+                        co.ops[String(pmIdx)] = {
+                            op: 'modify',
+                            coords: currentCoords.map(c => [c.lng, c.lat]),
+                        };
+                        setCommitOps(siteID, type, co);
+                        const count = commitOpsCount(siteID, type);
+                        if (!silent) showKMLToast(`Saved vertex edits to ${type} #${pmIdx}. ${count} pending commit${count === 1 ? '' : 's'} — commit from the panel.`, 5500);
+                    }
+                }
             } else {
                 if (!silent) showKMLToast(`No vertex changes to save.`, 2500);
             }
@@ -2679,9 +3270,13 @@
             if (!silent) showKMLToast(`Discarded vertex edits.`, 3000);
         }
         handles.forEach(h => { try { h.remove(); } catch (e) {} });
+        // v34.57: also remove ghost midpoint handles
+        (midhandles || []).forEach(h => { try { h.remove(); } catch (e) {} });
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         vertexEditState = null;
+        clearSnapIndicator();
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     // ============================================================
@@ -2700,24 +3295,52 @@
     // Saved-but-pending added lines render solid green.
     // Only one drawing session at a time across both types.
     // ============================================================
-    function enterDrawMode(type) {
+    function enterDrawMode(type, seedCoord) {
         if (drawingState) exitDrawMode({ silent: true });
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
-        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null };
+        drawingState = { type, coords: [], clickHandler: null, escHandler: null, toolbarEl: null, seeded: false };
+        // v34.61 Phase 3a: branch-from-vertex. If a seedCoord is provided,
+        // push it as the first vertex of the new line so the line starts
+        // attached to the source vertex. drawingState.seeded marks the
+        // branch flavor for the toolbar label.
+        if (seedCoord && Number.isFinite(seedCoord.lat) && Number.isFinite(seedCoord.lng)) {
+            drawingState.coords.push([seedCoord.lng, seedCoord.lat]);
+            drawingState.seeded = true;
+        }
         const onClick = (e) => {
             if (!drawingState) return;
             const ll = e.latlng;
             if (!ll) return;
-            drawingState.coords.push([ll.lng, ll.lat]);
+            let lat = ll.lat, lng = ll.lng;
+            // v34.63 Phase 3b: snap click placement to nearby vertex.
+            // Excludes our own in-progress draw line.
+            const snap = findSnapCandidate({ lat, lng }, 'draw');
+            if (snap) { lat = snap.lat; lng = snap.lng; }
+            clearSnapIndicator();
+            drawingState.coords.push([lng, lat]);
             updateDrawToolbar();
             if (isActive) runUpdate();
         };
         try { map.on('click', onClick); } catch (e) {}
         drawingState.clickHandler = onClick;
+        // v34.63 Phase 3b: live snap-preview during draw — show the
+        // yellow ring under the cursor when within tolerance so the
+        // user knows their next click will snap.
+        const onMove = (e) => {
+            if (!drawingState) return;
+            const ll = e.latlng;
+            if (!ll) return;
+            const snap = findSnapCandidate({ lat: ll.lat, lng: ll.lng }, 'draw');
+            const m = getLeafletMap();
+            if (snap && m) showSnapIndicator(m, snap);
+            else clearSnapIndicator();
+        };
+        try { map.on('mousemove', onMove); } catch (e) {}
+        drawingState.moveHandler = onMove;
         const onEsc = (e) => { if (e.key === 'Escape') exitDrawMode({ silent: false }); };
         window.addEventListener('keydown', onEsc, true);
         drawingState.escHandler = onEsc;
@@ -2725,7 +3348,12 @@
         const container = map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = 'crosshair';
         buildDrawToolbar();
-        showKMLToast(`Drawing new ${type} line — click map to add vertices · Save when done · Esc to cancel.`, 7000);
+        if (drawingState.seeded && isActive) runUpdate();
+        // v34.46: removed the showKMLToast announcement — the floating
+        // green draw-toolbar (with vertex count + Save/Undo/Cancel) is
+        // already on-screen and tells the user the same thing without
+        // covering the map. User feedback: "I like the green one better".
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function buildDrawToolbar() {
@@ -2742,7 +3370,10 @@
         `;
         const label = document.createElement('span');
         label.id = 'aim-draw-label';
-        label.textContent = `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
+        const initN = drawingState.coords.length;
+        label.textContent = drawingState.seeded
+            ? `Branching new ${drawingState.type} line · ${initN} vertex${initN === 1 ? '' : 'es'}${initN < 2 ? ' (need ≥2 — click to add)' : ''}`
+            : `Drawing ${drawingState.type} line · 0 vertices (need ≥2)`;
         label.style.cssText = 'color:#5fff5f;font-weight:600';
         tb.appendChild(label);
         const saveBtn = document.createElement('button');
@@ -2776,7 +3407,8 @@
         const n = drawingState.coords.length;
         const label = drawingState.toolbarEl.querySelector('#aim-draw-label');
         if (label) {
-            label.textContent = `Drawing ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
+            const verb = drawingState.seeded ? 'Branching new' : 'Drawing';
+            label.textContent = `${verb} ${drawingState.type} line · ${n} vertex${n === 1 ? '' : 'es'}${n < 2 ? ' (need ≥2)' : ''}`;
         }
         const saveBtn = drawingState.toolbarEl.querySelector('button[data-role="save"]');
         if (saveBtn) {
@@ -2807,16 +3439,19 @@
     function exitDrawMode(opts) {
         if (!drawingState) return;
         const silent = !!(opts && opts.silent);
-        const { clickHandler, escHandler, toolbarEl } = drawingState;
+        const { clickHandler, moveHandler, escHandler, toolbarEl } = drawingState;
         const map = getLeafletMap();
         if (map && clickHandler) { try { map.off('click', clickHandler); } catch (e) {} }
+        if (map && moveHandler) { try { map.off('mousemove', moveHandler); } catch (e) {} }
         if (escHandler) { try { window.removeEventListener('keydown', escHandler, true); } catch (e) {} }
         if (toolbarEl) { try { toolbarEl.remove(); } catch (e) {} }
         const container = map && map.getContainer ? map.getContainer() : null;
         if (container) container.style.cursor = '';
         if (!silent) showKMLToast('Drawing cancelled.', 2500);
         drawingState = null;
+        clearSnapIndicator();
         if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     // Small modal for naming a newly-drawn line. Optional input;
@@ -2981,10 +3616,18 @@
                 pmIdx: f.pmIdx, visible: f.visible,
             });
         });
-        // 2. Pending-add lines from commitOps.added
+        // 2. Pending-add lines from commitOps.added. v34.47: if THIS
+        // added line is currently in vertex edit, pull coords from
+        // vertexEditState.currentCoords for live-drag visual feedback.
         co.added.forEach((added, addedIdx) => {
             if (!Array.isArray(added.coords) || added.coords.length < 2) return;
-            const coords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            let coords;
+            if (vertexEditState && vertexEditState.isAdded &&
+                vertexEditState.type === type && vertexEditState.addedIdx === addedIdx) {
+                coords = vertexEditState.currentCoords;
+            } else {
+                coords = added.coords.map(c => ({ lat: c[1], lng: c[0] }));
+            }
             const pts = projectCoords(coords);
             if (pts.length >= 2) out.push({
                 type: 'line', points: pts,
@@ -3060,13 +3703,16 @@
                     p.setAttribute('data-kml-added-idx', String(f.addedIdx));
                     p.setAttribute('stroke-opacity', '0.95');
                     p.setAttribute('stroke-width', String(thickness + 1));
-                    // Right-clickable when edit mode is on (to discard)
-                    if (editMode) {
-                        p.setAttribute('class', 'leaflet-interactive');
-                        p.setAttribute('pointer-events', 'visibleStroke');
-                    } else {
-                        p.setAttribute('pointer-events', 'none');
-                    }
+                    // v34.59: ALWAYS clickable — these are transient user-
+                    // drawn lines that haven't been committed yet. There's
+                    // no scenario where the user wants them un-interactive
+                    // (M1 = edit vertices, M2 = discard menu). Previously
+                    // gated on editMode but green lines silently lost
+                    // clickability in some setups even with edit mode on
+                    // (yellow lines worked from the same render — root
+                    // cause unclear, this is the brute-force fix).
+                    p.setAttribute('class', 'leaflet-interactive');
+                    p.setAttribute('pointer-events', 'visibleStroke');
                 } else {
                     // Drawing-in-progress preview → dashed green, no right-click
                     p.setAttribute('stroke-opacity', '0.85');
@@ -4347,7 +4993,144 @@
     installListener();
     installAssetLockHandler();
     installKMLEditHandlers();
+    // Power Line Editor bridge — the editor lives in its own script
+    // (AIM_Power_Line_Editor.user.js) and owns the floating toolbar +
+    // M1 click detection. All the actual edit + commit code stays here
+    // (it's tightly coupled with rendering + commit pipeline). The
+    // editor drives us via these messages; we push status updates so
+    // its dirty-count badge stays in sync.
+    //
+    //   editor → styler:
+    //     ENTER_VERTEX_EDIT { kmlType, pmIdx }
+    //     ENTER_DRAW_MODE   { kmlType }
+    //     EXIT_VERTEX_EDIT  { save?: bool }     // explicit exit
+    //     COMMIT_KML        { kmlType }
+    //     DISCARD_OPS       { kmlType }
+    //     REQUEST_STATUS
+    //   styler → editor:
+    //     STATUS { siteID, distroCount, transCount,
+    //              vertexEditActive, drawModeActive,
+    //              vertexEditType?, vertexEditPmIdx? }
+    //
+    // Status is broadcast on REQUEST_STATUS and on any state change
+    // (setCommitOps, enterVertexEdit, exitVertexEdit, enterDrawMode,
+    // exitDrawMode, commit success/failure).
+    //
+    // TDZ NOTE: `let powerLineEditorChannel` is declared HERE (before
+    // setupPowerLineEditorBridge() is called), not below. Function
+    // declarations hoist but `let` does NOT — without this ordering,
+    // the BroadcastChannel assignment inside the bridge fn hits TDZ.
+    // Same pattern as feedback_perf_shield_tdz_pattern memory.
+    let powerLineEditorChannel = null;
     setupKmlDataResponder();
+    setupPowerLineEditorBridge();
+    function broadcastPowerLineStatus() {
+        if (!powerLineEditorChannel) return;
+        const siteID = getCurrentSiteID();
+        powerLineEditorChannel.postMessage({
+            type: 'STATUS',
+            siteID,
+            distroCount: siteID ? commitOpsCount(siteID, 'distro') : 0,
+            transCount: siteID ? commitOpsCount(siteID, 'trans') : 0,
+            vertexEditActive: !!vertexEditState,
+            vertexEditType: vertexEditState ? vertexEditState.type : null,
+            vertexEditPmIdx: vertexEditState ? vertexEditState.pmIdx : null,
+            drawModeActive: !!drawingState,
+            drawModeType: drawingState ? drawingState.type : null,
+        });
+    }
+    function setupPowerLineEditorBridge() {
+        try { powerLineEditorChannel = new BroadcastChannel('AIM_POWER_LINE_EDIT'); }
+        catch (e) { console.warn(`${TAG} PLE channel unavailable:`, e); return; }
+        powerLineEditorChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'REQUEST_STATUS') { broadcastPowerLineStatus(); return; }
+            // Only the frame that actually has the Leaflet map should act
+            // on commands. v34.48 fix: `isActive` is NOT a sufficient
+            // gate — TOP frame auto-activates via the 1.5s safety timer
+            // even though it has no map-pane. The real gate is
+            // `getLeafletMap()` returning non-null — only true in iframe.
+            if (!isActive) {
+                if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: dropping ${m.type} (isActive=false)`);
+                return;
+            }
+            if (!getLeafletMap()) {
+                if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: dropping ${m.type} (no Leaflet map — likely TOP frame)`);
+                return;
+            }
+            if (m.type !== 'STATUS') console.log(`${TAG} PLE bridge: handling ${m.type}`, m);
+            try {
+                if (m.type === 'ENTER_VERTEX_EDIT' && m.kmlType) {
+                    // v34.47: addedIdx for pending-add (green) lines,
+                    // pmIdx for file lines. Mutually exclusive.
+                    if (Number.isFinite(m.addedIdx)) {
+                        enterAddedVertexEdit(m.kmlType, m.addedIdx);
+                    } else if (Number.isFinite(m.pmIdx)) {
+                        enterVertexEdit(m.kmlType, m.pmIdx);
+                    }
+                } else if (m.type === 'EXIT_VERTEX_EDIT') {
+                    exitVertexEdit({ save: !!m.save });
+                } else if (m.type === 'ENTER_DRAW_MODE' && m.kmlType) {
+                    // v34.61: optional seedCoord {lat,lng} for branching
+                    // (Phase 3a). When present, draw mode pre-seeds
+                    // vertex 0 at that coord so the new line starts
+                    // attached to the source vertex.
+                    enterDrawMode(m.kmlType, m.seedCoord || null);
+                } else if (m.type === 'COMMIT_KML' && m.kmlType) {
+                    // v34.46: was commitKMLChanges (legacy hide-only path);
+                    // commitPendingOps is the ops-aware fn that handles
+                    // modify/delete/added. Was silently saying "no pending
+                    // changes" for newly-added lines.
+                    commitPendingOps(m.kmlType);
+                } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
+                    discardCommitOps(m.kmlType);
+                } else if (m.type === 'DISCARD_ADDED_LINE' && m.kmlType && Number.isFinite(m.addedIdx)) {
+                    // v34.64: PLE delete-mode + click on a green pending-add
+                    // line. Discard outright (splice from co.added) — there's
+                    // no "mark for deletion" stage for pending-adds.
+                    //
+                    // CRITICAL: exit ANY active added-line vertex edit first
+                    // because the splice shifts subsequent indices and a
+                    // stale vertexEditState.addedIdx would point to the
+                    // wrong line on the next interaction.
+                    const siteID = getCurrentSiteID();
+                    if (siteID) {
+                        if (vertexEditState && vertexEditState.isAdded) {
+                            exitVertexEdit({ save: false, silent: true });
+                        }
+                        const co = getCommitOps(siteID, m.kmlType);
+                        const target = co.added && co.added[m.addedIdx];
+                        if (target) {
+                            const name = target.name || '(unnamed)';
+                            co.added.splice(m.addedIdx, 1);
+                            setCommitOps(siteID, m.kmlType, co);
+                            const count = commitOpsCount(siteID, m.kmlType);
+                            showKMLToast(`Discarded pending ${m.kmlType} line "${name}". ${count} pending commit${count === 1 ? '' : 's'}.`, 4500);
+                            if (isActive) runUpdate();
+                            try { broadcastPowerLineStatus(); } catch (e2) {}
+                        } else {
+                            showKMLToast(`Pending ${m.kmlType} line at index ${m.addedIdx} not found — may have already been discarded.`, 4000);
+                        }
+                    }
+                } else if (m.type === 'MARK_LINE_FOR_DELETE' && m.kmlType && Number.isFinite(m.pmIdx)) {
+                    // v34.55: PLE's delete-line-mode → M1 on a power
+                    // line dispatches this instead of ENTER_VERTEX_EDIT.
+                    // Calls the existing markPlacemarkForDelete which
+                    // queues an op + flips render to red dashed.
+                    const siteID = getCurrentSiteID();
+                    if (siteID) {
+                        markPlacemarkForDelete(siteID, m.kmlType, m.pmIdx);
+                        const count = commitOpsCount(siteID, m.kmlType);
+                        showKMLToast(`Marked ${m.kmlType} #${m.pmIdx} for deletion. ${count} pending — click ✓ in the strip to commit.`, 4500);
+                        if (isActive) runUpdate();
+                        try { broadcastPowerLineStatus(); } catch (e2) {}
+                    }
+                }
+            } catch (e) {
+                console.warn(`${TAG} PLE command failed (${m.type}):`, e);
+            }
+        };
+    }
 
     // KML data sharing — other AIM scripts (Asset Inspector's Site Setup
     // Analyzer) need access to the parsed KML features we've already
@@ -4410,6 +5193,10 @@
         // new site.
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         if (drawingState) exitDrawMode({ silent: true });
+        // v34.49: invalidate the SHA cache — it's keyed by siteID|type,
+        // so technically it's safe to keep, but better to drop on site
+        // nav so a stale entry can never apply to the wrong site.
+        Object.keys(committedKmlCache).forEach(k => { delete committedKmlCache[k]; });
         loadValidatorResults();
         if (isActive && sid) {
             console.log(`${TAG} site changed to ${sid} — fetching KML`);

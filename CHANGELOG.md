@@ -6,6 +6,30 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — Production rollout
+
+Promoted today's accumulated dev/`latest` work to the repo root so coworker installs (which point at the root via `@updateURL`) pick up the changes on their next Tampermonkey auto-check (~24h).
+
+### Versions promoted to prod
+| Script | Prod was | Prod now | What's new |
+|---|---|---|---|
+| AIM Control Panel | 1.24 | **1.25** | debounce + idempotency fix |
+| AIM Map Styler | 34.43 | **34.66** | PLE pipeline (vertex edit, draw, branch, snap to vertex/segment); modify/delete clobber + green-line delete fixes; toast positioning |
+| AIM Asset Inspector | 3.39 | **3.54** | inline subtype + name editing → Apply queue (drives Percepto's Ant Select via React fiber); SUM table per-entity 👁 visibility; M2-solo on chips; Bulk → Subtype; sidebar-search lookup; bail on `.aim-issues-icon-marker` (coexists with Issues) |
+| **AIM Power Line Editor** | — | **0.14 NEW** | ⚡ button in `.map-tools` drives Map Styler's vertex-edit + draw + delete-line modes |
+| **AIM Map Nav** | — | **0.7 NEW** | WASD pan / Q-E zoom / Alt sprint / Space fit-to-site keyboard nav (Shift+drag = native Leaflet box-zoom) |
+| **AIM Issues** | — | **0.20 NEW** | CSM-collaborative issue flagging — 🚩 in `.map-tools` draws rect/polygon, required note, GitHub sync with per-user identity, full status state machine (Open → Ready → Resolved/Ignored with re-open), per-issue creator-only delete, dedicated floating panel with drag/resize/filter/search/solo, affected-entities detection via point-in-polygon against `/map_objects/`, Google Sheets export, Site ID + Site Name columns |
+
+Coworker installs get all of this on their next Tampermonkey check.
+
+### Other housekeeping
+- README.md install table updated with the 3 new scripts
+- `docs/index.html` install guide updated with 3 new install cards
+- `features.csv` updated with v0.15-v0.20 Asset Inspector + AIM Issues rows
+- Memory snapshot rewritten as `project_status_2026-06-01.md`
+
+---
+
 ## 2026-06-01 — AIM Issues v0.20 (Site Name in export + panel header)
 
 - **Site column split** in the export — `Site` renamed to `Site ID` (the numeric id, unchanged), and a new `Site Name` column added with the human-readable name (e.g. "Exxon - Lille Midkiff 5"). HTML table + TSV both updated.

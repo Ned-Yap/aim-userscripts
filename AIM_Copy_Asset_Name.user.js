@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.39
+// @version      3.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.39';
+    const SCRIPT_VERSION = '3.54';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -939,7 +939,10 @@
                 if (row) out.push(row);
             }
             if (e.custom.poi_id) out.push({ label: 'POI ID', value: e.custom.poi_id });
-            out.push({ label: 'Unshielded', value: e.is_unshielded ? 'yes' : 'no' });
+            // v3.40: Unshielded + Validated rows removed for assets — they're
+            // for other entity types (FFZ/FP/NFZ) and not meaningful here.
+            // Other entity types still get Validated via the type-agnostic
+            // push below.
         }
         if (e.type === 15) {
             const wpCount = Array.isArray(e.coords) ? e.coords.length : 0;
@@ -990,7 +993,11 @@
             const desc = String(e.description).trim();
             if (desc) out.push({ label: 'Notes', value: desc.length > 140 ? desc.slice(0, 140) + '…' : desc });
         }
-        out.push({ label: 'Validated', value: e.validated ? 'yes' : 'no' });
+        // v3.40: skip Validated for assets (the field exists on Percepto's
+        // model but isn't meaningful for assets — only FFZ/FP/NFZ care).
+        if (e.type !== 3) {
+            out.push({ label: 'Validated', value: e.validated ? 'yes' : 'no' });
+        }
         return out;
     }
 
@@ -1067,24 +1074,57 @@
                 return;
             }
             // Single-value rows — whole row click-to-copy as before.
+            // v3.41 exception: the Subtype row for assets is click-to-EDIT
+            // (opens inline editor), pencil icon instead of copy icon.
             if (value === '' || value === null || value === undefined) return;
+            const isSubtypeEditable = (label === 'Subtype' && entity.type === 3);
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;padding:5px 12px;cursor:pointer;align-items:flex-start;gap:8px';
             row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.12)'; };
             row.onmouseleave = () => { row.style.background = 'transparent'; };
-            row.onclick = (ev) => {
-                ev.stopPropagation();
-                copyToClipboard(String(value), `Copied ${label}`);
-            };
             const lbl = document.createElement('span');
             lbl.style.cssText = 'flex:0 0 75px;color:#888;font-size:11px;line-height:1.4';
             lbl.textContent = label;
             const val = document.createElement('span');
             val.style.cssText = 'flex:1;color:#e6e6e6;font-size:12px;word-break:break-word;line-height:1.4';
-            val.textContent = String(value);
             const icon = document.createElement('span');
             icon.style.cssText = 'flex:0 0 14px;color:#7adfe6;font-size:11px;text-align:right;opacity:0.55';
-            icon.textContent = '⧉';
+            if (isSubtypeEditable) {
+                // Show effective value + pending visual; click to edit.
+                const eff = effectiveSubtype(entity);
+                if (eff.pending && eff.oldValue) {
+                    const oldSpan = document.createElement('span');
+                    oldSpan.textContent = eff.oldValue;
+                    oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px';
+                    const newSpan = document.createElement('span');
+                    newSpan.textContent = eff.value + (eff.isNew ? ' ✨' : '');
+                    newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                    val.appendChild(oldSpan);
+                    val.appendChild(newSpan);
+                } else {
+                    val.textContent = String(eff.value || '');
+                }
+                icon.textContent = '✎';
+                icon.title = 'Click to edit subtype';
+                row.title = 'Click: edit subtype · queues to apply';
+                row.onclick = (ev) => {
+                    ev.stopPropagation();
+                    startInlineSubtypeEdit(val, entity, (queued) => {
+                        // Refresh just this row's display by closing +
+                        // re-opening would also work, but we already have
+                        // the popup state; the next click on the entity
+                        // will re-build from the freshly-queued data.
+                        if (queued) closeInspector();
+                    });
+                };
+            } else {
+                val.textContent = String(value);
+                icon.textContent = '⧉';
+                row.onclick = (ev) => {
+                    ev.stopPropagation();
+                    copyToClipboard(String(value), `Copied ${label}`);
+                };
+            }
             row.appendChild(lbl);
             row.appendChild(val);
             row.appendChild(icon);
@@ -1249,11 +1289,264 @@
             // Also focus the input so the user can immediately keyboard-arrow
             // through results if they want.
             try { input.focus(); } catch (e) {}
-            showToast(`Filtered Map Entities to "${name}" — click the result to open`);
+            // v3.46: after the filter settles, auto-click the matching
+            // result row so the user lands directly in the entity editor
+            // instead of having to do an extra M1 on the result.
+            const inputDoc = input.ownerDocument || document;
+            const matchLower = name.trim().toLowerCase();
+            setTimeout(() => {
+                let target = null;
+                const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+                // Prefer an exact name match. Fall back to "the only visible row"
+                // after the filter (if there's just one, it's our target).
+                for (const item of items) {
+                    const txt = (item.textContent || '').trim().toLowerCase();
+                    if (txt.includes(matchLower)) { target = item; break; }
+                }
+                if (!target && items.length === 1) target = items[0];
+                if (target) {
+                    try { clickElDispatch(target, inputDoc); } catch (e) {}
+                    showToast(`Opened ${name}`);
+                } else {
+                    showToast(`Filtered Map Entities to "${name}" — click the result to open`);
+                }
+            }, 300);
         } catch (e) {
             console.warn(`${TAG} sidebar paste failed, falling back to clipboard:`, e);
             copyToClipboard(name, `Copied "${name}" — paste in Map Entities sidebar`);
         }
+    }
+
+    // ============================================================
+    // Visibility control (v3.47) — drive Percepto's sidebar checkboxes
+    //
+    // Per-entity visibility toggle backed by Percepto's native sidebar:
+    //   M1 on the eye → search + click that one entity's checkbox.
+    //   M2 on a visible eye → solo: uncheck + collapse every section, then
+    //     search + check just the target.
+    //   M2 on a hidden eye → unsolo: check every section, clear search.
+    //
+    // Why drive sidebar checkboxes (vs hiding Leaflet layers directly):
+    //   The sidebar is the source of truth for Percepto's per-entity
+    //   visibility state. Driving it keeps everything in sync (visual
+    //   checkbox state, map render). Bypassing it would desync.
+    //
+    // Virtualization caveat: rows not in the viewport don't exist in the
+    //   DOM. We sidestep that by using SECTION-level checkboxes (always
+    //   in DOM) for bulk on/off, then the search filter to bring the
+    //   target into view.
+    //
+    // Resync caveat: Percepto resets its per-session visibility when
+    //   editors close. Our `sumPanelState.visibility` reflects USER INTENT,
+    //   not Percepto's current state. Re-M2 between edits as needed.
+    // ============================================================
+
+    function getSidebarDoc() {
+        // Sidebar is in whichever doc has the search input.
+        if (document.querySelector(SIDEBAR_INPUT_SELECTOR)) return document;
+        try {
+            if (window.top && window.top.document.querySelector(SIDEBAR_INPUT_SELECTOR)) return window.top.document;
+            const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+            for (const f of frames) {
+                try {
+                    const d = f.contentDocument;
+                    if (d && d.querySelector(SIDEBAR_INPUT_SELECTOR)) return d;
+                } catch (e) {}
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function getSidebarSections(doc) {
+        if (!doc) return [];
+        const out = [];
+        doc.querySelectorAll('.map-entities__header-wrapper').forEach(wrap => {
+            const title = (wrap.querySelector('.map-entities__type-title')?.textContent || '').trim();
+            const checkbox = wrap.querySelector('.map-entities__type-checkbox input.ant-checkbox-input');
+            const toggleBtn = wrap.querySelector('.map-entities__toggle-button');
+            out.push({ wrap, title, checkbox, toggleBtn });
+        });
+        return out;
+    }
+
+    function pasteSidebarSearch(doc, text) {
+        if (!doc) return false;
+        const input = doc.querySelector(SIDEBAR_INPUT_SELECTOR);
+        if (!input) return false;
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(input, String(text));
+            else input.value = String(text);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function findSidebarItemByName(doc, name) {
+        if (!doc || !name) return null;
+        const lower = name.trim().toLowerCase();
+        const items = doc.querySelectorAll('.map-entities__entity-item');
+        for (const item of items) {
+            const txt = (item.textContent || '').trim().toLowerCase();
+            if (txt.includes(lower)) return item;
+        }
+        return items.length === 1 ? items[0] : null;
+    }
+
+    function getEntityCheckboxFromItem(item) {
+        return item && item.querySelector('.map-entities__entity-checkbox input.ant-checkbox-input');
+    }
+
+    function ensurePanelVisibility(siteID) {
+        if (sumPanelState.visibilitySite !== siteID) {
+            sumPanelState.visibility = new Map();
+            sumPanelState.visibilitySite = siteID;
+        }
+    }
+    function isEntityVisible(entityId) {
+        // Default to true (visible) — missing entries = "all on".
+        const v = sumPanelState.visibility.get(entityId);
+        return v === undefined ? true : !!v;
+    }
+    function setEntityVisible(entityId, on) {
+        if (on) sumPanelState.visibility.delete(entityId);
+        else sumPanelState.visibility.set(entityId, false);
+    }
+
+    // M1 toggle: search for this entity in the sidebar, click its checkbox.
+    // Leaves the search filter set (per user pref).
+    async function toggleEntityVisibility(entity) {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+        const ok = pasteSidebarSearch(doc, entity.name);
+        if (!ok) { showToast('Could not paste into sidebar search', 'rgba(255,96,96,0.55)'); return; }
+        await sleep(200);
+        const item = findSidebarItemByName(doc, entity.name);
+        if (!item) {
+            showToast(`"${entity.name}" not in sidebar after filter`, 'rgba(255,180,0,0.55)');
+            return;
+        }
+        const cb = getEntityCheckboxFromItem(item);
+        if (!cb) { showToast('No checkbox on sidebar item', 'rgba(255,96,96,0.55)'); return; }
+        try { cb.click(); } catch (e) { return; }
+        const nowVisible = !isEntityVisible(entity.id);
+        setEntityVisible(entity.id, nowVisible);
+        showToast(`${entity.name} → ${nowVisible ? 'visible' : 'hidden'}`);
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // v3.48: scroll the virtualized sidebar list to top so subsequent
+    // section walks start from the first header. Walk for the inner
+    // scrollable container — the .map-entities__autosizer wraps the
+    // virtualized list and is the actual scroll surface in Ant.
+    function scrollSidebarToTop(doc) {
+        if (!doc) return;
+        const candidates = doc.querySelectorAll('.map-entities__list, .map-entities__autosizer, .map-entities__virtualized-list');
+        candidates.forEach(el => { try { el.scrollTop = 0; } catch (e) {} });
+    }
+
+    // v3.48: walk + act on sidebar sections REPEATEDLY until none satisfy
+    // the predicate (i.e. nothing left to do). The sidebar is virtualized:
+    // when sections are expanded with many children, only the top 1-2
+    // section headers exist in the DOM. After unchecking + collapsing
+    // those, the remaining sections come into view and we can act on
+    // them. wantState='off' means uncheck + collapse; 'on' means check
+    // (don't touch collapse state on the way back).
+    // wantState modes:
+    //   'off'           — uncheck section + collapse it (M2 solo)
+    //   'on'            — check section parent (M2 unsolo, after collapse-only)
+    //   'collapse-only' — JUST collapse, don't touch checkbox (used before 'on'
+    //                     so 6 collapsed headers all fit in viewport before we
+    //                     start checking — otherwise checking the first section
+    //                     expands it and pushes the rest off-screen)
+    async function walkSidebarSections(doc, wantState, maxPasses = 8) {
+        let pass = 0;
+        while (pass < maxPasses) {
+            scrollSidebarToTop(doc);
+            await sleep(25);
+            const sections = getSidebarSections(doc);
+            if (sections.length === 0) {
+                console.log(`${TAG} walkSidebarSections(${wantState}) pass ${pass}: 0 sections in DOM — bailing`);
+                break;
+            }
+            let didWork = false;
+            const titles = [];
+            for (const s of sections) {
+                titles.push(s.title);
+                if (wantState === 'off') {
+                    if (s.checkbox && s.checkbox.checked) {
+                        try { s.checkbox.click(); didWork = true; } catch (e) {}
+                    }
+                    if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                        try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    }
+                } else if (wantState === 'on') {
+                    if (s.checkbox && !s.checkbox.checked) {
+                        try { s.checkbox.click(); didWork = true; } catch (e) {}
+                    }
+                } else if (wantState === 'collapse-only') {
+                    if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                        try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    }
+                }
+                await sleep(25);
+            }
+            console.log(`${TAG} walkSidebarSections(${wantState}) pass ${pass}: [${titles.join(', ')}] didWork=${didWork}`);
+            if (!didWork) break;
+            pass++;
+            // Wait for the virtualized list to re-layout (sections below
+            // shift up into view as the ones above collapse).
+            await sleep(120);
+        }
+    }
+
+    // M2 solo: uncheck + collapse every section, then check just this one.
+    async function soloEntityVisibility(entity, allEntityIds) {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+        // 1. Uncheck + collapse all sections (loops until stable to
+        // handle the virtualized list — top-most sections get acted on
+        // first, then their children disappear and the next sections
+        // come into view).
+        await walkSidebarSections(doc, 'off');
+        // 2. Search + check the target
+        pasteSidebarSearch(doc, entity.name);
+        await sleep(220);
+        const item = findSidebarItemByName(doc, entity.name);
+        if (item) {
+            const cb = getEntityCheckboxFromItem(item);
+            if (cb && !cb.checked) { try { cb.click(); } catch (e) {} }
+        } else {
+            showToast(`Soloed but "${entity.name}" not visible in sidebar — check name match`, 'rgba(255,180,0,0.55)');
+        }
+        // 3. Update state — everyone false except this one
+        sumPanelState.visibility = new Map();
+        (allEntityIds || []).forEach(id => { if (id !== entity.id) sumPanelState.visibility.set(id, false); });
+        showToast(`Soloed ${entity.name}`);
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // M2 unsolo: check every section, clear search.
+    async function unsoloAllVisibility() {
+        const doc = getSidebarDoc();
+        if (!doc) { showToast('Sidebar not found', 'rgba(255,96,96,0.55)'); return; }
+        // Clear search first so the section headers are all in the
+        // virtualized list (the search filter hides them otherwise).
+        pasteSidebarSearch(doc, '');
+        await sleep(120);
+        // v3.49: COLLAPSE first, then CHECK. Checking a section's
+        // parent checkbox while the section is collapsed auto-expands
+        // it (Percepto's behavior), and the expanded section fills the
+        // viewport — the next sections get pushed off the virtualized
+        // list. By ensuring everything is collapsed first, the 6
+        // section headers all stay in the DOM during the check pass.
+        await walkSidebarSections(doc, 'collapse-only');
+        await walkSidebarSections(doc, 'on');
+        sumPanelState.visibility = new Map();
+        showToast('All entities visible');
+        if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
     }
 
     // ============================================================
@@ -1276,6 +1569,13 @@
                 if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || target.isContentEditable) return;
                 if (target.closest && target.closest('.ant-input, .ant-select')) return;
             }
+            // v3.54: AIM Issues icons sit ON TOP of Percepto entities. If
+            // the right-click landed on an issue marker, bail — let the
+            // Issues script's marker handler open the status modal. Without
+            // this, AI's capture-phase handler runs first and pops its own
+            // inspector popup over an entity that happens to be beneath the
+            // issue icon.
+            if (target && target.closest && target.closest('.aim-issues-icon-marker')) return;
             const map = getLeafletMap();
             if (!map) return;
             const container = map.getContainer();
@@ -1390,7 +1690,7 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -1526,6 +1826,126 @@
         if (r._isSegment && r.arc) return true;
         if (r.type === 16) return true;
         return false;
+    }
+
+    // v3.41: assets are editable for SUBTYPE only via a separate
+    // Percepto editor path (Ant Select dropdown with creatable input,
+    // not number inputs). Branches off in startInlineSubtypeEdit +
+    // applyAssetSubtypeChange.
+    function isAssetEditableForSubtype(r) {
+        return !!(r && r.type === 3 && r.entity);
+    }
+
+    // Distinct subtype strings currently observed across all loaded
+    // assets on the given site. Used to populate the inline editor's
+    // datalist (autocomplete) AND to decide whether a queued subtype
+    // is "existing" (just-select in the Percepto dropdown) or "new"
+    // (needs the "Enter new type" + Add path during apply).
+    function observedSubtypesForSite(siteID) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        if (!bucket) return [];
+        const set = new Set();
+        (bucket.entities || []).forEach(en => {
+            if (en.type === 3 && en.custom && en.custom.poi_type_str) {
+                const s = String(en.custom.poi_type_str).trim();
+                if (s) set.add(s);
+            }
+        });
+        return Array.from(set).sort((a, b) => a.localeCompare(b));
+    }
+
+    // Queue entry for subtype changes. arcId=null, field='subtype'.
+    // Stores plain strings rather than meter values; the Apply pipeline
+    // branches on field === 'subtype' to use the Ant Select path.
+    function getPendingSubtype(entityId) {
+        return getPendingEdit(entityId, null, 'subtype');
+    }
+    function queueSubtypeEdit(entity, newValueRaw) {
+        if (!entity || entity.type !== 3) return false;
+        const newValue = String(newValueRaw || '').trim();
+        if (!newValue) return false;
+        const current = (entity.custom && entity.custom.poi_type_str) || '';
+        if (newValue === current) {
+            // No-op — if there was a pending edit for this entity,
+            // clear it (user typed back to original).
+            if (getPendingSubtype(entity.id)) {
+                discardPendingEdit(entity.id, null, 'subtype');
+                return false;
+            }
+            return false;
+        }
+        const siteID = getCurrentSiteID();
+        const observed = new Set(observedSubtypesForSite(siteID));
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: false,
+            isAsset: true,
+            field: 'subtype',
+            oldValue: current,
+            newValue,
+            isNewSubtype: !observed.has(newValue),
+            // For grouping + display. Mirrors fpName for FP/FFZ edits.
+            fpName: entity.name || '(unnamed)',
+            entityName: entity.name || '(unnamed)',
+            segmentName: entity.name || '(unnamed)',
+        });
+        return true;
+    }
+
+    // v3.50: name editing for all non-segment entity rows.
+    function getPendingName(entityId) {
+        return getPendingEdit(entityId, null, 'name');
+    }
+    function queueNameEdit(entity, newRaw) {
+        if (!entity) return false;
+        const newValue = String(newRaw || '').trim();
+        if (!newValue) return false;
+        const current = entity.name || '';
+        if (newValue === current) {
+            if (getPendingName(entity.id)) {
+                discardPendingEdit(entity.id, null, 'name');
+                return false;
+            }
+            return false;
+        }
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: entity.type === 16,
+            isAsset: entity.type === 3,
+            field: 'name',
+            oldValue: current,
+            newValue,
+            // For Apply pipeline lookup + display. Mirrors fpName/segmentName
+            // shape from FP/FFZ edits — uses the CURRENT name so sidebar
+            // lookups succeed (Percepto's data hasn't been renamed yet).
+            fpName: current,
+            entityName: current,
+            segmentName: current,
+        });
+        return true;
+    }
+    function effectiveName(entity) {
+        const orig = (entity && entity.name) || '';
+        if (!entity) return { value: orig, pending: false };
+        const p = getPendingName(entity.id);
+        if (!p) return { value: orig, pending: false };
+        return { value: p.newValue, pending: true, oldValue: orig };
+    }
+
+    // Returns the EFFECTIVE subtype value for an entity, honoring any
+    // pending edit. { value, pending, isNew } — pending=true means a
+    // queued subtype edit overrides the original; isNew=true means the
+    // queued value isn't yet in the existing dropdown list.
+    function effectiveSubtype(entity) {
+        const orig = (entity && entity.custom && entity.custom.poi_type_str) || '';
+        if (!entity) return { value: orig, pending: false, isNew: false };
+        const p = getPendingSubtype(entity.id);
+        if (!p) return { value: orig, pending: false, isNew: false };
+        return { value: p.newValue, pending: true, isNew: !!p.isNewSubtype, oldValue: orig };
     }
     // Helper: pull the arcId for the queue entry shape (null for FFZ).
     function rowArcId(r) {
@@ -1790,39 +2210,80 @@
         if (nm && nm.textContent) return nm.textContent.trim();
         return (item.el.textContent || '').trim();
     }
-    async function findEntityInSidebar(name, scrollLimit = 30) {
-        const matchName = name.trim().toLowerCase();
-        const findMatch = () => findSidebarItems().find(it => {
-            const t = getSidebarItemName(it).toLowerCase();
-            return t === matchName;
-        });
-        const initial = findMatch();
-        if (initial) return initial;
-        const anyItem = findSidebarItems()[0];
-        const list = anyItem
-            ? (anyItem.el.closest('.map-entities__virtualized-list')
-                || anyItem.el.closest('[class*="virtualized"]')
-                || anyItem.el.parentElement)
-            : null;
-        if (!list) {
-            console.warn(`${TAG} apply: no sidebar list found — entity-item selector may be stale`);
+    // v3.45: renamed from findEntityInSidebar — the popup's "Find in
+    // Map Entities" button has its OWN findEntityInSidebar(entity) at
+    // line ~1254 that pastes the name into the sidebar search input.
+    // The duplicate name meant the popup call dispatched here (because
+    // function declarations get hoisted, last-wins) and the apply path
+    // was getting called with an entity object instead of a name string.
+    // v3.51: switched from virtualized-list scroll walking to a search-
+    // based lookup. The scroll walk had a cap (~30 viewport-heights) and
+    // missed entities below it — explains why 3 of 4 queued asset edits
+    // failed: only the first asset's row was in initial viewport range,
+    // the rest were past the scrollLimit. The sidebar search input
+    // filters the list down to just our target, which always brings it
+    // into the (small) visible viewport regardless of the original
+    // position. Same shape returned as before: { el, doc } or null.
+    async function findAndClickSidebarItem(name, _scrollLimit) {
+        const matchLower = (name || '').trim().toLowerCase();
+        if (!matchLower) return null;
+
+        // Find the sidebar search input in whichever doc has it.
+        let inputDoc = null, input = null;
+        const docs = [document];
+        try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+        for (const d of docs) {
+            const i = d.querySelector(SIDEBAR_INPUT_SELECTOR);
+            if (i) { inputDoc = d; input = i; break; }
+        }
+        if (!input) {
+            try {
+                const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+                for (const f of frames) {
+                    try {
+                        const d = f.contentDocument;
+                        const i = d && d.querySelector(SIDEBAR_INPUT_SELECTOR);
+                        if (i) { inputDoc = d; input = i; break; }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+        }
+        if (!input || !inputDoc) {
+            console.warn(`${TAG} apply: sidebar search input not found via "${SIDEBAR_INPUT_SELECTOR}"`);
             return null;
         }
-        list.scrollTop = 0;
-        await sleep(250);
-        for (let i = 0; i < scrollLimit; i++) {
-            const hit = findMatch();
-            if (hit) {
-                hit.el.scrollIntoView({ block: 'center' });
-                await sleep(150);
-                return hit;
-            }
-            const before = list.scrollTop;
-            list.scrollTop += list.clientHeight * 0.7;
-            if (list.scrollTop === before) break;
-            await sleep(200);
+
+        // Paste the name via React-aware value setter so React's onChange fires.
+        try {
+            const proto = window.HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(input, name);
+            else input.value = name;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e) {
+            console.warn(`${TAG} apply: failed to paste search:`, e);
+            return null;
         }
-        return null;
+
+        // Wait for the filter to apply, then find the matching item.
+        // Try includes-match first (handles "FOO" matching "FOO BAR" if
+        // names share prefixes); fall back to "the only visible row"
+        // when the filter narrowed down to exactly one entity.
+        const matched = await waitForCondition(() => {
+            const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+            for (const item of items) {
+                const txt = (item.textContent || '').trim().toLowerCase();
+                if (txt.includes(matchLower)) return { el: item, doc: inputDoc };
+            }
+            if (items.length === 1) return { el: items[0], doc: inputDoc };
+            return null;
+        }, 2000, 100);
+
+        if (!matched) {
+            console.warn(`${TAG} apply: "${name}" not in filtered sidebar after 2s`);
+        }
+        return matched;
     }
 
     // Close any open editor by clicking its Cancel button — used to
@@ -1907,12 +2368,14 @@
     function groupPendingByEntity() {
         const byKey = new Map();
         Object.values(pendingSegmentEdits).forEach(e => {
-            const key = `${e.isFfz ? 'ffz' : 'fp'}:${e.entityId}`;
+            const kind = e.isAsset ? 'ast' : (e.isFfz ? 'ffz' : 'fp');
+            const key = `${kind}:${e.entityId}`;
             if (!byKey.has(key)) {
                 byKey.set(key, {
-                    entityName: e.fpName || '',
+                    entityName: e.entityName || e.fpName || '',
                     entityId: e.entityId,
                     isFfz: !!e.isFfz,
+                    isAsset: !!e.isAsset,
                     edits: [],
                 });
             }
@@ -1926,8 +2389,12 @@
                 return ra - rb;
             });
         });
+        // Order: FFZs first (FP altitude safety), then FPs, then Assets
+        // (subtype changes). Within each kind, alpha by entity name.
         groups.sort((a, b) => {
-            if (a.isFfz !== b.isFfz) return a.isFfz ? -1 : 1;
+            const aRank = a.isFfz ? 0 : a.isAsset ? 2 : 1;
+            const bRank = b.isFfz ? 0 : b.isAsset ? 2 : 1;
+            if (aRank !== bRank) return aRank - bRank;
             return String(a.entityName).localeCompare(String(b.entityName));
         });
         return groups;
@@ -1940,7 +2407,7 @@
     const APPLY_LAUNCHER_ID = 'aim-ai-apply-launcher';
     function openApplyLauncher(cfg) {
         closeApplyLauncher();
-        const { editCount, groupCount, fpCount, ffzCount, warnings, onLaunch } = cfg;
+        const { editCount, groupCount, fpCount, ffzCount, astCount = 0, warnings, onLaunch } = cfg;
         const m = document.createElement('div');
         m.id = APPLY_LAUNCHER_ID;
         m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
@@ -1959,7 +2426,7 @@
             <div style="color:#888;font-size:11px;margin-bottom:12px">FFZs first, then FP segments. Per-entity ~3-6 s.</div>
             <div style="color:#cfd6dc;font-size:13px;line-height:1.7">
                 <strong>${editCount}</strong> edit${editCount === 1 ? '' : 's'} across <strong>${groupCount}</strong> entit${groupCount === 1 ? 'y' : 'ies'}<br>
-                Order: <strong style="color:#5fff5f">${ffzCount}</strong> FFZ${ffzCount === 1 ? '' : 's'}, then <strong style="color:#7adfe6">${fpCount}</strong> FP${fpCount === 1 ? '' : 's'}<br>
+                Order: <strong style="color:#5fff5f">${ffzCount}</strong> FFZ${ffzCount === 1 ? '' : 's'}, then <strong style="color:#7adfe6">${fpCount}</strong> FP${fpCount === 1 ? '' : 's'}${astCount > 0 ? `, then <strong style="color:#ffffff">${astCount}</strong> Asset${astCount === 1 ? '' : 's'}` : ''}<br>
                 Estimated total: ~<strong>${etaMin}</strong> min
             </div>
             ${warnHtml}
@@ -2096,6 +2563,22 @@
         Object.values(pendingSegmentEdits).forEach(e => {
             const ent = entities.find(en => en.id === e.entityId);
             if (!ent) return; // already caught above
+            // v3.41: subtype path is string-valued, not numeric.
+            if (e.isAsset && e.field === 'subtype') {
+                const cur = (ent.custom && ent.custom.poi_type_str) || '';
+                if (cur && cur !== e.oldValue) {
+                    result.warnings.push(`${e.entityName} subtype: queued from "${e.oldValue}" but current value is "${cur}" (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
+            // v3.50: name path is also string-valued.
+            if (e.field === 'name') {
+                const cur = ent.name || '';
+                if (cur !== e.oldValue) {
+                    result.warnings.push(`"${e.oldValue}" name: queued rename to "${e.newValue}" but current name is "${cur}" (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
             let currentM = null;
             if (e.isFfz) {
                 if (ent.restrictions) {
@@ -2180,13 +2663,19 @@
                     entityName: g.entityName,
                     entityId: g.entityId,
                     isFfz: g.isFfz,
+                    isAsset: !!g.isAsset,
                     editsAttempted: g.edits.length,
                     editsApplied: outcome.appliedCount || 0,
                     success: !!outcome.ok,
                     reason: outcome.reason || '',
                     verified: outcome.verified === true,
                     durationMs,
-                    edits: g.edits.map(e => ({
+                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name') ? ({
+                        field: e.field,
+                        oldValue: e.oldValue,
+                        newValue: e.newValue,
+                        isNewSubtype: !!e.isNewSubtype,
+                    }) : ({
                         field: e.field,
                         arcId: e.arcId,
                         oldValueM: e.oldValueM,
@@ -2222,6 +2711,34 @@
                 entities: auditEntries,
             };
             console.log(`${TAG} apply: audit log → window.__aim_ai_lastApplyLog`);
+            // v3.51: clear the sidebar search filter we left set from the
+            // last entity's search. Otherwise the user reopens the sidebar
+            // and sees just the last-edited entity, which is confusing.
+            try {
+                const docs = [document];
+                try { if (window.top && window.top !== window) docs.push(window.top.document); } catch (e) {}
+                let sidebarInput = null;
+                for (const d of docs) {
+                    sidebarInput = d.querySelector(SIDEBAR_INPUT_SELECTOR);
+                    if (sidebarInput) break;
+                }
+                if (!sidebarInput) {
+                    const frames = Array.from(window.top.document.querySelectorAll('iframe'));
+                    for (const f of frames) {
+                        try { sidebarInput = f.contentDocument && f.contentDocument.querySelector(SIDEBAR_INPUT_SELECTOR); }
+                        catch (e) {}
+                        if (sidebarInput) break;
+                    }
+                }
+                if (sidebarInput && sidebarInput.value) {
+                    const proto = window.HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (desc && desc.set) desc.set.call(sidebarInput, '');
+                    else sidebarInput.value = '';
+                    sidebarInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    sidebarInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            } catch (e) {}
             onProgress(applyState);
             // AUTO-REFRESH after a live run that wrote anything. Force
             // a final fetch + re-render the SUM panel so the user sees
@@ -2252,15 +2769,300 @@
     // Process one entity group: open editor, set all values, save.
     // Returns true if save succeeded, false otherwise (with the
     // failure recorded in applyState.errors).
+    // v3.42: walk React fiber from an element looking for a props
+    // object that matches the predicate. Stops at first match. Returns
+    // the props object (so caller can grab the handler). Same primitive
+    // as feedback-react-fiber-walk-for-ant-actions — fiber walks beat
+    // DOM-driven Ant dropdown opens (which corrupt hover state and have
+    // bad mousedown timing).
+    function findReactPropsByPredicate(el, predicate, maxDepth = 30) {
+        if (!el) return null;
+        const fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (!fiberKey) return null;
+        let fiber = el[fiberKey];
+        let depth = 0;
+        while (fiber && depth < maxDepth) {
+            const props = fiber.memoizedProps || (fiber.stateNode && fiber.stateNode.props);
+            if (props && predicate(props)) return props;
+            fiber = fiber.return;
+            depth++;
+        }
+        return null;
+    }
+
+    // v3.42: Apply automation for asset subtype changes via React fiber.
+    // Instead of clicking the Ant Select dropdown open (which had click-
+    // timing + portal-mount issues), walk the fiber from #asset-form-type
+    // to find the Ant Select's onChange handler and call it directly.
+    // Works for both existing and new subtypes — Ant Form accepts any
+    // value via onChange; Percepto's save persists it regardless of
+    // whether it was in the options list.
+    //
+    // If fiber walk fails (Percepto markup changed), falls back to DOM-
+    // driving the dropdown (the v3.41 path, less reliable).
+    //
+    // Only the first edit in the group is applied — subtype is entity-
+    // level (one value per asset). Multiple queued subtype edits on the
+    // same entity collapse to the latest by virtue of the queue's
+    // pendingEditKey shape (entityId:'':subtype).
+    async function applyAssetSubtypeChange(group, opts) {
+        const { dryRun } = opts || {};
+        const label = group.entityName || '(unnamed)';
+        // v3.50: support both 'subtype' and 'name' edits on the same asset
+        // in one editor session.
+        const subtypeEdit = group.edits.find(e => e.field === 'subtype');
+        const nameEdit = group.edits.find(e => e.field === 'name');
+        if (!subtypeEdit && !nameEdit) {
+            return { ok: false, reason: 'no actionable edits in group', appliedCount: 0 };
+        }
+        const targetSubtype = subtypeEdit ? String(subtypeEdit.newValue || '').trim() : null;
+        const targetName = nameEdit ? String(nameEdit.newValue || '').trim() : null;
+        const fields = [];
+        if (targetName) fields.push(`name → "${targetName}"`);
+        if (targetSubtype) fields.push(`subtype → "${targetSubtype}"${subtypeEdit.isNewSubtype ? ' (NEW)' : ''}`);
+        console.log(`${TAG} apply: starting asset "${label}" ${fields.join(', ')}${dryRun ? ' [DRY RUN]' : ''}`);
+
+        await closeEditor();
+        const hit = await findAndClickSidebarItem(label);
+        if (!hit) {
+            applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
+            return { ok: false, reason: 'not found in sidebar', appliedCount: 0 };
+        }
+        clickElDispatch(hit.el, hit.doc);
+        const editor = await waitForCondition(() => findOpenEditorWithName(), 15000, 250);
+        if (!editor) {
+            // One retry — same pattern as FP/FFZ path
+            clickElDispatch(hit.el, hit.doc);
+            const retry = await waitForCondition(() => findOpenEditorWithName(), 10000, 250);
+            if (!retry) {
+                applyState.errors.push({ entityName: label, reason: 'editor did not open (after retry)' });
+                return { ok: false, reason: 'editor did not open', appliedCount: 0 };
+            }
+        }
+        const finalEditor = findOpenEditorWithName();
+        if (!finalEditor) {
+            applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
+            return { ok: false, reason: 'editor lost', appliedCount: 0 };
+        }
+        const openedName = getEditorTitle(finalEditor.doc);
+        if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
+            applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
+            return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
+        }
+        const panelDoc = finalEditor.doc;
+        let appliedCount = 0;
+
+        // v3.50: set the entity name first if it's pending. Doing this
+        // before subtype keeps the same editor session for both edits.
+        if (targetName) {
+            const nameInput = panelDoc.getElementById('upsert-entity-form-name');
+            if (nameInput) {
+                console.log(`${TAG} apply: ${label} — setting name → "${targetName}"`);
+                setReactInputValue(nameInput, targetName);
+                await sleep(180);
+                appliedCount++;
+            } else {
+                applyState.errors.push({ entityName: label, reason: 'name input not found (#upsert-entity-form-name)' });
+                // Don't bail — subtype may still succeed.
+            }
+        }
+
+        // No subtype edit → skip the dropdown driving + go straight to save.
+        if (!targetSubtype) {
+            if (appliedCount === 0) {
+                applyState.errors.push({ entityName: label, reason: 'no edits applied (name input missing?)' });
+                await closeEditor();
+                return { ok: false, reason: 'no edits applied', appliedCount: 0 };
+            }
+            if (dryRun) {
+                await sleep(400);
+                await closeEditor();
+                return { ok: true, reason: '[DRY RUN] name set + cancelled', appliedCount, verified: false };
+            }
+            await sleep(250);
+            const saved = await saveCurrentEditor();
+            const valErr = findValidationError();
+            if (valErr) {
+                applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
+                await closeEditor();
+                return { ok: false, reason: `validation: ${valErr}`, appliedCount };
+            }
+            if (!saved) {
+                applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
+                return { ok: false, reason: 'save timed out', appliedCount };
+            }
+            console.log(`${TAG} apply: ${label} — name saved`);
+            return { ok: true, reason: 'saved', appliedCount, verified: false };
+        }
+
+        // Find the Type combobox. ID 'asset-form-type' is the input
+        // inside Percepto's Ant Select trigger.
+        const combo = panelDoc.getElementById('asset-form-type');
+        if (!combo) {
+            applyState.errors.push({ entityName: label, reason: 'Type input not found (#asset-form-type)' });
+            await closeEditor();
+            return { ok: false, reason: 'Type input not found', appliedCount };
+        }
+
+        // v3.42: PRIMARY PATH — React fiber walk. Find the Ant Select's
+        // onChange handler and call it directly. No dropdown opening, no
+        // mousedown timing games, no portal scanning. The Ant Form Item
+        // (parent component) picks up the change via its onChange context
+        // and persists when the user (us) clicks Save.
+        const selectProps = findReactPropsByPredicate(combo, (p) => {
+            // Ant Select v5: onChange + optionFilterProp or options/children.
+            // We want the Select that controls Type, not some other ancestor.
+            // Heuristic: must have onChange + a typeof string value (current
+            // subtype is a string).
+            return typeof p.onChange === 'function'
+                && (typeof p.value === 'string' || p.value == null)
+                && !!p.options !== false; // options is array OR options derived from children — allow both
+        });
+        let fiberSucceeded = false;
+        if (selectProps && typeof selectProps.onChange === 'function') {
+            console.log(`${TAG} apply: ${label} — calling Ant Select onChange via fiber (value="${targetSubtype}")`);
+            try {
+                // Build a minimal option object that matches Ant's contract.
+                // For unknown values, Ant tends to accept { label, value }.
+                const opt = { label: targetSubtype, value: targetSubtype, key: targetSubtype };
+                selectProps.onChange(targetSubtype, opt);
+                fiberSucceeded = true;
+            } catch (e) {
+                console.warn(`${TAG} apply: ${label} — fiber onChange threw, falling back to DOM path:`, e);
+            }
+            // Brief settle for React to flush + Form context to update.
+            await sleep(200);
+        } else {
+            console.log(`${TAG} apply: ${label} — fiber walk found no Select onChange, falling back to DOM path`);
+        }
+
+        // FALLBACK: DOM-driven dropdown (v3.41 path). Only runs if the
+        // fiber walk didn't find onChange. Kept for robustness in case
+        // Percepto reshapes the Select wrapper.
+        if (!fiberSucceeded) {
+            const selectWrap = combo.closest('.ant-select');
+            const selectorEl = (selectWrap && selectWrap.querySelector('.ant-select-selector')) || selectWrap || combo;
+            try { combo.focus(); } catch (e) {}
+            // Mousedown is what Ant Select listens for to toggle open.
+            selectorEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+            selectorEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+            selectorEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: panelDoc.defaultView || window }));
+
+            const findDropdown = () => {
+                const docs = [panelDoc, document];
+                try { if (panelDoc.defaultView && panelDoc.defaultView.top) docs.push(panelDoc.defaultView.top.document); } catch (e) {}
+                for (const d of docs) {
+                    if (!d) continue;
+                    const list = d.querySelector('.pr-creatable-dropdown, .ant-select-dropdown:not(.ant-select-dropdown-hidden) .rc-virtual-list');
+                    if (list) {
+                        const cd = list.closest('.pr-creatable-dropdown') || list.closest('.ant-select-dropdown') || list;
+                        return { dropdown: cd, doc: d };
+                    }
+                }
+                return null;
+            };
+            let dd = await waitForCondition(findDropdown, 4000, 100);
+            if (!dd) {
+                applyState.errors.push({ entityName: label, reason: 'Type dropdown did not open (DOM fallback)' });
+                await closeEditor();
+                return { ok: false, reason: 'Type dropdown did not open', appliedCount };
+            }
+            await sleep(150);
+            const findOption = (root) => {
+                const opts = root.querySelectorAll('.ant-select-item-option');
+                for (const o of opts) {
+                    const title = o.getAttribute('title') || '';
+                    const txt = (o.querySelector('.ant-select-item-option-content')?.textContent || '').trim();
+                    if (title === targetSubtype || txt === targetSubtype) return o;
+                }
+                return null;
+            };
+            let optEl = findOption(dd.dropdown);
+            if (!optEl) {
+                const newInput = dd.dropdown.querySelector('.pr-creatable-dropdown__input');
+                const addBtn = dd.dropdown.querySelector('.pr-creatable-dropdown__button');
+                if (!newInput || !addBtn) {
+                    applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" not found and no creatable footer` });
+                    await closeEditor();
+                    return { ok: false, reason: 'no creatable footer', appliedCount };
+                }
+                setReactInputValue(newInput, targetSubtype);
+                await sleep(200);
+                await waitForCondition(() => !addBtn.disabled, 1500, 50);
+                if (addBtn.disabled) {
+                    applyState.errors.push({ entityName: label, reason: 'Add button never enabled' });
+                    await closeEditor();
+                    return { ok: false, reason: 'Add button disabled', appliedCount };
+                }
+                clickElDispatch(addBtn, dd.doc);
+                optEl = await waitForCondition(() => findOption(dd.dropdown), 4000, 100);
+                if (!optEl) {
+                    applyState.errors.push({ entityName: label, reason: `subtype "${targetSubtype}" never appeared after Add` });
+                    await closeEditor();
+                    return { ok: false, reason: 'new option never appeared', appliedCount };
+                }
+                await sleep(100);
+            }
+            clickElDispatch(optEl, dd.doc);
+            await waitForCondition(
+                () => optEl.getAttribute('aria-selected') === 'true' || (combo.value && combo.value.includes(targetSubtype)),
+                1500, 100,
+            );
+            await sleep(200);
+        }
+
+        // Verify the form picked up the new value before saving.
+        // combo.value is the search-input's text; Ant Select shows the
+        // selected label in .ant-select-selection-item.
+        const selectedItem = (combo.closest('.ant-select') || panelDoc).querySelector('.ant-select-selection-item');
+        const selectedText = selectedItem ? (selectedItem.getAttribute('title') || selectedItem.textContent || '').trim() : '';
+        console.log(`${TAG} apply: ${label} — selection-item now reads "${selectedText}" (target was "${targetSubtype}")`);
+        if (selectedText && selectedText !== targetSubtype) {
+            applyState.errors.push({ entityName: label, reason: `selection-item reads "${selectedText}" not "${targetSubtype}" — onChange may not have stuck` });
+            await closeEditor();
+            return { ok: false, reason: `value not applied (shows "${selectedText}")`, appliedCount };
+        }
+        appliedCount++;
+
+        if (dryRun) {
+            await sleep(500);
+            await closeEditor();
+            return { ok: true, reason: '[DRY RUN] edits applied + cancelled', appliedCount, verified: false };
+        }
+
+        // Save.
+        await sleep(300);
+        const saved = await saveCurrentEditor();
+        const valErr = findValidationError();
+        if (valErr) {
+            applyState.errors.push({ entityName: label, reason: `Percepto validation error: ${valErr}` });
+            await closeEditor();
+            return { ok: false, reason: `validation: ${valErr}`, appliedCount };
+        }
+        if (!saved) {
+            applyState.errors.push({ entityName: label, reason: 'save timed out (no editor close)' });
+            return { ok: false, reason: 'save timed out', appliedCount };
+        }
+        console.log(`${TAG} apply: ${label} — saved (${appliedCount} edit${appliedCount === 1 ? '' : 's'})`);
+        return { ok: true, reason: 'saved', appliedCount, verified: false };
+    }
+
     async function applyOneEntity(group, opts) {
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
-        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${group.isFfz ? ', FFZ' : ', FP'})${dryRun ? ' [DRY RUN]' : ''}`);
+        // v3.41: branch to the asset path for subtype-only edits. The
+        // FP/FFZ path operates on number inputs; assets need the Ant
+        // Select dropdown ("Type" field with creatable footer).
+        if (group.isAsset) {
+            return applyAssetSubtypeChange(group, opts);
+        }
+        const kindLabel = group.isFfz ? 'FFZ' : 'FP';
+        console.log(`${TAG} apply: starting "${label}" (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}, ${kindLabel})${dryRun ? ' [DRY RUN]' : ''}`);
         // 1. Close any existing editor (we may have landed in the
         //    wrong one from a previous step).
         await closeEditor();
         // 2. Find + click the entity in the sidebar.
-        const hit = await findEntityInSidebar(label);
+        const hit = await findAndClickSidebarItem(label);
         if (!hit) {
             applyState.errors.push({ entityName: label, reason: 'not found in sidebar' });
             console.warn(`${TAG} apply: ${label} — entity not in sidebar`);
@@ -2298,14 +3100,35 @@
             return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — editor open, name="${openedName}"`);
-        // 4. Find the inputs.
-        const { minInputs, maxInputs } = findEditorInputs(finalEditor.doc);
-        console.log(`${TAG} apply: ${label} — found ${minInputs.length} Min input(s), ${maxInputs.length} Max input(s)`);
-        if (minInputs.length === 0 && maxInputs.length === 0) {
-            applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
-            console.warn(`${TAG} apply: no inputs found for ${label}`);
-            await closeEditor();
-            return { ok: false, reason: 'no Min/Max inputs found', appliedCount: 0 };
+        // v3.50: split edits by field. Name + altitudes can coexist; for
+        // NFZ/GM there may only be a name edit (no Min/Max inputs exist).
+        const altEdits = group.edits.filter(e => e.field === 'min_alt' || e.field === 'max_alt');
+        const nameEdit = group.edits.find(e => e.field === 'name');
+        let appliedCount = 0;
+        // 4a. Apply name edit if present.
+        if (nameEdit) {
+            const nameInput = finalEditor.doc.getElementById('upsert-entity-form-name');
+            if (nameInput) {
+                console.log(`${TAG} apply: ${label} — setting name → "${nameEdit.newValue}"`);
+                setReactInputValue(nameInput, nameEdit.newValue);
+                await sleep(180);
+                appliedCount++;
+            } else {
+                applyState.errors.push({ entityName: label, reason: 'name input not found (#upsert-entity-form-name)' });
+                // Continue — altitudes may still succeed.
+            }
+        }
+        // 4b. Find the alt inputs (only needed if there are alt edits).
+        let minInputs = [], maxInputs = [];
+        if (altEdits.length > 0) {
+            ({ minInputs, maxInputs } = findEditorInputs(finalEditor.doc));
+            console.log(`${TAG} apply: ${label} — found ${minInputs.length} Min input(s), ${maxInputs.length} Max input(s)`);
+            if (minInputs.length === 0 && maxInputs.length === 0) {
+                applyState.errors.push({ entityName: label, reason: 'no Min/Max inputs found' });
+                console.warn(`${TAG} apply: no inputs found for ${label}`);
+                await closeEditor();
+                return { ok: false, reason: 'no Min/Max inputs found', appliedCount };
+            }
         }
         // 5. Set values. For FP segment edits, index = arc order in
         //    the buildSummaryRows pass. We re-resolve from the
@@ -2315,9 +3138,8 @@
             const bucket = siteID ? mapObjectsBySite[siteID] : null;
             return bucket ? (bucket.entities || []).find(en => en.id === group.entityId) : null;
         })();
-        // Convert each edit into an input mutation.
-        let appliedCount = 0;
-        for (const ed of group.edits) {
+        // Convert each alt edit into an input mutation.
+        for (const ed of altEdits) {
             const valFt = Math.round(ed.newValueM * 3.28084); // Percepto's inputs are feet
             const isMin = ed.field === 'min_alt';
             // FFZ: single Min/Max inputs (use index 0).
@@ -2350,9 +3172,9 @@
             await sleep(80);
         }
         if (appliedCount === 0) {
-            applyState.errors.push({ entityName: label, reason: 'no inputs matched any edit' });
+            applyState.errors.push({ entityName: label, reason: 'no edits applied (no name input + no matching alt inputs)' });
             await closeEditor();
-            return { ok: false, reason: 'no inputs matched any edit', appliedCount: 0 };
+            return { ok: false, reason: 'no edits applied', appliedCount: 0 };
         }
         console.log(`${TAG} apply: ${label} — set ${appliedCount} input value(s)${dryRun ? ' [DRY RUN — skipping save]' : ', saving…'}`);
         // DRY RUN — don't click save. Cancel out instead so the
@@ -2417,6 +3239,13 @@
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
         selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
+        // v3.47: per-entity visibility state we drive via Percepto's
+        // sidebar checkboxes. Map<entityId, boolean>. Missing entries
+        // default to visible=true. Session-only; reset on site change.
+        // Percepto resets its own state when an editor closes, so this
+        // can desync — that's accepted (user re-M2s as needed).
+        visibility: new Map(),
+        visibilitySite: null,      // siteID this Map belongs to
         // Ordered list of visible column keys. Persisted to GM_setValue
         // so it survives reloads. Hidden columns are simply absent from
         // this array. Reorder via ↑/↓ in the Columns ▾ menu.
@@ -3434,6 +4263,7 @@
     function renderSummaryPanel(siteID) {
         closeSummaryPanel();
         ensurePendingForSite(siteID);
+        ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
@@ -3555,11 +4385,15 @@
             { tNum: '3',  label: 'Assets' },
             { tNum: '19', label: 'GMs'    },
         ];
+        // v3.44: chipUpdates collects every chip's update fn so M2-solo
+        // can refresh ALL chips' visual state, not just the clicked one.
+        const chipUpdates = [];
         chipDefs.forEach(({ tNum, label }) => {
             const reg = typeReg(parseInt(tNum, 10));
             const color = reg.color;
             const chip = document.createElement('button');
             chip.type = 'button';
+            chip.title = 'M1: toggle this type · M2: solo (only this type ON, rest OFF; M2 again restores all)';
             const update = () => {
                 const on = sumPanelState.typeFilter.has(tNum);
                 if (on) {
@@ -3578,8 +4412,25 @@
                 update();
                 redrawTable();
             };
+            // v3.44: M2 = solo. If this type is already the only one ON,
+            // restore all (undo solo). Otherwise clear + add just this one.
+            chip.oncontextmenu = (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const allTypes = chipDefs.map(d => d.tNum);
+                const isSoloed = sumPanelState.typeFilter.size === 1 && sumPanelState.typeFilter.has(tNum);
+                sumPanelState.typeFilter.clear();
+                if (isSoloed) {
+                    allTypes.forEach(t => sumPanelState.typeFilter.add(t));
+                } else {
+                    sumPanelState.typeFilter.add(tNum);
+                }
+                chipUpdates.forEach(fn => fn());
+                redrawTable();
+            };
             update();
             chipRow.appendChild(chip);
+            chipUpdates.push(update);
         });
         // Filter checkboxes. Validated and Unvalidated are mutually
         // exclusive — toggling one auto-clears the other (otherwise
@@ -3922,6 +4773,164 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(deltaBtn);
+
+        // --- v3.53: Bulk → Subtype button ---
+        // Queues a subtype edit for every selected asset row (or all asset
+        // rows if none selected). Uses the same datalist of observed
+        // subtypes as the inline editor. Free-text values not in the list
+        // flow through the same "Enter new type" path during Apply.
+        const subBtn = document.createElement('button');
+        subBtn.type = 'button';
+        subBtn.textContent = 'Bulk → Subtype';
+        subBtn.title = 'Queue subtype edits across selected assets (or all assets)';
+        subBtn.style.cssText = 'background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        let subPopEl = null;
+        subBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (subPopEl) { subPopEl.remove(); subPopEl = null; return; }
+            subPopEl = buildBulkSubtypePopover(subBtn, () => {
+                if (subPopEl) { subPopEl.remove(); subPopEl = null; }
+            });
+            document.body.appendChild(subPopEl);
+            const r = subBtn.getBoundingClientRect();
+            subPopEl.style.left = r.left + 'px';
+            subPopEl.style.top = (r.bottom + 4) + 'px';
+            const rect = subPopEl.getBoundingClientRect();
+            if (rect.right > window.innerWidth - 8) {
+                subPopEl.style.left = (window.innerWidth - rect.width - 8) + 'px';
+            }
+            const onDocClick = (e) => {
+                if (subPopEl && !subPopEl.contains(e.target) && e.target !== subBtn) {
+                    subPopEl.remove(); subPopEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(subBtn);
+
+        function buildBulkSubtypePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:340px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🏷  Bulk Set Asset Subtype';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Queues a subtype change for every targeted asset. Pick from the list or type a new value — new values get added via the "Enter new type" path during Apply.';
+            pop.appendChild(help);
+
+            // Target subtype input — datalist of observed subtypes
+            const siteIDLocal = getCurrentSiteID();
+            const dlId = `aim-bulk-sub-dl-${Date.now()}`;
+            const dl = document.createElement('datalist');
+            dl.id = dlId;
+            observedSubtypesForSite(siteIDLocal).forEach(s => {
+                const o = document.createElement('option');
+                o.value = s;
+                dl.appendChild(o);
+            });
+            pop.appendChild(dl);
+
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px';
+            const lbl1 = document.createElement('label');
+            lbl1.textContent = 'Target subtype:';
+            lbl1.style.cssText = 'flex:0 0 110px;color:#cfd6dc';
+            row1.appendChild(lbl1);
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.setAttribute('list', dlId);
+            inp.placeholder = 'e.g. v-well - empty';
+            inp.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:12px';
+            row1.appendChild(inp);
+            pop.appendChild(row1);
+
+            // Scope radio
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:10px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = 'aim-ai-bulk-sub-scope';
+                r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r);
+                l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All assets on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true;
+            else allScope.r.checked = true;
+            row2.appendChild(allScope.l);
+            row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            const computeEligible = () => {
+                const target = String(inp.value || '').trim();
+                if (!target) return { eligible: [], target: '', candidates: [] };
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const candidates = allRows.filter(r => {
+                    if (r.type !== 3 || !r.entity) return false; // assets only
+                    if (r._isSegment) return false;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return false;
+                    return true;
+                });
+                const eligible = candidates.filter(r => {
+                    const cur = (r.entity.custom && r.entity.custom.poi_type_str) || '';
+                    return cur !== target;
+                });
+                return { eligible, target, candidates };
+            };
+            const refreshPreview = () => {
+                const { eligible, target, candidates } = computeEligible();
+                if (!target) { preview.textContent = '⚠️ Type or pick a target subtype'; return; }
+                if (candidates.length === 0) { preview.textContent = '⚠️ No eligible assets in scope'; return; }
+                const observed = new Set(observedSubtypesForSite(siteIDLocal));
+                const isNew = !observed.has(target);
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> edit${eligible.length === 1 ? '' : 's'} · skipping ${candidates.length - eligible.length} already at "${target}"${isNew ? ' · <span style="color:#c4b5fd">NEW type</span>' : ''}`;
+            };
+            refreshPreview();
+            inp.oninput = refreshPreview;
+            allScope.r.onchange = refreshPreview;
+            selScope.r.onchange = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, target } = computeEligible();
+                if (!target) { showToast('Pick a target subtype first', 'rgba(255,82,82,0.6)'); return; }
+                if (eligible.length === 0) { showToast('Nothing to queue — all eligible assets already at target'); return; }
+                let queued = 0;
+                eligible.forEach(r => { if (queueSubtypeEdit(r.entity, target)) queued++; });
+                showToast(`Queued ${queued} subtype edit${queued === 1 ? '' : 's'} → "${target}"`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
 
         // Builds the Bulk → Delta popover. Separate inputs for FP (20)
         // and FFZ (30) defaults — different SOPs per the user. One
@@ -4349,15 +5358,42 @@
             const unit = useFt ? 'ft' : 'm';
             const header = ['Type', 'Entity', 'Segment', 'Field', `Old (${unit})`, `New (${unit})`, `Δ (${unit})`];
             const lines = [header.join('\t')];
-            // Sort: FFZs first (entity-level edits), then FP segments.
-            // This matches the v3.19 commit-order rule baked in for the
-            // automated Apply path (AIM's overlap/steepness checks
-            // block FP saves when FFZ endpoints haven't moved yet).
+            // Sort: FFZs first (FP-safety order), then FPs, then Assets
+            // (subtype changes). Matches the Apply queue commit order.
             const sorted = Object.values(pendingSegmentEdits).sort((a, b) => {
-                if (a.isFfz !== b.isFfz) return a.isFfz ? -1 : 1;
-                return 0;
+                const aRank = a.isFfz ? 0 : a.isAsset ? 2 : 1;
+                const bRank = b.isFfz ? 0 : b.isAsset ? 2 : 1;
+                return aRank - bRank;
             });
             sorted.forEach(e => {
+                // v3.50: name is a string field — Old/New hold the names; Δ empty.
+                if (e.field === 'name') {
+                    const typeLabel = e.isAsset ? 'Asset' : e.isFfz ? 'FFZ' : 'Entity';
+                    lines.push([
+                        typeLabel,
+                        e.oldValue || '',
+                        '(entity)',
+                        'Name',
+                        e.oldValue || '',
+                        e.newValue || '',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
+                // v3.41: subtype is a string field, not numeric. The Old/New
+                // columns hold the raw subtype text; Δ is empty.
+                if (e.isAsset && e.field === 'subtype') {
+                    lines.push([
+                        'Asset',
+                        e.entityName || e.fpName || '',
+                        '(entity)',
+                        'Subtype' + (e.isNewSubtype ? ' (NEW)' : ''),
+                        e.oldValue || '',
+                        e.newValue || '',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
                 const oldV = conv(e.oldValueM);
                 const newV = conv(e.newValueM);
                 const delta = newV - oldV;
@@ -4399,8 +5435,9 @@
                 return;
             }
             const groups = groupPendingByEntity();
-            const fpCount = groups.filter(g => !g.isFfz).length;
             const ffzCount = groups.filter(g => g.isFfz).length;
+            const astCount = groups.filter(g => g.isAsset).length;
+            const fpCount = groups.length - ffzCount - astCount;
             // Open the launcher modal — picks dry-run vs live + shows
             // warnings before any action. Replaces the bare confirm()
             // dialog so the user can see drift warnings.
@@ -4409,6 +5446,7 @@
                 groupCount: groups.length,
                 fpCount,
                 ffzCount,
+                astCount,
                 warnings: pre.warnings,
                 onLaunch: (opts) => {
                     openApplyProgressModal(groups);
@@ -4479,7 +5517,15 @@
             redrawTable();
         };
         function redrawTable() {
+            // v3.52: preserve scroll position across redraws. Without
+            // this, every inline-edit commit wiped tableWrap.scrollTop
+            // and dumped the user at the top of the table — exactly
+            // what they complained about ruining the Tab-down rhythm.
+            const prevScrollTop = tableWrap.scrollTop;
             const rows = filterAndSortRows(allRows, sumPanelState);
+            // v3.52: expose current visible rows in display order so
+            // Tab-navigation in inline edits can find next/prev row.
+            window.__aim_ai_visibleRows = rows;
             tableWrap.innerHTML = '';
             const table = document.createElement('table');
             table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:auto';
@@ -4503,6 +5549,7 @@
                 return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
             };
             const allColDefs = [
+                { key: 'visibility', label: '👁',            w: 28,  num: false, dataKey: '_vis' },
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
@@ -4582,6 +5629,10 @@
             const tbody = document.createElement('tbody');
             rows.forEach((r) => {
                 const tr = document.createElement('tr');
+                // v3.52: data-row-key enables Tab-navigation between
+                // inline edits — startInlineSubtypeEdit/NameEdit finds
+                // the next row's cell via querySelector after commit.
+                tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
                 tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
                 tr.onmouseleave = () => { tr.style.background = 'transparent'; };
@@ -4646,15 +5697,92 @@
                     const td = document.createElement('td');
                     td.style.cursor = 'pointer';
                     td.onclick = onRowClick;
-                    if (col.key === 'typeShort') {
+                    td.setAttribute('data-col-key', col.key);
+                    if (col.key === 'visibility') {
+                        // v3.47: per-entity eye icon. M1 toggles, M2 solos.
+                        // Only applies to entity rows — segments inherit from
+                        // their parent FP, so segment rows show a dim em-dash.
+                        td.style.cssText = 'padding:5px 4px;text-align:center;cursor:pointer;font-size:14px;line-height:1';
+                        if (r._isSegment) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Segments inherit visibility from the parent flight path';
+                        } else {
+                            const visible = isEntityVisible(r.entity.id);
+                            td.textContent = '👁';
+                            td.style.color = visible ? '#14d2dc' : '#555';
+                            td.style.opacity = visible ? '1' : '0.35';
+                            td.style.textDecoration = visible ? 'none' : 'line-through';
+                            td.title = visible
+                                ? 'M1: hide this entity · M2: SOLO (hide all others)'
+                                : 'M1: show this entity · M2: show ALL entities again';
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                toggleEntityVisibility(r.entity);
+                            };
+                            td.oncontextmenu = (ev) => {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                if (visible) {
+                                    // Solo this one — collect all entity IDs
+                                    // from the current bucket so the state
+                                    // reflects "everyone but this one".
+                                    const siteID = getCurrentSiteID();
+                                    ensurePanelVisibility(siteID);
+                                    const bucket = siteID ? mapObjectsBySite[siteID] : null;
+                                    const allIds = bucket ? (bucket.entities || []).map(e => e.id) : [];
+                                    soloEntityVisibility(r.entity, allIds);
+                                } else {
+                                    unsoloAllVisibility();
+                                }
+                            };
+                        }
+                    } else if (col.key === 'typeShort') {
                         td.style.cssText = `padding:5px 8px;color:${typeBadgeColor(r.type)};font-weight:600;font-size:11px;cursor:pointer`;
                         td.textContent = r.typeShort;
                     } else if (col.key === 'name') {
-                        // Segment names get the parent FP color tinted
-                        // slightly dimmer so the eye groups them visually.
+                        // v3.50: Name cell is click-to-EDIT (queues rename)
+                        // for non-segment entity rows. M2 always copies the
+                        // current name to clipboard.
+                        // Segment rows stay click-to-pan/inspect (row default).
+                        const isEditable = !r._isSegment && r.entity;
                         const nameColor = r._isSegment ? '#a8c8d2' : '#e6e6e6';
-                        td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer`;
-                        td.textContent = r.name || '(unnamed)';
+                        const eff = isEditable ? effectiveName(r.entity) : { value: r.name || '', pending: false };
+                        // v3.52: nowrap so the pending overlay doesn't double row height.
+                        const nameNowrap = 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px';
+                        if (eff.pending && eff.oldValue) {
+                            td.style.cssText = `padding:5px 8px;cursor:pointer;border-bottom:1px dotted rgba(122,223,230,0.30);${nameNowrap}`;
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = eff.oldValue;
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = eff.value;
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `Was "${eff.oldValue}", will be "${eff.value}". M1: re-edit · M2: copy original.`;
+                        } else {
+                            td.style.cssText = `padding:5px 8px;color:${nameColor};cursor:pointer${isEditable ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''};${nameNowrap}`;
+                            td.textContent = eff.value || '(unnamed)';
+                            td.title = isEditable
+                                ? 'M1: edit name (queues) · M2: copy to clipboard'
+                                : 'M2: copy to clipboard';
+                        }
+                        if (isEditable) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineNameEdit(td, r.entity);
+                            };
+                        }
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            // Copy the EFFECTIVE (pending if any, else current)
+                            // name. Matches the subtype cell's pattern.
+                            const txt = (eff && eff.value) || r.name || '';
+                            if (!txt) return;
+                            copyToClipboard(txt, `Copied "${txt}"`);
+                        };
                     } else if (col.key === 'segId') {
                         // FP segment rows show the arc's ID from Percepto's
                         // JSON. NOT stable across saves — Percepto
@@ -4674,8 +5802,44 @@
                             copyToClipboard(String(r._segId), `Copied ${r._segId}`);
                         };
                     } else if (col.key === 'subtype') {
-                        td.style.cssText = 'padding:5px 8px;color:#bbb;font-size:11px;cursor:pointer';
-                        td.textContent = r.subtype || '—';
+                        // v3.41: asset subtype cells are inline-editable.
+                        // Non-asset rows (FP/FFZ/NFZ/markers) stay plain text.
+                        // v3.52: force single-line via nowrap+ellipsis so the
+                        // pending overlay (old strikethrough + new) doesn't
+                        // double row height and ruin the Tab-down rhythm.
+                        const isAsset = r.type === 3 && r.entity;
+                        const eff = isAsset ? effectiveSubtype(r.entity) : { value: r.subtype || '', pending: false };
+                        const baseColor = eff.pending ? '#ffd54f' : '#bbb';
+                        td.style.cssText = `padding:5px 8px;color:${baseColor};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px${isAsset ? ';border-bottom:1px dotted rgba(122,223,230,0.30)' : ''}`;
+                        if (eff.pending && eff.oldValue) {
+                            const oldSpan = document.createElement('span');
+                            oldSpan.textContent = eff.oldValue;
+                            oldSpan.style.cssText = 'color:#888;text-decoration:line-through;margin-right:5px;font-weight:normal';
+                            const newSpan = document.createElement('span');
+                            newSpan.textContent = eff.value + (eff.isNew ? ' ✨' : '');
+                            newSpan.style.cssText = 'color:#ffd54f;font-weight:700';
+                            td.appendChild(oldSpan);
+                            td.appendChild(newSpan);
+                            td.title = `Was "${eff.oldValue}", will be "${eff.value}"${eff.isNew ? ' (NEW type — will be added to Percepto)' : ''}. Click to re-edit · Right-click: copy current value.`;
+                        } else {
+                            td.textContent = eff.value || '—';
+                            td.title = isAsset
+                                ? 'Click: edit subtype · Right-click: copy'
+                                : (r.subtype ? 'Right-click: copy' : 'No subtype');
+                        }
+                        if (isAsset) {
+                            td.onclick = (ev) => {
+                                ev.stopPropagation();
+                                startInlineSubtypeEdit(td, r.entity);
+                            };
+                        }
+                        td.oncontextmenu = (ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const txt = eff.value || r.subtype || '';
+                            if (!txt) return;
+                            copyToClipboard(txt, `Copied "${txt}"`);
+                        };
                     } else if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta') {
                         // Min, Max, and Delta cells. Min/Max on FP segment
                         // rows are inline-editable. Delta is derived; never
@@ -4809,6 +5973,11 @@
             });
             table.appendChild(tbody);
             tableWrap.appendChild(table);
+            // v3.52: restore the scroll position we saved at the top of
+            // redrawTable. Inline-edit commits trigger a full redraw;
+            // keeping the user in the same vertical position is what
+            // makes Tab-to-next-row feel like a continuous edit flow.
+            try { tableWrap.scrollTop = prevScrollTop; } catch (e) {}
 
             countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
             refreshQueueUi();
@@ -4837,6 +6006,12 @@
                     return sumPanelState.unitsFt ? Math.round(m * 3.28084).toString() : m.toFixed(1);
                 };
                 const data = exportRows().map(r => cols.map(col => {
+                    if (col.key === 'visibility') {
+                        // Visibility is UI state, not data. Empty cell in
+                        // exports keeps the column count consistent with
+                        // the header without leaking emoji into spreadsheets.
+                        return '';
+                    }
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
@@ -5010,6 +6185,216 @@
         input.onblur = commit;
         input.onkeydown = (e) => {
             if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelled = true;
+                input.onblur = null;
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            }
+        };
+    }
+
+    // v3.41: open an inline editor on an asset's Subtype cell — either
+    // the SUM table column or the right-click popup row. Replaces the
+    // cell content with a text input pre-filled with the current (or
+    // pending-derived) value, with a datalist of observed subtypes for
+    // autocomplete. Enter/Tab/blur commits to the pending queue; Esc
+    // cancels. Free-text values not in the list get isNewSubtype=true
+    // and apply via the "Enter new type" + Add path in Percepto's editor.
+    //
+    // td: the cell element to swap in the input
+    // entity: the asset entity (must be type === 3)
+    // v3.52: Tab navigation in inline edits. Given the currently-edited
+    // row's _rowKey, find the next/prev row in display order that has an
+    // editable cell for this column. After a commit + table redraw,
+    // openInlineForRow opens an inline editor on the resolved cell.
+    //
+    // Filter: subtype edits only walk to asset rows (type === 3). Name
+    // edits walk to any non-segment entity row.
+    function findNextRowForCol(currentRowKey, direction, filter) {
+        const rows = window.__aim_ai_visibleRows || [];
+        const idx = rows.findIndex(r => r._rowKey === currentRowKey);
+        if (idx < 0) return null;
+        for (let i = 1; i <= rows.length; i++) {
+            const ci = idx + i * direction;
+            if (ci < 0 || ci >= rows.length) return null; // don't wrap
+            const cand = rows[ci];
+            if (filter(cand)) return cand;
+        }
+        return null;
+    }
+    // Finds the cell in the rendered table for a given rowKey + colKey.
+    // Called inside requestAnimationFrame after a commit-triggered redraw.
+    function findCellAfterRedraw(rowKey, colKey) {
+        return document.querySelector(`tr[data-row-key="${CSS.escape(rowKey)}"] td[data-col-key="${colKey}"]`);
+    }
+
+    // onCommit: optional callback fired AFTER successful queue (used
+    //   for the popup path so it can close itself; the SUM table path
+    //   redraws via window.__aim_ai_redrawTable).
+    function startInlineSubtypeEdit(td, entity, onCommit) {
+        if (!entity || entity.type !== 3) return;
+        // v3.43: starting an edit implicitly means "I'm focused on this
+        // asset" — pan the map to it so the user can see the entity
+        // they're about to relabel without an extra click on the row.
+        try { panToEntity(entity); } catch (e) {}
+        const eff = effectiveSubtype(entity);
+        const startVal = eff.value;
+
+        // Build a unique datalist id so multiple cells don't collide.
+        const dlId = `aim-subtype-dl-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const dl = document.createElement('datalist');
+        dl.id = dlId;
+        const siteID = getCurrentSiteID();
+        observedSubtypesForSite(siteID).forEach(s => {
+            const o = document.createElement('option');
+            o.value = s;
+            dl.appendChild(o);
+        });
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = startVal || '';
+        input.setAttribute('list', dlId);
+        input.title = 'Pick from list OR type a new subtype. Enter = queue · Esc = cancel.';
+        input.style.cssText = 'width:160px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px';
+        // v3.42: critical — stop click/mousedown propagation. Without
+        // this, clicking the input bubbles to the cell's onclick which
+        // re-runs startInlineSubtypeEdit and wipes the input mid-edit
+        // (looks like "dropdown opens then immediately closes").
+        input.onmousedown = (e) => e.stopPropagation();
+        input.onclick = (e) => e.stopPropagation();
+
+        td.innerHTML = '';
+        td.appendChild(input);
+        td.appendChild(dl);
+        input.focus();
+        input.select();
+
+        let cancelled = false;
+        const commit = () => {
+            if (cancelled) return;
+            const raw = input.value;
+            const newVal = String(raw || '').trim();
+            if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            const queued = queueSubtypeEdit(entity, newVal);
+            if (queued) {
+                const observed = new Set(observedSubtypesForSite(siteID));
+                const isNew = !observed.has(newVal);
+                showToast(
+                    `Queued: ${entity.name || 'asset'} subtype → ${newVal}${isNew ? ' (will be added as new type)' : ''}`,
+                    'rgba(255,213,79,0.7)'
+                );
+            } else if (newVal === ((entity.custom && entity.custom.poi_type_str) || '')) {
+                // No-op — either typed back to original, or never changed
+                if (getPendingSubtype(entity.id) === undefined && eff.pending) {
+                    // (eff.pending was true at start but cleared above by no-op)
+                    showToast('Reverted to original subtype');
+                }
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            if (typeof onCommit === 'function') {
+                try { onCommit(queued); } catch (e) {}
+            }
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Tab') {
+                // v3.52: Tab → next asset row's Subtype cell; Shift+Tab → prev.
+                // Commits current edit + opens edit on the next cell so the
+                // user never leaves the keyboard.
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                const next = findNextRowForCol(String(entity.id), dir, r => r.type === 3 && !r._isSegment);
+                input.blur(); // triggers commit + redraw
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, 'subtype');
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineSubtypeEdit(nextTd, next.entity);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelled = true;
+                input.onblur = null;
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                if (typeof onCommit === 'function') {
+                    try { onCommit(false); } catch (e2) {}
+                }
+            }
+        };
+    }
+
+    // v3.50: inline editor for entity name. Plain text input (no datalist
+    // — names are unique-by-intent, no autocomplete needed). Same click-
+    // propagation guards as subtype edit. Auto-pans to entity on edit.
+    function startInlineNameEdit(td, entity, onCommit) {
+        if (!entity) return;
+        try { panToEntity(entity); } catch (e) {}
+        const eff = effectiveName(entity);
+        const startVal = eff.value || '';
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = startVal;
+        input.title = 'Enter new name. Enter = queue · Esc = cancel.';
+        input.style.cssText = 'width:220px;background:#1a1d23;border:1px solid #14d2dc;color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:12px';
+        input.onmousedown = (e) => e.stopPropagation();
+        input.onclick = (e) => e.stopPropagation();
+
+        td.innerHTML = '';
+        td.appendChild(input);
+        input.focus();
+        input.select();
+
+        let cancelled = false;
+        const commit = () => {
+            if (cancelled) return;
+            const newVal = String(input.value || '').trim();
+            if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            const queued = queueNameEdit(entity, newVal);
+            if (queued) {
+                showToast(`Queued: rename "${entity.name}" → "${newVal}"`, 'rgba(255,213,79,0.7)');
+            } else if (newVal === (entity.name || '')) {
+                if (eff.pending) showToast('Reverted to original name');
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+            if (typeof onCommit === 'function') {
+                try { onCommit(queued); } catch (e) {}
+            }
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Tab') {
+                // v3.52: Tab → next non-segment entity row's Name cell.
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                const next = findNextRowForCol(String(entity.id), dir, r => !r._isSegment && r.entity);
+                input.blur();
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, 'name');
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineNameEdit(nextTd, next.entity);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             } else if (e.key === 'Escape') {
