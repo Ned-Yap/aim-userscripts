@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.23 — icon always inside the polygon
+
+For L-shaped, C-shaped, or any concave polygon, the arithmetic centroid can fall OUTSIDE the polygon (the empty corner of the L). User reported the ⚠ icon landing outside the dashed outline. Fixed with `bestInteriorPoint()`:
+
+1. If the arithmetic centroid is inside the polygon → use it (fast, ideal for convex shapes — the common case)
+2. Else: grid-search 20×20 candidates in the bounding box, return the interior candidate with maximum distance to the nearest edge (pole-of-inaccessibility approximation, ~50 lines, fast enough for 4-100 vertex polygons)
+3. Degenerate fallback: first vertex if grid finds nothing inside
+
+Both the icon placement and the "row click → pan" fallback now use the new helper.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.22 — first-issue icon-render bug
 
 Root cause finally pinned (thanks to v0.21's try/catch console diagnostic):

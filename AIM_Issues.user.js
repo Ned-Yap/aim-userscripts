@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1479,6 +1479,64 @@
         return [sLat / latlngs.length, sLng / latlngs.length];
     }
 
+    // v0.23: arithmetic centroid falls OUTSIDE concave polygons (L-shapes,
+    // C-shapes, etc.) — user reported the issue icon landing outside the
+    // polygon. Better: pole-of-inaccessibility — the interior point that
+    // is maximally distant from every edge. Simple grid-search variant
+    // since our polygons are small (4-100 vertices). Falls back to:
+    //   1. arithmetic centroid if it's inside the polygon
+    //   2. grid-search best interior point
+    //   3. first vertex if grid search finds nothing inside (degenerate)
+    function pointToSegDistSq(px, py, x1, y1, x2, y2) {
+        const dx = x2 - x1, dy = y2 - y1;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq === 0) return (px - x1) * (px - x1) + (py - y1) * (py - y1);
+        let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const cx = x1 + t * dx, cy = y1 + t * dy;
+        return (px - cx) * (px - cx) + (py - cy) * (py - cy);
+    }
+
+    function bestInteriorPoint(polygon) {
+        if (!polygon || polygon.length < 3) return centroidOfLatLngs(polygon);
+        // 1. arithmetic centroid if it's inside the polygon — fastest, ideal
+        //    for convex shapes (the common case).
+        const centroid = centroidOfLatLngs(polygon);
+        if (centroid && pointInPolygon(centroid[0], centroid[1], polygon)) {
+            return centroid;
+        }
+        // 2. grid search: 20x20 candidates in the bounding box, pick the
+        //    interior point with the maximum distance to the nearest edge.
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        for (const p of polygon) {
+            if (p[0] < minLat) minLat = p[0];
+            if (p[0] > maxLat) maxLat = p[0];
+            if (p[1] < minLng) minLng = p[1];
+            if (p[1] > maxLng) maxLng = p[1];
+        }
+        const N = 20;
+        let bestPoint = null, bestDistSq = -1;
+        for (let i = 1; i < N; i++) {
+            for (let j = 1; j < N; j++) {
+                const lat = minLat + (maxLat - minLat) * (i / N);
+                const lng = minLng + (maxLng - minLng) * (j / N);
+                if (!pointInPolygon(lat, lng, polygon)) continue;
+                let minDistSq = Infinity;
+                for (let k = 0; k < polygon.length; k++) {
+                    const a = polygon[k], b = polygon[(k + 1) % polygon.length];
+                    const d = pointToSegDistSq(lat, lng, a[0], a[1], b[0], b[1]);
+                    if (d < minDistSq) minDistSq = d;
+                }
+                if (minDistSq > bestDistSq) {
+                    bestDistSq = minDistSq;
+                    bestPoint = [lat, lng];
+                }
+            }
+        }
+        // 3. degenerate (very thin sliver) → first vertex
+        return bestPoint || (polygon[0] ? [polygon[0][0], polygon[0][1]] : null);
+    }
+
     // ------- Affected-entity detection (v0.17 — Phase 5b) -------
     //
     // Percepto's /map_objects endpoint returns the site's entity list. We
@@ -1940,7 +1998,10 @@
             try { polygon._path.style.pointerEvents = 'none'; } catch (e) {}
         }
 
-        const c = centroidOfLatLngs(issue.polygon);
+        // v0.23: bestInteriorPoint (pole-of-inaccessibility variant) instead
+        // of arithmetic centroid — guarantees the icon lands INSIDE the
+        // polygon even for L-shapes / C-shapes / concave outlines.
+        const c = bestInteriorPoint(issue.polygon);
         let marker = null;
         // v0.21: wrap marker code in try/catch. A coworker hit "polygon
         // renders but icon doesn't" — meant something in here threw silently
@@ -2940,8 +3001,8 @@
             const bounds = L.latLngBounds(issue.polygon);
             map.fitBounds(bounds, { padding: [80, 80], maxZoom: 19, animate: true, duration: 0.4 });
         } catch (e) {
-            // Fallback to plain pan
-            const c = centroidOfLatLngs(issue.polygon);
+            // Fallback to plain pan (v0.23: best-interior, not raw centroid)
+            const c = bestInteriorPoint(issue.polygon);
             if (c) { try { map.panTo(c, { animate: true, duration: 0.4 }); } catch (e2) {} }
         }
     }
