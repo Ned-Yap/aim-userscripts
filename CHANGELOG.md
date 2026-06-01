@@ -6,6 +6,28 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.3 (Phase 1 polish)
+
+Second round of v0.1 testing fixes:
+
+- **Tooltip readability.** Leaflet's default `.leaflet-tooltip` is white-on-white-ish — the issue note text washed out. Injected a `.aim-issues-tooltip` style override: dark background `rgba(15,18,22,0.96)`, red border, bright `#ffffff` bold note text, blue username. Tooltip arrow color updated for all four directions.
+- **M2 on 🚩 simplified to "un-hide all non-resolved".** v0.2's "toggle showHidden" mode was confusing. v0.3: M2 simply un-hides every session-hidden issue whose status is NOT `resolved` or `ignored`. Resolved/ignored stay hidden by design (they're meant to be background). For Phase 1 (only `open` issues exist), it's effectively un-hide-all. `showHidden` state removed; hidden issues always render dimmed until un-hid or refresh.
+- **Control Panel "Issue rendering" category.** Eight sliders for tuning visible + hidden style. All re-render live on change.
+  - Visible stroke weight (1-6 px, default 3)
+  - Visible stroke opacity (0.4-1, default 0.95)
+  - Visible fill opacity (0-0.5, default 0.15)
+  - Visible marker size (16-44 px, default 26)
+  - Hidden stroke opacity (0.05-0.8, default 0.25)
+  - Hidden fill opacity (0-0.3, default 0.04)
+  - Hidden stroke weight (0.5-3 px, default 1.5)
+  - Hidden marker size (10-40 px, default 20)
+- Marker font size auto-derives from marker size now (no separate toggle).
+- Status colors + dash patterns are NOT in the toggles — they encode meaning (red=open, yellow=ready-for-review, etc.) and shouldn't be user-overridden.
+
+Still LOCAL-ONLY — Phase 2 brings GitHub identity + sync.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.2 (Phase 1 follow-up)
 
 First-look feedback fixes from testing v0.1:

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -41,7 +41,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -49,16 +49,62 @@
     const SCRIPT_ID = 'aim-issues';
     const STORAGE_PREFIX = 'aim-issues-site-';
 
+    // ------- Control Panel toggle schema (v0.3) -------
+    // Defaults match v0.2 visual behavior. User can dial these in via the
+    // AIM Controls dropdown — "Issue rendering" category.
+    const TOGGLES = [
+        { id: 'master', label: 'Enable Issues', type: 'boolean', default: true, master: true },
+        {
+            type: 'category',
+            id: 'render-cat',
+            label: 'Issue rendering',
+            children: [
+                { id: 'render.visible-weight', label: 'Visible stroke weight', type: 'number',
+                  min: 1, max: 6, step: 0.5, default: 3, unit: 'px' },
+                { id: 'render.visible-opacity', label: 'Visible stroke opacity', type: 'number',
+                  min: 0.4, max: 1, step: 0.05, default: 0.95, unit: 'fill' },
+                { id: 'render.visible-fill', label: 'Visible fill opacity', type: 'number',
+                  min: 0, max: 0.5, step: 0.025, default: 0.15, unit: 'fill' },
+                { id: 'render.visible-marker-size', label: 'Visible marker size', type: 'number',
+                  min: 16, max: 44, step: 2, default: 26, unit: 'px' },
+                { id: 'render.hidden-opacity', label: 'Hidden stroke opacity', type: 'number',
+                  min: 0.05, max: 0.8, step: 0.05, default: 0.25, unit: 'fill' },
+                { id: 'render.hidden-fill', label: 'Hidden fill opacity', type: 'number',
+                  min: 0, max: 0.3, step: 0.01, default: 0.04, unit: 'fill' },
+                { id: 'render.hidden-weight', label: 'Hidden stroke weight', type: 'number',
+                  min: 0.5, max: 3, step: 0.5, default: 1.5, unit: 'px' },
+                { id: 'render.hidden-marker-size', label: 'Hidden marker size', type: 'number',
+                  min: 10, max: 40, step: 2, default: 20, unit: 'px' },
+            ],
+        },
+    ];
+
+    function flattenToggles(arr) {
+        const out = [];
+        (arr || []).forEach(t => {
+            if (!t) return;
+            if ((t.type === 'advanced' || t.type === 'category') && Array.isArray(t.children)) {
+                if (t.type === 'category' && t.master && t.master.id) {
+                    out.push({ id: t.master.id, default: t.master.default });
+                }
+                t.children.forEach(c => { if (c && c.id) out.push(c); });
+            } else if (t.id) {
+                out.push(t);
+            }
+        });
+        return out;
+    }
+    const toggleState = {};
+    flattenToggles(TOGGLES).forEach(t => { toggleState[t.id] = t.default; });
+
+    function getT(key) { return toggleState[key]; }
+
     // ------- State -------
     let masterEnabled = true;
     let flagModeActive = false;
     let siteID = null;
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
-    let showHidden = true;                       // v0.2: when ON, session-hidden
-                                                 // issues render dimmed instead
-                                                 // of disappearing. M2 on 🚩
-                                                 // toggles this.
     const issueLayers = new Map();               // issueId → { polygon, marker }
     let drawingState = null;
     let drawToolbarEl = null;
@@ -142,20 +188,35 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
-                const v = msg.value !== undefined ? msg.value : msg.enabled;
-                if (msg.toggleId === 'master') {
-                    if (!!v === masterEnabled) return;
-                    masterEnabled = !!v;
-                    renderButtonState();
-                    if (!masterEnabled) {
-                        if (flagModeActive) setFlagMode(false);
-                        clearIssueLayers();
-                    } else {
-                        renderAllIssues();
-                    }
-                }
+                handleSetToggle(msg);
             }
         };
+    }
+
+    function handleSetToggle(msg) {
+        const v = msg.value !== undefined ? msg.value : msg.enabled;
+        if (msg.toggleId === 'master') {
+            const next = !!v;
+            if (next === masterEnabled) return;
+            masterEnabled = next;
+            renderButtonState();
+            if (!masterEnabled) {
+                if (flagModeActive) setFlagMode(false);
+                clearIssueLayers();
+            } else {
+                renderAllIssues();
+            }
+            return;
+        }
+        // Render toggles (numbers). All re-render on change — idempotent
+        // early-return prevents render thrash from duplicate broadcasts.
+        if (msg.toggleId in toggleState) {
+            const def = flattenToggles(TOGGLES).find(t => t.id === msg.toggleId);
+            const nextRaw = (def && def.type === 'number') ? Number(v) : v;
+            if (toggleState[msg.toggleId] === nextRaw) return;
+            toggleState[msg.toggleId] = nextRaw;
+            renderAllIssues();
+        }
     }
 
     function registerWithControlPanel() {
@@ -166,9 +227,7 @@
                 scriptId: SCRIPT_ID,
                 name: 'Issues',
                 version: SCRIPT_VERSION,
-                toggles: [
-                    { id: 'master', label: 'Enable Issues', type: 'boolean', default: true, master: true },
-                ],
+                toggles: TOGGLES,
                 hotkeys: [],
             });
         } catch (e) {}
@@ -281,19 +340,7 @@
         buttonEl.addEventListener('contextmenu', (e) => {
             e.preventDefault(); e.stopPropagation();
             if (!masterEnabled) return;
-            // v0.2: M2 toggles whether session-hidden issues render at all.
-            // When ON (default), hidden issues show DIMMED (M1 the marker
-            // to un-hide). When OFF, they vanish entirely until either
-            // a) M2 here flips back, or b) page refresh resets hiddenIds.
-            showHidden = !showHidden;
-            renderAllIssues();
-            renderButtonState();
-            const n = hiddenIds.size;
-            if (showHidden) {
-                showToast(`Showing ${n} hidden issue${n === 1 ? '' : 's'} dimmed. M1 the icon to un-hide.`, 3500);
-            } else {
-                showToast(`Hiding ${n} session-hidden issue${n === 1 ? '' : 's'} completely.`, 3500);
-            }
+            unhideAllNonResolved();
         });
         renderButtonState();
         console.log(`${TAG} v${SCRIPT_VERSION} button injected into .map-tools`);
@@ -340,14 +387,12 @@
             }
         }
         const hiddenCount = hiddenIds.size;
-        const hiddenSuffix = hiddenCount > 0
-            ? ` · ${hiddenCount} hidden ${showHidden ? '(dimmed)' : '(off)'} — M2 to toggle`
-            : '';
+        const hiddenSuffix = hiddenCount > 0 ? ` · ${hiddenCount} hidden — M2 un-hides non-resolved` : '';
         buttonEl.title = !masterEnabled
             ? 'Issues: disabled in AIM Controls'
             : flagModeActive
                 ? `Issues: FLAG MODE armed — click-drag for rectangle, Shift+click for polygon, Esc to exit${hiddenSuffix}`
-                : `Issues · M1 toggle flag mode · M2 toggle visibility of session-hidden${hiddenSuffix}`;
+                : `Issues · M1 toggle flag mode · M2 un-hide all non-resolved${hiddenSuffix}`;
 
         // Badge: count for current site
         let badge = buttonEl.querySelector('.aim-issues-badge');
@@ -793,14 +838,39 @@
         if (!masterEnabled) return;
         currentSiteIssues.forEach((issue) => {
             const isHidden = hiddenIds.has(issue.id);
-            // v0.2: when showHidden=OFF, hidden issues are not rendered at all.
-            // When showHidden=ON (default), they render with dimmed style and
-            // the polygon goes pointer-events:none so clicks fall through to
-            // whatever's under it (Percepto markers, KML lines, etc.). The
-            // small ⚠ marker stays clickable so the user can M1 to un-hide.
-            if (isHidden && !showHidden) return;
+            // Hidden issues ALWAYS render dimmed (polygon click-through,
+            // marker still clickable to un-hide). M2 on the 🚩 button
+            // un-hides all non-resolved at once.
             renderOneIssue(issue, { isHidden });
         });
+    }
+
+    function unhideAllNonResolved() {
+        if (hiddenIds.size === 0) {
+            showToast('Nothing to un-hide.', 2000);
+            return;
+        }
+        let unhid = 0;
+        let kept = 0;
+        const toUnhide = [];
+        hiddenIds.forEach(id => {
+            const issue = currentSiteIssues.find(i => i.id === id);
+            // If the underlying issue no longer exists, drop the hide.
+            if (!issue) { toUnhide.push(id); return; }
+            // Resolved + ignored stay hidden — they're meant to be background.
+            if (issue.status === 'resolved' || issue.status === 'ignored') { kept++; return; }
+            toUnhide.push(id);
+        });
+        toUnhide.forEach(id => { hiddenIds.delete(id); unhid++; });
+        renderAllIssues();
+        renderButtonState();
+        if (unhid === 0) {
+            showToast(`No active issues hidden (${kept} resolved/ignored stay hidden).`, 3000);
+        } else {
+            showToast(
+                `Un-hid ${unhid} issue${unhid === 1 ? '' : 's'}${kept > 0 ? ` (${kept} resolved/ignored stay hidden)` : ''}.`,
+                3500);
+        }
     }
 
     function centroidOfLatLngs(latlngs) {
@@ -850,25 +920,30 @@
         }
         const st = styleForStatus(issue.status);
         const icoMeta = iconForStatus(issue.status);
-        // v0.2: hidden style — dimmed to ~25% opacity, thinner stroke, almost
-        // no fill, polygon goes interactive:false so clicks fall through.
-        // The marker stays interactive so M1 on it un-hides.
+        // v0.3: stroke weight + opacities are user-tunable via Control Panel.
+        // Status only drives color + dash pattern; size/opacity are global.
+        const vWeight  = Number(getT('render.visible-weight'))  || 3;
+        const vOpacity = Number(getT('render.visible-opacity')) || 0.95;
+        const vFill    = Number(getT('render.visible-fill'))    || 0.15;
+        const hOpacity = Number(getT('render.hidden-opacity'))  || 0.25;
+        const hFill    = Number(getT('render.hidden-fill'))     || 0.04;
+        const hWeight  = Number(getT('render.hidden-weight'))   || 1.5;
         const polygonOpts = isHidden ? {
             color: st.color,
-            weight: 1.5,
-            opacity: 0.25,
+            weight: hWeight,
+            opacity: hOpacity,
             dashArray: st.dashArray,
             fillColor: st.fill,
-            fillOpacity: 0.04,
+            fillOpacity: hFill,
             interactive: false,
             bubblingMouseEvents: false,
         } : {
             color: st.color,
-            weight: st.weight,
-            opacity: 0.95,
+            weight: vWeight,
+            opacity: vOpacity,
             dashArray: st.dashArray,
             fillColor: st.fill,
-            fillOpacity: st.fillOpacity,
+            fillOpacity: vFill,
             interactive: true,
             bubblingMouseEvents: false,
         };
@@ -901,10 +976,11 @@
         const c = centroidOfLatLngs(issue.polygon);
         let marker = null;
         if (c) {
-            // Hidden marker: smaller, dim border, dim glyph, but still clickable.
+            const vMarker = Number(getT('render.visible-marker-size')) || 26;
+            const hMarker = Number(getT('render.hidden-marker-size')) || 20;
             const markerOpacity = isHidden ? 0.45 : 1;
-            const markerSize = isHidden ? 20 : 26;
-            const fontSize = isHidden ? 11 : 14;
+            const markerSize = isHidden ? hMarker : vMarker;
+            const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
             const divIcon = L.divIcon({
                 className: 'aim-issues-icon-marker',
@@ -951,14 +1027,17 @@
         const safeBy = (issue.createdBy || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
         const statusLabel = (issue.status || 'open').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
         const hideHint = opts.isHidden
-            ? '<span style="color:#5fff5f">HIDDEN</span> · M1 to un-hide · M2 = status (stub)'
-            : 'M1 = hide for this session · M2 = status (stub)';
+            ? '<span style="color:#5fff5f;font-weight:700">HIDDEN</span> &middot; M1 to un-hide &middot; M2 = status (stub)'
+            : 'M1 = hide &middot; M2 = status (stub)';
+        // v0.3: dark-background tooltip via .aim-issues-tooltip class (CSS
+        // injected once at init). Note text is now bold #ffffff for max
+        // contrast against the dark bg.
         return `
-            <div style="max-width:300px">
-                <div style="font-weight:700;color:#ff8585;margin-bottom:4px">${statusLabel} · ${age}</div>
-                <div style="color:#e6e6e6;font-size:12px;margin-bottom:4px">${safeNote}</div>
-                <div style="color:#888;font-size:11px">@${safeBy}</div>
-                <div style="color:#666;font-size:10px;margin-top:4px;font-style:italic">${hideHint}</div>
+            <div style="max-width:320px;line-height:1.35">
+                <div style="font-weight:700;color:#ff8585;font-size:13px;margin-bottom:6px">${statusLabel} &middot; ${age}</div>
+                <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
+                <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
+                <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>
             </div>
         `;
     }
@@ -987,27 +1066,10 @@
         const willHide = !hiddenIds.has(id);
         if (willHide) hiddenIds.add(id);
         else hiddenIds.delete(id);
-        // v0.2: don't remove layers — re-render with the new style. When
-        // showHidden=OFF and we're hiding, renderOneIssue would still draw
-        // it dimmed, so we have to honor the global flag here too.
-        if (willHide && !showHidden) {
-            // Truly remove
-            const map = getLeafletMap();
-            const layers = issueLayers.get(id);
-            if (layers && map) {
-                try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
-                try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
-            }
-            issueLayers.delete(id);
-        } else {
-            renderOneIssue(issue, { isHidden: willHide });
-        }
+        renderOneIssue(issue, { isHidden: willHide });
         renderButtonState();
         if (willHide) {
-            showToast(showHidden
-                ? 'Issue hidden (dimmed). M1 the small icon to un-hide. M2 🚩 to hide all hidden completely.'
-                : 'Issue hidden completely. M2 🚩 to show dimmed.',
-                4500);
+            showToast('Issue dimmed. M1 the small icon to un-hide. M2 🚩 to un-hide all non-resolved.', 4500);
         } else {
             showToast('Issue un-hidden.', 2000);
         }
@@ -1092,6 +1154,32 @@
         setTimeout(() => { try { toast.remove(); } catch (e) {} }, durationMs || 3000);
     }
 
+    // v0.3: dark tooltip so the issue note is readable. Leaflet's default
+    // .leaflet-tooltip is white on white-ish — the note text washed out.
+    // Scoped to .aim-issues-tooltip so it doesn't touch Percepto's other
+    // tooltips.
+    function injectStyles() {
+        if (document.getElementById('aim-issues-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'aim-issues-styles';
+        style.textContent = `
+            .leaflet-tooltip.aim-issues-tooltip {
+                background: rgba(15, 18, 22, 0.96) !important;
+                color: #ffffff !important;
+                border: 1px solid rgba(255, 77, 77, 0.65) !important;
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.65) !important;
+                padding: 9px 12px !important;
+                border-radius: 6px !important;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
+            }
+            .leaflet-tooltip-top.aim-issues-tooltip::before    { border-top-color:    rgba(15,18,22,0.96) !important; }
+            .leaflet-tooltip-bottom.aim-issues-tooltip::before { border-bottom-color: rgba(15,18,22,0.96) !important; }
+            .leaflet-tooltip-left.aim-issues-tooltip::before   { border-left-color:   rgba(15,18,22,0.96) !important; }
+            .leaflet-tooltip-right.aim-issues-tooltip::before  { border-right-color:  rgba(15,18,22,0.96) !important; }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
     // ------- Init -------
     function init() {
         setupControlChannel();
@@ -1105,6 +1193,7 @@
             attachHashListener();
             return;
         }
+        injectStyles();
         setCurrentSite(readSiteIdFromHash());
         attachHashListener();
         ensureButton();
