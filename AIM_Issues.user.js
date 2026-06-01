@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.21';
+    const SCRIPT_VERSION = '0.22';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1386,7 +1386,10 @@
     // in, the first explicit call polls every 500ms (up to ~15s) until the
     // map appears, then renders. Any new explicit call resets the budget.
     let renderRetryTimer = null;
-    const RENDER_MAX_RETRIES = 30;
+    // v0.22: bumped from 30 → 60 (15s → 30s budget). User hit "gave up
+    // after 30 tries" on a slow load with concurrent Map Styler kick;
+    // 30s gives Leaflet a more comfortable window to materialize.
+    const RENDER_MAX_RETRIES = 60;
     const RENDER_RETRY_MS = 500;
 
     function renderAllIssues() {
@@ -1884,6 +1887,13 @@
         const map = getLeafletMap();
         const L = getL();
         if (!map || !L) return;
+        // v0.22: ensureCustomPanes was only called by renderAllIssues, but
+        // createIssue calls renderOneIssue DIRECTLY. Result: first-issue
+        // creation on a fresh site fails — `pane: 'aim-issues-markers'` is
+        // passed to L.marker, then marker.addTo blows up in _initIcon
+        // because the pane was never registered on this map. Idempotent
+        // (gated by map._aim_issues_panes_created).
+        ensureCustomPanes(map);
         // Wipe any prior layers for this id (re-renders are idempotent)
         const prior = issueLayers.get(issue.id);
         if (prior) {

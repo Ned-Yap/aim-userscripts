@@ -6,6 +6,29 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.22 — first-issue icon-render bug
+
+Root cause finally pinned (thanks to v0.21's try/catch console diagnostic):
+
+```
+[AIM ISSUES] marker render failed for issue iss_...:
+  TypeError: Cannot read properties of undefined (reading 'appendChild')
+    at L.Marker._initIcon ... at marker.addTo ... at renderOneIssue
+    at createIssue at save.onclick
+```
+
+`ensureCustomPanes(map)` was only called from `renderAllIssues`. But `createIssue` calls `renderOneIssue` DIRECTLY. On a fresh site with no issues yet, the panes were never created when the user created their first one — the marker was constructed with `pane: 'aim-issues-markers'`, then `marker.addTo` blew up trying to `appendChild` to the missing pane.
+
+Fix: call `ensureCustomPanes(map)` at the top of `renderOneIssue`. Idempotent (gated by `map._aim_issues_panes_created`), no perf cost on subsequent calls. Bumped `RENDER_MAX_RETRIES` from 30 → 60 (15s → 30s) too — earlier log showed "gave up after 30 tries" during a slow load colliding with a Map Styler kick.
+
+---
+
+## 2026-06-01 — Asset Inspector v3.58 — visible version log
+
+Console startup was hardcoded to "v2.0 loading" / "v2.0 ready" — had been stuck there for ~50 versions, which made auto-update verification impossible from the console (user saw "v2.0" no matter what was actually loaded). Fixed to use the `SCRIPT_VERSION` constant.
+
+---
+
 ## 2026-06-01 — Asset Inspector v3.57 — two more whitespace bugs
 
 The trailing-whitespace saga continues. Two more sites un-trimmed:
