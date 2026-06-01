@@ -6,6 +6,31 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.5 (Phase 2 — GitHub sync)
+
+Issues now persist to GitHub instead of just `localStorage`. All Phase 2 design lines (private repo, PAT-driven, per-site JSON, real GitHub identity) landed in one cut.
+
+### What changed
+- **`@grant`** widened to `GM_xmlhttpRequest / GM_setValue / GM_getValue` + `@connect api.github.com`.
+- **Token plumbing.** Subscribes to `TOKEN_VALUE` on `AIM_CONTROL_CHANNEL` (same channel Map Styler uses); also recovers token from GM storage on refresh so we can sync before the panel broadcasts. On token change → `GET /user` once, cache the login. `REFETCH_KMLS` (Map Styler's "token changed" signal) triggers a re-pull of issues too.
+- **Site-change fetch.** `setCurrentSite` calls `refetchIssues` when a token is present. Reads `issues/<siteID>-issues.json` from `Ned-Yap/aim-userscripts-data` via the Contents API (always-fresh, not raw CDN). Caches SHA per site.
+  - **200**: union-merges remote + local by ID. Conflicts pick the one with the later `history[last].at`. If local had IDs the remote didn't, immediately PUTs the merge.
+  - **404**: no file yet. If local has issues, PUTs them as the initial commit (this is the v0.1-v0.4 migration path).
+- **Create commit.** `createIssue` now uses the cached GitHub username for `createdBy` + each `history` entry. Token present → fires `commitIssuesToGitHub` (PUT with cached SHA). 409/422 conflicts re-GET + union-merge + retry once. A concurrent second create during an in-flight commit is queued and pushed on a follow-up.
+- **Sync status dot.** Small colored circle in the 🚩 button's top-left corner (count badge stays top-right):
+  - **grey** = no token (local-only)
+  - **green** = synced
+  - **orange** = syncing or pending (glows during a request in flight)
+  - **red** = error (glows; check console)
+- **TOP-frame gate.** The script runs in both top and iframe contexts, but all `fetchRemoteIssues` / `commitIssuesToGitHub` / `fetchGithubUsername` calls early-return on TOP to avoid duplicate GitHub round trips. Sync is iframe-only.
+
+### What's still ahead
+- Phase 3: real status state machine (Open → Ready-for-Review → Resolved/Ignored with required notes, real M2 status modal).
+- Phase 5: dedicated 🚩 panel + SUM-table integration.
+- Phase 6: Mission Bank surface filter.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.4 (Phase 1 startup-race fix)
 
 Bug: on page refresh, issues didn't render. Only way to see them was to toggle Enable off/on or move any Issue Rendering slider — both of those re-fire `renderAllIssues` after Leaflet has mounted, hiding the underlying race.

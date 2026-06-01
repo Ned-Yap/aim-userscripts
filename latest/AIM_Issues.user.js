@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -9,7 +9,10 @@
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @connect      api.github.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -48,6 +51,56 @@
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-issues';
     const STORAGE_PREFIX = 'aim-issues-site-';
+
+    // ------- GitHub sync constants (v0.5 Phase 2) -------
+    const GITHUB_API_BASE = 'https://api.github.com';
+    const ISSUES_REPO = 'Ned-Yap/aim-userscripts-data';
+    const ISSUES_BRANCH = 'main';
+    const ISSUES_PATH = (sid) => `issues/${sid}-issues.json`;
+    const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
+    const USERNAME_KEY = 'aim-issues-github-login'; // ours
+
+    // ------- GM helpers (silently no-op if grants unconfirmed) -------
+    function gmGet(key, def) {
+        try { if (typeof GM_getValue === 'function') return GM_getValue(key, def); } catch (e) {}
+        return def;
+    }
+    function gmSet(key, value) {
+        try { if (typeof GM_setValue === 'function') GM_setValue(key, value); } catch (e) {}
+    }
+
+    // ------- GitHub HTTP wrapper (Promise over GM_xmlhttpRequest) -------
+    function ghRequest(opts) {
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                reject(new Error('GM_xmlhttpRequest unavailable — re-approve script grants in Tampermonkey'));
+                return;
+            }
+            try {
+                GM_xmlhttpRequest({
+                    ...opts,
+                    onload: (resp) => resolve(resp),
+                    onerror: (err) => reject(err || new Error('network error')),
+                    ontimeout: () => reject(new Error('timeout')),
+                });
+            } catch (e) {
+                reject(e);
+            }
+        });
+    }
+
+    function textToB64(text) {
+        const utf8 = new TextEncoder().encode(text);
+        let bin = '';
+        for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+        return btoa(bin);
+    }
+    function b64ToText(b64) {
+        const bin = atob((b64 || '').replace(/\n/g, ''));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder('utf-8').decode(bytes);
+    }
 
     // ------- Control Panel toggle schema (v0.3) -------
     // Defaults match v0.2 visual behavior. User can dial these in via the
@@ -105,6 +158,20 @@
     let siteID = null;
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
+
+    // GitHub sync state (v0.5)
+    let cachedToken = gmGet(TOKEN_KEY, '') || '';       // recovered after refresh; also via TOKEN_VALUE broadcast
+    let cachedUsername = gmGet(USERNAME_KEY, '') || ''; // fetched once on first token, persisted
+    const shaBySite = {};                                // {[siteID]: 'sha-from-last-GET-or-PUT'}
+    // syncStatus drives the small dot on the 🚩 button:
+    //   'no-token' (grey)  — no PAT yet, local-only
+    //   'syncing'  (orange-pulse) — GET or PUT in flight
+    //   'ok'       (green) — last op succeeded, in sync with GitHub
+    //   'pending'  (orange) — local changes not yet pushed (rare; created during retry)
+    //   'error'    (red)   — last op failed
+    let syncStatus = 'no-token';
+    let pendingCommit = false;                           // serialize concurrent PUTs to avoid SHA races
+    let commitNeededAgain = false;                       // set when a second commit request arrives mid-flight
     const issueLayers = new Map();               // issueId → { polygon, marker }
     let drawingState = null;
     let drawToolbarEl = null;
@@ -161,9 +228,13 @@
         clearIssueLayers();
         hiddenIds.clear();
         currentSiteIssues = loadIssuesFromStorage(siteID);
-        console.log(`${TAG} site changed → ${siteID} (${currentSiteIssues.length} issue${currentSiteIssues.length === 1 ? '' : 's'})`);
+        console.log(`${TAG} site changed → ${siteID} (${currentSiteIssues.length} local issue${currentSiteIssues.length === 1 ? '' : 's'})`);
         renderAllIssues();
         renderButtonState();
+        // v0.5: if we have a token, pull authoritative data from GitHub.
+        // refetchIssues merges remote + local by ID and pushes any local-only
+        // additions back. No token → local-only fallback (Phase 1 behavior).
+        if (siteID && cachedToken) refetchIssues();
     }
 
     // v0.2: listen for hashchange on BOTH top and current windows. The
@@ -189,8 +260,251 @@
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 handleSetToggle(msg);
+            } else if (msg.type === 'TOKEN_VALUE') {
+                handleTokenValue(msg.token || '');
+            } else if (msg.type === 'REFETCH_KMLS') {
+                // Token was just saved/cleared — Map Styler emits this; we
+                // piggyback because the same broadcast is "token changed,
+                // re-pull your data". Refetch our issues file too.
+                if (siteID && cachedToken) refetchIssues();
             }
         };
+    }
+
+    function handleTokenValue(token) {
+        const prev = cachedToken;
+        cachedToken = token || '';
+        if (cachedToken === prev) return;       // idempotent
+        gmSet(TOKEN_KEY, cachedToken);          // mirror locally so refresh recovers
+        if (!cachedToken) {
+            cachedUsername = '';
+            gmSet(USERNAME_KEY, '');
+            syncStatus = 'no-token';
+            renderButtonState();
+            return;
+        }
+        // New / changed token. Ensure username + (re-)fetch current site.
+        fetchGithubUsername().then(() => {
+            if (siteID) refetchIssues();
+            else { syncStatus = 'ok'; renderButtonState(); }
+        });
+    }
+
+    async function fetchGithubUsername() {
+        if (IS_TOP) return;        // IFRAME owns sync to avoid duplicate API calls
+        if (!cachedToken) return;
+        try {
+            const resp = await ghRequest({
+                method: 'GET',
+                url: `${GITHUB_API_BASE}/user`,
+                headers: {
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+            });
+            if (resp.status === 200) {
+                const data = JSON.parse(resp.responseText);
+                if (data && data.login && data.login !== cachedUsername) {
+                    cachedUsername = data.login;
+                    gmSet(USERNAME_KEY, cachedUsername);
+                    console.log(`${TAG} authenticated as @${cachedUsername}`);
+                }
+            } else {
+                console.warn(`${TAG} GET /user HTTP ${resp.status}`);
+            }
+        } catch (e) {
+            console.warn(`${TAG} GET /user threw:`, e);
+        }
+    }
+
+    // ------- Remote read / write -------
+    // Pulls issues/<siteID>-issues.json. null on 404 (no file yet);
+    // throws on any other non-200. Caches SHA per site.
+    async function fetchRemoteIssues(sid) {
+        if (!cachedToken || !sid) return null;
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(ISSUES_PATH(sid))}?ref=${ISSUES_BRANCH}`;
+        const resp = await ghRequest({
+            method: 'GET',
+            url,
+            headers: {
+                'Authorization': `Bearer ${cachedToken}`,
+                'Accept': 'application/vnd.github+json',
+            },
+            timeout: 20000,
+        });
+        if (resp.status === 404) return null;
+        if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`);
+        const meta = JSON.parse(resp.responseText);
+        const text = b64ToText(meta.content || '');
+        const data = JSON.parse(text);
+        const issues = (data && Array.isArray(data.issues)) ? data.issues : [];
+        return { issues, sha: meta.sha };
+    }
+
+    // Compare history-last timestamps; tiebreak on createdAt.
+    function lastHistAt(issue) {
+        if (issue.history && issue.history.length) {
+            const t = new Date(issue.history[issue.history.length - 1].at).getTime();
+            if (Number.isFinite(t)) return t;
+        }
+        return new Date(issue.createdAt || 0).getTime() || 0;
+    }
+
+    // Union by ID — pick whichever copy has the later history tail.
+    function mergeIssueLists(localList, remoteList) {
+        const byId = new Map();
+        const stamp = (issue) => byId.set(issue.id, issue);
+        (remoteList || []).forEach(stamp);
+        (localList || []).forEach(l => {
+            const r = byId.get(l.id);
+            if (!r) { byId.set(l.id, l); return; }
+            byId.set(l.id, lastHistAt(l) >= lastHistAt(r) ? l : r);
+        });
+        return Array.from(byId.values());
+    }
+
+    async function refetchIssues() {
+        // Sync only runs in the IFRAME — TOP also gets TOKEN_VALUE +
+        // hashchange but would fire duplicate API calls otherwise.
+        if (IS_TOP) return;
+        if (!siteID || !cachedToken) return;
+        const sid = siteID;
+        setSyncStatus('syncing');
+        try {
+            const remote = await fetchRemoteIssues(sid);
+            if (sid !== siteID) return;                      // site changed mid-flight
+            if (remote === null) {
+                // No file on GitHub yet. Keep whatever's local. If local
+                // has issues, they'll be uploaded on next createIssue (or
+                // we can push now to migrate). For first-deploy migration,
+                // push immediately so the file exists for other CSMs.
+                delete shaBySite[sid];
+                if (currentSiteIssues.length > 0) {
+                    console.log(`${TAG} no remote file for site ${sid} but ${currentSiteIssues.length} local issue${currentSiteIssues.length === 1 ? '' : 's'} — pushing to create file`);
+                    await commitIssuesToGitHub('initial push to migrate local issues');
+                } else {
+                    setSyncStatus('ok');
+                }
+                return;
+            }
+            // 200 — merge remote + local by ID.
+            const beforeLocalCount = currentSiteIssues.length;
+            const merged = mergeIssueLists(currentSiteIssues, remote.issues);
+            const localOnlyCount = merged.filter(m =>
+                !remote.issues.some(r => r.id === m.id)
+            ).length;
+            shaBySite[sid] = remote.sha;
+            currentSiteIssues = merged;
+            saveIssuesToStorage(sid, currentSiteIssues);
+            renderAllIssues();
+            renderButtonState();
+            if (localOnlyCount > 0) {
+                console.log(`${TAG} merged remote (${remote.issues.length}) with local (${beforeLocalCount}) → ${merged.length} total; ${localOnlyCount} local-only being pushed`);
+                await commitIssuesToGitHub(`merge ${localOnlyCount} local-only issue${localOnlyCount === 1 ? '' : 's'}`);
+            } else {
+                setSyncStatus('ok');
+                console.log(`${TAG} synced from GitHub: ${remote.issues.length} issue${remote.issues.length === 1 ? '' : 's'} on site ${sid}`);
+            }
+        } catch (e) {
+            setSyncStatus('error');
+            console.warn(`${TAG} refetchIssues failed:`, e);
+            showToast(`Sync failed: ${e.message || 'unknown error'}. Local changes preserved.`, 5000);
+        }
+    }
+
+    async function commitIssuesToGitHub(reasonOverride) {
+        if (IS_TOP) return false;
+        if (!siteID || !cachedToken) return false;
+        if (pendingCommit) {
+            // Serialize — a second commit while one is in flight would
+            // race the SHA cache. Flag a follow-up push to capture the
+            // newest currentSiteIssues after the in-flight one finishes.
+            commitNeededAgain = true;
+            console.log(`${TAG} commit already in flight — queued follow-up`);
+            return false;
+        }
+        pendingCommit = true;
+        const sid = siteID;
+        setSyncStatus('syncing');
+        try {
+            const path = ISSUES_PATH(sid);
+            const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(path)}`;
+            const payload = { version: 1, siteID: sid, issues: currentSiteIssues };
+            const b64 = textToB64(JSON.stringify(payload, null, 2));
+            const sha = shaBySite[sid];
+            const reason = reasonOverride || `update (${currentSiteIssues.length} total)`;
+            const body = {
+                message: `[AIM site ${sid}] issues: ${reason}`,
+                content: b64,
+                branch: ISSUES_BRANCH,
+            };
+            if (sha) body.sha = sha;
+            const resp = await ghRequest({
+                method: 'PUT',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'Accept': 'application/vnd.github+json',
+                    'Content-Type': 'application/json',
+                },
+                data: JSON.stringify(body),
+                timeout: 25000,
+            });
+            if (resp.status === 200 || resp.status === 201) {
+                const ret = JSON.parse(resp.responseText);
+                if (ret && ret.content && ret.content.sha) shaBySite[sid] = ret.content.sha;
+                setSyncStatus('ok');
+                showToast(`✓ Synced to GitHub (${currentSiteIssues.length} issue${currentSiteIssues.length === 1 ? '' : 's'}).`, 2500);
+                return true;
+            }
+            if (resp.status === 409 || resp.status === 422) {
+                // SHA mismatch — someone else committed since our last GET.
+                // Re-fetch, union-merge, retry PUT once.
+                console.warn(`${TAG} commit conflict (HTTP ${resp.status}) — re-fetching to merge`);
+                pendingCommit = false;
+                const remote = await fetchRemoteIssues(sid);
+                if (remote === null) {
+                    delete shaBySite[sid];
+                } else {
+                    currentSiteIssues = mergeIssueLists(currentSiteIssues, remote.issues);
+                    shaBySite[sid] = remote.sha;
+                    saveIssuesToStorage(sid, currentSiteIssues);
+                    renderAllIssues();
+                }
+                // One retry — no infinite loop on persistent conflicts.
+                if (sid === siteID) return commitIssuesToGitHub(reasonOverride);
+                return false;
+            }
+            if (resp.status === 401 || resp.status === 403) {
+                setSyncStatus('error');
+                showToast('GitHub denied write — PAT needs contents:write on aim-userscripts-data.', 8000);
+                return false;
+            }
+            setSyncStatus('error');
+            showToast(`Commit failed: HTTP ${resp.status}.`, 4500);
+            console.warn(`${TAG} commit PUT HTTP ${resp.status}:`, (resp.responseText || '').substring(0, 600));
+            return false;
+        } catch (e) {
+            setSyncStatus('error');
+            showToast(`Commit failed: ${e.message || 'network error'}.`, 4500);
+            console.error(`${TAG} commit threw:`, e);
+            return false;
+        } finally {
+            pendingCommit = false;
+            // If something arrived during this commit (typically another
+            // createIssue), schedule a follow-up so it lands in GitHub.
+            if (commitNeededAgain && siteID && cachedToken) {
+                commitNeededAgain = false;
+                setTimeout(() => commitIssuesToGitHub('follow-up after concurrent change'), 100);
+            }
+        }
+    }
+
+    function setSyncStatus(s) {
+        if (s === syncStatus) return;
+        syncStatus = s;
+        renderButtonState();
     }
 
     function handleSetToggle(msg) {
@@ -388,13 +702,21 @@
         }
         const hiddenCount = hiddenIds.size;
         const hiddenSuffix = hiddenCount > 0 ? ` · ${hiddenCount} hidden — M2 un-hides non-resolved` : '';
+        const syncLabel = ({
+            'no-token': 'no GitHub token (local-only)',
+            'syncing':  'syncing with GitHub…',
+            'ok':       cachedUsername ? `synced to GitHub as @${cachedUsername}` : 'synced to GitHub',
+            'pending':  'local changes pending push',
+            'error':    'GitHub sync error — see console',
+        })[syncStatus] || '';
+        const syncSuffix = syncLabel ? ` · ${syncLabel}` : '';
         buttonEl.title = !masterEnabled
             ? 'Issues: disabled in AIM Controls'
             : flagModeActive
-                ? `Issues: FLAG MODE armed — click-drag for rectangle, Shift+click for polygon, Esc to exit${hiddenSuffix}`
-                : `Issues · M1 toggle flag mode · M2 un-hide all non-resolved${hiddenSuffix}`;
+                ? `Issues: FLAG MODE armed — click-drag rect, Shift+click polygon, Esc to exit${hiddenSuffix}${syncSuffix}`
+                : `Issues · M1 toggle flag mode · M2 un-hide all non-resolved${hiddenSuffix}${syncSuffix}`;
 
-        // Badge: count for current site
+        // Badge: count for current site (top-right corner)
         let badge = buttonEl.querySelector('.aim-issues-badge');
         const n = currentSiteIssues.length;
         if (n > 0) {
@@ -417,6 +739,33 @@
         } else if (badge) {
             badge.remove();
         }
+
+        // Sync dot: small colored circle in top-LEFT corner so it doesn't
+        // collide with the count badge. v0.5.
+        let dot = buttonEl.querySelector('.aim-issues-syncdot');
+        if (!dot) {
+            dot = document.createElement('span');
+            dot.className = 'aim-issues-syncdot';
+            dot.style.cssText = [
+                'position:absolute', 'top:-3px', 'left:-3px',
+                'width:8px', 'height:8px', 'border-radius:4px',
+                'border:1px solid rgba(0,0,0,0.55)',
+                'pointer-events:none',
+                'transition:background 200ms ease',
+            ].join(';');
+            buttonEl.appendChild(dot);
+        }
+        const dotColor = ({
+            'no-token': '#777',
+            'syncing':  '#ffb347',
+            'ok':       '#5fff5f',
+            'pending':  '#ffb347',
+            'error':    '#ff4d4d',
+        })[syncStatus] || '#777';
+        dot.style.background = dotColor;
+        dot.style.boxShadow = (syncStatus === 'syncing')
+            ? '0 0 6px rgba(255,179,71,0.9)'
+            : (syncStatus === 'error' ? '0 0 6px rgba(255,77,77,0.9)' : 'none');
     }
 
     // ------- Flag mode + draw -------
@@ -800,8 +1149,9 @@
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const polygon = latlngsObjs.map(c => [c.lat, c.lng]);
-        // Phase 1: no GitHub identity yet — leave createdBy as the local
-        // placeholder. Phase 2 swaps in the GitHub login.
+        // v0.5: createdBy is the GitHub login when authenticated; falls
+        // back to 'local-only' when there's no PAT.
+        const by = cachedUsername || 'local-only';
         const issue = {
             id,
             surface: 'site-setup',
@@ -810,17 +1160,23 @@
             note,
             status: 'open',
             createdAt: nowIso,
-            createdBy: 'local-only',
+            createdBy: by,
             history: [
-                { at: nowIso, by: 'local-only', fromStatus: null, toStatus: 'open', note },
+                { at: nowIso, by, fromStatus: null, toStatus: 'open', note },
             ],
         };
         currentSiteIssues.push(issue);
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue);
         renderButtonState();
-        showToast(`Issue created (${currentSiteIssues.length} on this site).`, 3000);
-        console.log(`${TAG} created issue ${id} (${shape}, ${polygon.length} vertices)`);
+        const localCount = currentSiteIssues.length;
+        if (cachedToken) {
+            showToast(`Issue created — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`add issue by @${by}`);
+        } else {
+            showToast(`Issue created locally (no GitHub token, ${localCount} on this site).`, 3500);
+        }
+        console.log(`${TAG} created issue ${id} (${shape}, ${polygon.length} vertices) by @${by}`);
     }
 
     // ------- Rendering issues -------
@@ -1212,11 +1568,24 @@
     function init() {
         setupControlChannel();
         registerWithControlPanel();
+        // v0.5: seed sync status from the cached token recovered from
+        // GM storage (survives refresh). Control Panel will broadcast
+        // the authoritative TOKEN_VALUE shortly after; that path also
+        // (re)fetches the username.
+        if (cachedToken) {
+            syncStatus = cachedUsername ? 'ok' : 'syncing';
+            // Refresh username in the background — handles PAT rotation.
+            fetchGithubUsername();
+        } else {
+            syncStatus = 'no-token';
+        }
+        // Always ask the Control Panel for the current token so we get
+        // the latest if the user updated it elsewhere.
+        try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
+
         if (IS_TOP) {
             // TOP frame: register with Control Panel only — no UI here.
             console.log(`${TAG} v${SCRIPT_VERSION} ready (TOP — no UI in this frame)`);
-            // Still watch site changes from TOP for completeness, in case
-            // future phases want to coordinate across frames.
             setCurrentSite(readSiteIdFromHash());
             attachHashListener();
             return;
@@ -1227,7 +1596,7 @@
         ensureButton();
         // First render fires from setCurrentSite above; renderAllIssues
         // now has built-in retry-until-map-ready (v0.4).
-        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — site ${siteID || '(none)'}`);
+        console.log(`${TAG} v${SCRIPT_VERSION} ready (${FRAME}) — site ${siteID || '(none)'} · token ${cachedToken ? 'cached' : 'none'} · user ${cachedUsername || '(unknown)'}`);
     }
 
     if (document.readyState === 'loading') {
