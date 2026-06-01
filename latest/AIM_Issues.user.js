@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.16';
+    const SCRIPT_VERSION = '0.17';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -172,6 +172,13 @@
     let syncStatus = 'no-token';
     let pendingCommit = false;                           // serialize concurrent PUTs to avoid SHA races
     let commitNeededAgain = false;                       // set when a second commit request arrives mid-flight
+    // v0.17: affected-entities detection. Fetched once per site change
+    // from /map_objects/ (Percepto's entity list, same endpoint Asset
+    // Inspector uses). Cached + invalidated when entities reload.
+    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    let mapObjects = null;                                // { siteID, entities: [...] }
+    let mapObjectsFetching = false;
+    const issueAffectedCache = new Map();                 // issueId → array of affected entities
     const issueLayers = new Map();               // issueId → { polygon, marker }
     let drawingState = null;
     let drawToolbarEl = null;
@@ -275,6 +282,9 @@
         siteID = newId;
         clearIssueLayers();
         hiddenIds.clear();
+        // v0.17: invalidate entity caches on site change
+        mapObjects = null;
+        issueAffectedCache.clear();
         currentSiteIssues = loadIssuesFromStorage(siteID);
         console.log(`${TAG} site changed → ${siteID} (${currentSiteIssues.length} local issue${currentSiteIssues.length === 1 ? '' : 's'})`);
         renderAllIssues();
@@ -283,6 +293,9 @@
         // refetchIssues merges remote + local by ID and pushes any local-only
         // additions back. No token → local-only fallback (Phase 1 behavior).
         if (siteID && cachedToken) refetchIssues();
+        // v0.17: fetch Percepto entities for affected-entity detection.
+        // Cookie auth — no token needed.
+        if (siteID && !IS_TOP) fetchSiteEntities(siteID);
     }
 
     // v0.2: listen for hashchange on BOTH top and current windows. The
@@ -1405,6 +1418,128 @@
         return [sLat / latlngs.length, sLng / latlngs.length];
     }
 
+    // ------- Affected-entity detection (v0.17 — Phase 5b) -------
+    //
+    // Percepto's /map_objects endpoint returns the site's entity list. We
+    // fetch our own copy (cookie auth, same shape Asset Inspector uses)
+    // and run point-in-polygon for each entity against each issue's
+    // polygon to compute "what's affected". Results cached per issue id;
+    // cache invalidated when entities refresh.
+    //
+    // Entity type codes (per Asset Inspector):
+    //   3  = Asset (polygon)
+    //   4  = NFZ (polygon)
+    //   15 = Flight Path (polyline)
+    //   16 = FFZ (polygon)
+    //   19 = General Marker (point)
+    const ENTITY_TYPE_META = {
+        3:  { label: 'Asset',       short: 'AST', color: '#ffffff' },
+        4:  { label: 'NFZ',         short: 'NFZ', color: '#ff4d4d' },
+        15: { label: 'Flight Path', short: 'FP',  color: '#1ca0de' },
+        16: { label: 'FFZ',         short: 'FFZ', color: '#5fff5f' },
+        19: { label: 'Marker',      short: 'GM',  color: '#a855f7' },
+    };
+
+    async function fetchSiteEntities(sid) {
+        if (!sid) return;
+        if (mapObjects && mapObjects.siteID === sid) return;
+        if (mapObjectsFetching) return;
+        mapObjectsFetching = true;
+        try {
+            const url = MAP_OBJECTS_URL + encodeURIComponent(sid);
+            const r = await fetch(url, { credentials: 'same-origin' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            if (!Array.isArray(data)) throw new Error('response not an array');
+            mapObjects = { siteID: sid, entities: data };
+            issueAffectedCache.clear();
+            console.log(`${TAG} fetched ${data.length} entities for affected-entity detection on site ${sid}`);
+            // Refresh anything that displays counts
+            if (panelEl) renderIssuesPanel();
+            // Tooltips re-bind on next render anyway; status modal is one-shot.
+        } catch (e) {
+            console.warn(`${TAG} fetchSiteEntities failed for site ${sid}:`, e);
+        } finally {
+            mapObjectsFetching = false;
+        }
+    }
+
+    // Standard ray-casting point-in-polygon. polygon is [[lat,lng], ...].
+    // Returns true if (lat, lng) is inside the closed polygon.
+    function pointInPolygon(lat, lng, polygon) {
+        if (!polygon || polygon.length < 3) return false;
+        let inside = false;
+        const n = polygon.length;
+        for (let i = 0, j = n - 1; i < n; j = i++) {
+            const xi = polygon[i][1], yi = polygon[i][0];
+            const xj = polygon[j][1], yj = polygon[j][0];
+            const intersect = ((yi > lat) !== (yj > lat))
+                && (lng < (xj - xi) * (lat - yi) / (yj - yi + 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    // For each entity, "affected" means at least one of its vertices /
+    // arc endpoints / center sits inside the issue polygon. Doesn't catch
+    // the rare case where the entity surrounds the issue without any
+    // vertex inside — uncommon for typical issue rectangles.
+    function affectedEntitiesFor(issue) {
+        if (!issue || !Array.isArray(issue.polygon) || issue.polygon.length < 3) return [];
+        if (issueAffectedCache.has(issue.id)) return issueAffectedCache.get(issue.id);
+        const out = [];
+        if (!mapObjects || mapObjects.siteID !== siteID || !Array.isArray(mapObjects.entities)) {
+            return out;
+        }
+        const poly = issue.polygon;
+        for (const e of mapObjects.entities) {
+            if (!e || typeof e.type !== 'number') continue;
+            let hit = false;
+            if (e.type === 3 || e.type === 4 || e.type === 16) {
+                // Polygon entities — any vertex inside
+                if (Array.isArray(e.coords)) {
+                    for (const c of e.coords) {
+                        if (c && Number.isFinite(c.lat) && Number.isFinite(c.lng)
+                            && pointInPolygon(c.lat, c.lng, poly)) { hit = true; break; }
+                    }
+                }
+            } else if (e.type === 15) {
+                // Flight path — any arc endpoint or coord vertex inside
+                if (Array.isArray(e.arcs)) {
+                    for (const a of e.arcs) {
+                        if (!a) continue;
+                        if (a.point_a && pointInPolygon(a.point_a.lat, a.point_a.lng, poly)) { hit = true; break; }
+                        if (a.point_b && pointInPolygon(a.point_b.lat, a.point_b.lng, poly)) { hit = true; break; }
+                    }
+                }
+                if (!hit && Array.isArray(e.coords)) {
+                    for (const c of e.coords) {
+                        if (c && pointInPolygon(c.lat, c.lng, poly)) { hit = true; break; }
+                    }
+                }
+            } else if (e.type === 19) {
+                if (Array.isArray(e.coords) && e.coords[0]) {
+                    if (pointInPolygon(e.coords[0].lat, e.coords[0].lng, poly)) hit = true;
+                }
+            }
+            if (hit) {
+                out.push({
+                    id: e._id || e.id || String(out.length),
+                    name: e.name || '(unnamed)',
+                    type: e.type,
+                    typeLabel: (ENTITY_TYPE_META[e.type] || { label: String(e.type) }).label,
+                    typeShort: (ENTITY_TYPE_META[e.type] || { short: '?' }).short,
+                    typeColor: (ENTITY_TYPE_META[e.type] || { color: '#aaa' }).color,
+                    subtype: e.poi_type_str || e.subtype || '',
+                });
+            }
+        }
+        // Sort: by type then by name
+        out.sort((a, b) => (a.type - b.type) || a.name.localeCompare(b.name));
+        issueAffectedCache.set(issue.id, out);
+        return out;
+    }
+
     function styleForStatus(status) {
         // Phase 1 only renders 'open'; the rest are stubs for Phase 3.
         switch (status) {
@@ -1598,11 +1733,27 @@
         const hideHint = opts.isHidden
             ? '<span style="color:#5fff5f;font-weight:700">HIDDEN</span> &middot; M1 to un-hide &middot; M2 = change status'
             : 'M1 = hide &middot; M2 = change status';
+        // v0.17: affected-entities count + type breakdown
+        let affectsHtml = '';
+        const affected = affectedEntitiesFor(issue);
+        if (affected.length > 0) {
+            // Tally per type for the compact summary
+            const byType = {};
+            affected.forEach(a => { byType[a.typeShort] = (byType[a.typeShort] || 0) + 1; });
+            const parts = Object.keys(byType).map(t => {
+                const meta = Object.values(ENTITY_TYPE_META).find(m => m.short === t) || { color: '#aaa' };
+                return `<span style="color:${meta.color};font-weight:700">${byType[t]}&nbsp;${t}</span>`;
+            }).join(' &middot; ');
+            affectsHtml = `<div style="color:#ddd;font-size:11px;margin-top:4px">
+                <span style="color:#ffd54f;font-weight:700">Affects ${affected.length}:</span> ${parts}
+            </div>`;
+        }
         return `
             <div style="line-height:1.35">
                 <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
+                ${affectsHtml}
                 <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>
             </div>
         `;
@@ -1884,14 +2035,43 @@
                 `;
             }
 
+            // v0.17: affected-entities section. Compact pill list grouped by
+            // type with color coding. Show even when empty so the user knows
+            // we ran the detection.
+            const affected = affectedEntitiesFor(liveIssue);
+            const entitiesPillsHtml = affected.map(a => `
+                <div style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;margin:2px 4px 2px 0;
+                            background:#0e1115;border:1px solid ${a.typeColor}55;border-radius:12px;font-size:11px">
+                    <span style="color:${a.typeColor};font-weight:700;font-size:9px;letter-spacing:0.5px">${a.typeShort}</span>
+                    <span style="color:#e6e6e6">${escHtml(a.name)}</span>
+                    ${a.subtype ? `<span style="color:#888;font-size:9px">(${escHtml(a.subtype)})</span>` : ''}
+                </div>
+            `).join('');
+            const entitiesNote = !mapObjects
+                ? `<span style="color:#888;font-style:italic">loading entities…</span>`
+                : (affected.length === 0
+                    ? `<span style="color:#888;font-style:italic">No Percepto entities detected under this polygon.</span>`
+                    : entitiesPillsHtml);
+            const entitiesSectionHtml = `
+                <div style="margin-top:12px">
+                    <div style="color:#888;font-size:11px;margin-bottom:4px">
+                        Affected entities ${affected.length > 0 ? `(${affected.length})` : ''}
+                    </div>
+                    <div style="max-height:140px;overflow:auto;border:1px solid rgba(255,255,255,0.10);
+                                border-radius:4px;background:#14171b;padding:6px 8px">
+                        ${entitiesNote}
+                    </div>
+                </div>
+            `;
             card.innerHTML = `
                 <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:baseline;gap:8px">
                     <span style="color:#aaa">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700">${statusMeta.text}</span>
                 </div>
                 <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
-                <div style="color:#888;font-size:11px;margin-bottom:4px">History</div>
-                <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
+                ${entitiesSectionHtml}
+                <div style="color:#888;font-size:11px;margin:12px 0 4px 0">History</div>
+                <div style="max-height:180px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
                 ${actionSectionHtml}
                 <div style="display:flex;gap:8px;align-items:center;margin-top:14px">
                     ${deleteBtnHtml}
@@ -2133,11 +2313,30 @@
                 const sessionHidden = hiddenIds.has(issue.id);
                 const dimmed = (issue.status === 'resolved' || issue.status === 'ignored');
                 const rowOpacity = (sessionHidden || dimmed) ? 0.55 : 1;
+                // v0.17: per-type tally under the note. Empty when no entities
+                // detected; "loading…" while the fetch is in flight.
+                const affected = affectedEntitiesFor(issue);
+                let affectsHtml;
+                if (!mapObjects) {
+                    affectsHtml = `<div style="color:#888;font-size:10px;margin-top:3px;font-style:italic">loading entities…</div>`;
+                } else if (affected.length === 0) {
+                    affectsHtml = '';
+                } else {
+                    const byType = {};
+                    affected.forEach(a => { byType[a.typeShort] = (byType[a.typeShort] || 0) + 1; });
+                    const parts = Object.keys(byType).map(t => {
+                        const m = Object.values(ENTITY_TYPE_META).find(mm => mm.short === t) || { color: '#aaa' };
+                        return `<span style="color:${m.color};font-weight:700">${byType[t]}&nbsp;${t}</span>`;
+                    }).join(' &middot; ');
+                    affectsHtml = `<div style="font-size:10px;margin-top:3px">
+                        <span style="color:#ffd54f;font-weight:700">Affects ${affected.length}:</span> ${parts}
+                    </div>`;
+                }
                 return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
                     style="padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);
                            cursor:pointer;opacity:${rowOpacity};
                            display:grid;grid-template-columns:90px 110px 1fr 80px;gap:8px;align-items:start"
-                    title="Click to pan + open status modal">
+                    title="Click to zoom to issue + open status modal">
                     <div>
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;
                                      background:${meta.color};color:${(issue.status === 'ready-for-review' || issue.status === 'resolved') ? '#000' : '#fff'};
@@ -2148,9 +2347,12 @@
                         ${escHtml(headerLabel)}
                         <div style="color:#888;font-weight:400;font-size:10px;margin-top:1px">${age}</div>
                     </div>
-                    <div style="color:#e6e6e6;font-size:12px;line-height:1.35;
-                                overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
-                                -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
+                    <div>
+                        <div style="color:#e6e6e6;font-size:12px;line-height:1.35;
+                                    overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
+                                    -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
+                        ${affectsHtml}
+                    </div>
                     <div style="color:#a8c4ff;font-size:11px;text-align:right">@${safeBy}</div>
                 </div>`;
             }).join('');

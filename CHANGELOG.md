@@ -6,6 +6,42 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.17 (Phase 5b — affected-entities detection)
+
+Each issue now knows which Percepto entities (assets / FFZs / NFZs / flight paths / general markers) sit underneath it.
+
+### How it works
+- On every site change, fetches `https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=<id>` (cookie auth, same endpoint Asset Inspector uses — no PAT needed). Cached in memory; invalidated on site nav.
+- For each issue, runs a ray-casting **point-in-polygon** check: an entity is "affected" if ANY of its vertices / arc endpoints / marker point falls inside the issue polygon. Catches "issue contains entity" and "issue overlaps entity"; misses the rare "entity surrounds issue" case (uncommon for typical issue rectangles).
+- Results cached per issue id. Cache cleared whenever entities are re-fetched.
+
+### Where it shows up
+- **Tooltip** (hover the ⚠ icon): `Affects 3:` plus per-type tally (e.g. `2 AST · 1 FFZ`) with color-coded counts (white=Asset, green=FFZ, red=NFZ, blue=FP, purple=GM).
+- **Status modal** (M2 on icon): new "Affected entities (N)" section right under the note. Each entity rendered as a colored pill: type short-code chip + name + subtype.
+- **Panel rows**: per-type tally as a sub-line under each issue's note. Loading state shown while entities are still being fetched.
+
+### Color palette (matches Asset Inspector)
+- `3` Asset → white
+- `4` NFZ → red
+- `15` Flight Path → blue
+- `16` FFZ → green
+- `19` General Marker → purple
+
+### Internal
+- New `fetchSiteEntities(sid)` + `MAP_OBJECTS_URL` constant
+- `pointInPolygon(lat, lng, polygon)` ray-casting helper
+- `affectedEntitiesFor(issue)` does the per-issue detection with caching
+- `ENTITY_TYPE_META` map drives label/short/color per type code
+- `mapObjects` / `issueAffectedCache` / `mapObjectsFetching` state
+- Cache invalidated in `setCurrentSite` (along with entities reload)
+
+### What's next
+- v0.18 = Google Sheets export from the panel (HTML-clipboard write so paste produces formatted cells with the affected-entities columns)
+- Future: click an entity pill in the modal to pan-zoom to it
+- Future: filter the panel by "issues affecting Asset X"
+
+---
+
 ## 2026-06-01 — AIM Issues v0.16 (panel polish — drag/resize/solo/zoom)
 
 Four UX upgrades to the v0.15 panel:
