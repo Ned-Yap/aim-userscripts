@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.6';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -587,8 +587,19 @@
     }
 
     function getL() {
-        try { return window.L || (window.top && window.top.L) || null; }
-        catch (e) { return null; }
+        // v0.6: with @grant directives (added in v0.5), Tampermonkey runs
+        // the script in a sandboxed context where `window` is a proxy.
+        // Page-mounted Leaflet lives on `unsafeWindow`, and creating a
+        // polygon via the sandbox-side L produced a polygon that attached
+        // but rendered invisibly — markers (divIcon) happened to work
+        // because they're DOM-only. Same fix Map Styler uses (line 1104).
+        try {
+            const realWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+            if (realWin && realWin.L) return realWin.L;
+            if (window.L) return window.L;
+            if (window.top && window.top.L) return window.top.L;
+        } catch (e) {}
+        return null;
     }
 
     // ------- 🚩 button injection -------
@@ -1179,6 +1190,42 @@
         console.log(`${TAG} created issue ${id} (${shape}, ${polygon.length} vertices) by @${by}`);
     }
 
+    // v0.6: creator-only delete. Removes from currentSiteIssues, drops
+    // any rendered layer for it, saves locally, and pushes the new list
+    // to GitHub. The status modal's two-stage confirm is the user-facing
+    // guard; this function trusts the caller. The creator check is also
+    // re-asserted here as a belt-and-suspenders defence in case a future
+    // entry point forgets it.
+    function deleteIssue(id) {
+        const issue = currentSiteIssues.find(i => i.id === id);
+        if (!issue) return;
+        const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
+        const isLocalOnly = (issue.createdBy === 'local-only' && !cachedUsername);
+        if (!isCreator && !isLocalOnly) {
+            showToast(`Only @${issue.createdBy} can delete this issue.`, 4500);
+            return;
+        }
+        // Drop layers
+        const map = getLeafletMap();
+        const layers = issueLayers.get(id);
+        if (layers && map) {
+            try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
+            try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+        }
+        issueLayers.delete(id);
+        hiddenIds.delete(id);
+        currentSiteIssues = currentSiteIssues.filter(i => i.id !== id);
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderButtonState();
+        console.log(`${TAG} deleted issue ${id} by @${cachedUsername || 'local-only'}`);
+        if (cachedToken) {
+            showToast('Issue deleted — pushing to GitHub…', 2500);
+            commitIssuesToGitHub(`delete issue by @${cachedUsername || 'local-only'}`);
+        } else {
+            showToast('Issue deleted locally (no GitHub token).', 3000);
+        }
+    }
+
     // ------- Rendering issues -------
     function clearIssueLayers() {
         const map = getLeafletMap();
@@ -1331,6 +1378,11 @@
             interactive: true,
             bubblingMouseEvents: false,
         };
+        // v0.6 diagnostic: log polygon shape once per render so we can
+        // confirm the data + style are what we expect.
+        try {
+            console.log(`${TAG} render ${issue.id} (${issue.status}, hidden=${isHidden}) — polygon=${Array.isArray(issue.polygon) ? `[${issue.polygon.length} pts]` : typeof issue.polygon}, opts=`, polygonOpts);
+        } catch (e) {}
         const polygon = L.polygon(issue.polygon, polygonOpts);
         if (!isHidden) {
             polygon.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
@@ -1444,6 +1496,29 @@
         } catch (e) { return iso; }
     }
 
+    // v0.6: format an ISO timestamp as "MM-DD-YYYY h:mm AM/PM TZ" using
+    // the viewer's local timezone. e.g. "06-01-2026 8:23 PM CDT".
+    // formatToParts lets us reassemble in the user's preferred shape; the
+    // default `toLocaleString` would give "6/1/2026, 8:23:00 PM" without
+    // the zero-padded month/day or the timezone token.
+    function fmtDateTime(iso) {
+        try {
+            const d = new Date(iso);
+            if (Number.isNaN(d.getTime())) return iso;
+            const parts = new Intl.DateTimeFormat('en-US', {
+                month: '2-digit', day: '2-digit', year: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+                hour12: true,
+                timeZoneName: 'short',
+            }).formatToParts(d);
+            const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+            const mm = get('month'), dd = get('day'), yy = get('year');
+            const hh = get('hour'), mi = get('minute'), dp = (get('dayPeriod') || '').toUpperCase();
+            const tz = get('timeZoneName');
+            return `${mm}-${dd}-${yy} ${hh}:${mi} ${dp}${tz ? ` ${tz}` : ''}`;
+        } catch (e) { return iso; }
+    }
+
     function toggleSessionHide(id) {
         const issue = currentSiteIssues.find(i => i.id === id);
         if (!issue) return;
@@ -1476,29 +1551,44 @@
             color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
         `;
         const safeNote = (issue.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        // v0.6: history rows use fmtDateTime — was raw ISO before.
         const histRows = (issue.history || []).map(h => {
             const safeHistNote = (h.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
             const safeBy = (h.by || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
             const trans = h.fromStatus ? `${h.fromStatus} → ${h.toStatus}` : `created (${h.toStatus})`;
             return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
-                <div style="color:#aaa;font-size:11px">${h.at} · @${safeBy}</div>
-                <div style="color:#e6e6e6">${trans}</div>
+                <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
+                <div style="color:#e6e6e6;margin-top:2px">${trans}</div>
                 ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
             </div>`;
         }).join('');
+        // v0.6: creator-only delete. Compares cachedUsername (GitHub login)
+        // against issue.createdBy. local-only issues (no token) are
+        // delete-able when cachedUsername is also empty — that handles
+        // the offline / pre-Phase-2 testing case.
+        const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
+        const isLocalOnly = (issue.createdBy === 'local-only' && !cachedUsername);
+        const canDelete = isCreator || isLocalOnly;
+        const deleteBtnHtml = canDelete
+            ? `<button id="aim-issues-stub-delete"
+                   style="padding:7px 14px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;margin-right:auto">
+                   🗑 Delete (you created this)
+               </button>`
+            : '';
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:6px">
                 Issue · ${(issue.status || 'open').toUpperCase()}
             </div>
             <div style="color:#e6e6e6;font-size:13px;margin-bottom:10px">${safeNote}</div>
             <div style="color:#888;font-size:11px;margin-bottom:4px">History</div>
-            <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
+            <div style="max-height:220px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
             <div style="color:#666;font-size:11px;margin-top:10px;font-style:italic">
                 Phase 1 stub — status transitions arrive in Phase 3.
             </div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
+                ${deleteBtnHtml}
                 <button id="aim-issues-stub-close"
-                    style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
+                    style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
                     Close
                 </button>
             </div>
@@ -1507,6 +1597,32 @@
         document.body.appendChild(overlay);
         stubModalEl = overlay;
         card.querySelector('#aim-issues-stub-close').onclick = closeStubModal;
+        const deleteBtn = card.querySelector('#aim-issues-stub-delete');
+        if (deleteBtn) {
+            deleteBtn.onclick = () => {
+                // Two-stage confirm: first click flips the button to a
+                // red "CONFIRM DELETE" label that the user has to click
+                // again within 5s. Defends against typo / muscle-memory.
+                if (deleteBtn.dataset.armed === '1') {
+                    deleteIssue(issue.id);
+                    closeStubModal();
+                    return;
+                }
+                deleteBtn.dataset.armed = '1';
+                deleteBtn.textContent = '⚠ Click again to confirm delete';
+                deleteBtn.style.background = '#ff4d4d';
+                deleteBtn.style.color = '#fff';
+                deleteBtn.style.borderColor = '#ff4d4d';
+                setTimeout(() => {
+                    if (!deleteBtn || deleteBtn.dataset.armed !== '1') return;
+                    deleteBtn.dataset.armed = '0';
+                    deleteBtn.textContent = '🗑 Delete (you created this)';
+                    deleteBtn.style.background = '#5a2222';
+                    deleteBtn.style.color = '#ff8585';
+                    deleteBtn.style.borderColor = '#ff4d4d';
+                }, 5000);
+            };
+        }
         const keyH = (e) => { if (e.key === 'Escape') closeStubModal(); };
         overlay.addEventListener('keydown', keyH, true);
     }

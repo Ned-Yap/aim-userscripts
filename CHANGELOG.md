@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.6 (Phase 2 polish + creator-delete)
+
+Three follow-ups from v0.5 testing:
+
+- **Polygon-not-rendering bug — likely fix.** Adding `@grant` directives in v0.5 silently flipped Tampermonkey into sandbox mode; `window.L` is then the sandbox proxy's L, not the page's actual Leaflet. Polygons created via the sandbox L attached but rendered invisibly. Marker (divIcon) happened to work because it's DOM-only. Fix: `getL()` now prefers `unsafeWindow.L` (same trick Map Styler uses). Added a one-line render diagnostic so future polygon-disappears bugs surface with the exact options + point count in console.
+- **Creator-only delete.** M2 status modal now shows a red 🗑 "Delete (you created this)" button — visible only when `issue.createdBy === cachedUsername` (or when the issue is `local-only` and you have no token, so v0.1-v0.4 test issues are still removable). Two-stage confirm: first click flips the button to "Click again to confirm delete" for 5 seconds. On confirm, removes locally and PUTs the new list to GitHub with commit message "delete issue by @user".
+- **Date/time format.** History rows in the status modal were rendering raw ISO strings (`2026-06-01T01:21:15.967Z` — ugly and timezone-ambiguous). New `fmtDateTime` helper renders `MM-DD-YYYY h:mm AM/PM TZ` in the viewer's local timezone with the short tz token (e.g. `06-01-2026 8:23 PM CDT`). Built via `Intl.DateTimeFormat.formatToParts` for reliable zero-padding + token order. Tooltips still show relative age (`13 min ago`) — that's the right grain for hover.
+- Also bumped internal `SCRIPT_VERSION` constant to 0.6 (was stuck at 0.4 in v0.5 — header @version was right but the runtime log line lied).
+
+---
+
 ## 2026-06-01 — AIM Issues v0.5 (Phase 2 — GitHub sync)
 
 Issues now persist to GitHub instead of just `localStorage`. All Phase 2 design lines (private repo, PAT-driven, per-site JSON, real GitHub identity) landed in one cut.
