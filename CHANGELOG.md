@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.20 (Site Name in export + panel header)
+
+- **Site column split** in the export — `Site` renamed to `Site ID` (the numeric id, unchanged), and a new `Site Name` column added with the human-readable name (e.g. "Exxon - Lille Midkiff 5"). HTML table + TSV both updated.
+- **Reads the name from Percepto's `.site-select .ant-select-selection-item`** (lives in TOP frame's header). Prefers the `title` attribute, falls back to `textContent`. Same-origin so the cross-frame query works.
+- **Retry tick**: the site-select widget can mount a few hundred ms after a site nav. `tickReadSiteName` retries every 500ms for up to ~10s until a name appears, then re-renders the panel so the header updates.
+- **Bonus**: panel header now shows `Site 1245 · Exxon - Lille Midkiff 5` in blue when the name is available. Just the site id alone when it's not.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.19 (Google Sheets export)
 
 New `📊 Copy → Sheets (N)` button in the panel header (next to ↻ Refresh). Click → copies the **currently visible** issues (after chip filter + search) to the clipboard as a formatted HTML table that pastes directly into Google Sheets or Excel with colors + line breaks intact.

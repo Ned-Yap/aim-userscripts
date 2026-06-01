@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.19
+// @version      0.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.19';
+    const SCRIPT_VERSION = '0.20';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -156,6 +156,7 @@
     let masterEnabled = true;
     let flagModeActive = false;
     let siteID = null;
+    let siteName = '';     // v0.20: friendly name from .site-select widget
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
 
@@ -239,6 +240,42 @@
         return m ? m[1] : null;
     }
 
+    // v0.20: read the friendly site name from Percepto's site-select
+    // widget (lives in TOP frame's header). Same-origin so the
+    // cross-frame query works. Returns '' if the widget isn't mounted
+    // yet (e.g. very early in load) — caller retries later.
+    function readSiteName() {
+        const sel = '.site-select .ant-select-selection-item';
+        try {
+            const topDoc = window.top && window.top.document;
+            if (topDoc) {
+                const el = topDoc.querySelector(sel);
+                if (el) return (el.getAttribute('title') || el.textContent || '').trim();
+            }
+        } catch (e) {}
+        try {
+            const el = document.querySelector(sel);
+            if (el) return (el.getAttribute('title') || el.textContent || '').trim();
+        } catch (e) {}
+        return '';
+    }
+
+    // v0.20: retry reading the site name — Percepto's site-select widget
+    // can lag a few hundred ms behind the URL hash change on initial load.
+    // Stops once we get a non-empty value, or after ~10s.
+    function tickReadSiteName(attempt) {
+        if (attempt > 20) return;
+        const name = readSiteName();
+        if (name) {
+            if (name !== siteName) {
+                siteName = name;
+                renderButtonState(); // re-renders panel if open
+            }
+            return;
+        }
+        setTimeout(() => tickReadSiteName(attempt + 1), 500);
+    }
+
     function storageKeyForSite(id) { return `${STORAGE_PREFIX}${id}`; }
 
     function loadIssuesFromStorage(id) {
@@ -280,6 +317,10 @@
     function setCurrentSite(newId) {
         if (newId === siteID) return;
         siteID = newId;
+        // v0.20: refresh friendly site name. Retries below in case the
+        // .site-select widget isn't mounted yet on initial load.
+        siteName = readSiteName();
+        if (!siteName && newId) tickReadSiteName(0);
         clearIssueLayers();
         hiddenIds.clear();
         // v0.17: invalidate entity caches on site change
@@ -1649,13 +1690,13 @@
     // colors + inline line breaks. Pattern matches Asset Inspector's
     // copyStatsAsSheet (latest/, line 7388).
 
-    function buildIssuesHtmlForSheets(issues, siteId) {
+    function buildIssuesHtmlForSheets(issues, siteId, siteName_) {
         // Inline-styled table — Sheets/Excel honor most inline CSS.
         const headers = [
             'Status', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
             'Affects #', 'Affected Entities', 'Full History',
-            'Issue ID', 'Site',
+            'Issue ID', 'Site ID', 'Site Name',
         ];
         const out = [];
         out.push('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">');
@@ -1699,18 +1740,19 @@
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-family:monospace;font-size:10px;color:#888">${escHtml(issue.id)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteId)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteName_ || '')}</td>`);
             out.push('</tr>');
         });
         out.push('</tbody></table>');
         return out.join('');
     }
 
-    function buildIssuesTsv(issues, siteId) {
+    function buildIssuesTsv(issues, siteId, siteName_) {
         const headers = [
             'Status', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
             'Affects #', 'Affected Entities', 'Full History',
-            'Issue ID', 'Site',
+            'Issue ID', 'Site ID', 'Site Name',
         ];
         const lines = [headers.join('\t')];
         // TSV-safe: collapse tabs / newlines in cell text (no Sheets fancy
@@ -1742,18 +1784,19 @@
                 histText,
                 issue.id,
                 siteId,
+                siteName_ || '',
             ].map(safe).join('\t'));
         });
         return lines.join('\n');
     }
 
-    async function copyIssuesToSheets(issues, siteId) {
+    async function copyIssuesToSheets(issues, siteId, siteName_) {
         if (!issues || issues.length === 0) {
             showToast('Nothing to export — no issues match current filters.', 3000);
             return;
         }
-        const html = buildIssuesHtmlForSheets(issues, siteId);
-        const tsv = buildIssuesTsv(issues, siteId);
+        const html = buildIssuesHtmlForSheets(issues, siteId, siteName_);
+        const tsv = buildIssuesTsv(issues, siteId, siteName_);
         try {
             if (navigator.clipboard && window.ClipboardItem) {
                 const item = new ClipboardItem({
@@ -2670,7 +2713,7 @@
                 <span style="font-size:16px">🚩</span>
                 <span style="font-weight:700;color:#ff8585">Issues</span>
                 <span style="color:#888;font-size:11px">·</span>
-                <span style="color:#888;font-size:11px">Site ${escHtml(siteID || '—')}</span>
+                <span style="color:#888;font-size:11px">Site ${escHtml(siteID || '—')}${siteName ? ` <span style="color:#a8c4ff">· ${escHtml(siteName)}</span>` : ''}</span>
                 <span style="color:#888;font-size:11px">·</span>
                 <span style="color:#aaa;font-size:11px">${currentSiteIssues.length} total</span>
                 <span style="color:#888;font-size:11px">·</span>
@@ -2758,7 +2801,9 @@
         const exportBtn = panelEl.querySelector('#aim-issues-panel-export');
         if (exportBtn && !exportBtn.disabled) {
             exportBtn.onclick = () => {
-                copyIssuesToSheets(visibleIssues, siteID || '');
+                // v0.20: refresh siteName at click-time in case it loaded after init
+                if (!siteName) siteName = readSiteName();
+                copyIssuesToSheets(visibleIssues, siteID || '', siteName || '');
             };
         }
         const searchInput = panelEl.querySelector('#aim-issues-panel-search');
