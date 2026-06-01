@@ -6,6 +6,43 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.19 (Google Sheets export)
+
+New `📊 Copy → Sheets (N)` button in the panel header (next to ↻ Refresh). Click → copies the **currently visible** issues (after chip filter + search) to the clipboard as a formatted HTML table that pastes directly into Google Sheets or Excel with colors + line breaks intact.
+
+### Columns (one row per issue)
+1. **Status** — colored background (red Open / yellow Ready / grey Resolved / grey-blue Ignored)
+2. **Note** — the issue's main note text
+3. **Created** — full datetime: `MM-DD-YYYY h:mm AM/PM TZ`
+4. **By** — `@github-login` of creator
+5. **Last Event** — semantic label (Re-opened / Rejected / Ready for Review / etc.)
+6. **Last Event When** — full datetime
+7. **Last Event By** — `@user` of last transition
+8. **Affects #** — count of Percepto entities under polygon
+9. **Affected Entities** — one per line: `AST Tank 14B (Storage Tank)` etc. Type short-code + name + subtype.
+10. **Full History** — every transition in one cell, newline-separated: `[date] @user: from → to — "note"`
+11. **Issue ID** — for traceability
+12. **Site** — site ID
+
+### Clipboard write
+- Primary: multi-MIME `ClipboardItem` with both `text/html` and `text/plain` (TSV). Sheets/Excel pick the HTML for formatting; plain-text editors fall back to the TSV.
+- Fallback: hidden `<div>` + `execCommand('copy')` for older browsers / restricted Clipboard API.
+- Toast: `Copied N issues — paste into Google Sheets / Excel`.
+
+### Respects filters
+- Honors current chip filter (Open / Ready / Resolved / Ignored)
+- Honors search box
+- Button shows count of what's about to be exported: `📊 Copy → Sheets (5)`
+- Disabled (greyed out) when 0 issues match.
+
+### Internal
+- `buildIssuesHtmlForSheets(issues, siteId)` — inline-styled `<table>` builder
+- `buildIssuesTsv(issues, siteId)` — tab-separated rows, tabs/newlines collapsed to spaces in cells
+- `copyIssuesToSheets(issues, siteId)` — multi-MIME write + fallbacks
+- Same `ClipboardItem` + `execCommand` pattern Asset Inspector uses for its Stats popup `Copy → Sheets`.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.18 (entity pill interactivity + panel expansion)
 
 Affected-entity pills are now interactive in both the status modal and the panel, and the panel rows have an expand/collapse arrow for the entity list.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.18
+// @version      0.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.18';
+    const SCRIPT_VERSION = '0.19';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1641,6 +1641,157 @@
     // v0.18: per-issue expansion state for the panel's affected-entities list
     const expandedIssueIds = new Set();
 
+    // ------- v0.19: Google Sheets / Excel export -------
+    //
+    // Writes the panel's currently-visible issues as a formatted HTML
+    // table to the clipboard, alongside a TSV plain-text fallback.
+    // Sheets/Excel pick up text/html → cells inherit our background
+    // colors + inline line breaks. Pattern matches Asset Inspector's
+    // copyStatsAsSheet (latest/, line 7388).
+
+    function buildIssuesHtmlForSheets(issues, siteId) {
+        // Inline-styled table — Sheets/Excel honor most inline CSS.
+        const headers = [
+            'Status', 'Note', 'Created', 'By',
+            'Last Event', 'Last Event When', 'Last Event By',
+            'Affects #', 'Affected Entities', 'Full History',
+            'Issue ID', 'Site',
+        ];
+        const out = [];
+        out.push('<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">');
+        // Header row
+        out.push('<thead><tr>');
+        headers.forEach(h => {
+            out.push(`<th style="background:#14171b;color:#ffffff;font-weight:bold;text-align:left;padding:8px 10px;border:1px solid #444">${escHtml(h)}</th>`);
+        });
+        out.push('</tr></thead>');
+        out.push('<tbody>');
+        issues.forEach(issue => {
+            const status = issue.status || 'open';
+            const meta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#888' };
+            const statusFg = (status === 'ready-for-review' || status === 'resolved') ? '#000000' : '#ffffff';
+            const lastH = (issue.history && issue.history.length) ? issue.history[issue.history.length - 1] : null;
+            const lastEventLabel_ = lastEventLabel(issue);
+            const lastEventWhen = lastH ? fmtDateTime(lastH.at) : fmtDateTime(issue.createdAt);
+            const lastEventBy = lastH ? (lastH.by || '?') : (issue.createdBy || '?');
+            const createdWhen = fmtDateTime(issue.createdAt);
+            const createdBy = issue.createdBy || '?';
+            const affected = affectedEntitiesFor(issue);
+            const affectedCount = affected.length;
+            const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join('<br>');
+            const histText = (issue.history || []).map(h => {
+                const note = h.note ? ' — "' + h.note + '"' : '';
+                const trans = h.fromStatus
+                    ? `${h.fromStatus} → ${h.toStatus}`
+                    : `created (${h.toStatus})`;
+                return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
+            }).join('<br>');
+            out.push('<tr>');
+            out.push(`<td style="background:${meta.color};color:${statusFg};font-weight:bold;padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(meta.text)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(issue.note)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(createdWhen)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(createdBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-weight:bold;color:${meta.color}">${escHtml(lastEventLabel_)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(lastEventWhen)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(lastEventBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;font-weight:bold">${affectedCount}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${affectedList || '<i style="color:#888">(none)</i>'}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-family:monospace;font-size:10px;color:#888">${escHtml(issue.id)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteId)}</td>`);
+            out.push('</tr>');
+        });
+        out.push('</tbody></table>');
+        return out.join('');
+    }
+
+    function buildIssuesTsv(issues, siteId) {
+        const headers = [
+            'Status', 'Note', 'Created', 'By',
+            'Last Event', 'Last Event When', 'Last Event By',
+            'Affects #', 'Affected Entities', 'Full History',
+            'Issue ID', 'Site',
+        ];
+        const lines = [headers.join('\t')];
+        // TSV-safe: collapse tabs / newlines in cell text (no Sheets fancy
+        // formatting in TSV mode — plain text only).
+        const safe = (s) => String(s == null ? '' : s).replace(/[\t\r\n]+/g, ' ');
+        issues.forEach(issue => {
+            const status = issue.status || 'open';
+            const meta = STATUS_LABEL[status] || { text: status.toUpperCase() };
+            const lastH = (issue.history && issue.history.length) ? issue.history[issue.history.length - 1] : null;
+            const lastEventWhen = lastH ? fmtDateTime(lastH.at) : fmtDateTime(issue.createdAt);
+            const lastEventBy = lastH ? (lastH.by || '?') : (issue.createdBy || '?');
+            const affected = affectedEntitiesFor(issue);
+            const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join(' | ');
+            const histText = (issue.history || []).map(h => {
+                const note = h.note ? ' — "' + h.note + '"' : '';
+                const trans = h.fromStatus ? `${h.fromStatus} → ${h.toStatus}` : `created (${h.toStatus})`;
+                return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
+            }).join(' | ');
+            lines.push([
+                meta.text,
+                issue.note,
+                fmtDateTime(issue.createdAt),
+                '@' + (issue.createdBy || '?'),
+                lastEventLabel(issue),
+                lastEventWhen,
+                '@' + lastEventBy,
+                String(affected.length),
+                affectedList,
+                histText,
+                issue.id,
+                siteId,
+            ].map(safe).join('\t'));
+        });
+        return lines.join('\n');
+    }
+
+    async function copyIssuesToSheets(issues, siteId) {
+        if (!issues || issues.length === 0) {
+            showToast('Nothing to export — no issues match current filters.', 3000);
+            return;
+        }
+        const html = buildIssuesHtmlForSheets(issues, siteId);
+        const tsv = buildIssuesTsv(issues, siteId);
+        try {
+            if (navigator.clipboard && window.ClipboardItem) {
+                const item = new ClipboardItem({
+                    'text/html': new Blob([html], { type: 'text/html' }),
+                    'text/plain': new Blob([tsv], { type: 'text/plain' }),
+                });
+                await navigator.clipboard.write([item]);
+                showToast(`Copied ${issues.length} issue${issues.length === 1 ? '' : 's'} — paste into Google Sheets / Excel`, 3500);
+                return;
+            }
+        } catch (e) {
+            console.warn(`${TAG} ClipboardItem write failed, falling back:`, e);
+        }
+        // Fallback: select a hidden HTML node + execCommand('copy')
+        try {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            tmp.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+            document.body.appendChild(tmp);
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(tmp);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('copy');
+            sel.removeAllRanges();
+            document.body.removeChild(tmp);
+            showToast(`Copied ${issues.length} issue${issues.length === 1 ? '' : 's'} — paste into Google Sheets / Excel`, 3500);
+        } catch (e) {
+            console.error(`${TAG} Sheets fallback also failed:`, e);
+            copyTextToClipboard(tsv).then(() =>
+                showToast('Copied as plain TSV (HTML clipboard unavailable)', 3500)
+            ).catch(() =>
+                showToast('Export failed — see console.', 3500)
+            );
+        }
+    }
+
     function styleForStatus(status) {
         // Phase 1 only renders 'open'; the rest are stubs for Phase 3.
         switch (status) {
@@ -2546,6 +2697,15 @@
                                ↺ Un-hide all (${hiddenIds.size})
                            </button>`
                         : ''}
+                    <button id="aim-issues-panel-export"
+                        title="Copy ${visibleIssues.length} visible issue${visibleIssues.length === 1 ? '' : 's'} as a formatted table — paste into Google Sheets / Excel"
+                        ${visibleIssues.length === 0 ? 'disabled' : ''}
+                        style="padding:5px 10px;background:#3a3f48;color:#ffd54f;
+                               border:1px solid rgba(255,213,79,0.4);border-radius:4px;
+                               cursor:${visibleIssues.length === 0 ? 'not-allowed' : 'pointer'};font:inherit;font-size:11px;font-weight:700;
+                               opacity:${visibleIssues.length === 0 ? 0.4 : 1}">
+                        📊 Copy → Sheets (${visibleIssues.length})
+                    </button>
                     <button id="aim-issues-panel-refresh"
                         title="Re-fetch issues from GitHub"
                         style="padding:5px 10px;background:#3a3f48;color:#a8c4ff;
@@ -2592,6 +2752,13 @@
                 try { await refetchIssues(); }
                 catch (e) {}
                 renderIssuesPanel();
+            };
+        }
+        // v0.19: export visible issues to Sheets
+        const exportBtn = panelEl.querySelector('#aim-issues-panel-export');
+        if (exportBtn && !exportBtn.disabled) {
+            exportBtn.onclick = () => {
+                copyIssuesToSheets(visibleIssues, siteID || '');
             };
         }
         const searchInput = panelEl.querySelector('#aim-issues-panel-search');
