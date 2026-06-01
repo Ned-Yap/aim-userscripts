@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — Asset Inspector v3.56 — trim editor-title verification
+
+Same root as the v3.55 phantom-rename fix, different surface. Bulk subtype Apply on 7 entities was reporting `4 errors: wrong entity in editor (got "X")` where the "X" looked identical to the expected name — because the editor's title had trailing whitespace and the equality check trimmed neither side.
+
+Fix: trim both `openedName` and `label` before the lowercase comparison. Two call sites in `applyOneEntity` (subtype path + name/altitude path); both patched via `replace_all`. Apply runs now finish cleanly when Percepto's data has stray trailing spaces.
+
+---
+
 ## 2026-06-01 — Bug-fix patch (Asset Inspector v3.55 + AIM Issues v0.21)
 
 Two field-reported bugs from morning testing. Shipped directly to prod.

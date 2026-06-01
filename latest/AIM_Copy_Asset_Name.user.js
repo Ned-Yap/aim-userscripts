@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.55
+// @version      3.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.55';
+    const SCRIPT_VERSION = '3.56';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2849,8 +2849,12 @@
             applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
             return { ok: false, reason: 'editor lost', appliedCount: 0 };
         }
-        const openedName = getEditorTitle(finalEditor.doc);
-        if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
+        // v3.56: trim both sides — Percepto data sometimes has trailing
+        // whitespace, causing identical-looking strings to fail equality.
+        // Same root as the v3.55 phantom-rename fix.
+        const openedName = (getEditorTitle(finalEditor.doc) || '').trim();
+        const labelTrim = (label || '').trim();
+        if (openedName && openedName.toLowerCase() !== labelTrim.toLowerCase()) {
             applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
             return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
         }
@@ -3098,8 +3102,12 @@
             applyState.errors.push({ entityName: label, reason: 'editor lost between open + read' });
             return { ok: false, reason: 'editor lost', appliedCount: 0 };
         }
-        const openedName = getEditorTitle(finalEditor.doc);
-        if (openedName && openedName.toLowerCase() !== label.toLowerCase()) {
+        // v3.56: trim both sides — Percepto data sometimes has trailing
+        // whitespace, causing identical-looking strings to fail equality.
+        // Same root as the v3.55 phantom-rename fix.
+        const openedName = (getEditorTitle(finalEditor.doc) || '').trim();
+        const labelTrim = (label || '').trim();
+        if (openedName && openedName.toLowerCase() !== labelTrim.toLowerCase()) {
             console.warn(`${TAG} apply: ${label} — editor shows different entity "${openedName}" — skipping`);
             applyState.errors.push({ entityName: label, reason: `wrong entity in editor (got "${openedName}")` });
             return { ok: false, reason: `wrong entity ("${openedName}")`, appliedCount: 0 };
