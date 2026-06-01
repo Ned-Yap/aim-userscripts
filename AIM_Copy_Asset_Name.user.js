@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.56
+// @version      3.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.56';
+    const SCRIPT_VERSION = '3.57';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -2259,11 +2259,17 @@
         }
 
         // Paste the name via React-aware value setter so React's onChange fires.
+        // v3.57: paste the TRIMMED name. Percepto data sometimes has trailing
+        // whitespace baked into entity names; if Percepto's filter doesn't
+        // trim the query, the search returns no matches and Apply fails with
+        // "not found in sidebar" or "wrong entity in editor". This matches
+        // the trim we already do in matchLower below.
+        const nameTrimmed = (name || '').trim();
         try {
             const proto = window.HTMLInputElement.prototype;
             const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (desc && desc.set) desc.set.call(input, name);
-            else input.value = name;
+            if (desc && desc.set) desc.set.call(input, nameTrimmed);
+            else input.value = nameTrimmed;
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
         } catch (e) {
@@ -6287,11 +6293,19 @@
         input.select();
 
         let cancelled = false;
+        const startValTrimmed = (startVal || '').trim();
         const commit = () => {
             if (cancelled) return;
             const raw = input.value;
             const newVal = String(raw || '').trim();
             if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            // v3.57: same fix as name editor — no phantom queue when the
+            // value matches what we opened with (handles already-pending
+            // subtype edits cleanly).
+            if (newVal === startValTrimmed) {
                 if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
                 return;
             }
@@ -6372,10 +6386,20 @@
         input.select();
 
         let cancelled = false;
+        const startValTrimmed = (startVal || '').trim();
         const commit = () => {
             if (cancelled) return;
             const newVal = String(input.value || '').trim();
             if (!newVal) {
+                if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+                return;
+            }
+            // v3.57: only queue if the value actually changed from what
+            // the user opened the cell with. Without this, opening + closing
+            // a cell that already had a pending rename re-queues a phantom
+            // edit (effectiveName returns the pending newValue, queueNameEdit
+            // compares against entity.name = original → mismatch → queue).
+            if (newVal === startValTrimmed) {
                 if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
                 return;
             }

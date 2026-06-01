@@ -6,6 +6,22 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — Asset Inspector v3.57 — two more whitespace bugs
+
+The trailing-whitespace saga continues. Two more sites un-trimmed:
+
+### Phantom name/subtype rename on no-op blur (v3.55 didn't fully fix this)
+v3.55 only addressed the trim mismatch in `queueNameEdit` itself. The actual repro was different: if there was already a pending rename (or subtype), `effectiveName(entity)` returned the **pending newValue**, so the cell input opened showing the pending value (e.g. "Tank 14B Revised"). Clicking out without typing → `commit()` called `queueNameEdit(entity, "Tank 14B Revised")`. Inside queueNameEdit, that gets compared against `entity.name` ("Tank 14B" — the original) → mismatch → queued again.
+
+Fix: in both `startInlineNameEdit` and `startInlineSubtypeEdit`'s `commit()`, compare the new value against `startVal` (what the user opened with), not against `entity.name`. If unchanged from when the cell was opened, skip queue entirely. Catches both the "no pending" trim case AND the "has pending" case in one check.
+
+### Bulk subtype Apply failing on entities with trailing whitespace
+Log evidence: `apply: starting asset "ATKINS 47-02 UNIT 1 0212AH_ID 10100 " subtype → "h-well - test" (NEW)` — note the trailing space inside the closing quote. v3.56 trimmed the editor-title verification, but `findAndClickSidebarItem` still pasted the raw name (with trailing space) into Percepto's search input. If Percepto's search filter doesn't trim its query, no items match and Apply returns "not found in sidebar" → fail.
+
+Fix: paste the trimmed name into the search input. The internal `matchLower` already trimmed; now the search paste does too. Single root cause, all surfaces aligned.
+
+---
+
 ## 2026-06-01 — Asset Inspector v3.56 — trim editor-title verification
 
 Same root as the v3.55 phantom-rename fix, different surface. Bulk subtype Apply on 7 entities was reporting `4 errors: wrong entity in editor (got "X")` where the "X" looked identical to the expected name — because the editor's title had trailing whitespace and the equality check trimmed neither side.
