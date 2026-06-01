@@ -6,6 +6,21 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.11 + Asset Inspector v3.54 (tooltip width + click-priority)
+
+Two-script fix for the lingering v0.10 issues. The polygon and Asset Inspector were both fighting for clicks; now only the icon is the interactive surface.
+
+### AIM Issues v0.11
+- **Tooltip dynamic-width-with-cap finally works.** `width: max-content !important` + `max-width: 420px !important` — max-content tells the browser to use the natural one-line width, max-width caps it. Long notes wrap inside 420px; short notes get a compact box. v0.10's plain shrink-to-fit was being squeezed to a column by something in the page CSS chain.
+- **Polygon is now fully click-through.** `interactive: false` always (was true when visible) + force `pointer-events: none` on the SVG path. M2 inside the polygon area passes through to whatever entity is beneath. Removed polygon's `bindTooltip` + click/contextmenu handlers — tooltip and interactions move to the icon only.
+- **Icon M2 hardened.** Marker click + contextmenu handlers now call `stopImmediatePropagation` on the originalEvent so other bubble-phase listeners are stopped cold. Works in tandem with the Asset Inspector v3.54 bail check below.
+- **`data-issue-id`** added to the divIcon's inner HTML — a clean handle for cross-script detection (Asset Inspector uses it via the `.aim-issues-icon-marker` class but the id is there for future scripts).
+
+### AIM Asset Inspector v3.54 (bug fix for Issues coexistence)
+- Asset Inspector's window-capture contextmenu handler now bails when the right-click target is inside `.aim-issues-icon-marker`. Without this, AI's capture-phase handler ran *before* Issues' element-level marker handler and popped its inspector for an entity underneath the issue icon — even though z-index put the issue icon on top visually. One-line guard at the top of the handler, after the input/editable check.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.10 (tooltip dynamic sizing)
 
 v0.9's `min-width: 320px` was forcing every tooltip to that width, even for short notes. v0.10 drops `min-width` entirely. The browser's shrink-to-fit on absolute-positioned elements + word-boundary wrapping (which v0.8's removal of `overflow-wrap:break-word` enabled) gives the right shape for any content length: short notes compact, long notes wrap to the 420px max.

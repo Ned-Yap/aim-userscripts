@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1411,57 +1411,28 @@
         // Falls back to default overlayPane if our custom pane wasn't
         // created (unlikely but defensive).
         const polyPane = (map.getPane && map.getPane('aim-issues-polygons')) ? 'aim-issues-polygons' : undefined;
-        const polygonOpts = isHidden ? {
+        // v0.11: polygon is ALWAYS click-through. The icon is the only
+        // interactive surface — that lets users right-click entities under
+        // the issue box without the box swallowing the event. Tooltip and
+        // click handlers move to the icon only.
+        const polygonOpts = {
             color: st.color,
-            weight: hWeight,
-            opacity: hOpacity,
+            weight: isHidden ? hWeight : vWeight,
+            opacity: isHidden ? hOpacity : vOpacity,
             dashArray: st.dashArray,
             fillColor: st.fill,
-            fillOpacity: hFill,
+            fillOpacity: isHidden ? hFill : vFill,
             interactive: false,
             bubblingMouseEvents: false,
             pane: polyPane,
-        } : {
-            color: st.color,
-            weight: vWeight,
-            opacity: vOpacity,
-            dashArray: st.dashArray,
-            fillColor: st.fill,
-            fillOpacity: vFill,
-            interactive: true,
-            bubblingMouseEvents: false,
-            pane: polyPane,
         };
-        // v0.6 diagnostic: log polygon shape once per render so we can
-        // confirm the data + style are what we expect.
-        try {
-            console.log(`${TAG} render ${issue.id} (${issue.status}, hidden=${isHidden}) — polygon=${Array.isArray(issue.polygon) ? `[${issue.polygon.length} pts]` : typeof issue.polygon}, opts=`, polygonOpts);
-        } catch (e) {}
         const polygon = L.polygon(issue.polygon, polygonOpts);
         const ttPane = (map.getPane && map.getPane('aim-issues-tooltips')) ? 'aim-issues-tooltips' : undefined;
-        if (!isHidden) {
-            polygon.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
-                direction: 'top',
-                offset: L.point(0, -8),
-                sticky: true,
-                className: 'aim-issues-tooltip',
-                pane: ttPane,
-            });
-            polygon.on('click', (ev) => {
-                try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-                toggleSessionHide(issue.id);
-            });
-            polygon.on('contextmenu', (ev) => {
-                try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-                try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
-                openStatusModal(issue);
-            });
-        }
         polygon.addTo(map);
-        // Belt-and-suspenders for click-through when hidden: even with
-        // interactive:false, some Leaflet renderer paths still get a
-        // `pointer-events: visiblePainted` on the SVG path. Force none.
-        if (isHidden && polygon._path) {
+        // Force pointer-events:none on the SVG path — interactive:false
+        // alone isn't enough on every Leaflet renderer path. This is what
+        // lets M2 reach Percepto entities under the polygon area.
+        if (polygon._path) {
             try { polygon._path.style.pointerEvents = 'none'; } catch (e) {}
         }
 
@@ -1474,9 +1445,13 @@
             const markerSize = isHidden ? hMarker : vMarker;
             const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
+            // v0.11: data-issue-id lets other AIM scripts (notably Asset
+            // Inspector with its window-capture contextmenu handler) detect
+            // an issue icon and bail before they steal the click. Class
+            // .aim-issues-icon-marker is also a selector for the same purpose.
             const divIcon = L.divIcon({
                 className: 'aim-issues-icon-marker',
-                html: `<div style="
+                html: `<div data-issue-id="${issue.id}" style="
                     width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
                     background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
                     border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
@@ -1500,13 +1475,28 @@
                 className: 'aim-issues-tooltip',
                 pane: ttPane,
             });
-            marker.on('click', (ev) => {
+            // v0.11: stopImmediatePropagation on the originalEvent — without
+            // it, Percepto's own contextmenu listener (attached at document
+            // or window level) fires alongside ours and pops its asset menu
+            // even when the user clicked the issue icon. L.DomEvent.stopPropagation
+            // alone only stops Leaflet's internal propagation, not native DOM.
+            const swallow = (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
+                const oe = ev.originalEvent;
+                if (oe) {
+                    try { oe.preventDefault(); } catch (e) {}
+                    try { oe.stopPropagation(); } catch (e) {}
+                    try {
+                        if (typeof oe.stopImmediatePropagation === 'function') oe.stopImmediatePropagation();
+                    } catch (e) {}
+                }
+            };
+            marker.on('click', (ev) => {
+                swallow(ev);
                 toggleSessionHide(issue.id);
             });
             marker.on('contextmenu', (ev) => {
-                try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-                try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
+                swallow(ev);
                 openStatusModal(issue);
             });
             marker.addTo(map);
@@ -1951,13 +1941,14 @@
                 padding: 9px 12px !important;
                 border-radius: 6px !important;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-                /* v0.10: dynamic sizing. white-space:normal lets long text
-                   wrap; max-width caps it; no min-width so short notes get a
-                   compact tooltip. The browser's shrink-to-fit on absolute
-                   elements + word-boundary wrapping (NOT overflow-wrap:
-                   break-word, which v0.8 had wrong) gives us the right shape
-                   for any content length. */
+                /* v0.11: width:max-content + max-width:420px is the right
+                   incantation. max-content tells the browser "use the natural
+                   one-line width", max-width caps it. Long text → 420px wide
+                   and wraps inside; short text → narrow box hugging the
+                   content. Plain shrink-to-fit (v0.10) wasn't enough; Leaflet
+                   or Percepto was squeezing the tooltip to a column. */
                 white-space: normal !important;
+                width: max-content !important;
                 max-width: 420px !important;
             }
             .leaflet-tooltip-top.aim-issues-tooltip::before    { border-top-color:    rgba(15,18,22,0.96) !important; }
