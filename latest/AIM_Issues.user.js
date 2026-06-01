@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1526,8 +1526,10 @@
         // v0.3: dark-background tooltip via .aim-issues-tooltip class (CSS
         // injected once at init). Note text is now bold #ffffff for max
         // contrast against the dark bg.
+        // v0.9: width is driven by .aim-issues-tooltip's min/max-width
+        // (320–420px band). Inner div fills it so the layout is consistent.
         return `
-            <div style="max-width:320px;line-height:1.35">
+            <div style="line-height:1.35">
                 <div style="font-weight:700;color:#ff8585;font-size:13px;margin-bottom:6px">${statusLabel} &middot; ${age}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
@@ -1949,14 +1951,14 @@
                 padding: 9px 12px !important;
                 border-radius: 6px !important;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-                /* v0.8: Leaflet's .leaflet-tooltip default is white-space:nowrap,
-                   which let long notes blow past the container. Force wrap +
-                   cap width here so the inner div's max-width:320px actually
-                   constrains the rendered box. */
+                /* v0.9: unset Leaflet's white-space:nowrap so text wraps; force
+                   widescreen shape via min/max-width. v0.8 used overflow-wrap:
+                   break-word which let the browser break at any character and
+                   shrink the box to a narrow column. Removed — words now wrap
+                   at word boundaries and width stays in the 320–420px band. */
                 white-space: normal !important;
-                max-width: 340px !important;
-                word-wrap: break-word !important;
-                overflow-wrap: break-word !important;
+                min-width: 320px !important;
+                max-width: 420px !important;
             }
             .leaflet-tooltip-top.aim-issues-tooltip::before    { border-top-color:    rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-bottom.aim-issues-tooltip::before { border-bottom-color: rgba(15,18,22,0.96) !important; }
