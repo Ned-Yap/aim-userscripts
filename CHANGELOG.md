@@ -6,6 +6,19 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.2 (Phase 1 follow-up)
+
+First-look feedback fixes from testing v0.1:
+
+- **CRITICAL bug fix — persistence broken on refresh.** v0.1's `readSiteIdFromHash` read `location.hash` from the iframe context. But the map iframe's URL is `/static/dist/react-pages/*` and has NO site info — only the top window carries `#/site/<id>/...`. So after refresh, siteID came up null, localStorage lookup failed, issues vanished. Fix: read `window.top.location.hash` first (same-origin so cross-frame works), fall back to own hash. Hashchange listener also attaches to top now.
+- **Hide UX overhaul.** v0.1 removed the layer on M1 click — only way to bring it back was page refresh. v0.2 keeps the layer but switches it to a **dimmed** style (opacity ~0.25, thin stroke, near-zero fill, dashed-border marker shrunk to 20px) and forces `pointer-events:none` on the polygon so clicks fall through to Percepto entities underneath. The small ⚠ icon stays clickable — M1 it to un-hide.
+- **M2 on 🚩 button: toggle `showHidden`.** Default ON = hidden issues render dimmed. Flip OFF = hidden issues vanish entirely until you flip back (or refresh resets `hiddenIds`).
+- Button title + tooltip on hidden issues both updated to reflect the new behaviors.
+
+Still LOCAL-ONLY — Phase 2 brings GitHub identity + sync.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.1 (NEW script, Phase 1)
 
 First slice of the **CSM-collaborative issue flagging** tool. `latest/AIM_Issues.user.js` only — coworker installs at the repo root are not affected.

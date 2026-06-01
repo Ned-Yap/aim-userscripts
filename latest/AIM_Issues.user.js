@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -41,7 +41,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -55,6 +55,10 @@
     let siteID = null;
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
+    let showHidden = true;                       // v0.2: when ON, session-hidden
+                                                 // issues render dimmed instead
+                                                 // of disappearing. M2 on 🚩
+                                                 // toggles this.
     const issueLayers = new Map();               // issueId → { polygon, marker }
     let drawingState = null;
     let drawToolbarEl = null;
@@ -65,8 +69,17 @@
     let leafletMapRef = null;
 
     // ------- Site ID -------
+    // v0.2: read TOP frame's hash, not the IFRAME's own. The map iframe
+    // URL is `/static/dist/react-pages/*` and has NO site info — only the
+    // top-window URL hash carries `#/site/<id>/...`. v0.1 read the iframe
+    // hash and silently came up with siteID=null after every refresh,
+    // which made localStorage-stored issues vanish.
     function readSiteIdFromHash() {
-        const m = (location.hash || '').match(/#\/site\/(\d+)\//);
+        let hash = '';
+        try { hash = (window.top && window.top.location && window.top.location.hash) || ''; }
+        catch (e) {}
+        if (!hash) hash = location.hash || '';
+        const m = hash.match(/#\/site\/(\d+)\//);
         return m ? m[1] : null;
     }
 
@@ -104,6 +117,21 @@
         currentSiteIssues = loadIssuesFromStorage(siteID);
         console.log(`${TAG} site changed → ${siteID} (${currentSiteIssues.length} issue${currentSiteIssues.length === 1 ? '' : 's'})`);
         renderAllIssues();
+        renderButtonState();
+    }
+
+    // v0.2: listen for hashchange on BOTH top and current windows. The
+    // top frame is where Percepto's site navigation actually updates the
+    // hash; the iframe never sees it. Same-origin so cross-frame access
+    // works.
+    function attachHashListener() {
+        const handler = () => setCurrentSite(readSiteIdFromHash());
+        try {
+            if (window.top && window.top !== window) {
+                window.top.addEventListener('hashchange', handler);
+            }
+        } catch (e) {}
+        window.addEventListener('hashchange', handler);
     }
 
     // ------- Control Panel registration (Phase 1 minimal) -------
@@ -252,8 +280,20 @@
         });
         buttonEl.addEventListener('contextmenu', (e) => {
             e.preventDefault(); e.stopPropagation();
-            // Phase 1: stub — Phase 5 will open the dedicated issues panel here
-            console.log(`${TAG} M2 on 🚩 — panel will live here in Phase 5`);
+            if (!masterEnabled) return;
+            // v0.2: M2 toggles whether session-hidden issues render at all.
+            // When ON (default), hidden issues show DIMMED (M1 the marker
+            // to un-hide). When OFF, they vanish entirely until either
+            // a) M2 here flips back, or b) page refresh resets hiddenIds.
+            showHidden = !showHidden;
+            renderAllIssues();
+            renderButtonState();
+            const n = hiddenIds.size;
+            if (showHidden) {
+                showToast(`Showing ${n} hidden issue${n === 1 ? '' : 's'} dimmed. M1 the icon to un-hide.`, 3500);
+            } else {
+                showToast(`Hiding ${n} session-hidden issue${n === 1 ? '' : 's'} completely.`, 3500);
+            }
         });
         renderButtonState();
         console.log(`${TAG} v${SCRIPT_VERSION} button injected into .map-tools`);
@@ -299,11 +339,15 @@
                 icon.style.textShadow = 'none';
             }
         }
+        const hiddenCount = hiddenIds.size;
+        const hiddenSuffix = hiddenCount > 0
+            ? ` · ${hiddenCount} hidden ${showHidden ? '(dimmed)' : '(off)'} — M2 to toggle`
+            : '';
         buttonEl.title = !masterEnabled
             ? 'Issues: disabled in AIM Controls'
             : flagModeActive
-                ? 'Issues: FLAG MODE armed — click-drag for rectangle, Shift+click for polygon, Esc to exit'
-                : 'Issues · M1 toggle flag mode · click-drag = rectangle · Shift+click = polygon';
+                ? `Issues: FLAG MODE armed — click-drag for rectangle, Shift+click for polygon, Esc to exit${hiddenSuffix}`
+                : `Issues · M1 toggle flag mode · M2 toggle visibility of session-hidden${hiddenSuffix}`;
 
         // Badge: count for current site
         let badge = buttonEl.querySelector('.aim-issues-badge');
@@ -747,7 +791,16 @@
     function renderAllIssues() {
         clearIssueLayers();
         if (!masterEnabled) return;
-        currentSiteIssues.forEach(renderOneIssue);
+        currentSiteIssues.forEach((issue) => {
+            const isHidden = hiddenIds.has(issue.id);
+            // v0.2: when showHidden=OFF, hidden issues are not rendered at all.
+            // When showHidden=ON (default), they render with dimmed style and
+            // the polygon goes pointer-events:none so clicks fall through to
+            // whatever's under it (Percepto markers, KML lines, etc.). The
+            // small ⚠ marker stays clickable so the user can M1 to un-hide.
+            if (isHidden && !showHidden) return;
+            renderOneIssue(issue, { isHidden });
+        });
     }
 
     function centroidOfLatLngs(latlngs) {
@@ -782,20 +835,34 @@
         }
     }
 
-    function renderOneIssue(issue) {
+    function renderOneIssue(issue, opts) {
         if (!issue) return;
-        if (hiddenIds.has(issue.id)) return;
+        opts = opts || {};
+        const isHidden = !!opts.isHidden;
         const map = getLeafletMap();
         const L = getL();
         if (!map || !L) return;
-        // Wipe any prior layers for this id
+        // Wipe any prior layers for this id (re-renders are idempotent)
         const prior = issueLayers.get(issue.id);
         if (prior) {
             try { if (prior.polygon) map.removeLayer(prior.polygon); } catch (e) {}
             try { if (prior.marker)  map.removeLayer(prior.marker);  } catch (e) {}
         }
         const st = styleForStatus(issue.status);
-        const polygon = L.polygon(issue.polygon, {
+        const icoMeta = iconForStatus(issue.status);
+        // v0.2: hidden style — dimmed to ~25% opacity, thinner stroke, almost
+        // no fill, polygon goes interactive:false so clicks fall through.
+        // The marker stays interactive so M1 on it un-hides.
+        const polygonOpts = isHidden ? {
+            color: st.color,
+            weight: 1.5,
+            opacity: 0.25,
+            dashArray: st.dashArray,
+            fillColor: st.fill,
+            fillOpacity: 0.04,
+            interactive: false,
+            bubblingMouseEvents: false,
+        } : {
             color: st.color,
             weight: st.weight,
             opacity: 0.95,
@@ -804,52 +871,68 @@
             fillOpacity: st.fillOpacity,
             interactive: true,
             bubblingMouseEvents: false,
-        });
-        polygon.bindTooltip(buildTooltipHtml(issue), {
-            direction: 'top',
-            offset: L.point(0, -8),
-            sticky: true,
-            className: 'aim-issues-tooltip',
-        });
-        polygon.on('click', (ev) => {
-            // M1 on polygon = session-hide
-            try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-            sessionHideIssue(issue.id);
-        });
-        polygon.on('contextmenu', (ev) => {
-            try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-            try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
-            openStubStatusModal(issue);
-        });
+        };
+        const polygon = L.polygon(issue.polygon, polygonOpts);
+        if (!isHidden) {
+            polygon.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
+                direction: 'top',
+                offset: L.point(0, -8),
+                sticky: true,
+                className: 'aim-issues-tooltip',
+            });
+            polygon.on('click', (ev) => {
+                try { L.DomEvent.stopPropagation(ev); } catch (e) {}
+                toggleSessionHide(issue.id);
+            });
+            polygon.on('contextmenu', (ev) => {
+                try { L.DomEvent.stopPropagation(ev); } catch (e) {}
+                try { if (ev.originalEvent) ev.originalEvent.preventDefault(); } catch (e) {}
+                openStubStatusModal(issue);
+            });
+        }
         polygon.addTo(map);
+        // Belt-and-suspenders for click-through when hidden: even with
+        // interactive:false, some Leaflet renderer paths still get a
+        // `pointer-events: visiblePainted` on the SVG path. Force none.
+        if (isHidden && polygon._path) {
+            try { polygon._path.style.pointerEvents = 'none'; } catch (e) {}
+        }
 
         const c = centroidOfLatLngs(issue.polygon);
-        const icoMeta = iconForStatus(issue.status);
         let marker = null;
         if (c) {
+            // Hidden marker: smaller, dim border, dim glyph, but still clickable.
+            const markerOpacity = isHidden ? 0.45 : 1;
+            const markerSize = isHidden ? 20 : 26;
+            const fontSize = isHidden ? 11 : 14;
+            const borderWidth = isHidden ? 1 : 2;
             const divIcon = L.divIcon({
                 className: 'aim-issues-icon-marker',
                 html: `<div style="
-                    width:26px;height:26px;border-radius:13px;
-                    background:rgba(20,23,27,0.92);
-                    border:2px solid ${icoMeta.color};
+                    width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
+                    background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
+                    border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
                     color:${icoMeta.color};
+                    opacity:${markerOpacity};
                     display:flex;align-items:center;justify-content:center;
-                    font-size:14px;font-weight:700;
-                    box-shadow:0 2px 6px rgba(0,0,0,0.6);
-                    pointer-events:auto;">${icoMeta.glyph}</div>`,
-                iconSize: [26, 26],
-                iconAnchor: [13, 13],
+                    font-size:${fontSize}px;font-weight:700;
+                    box-shadow:${isHidden ? 'none' : '0 2px 6px rgba(0,0,0,0.6)'};
+                    pointer-events:auto;
+                    cursor:pointer;
+                    ${isHidden ? 'filter:grayscale(0.3);' : ''}
+                ">${icoMeta.glyph}</div>`,
+                iconSize: [markerSize, markerSize],
+                iconAnchor: [markerSize / 2, markerSize / 2],
             });
             marker = L.marker(c, { icon: divIcon, interactive: true, bubblingMouseEvents: false });
-            marker.bindTooltip(buildTooltipHtml(issue), {
+            marker.bindTooltip(buildTooltipHtml(issue, { isHidden }), {
                 direction: 'top',
                 offset: L.point(0, -8),
                 className: 'aim-issues-tooltip',
             });
             marker.on('click', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
-                sessionHideIssue(issue.id);
+                toggleSessionHide(issue.id);
             });
             marker.on('contextmenu', (ev) => {
                 try { L.DomEvent.stopPropagation(ev); } catch (e) {}
@@ -861,17 +944,21 @@
         issueLayers.set(issue.id, { polygon, marker });
     }
 
-    function buildTooltipHtml(issue) {
+    function buildTooltipHtml(issue, opts) {
+        opts = opts || {};
         const age = relativeAge(issue.createdAt);
         const safeNote = (issue.note || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
         const safeBy = (issue.createdBy || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
         const statusLabel = (issue.status || 'open').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+        const hideHint = opts.isHidden
+            ? '<span style="color:#5fff5f">HIDDEN</span> · M1 to un-hide · M2 = status (stub)'
+            : 'M1 = hide for this session · M2 = status (stub)';
         return `
             <div style="max-width:300px">
                 <div style="font-weight:700;color:#ff8585;margin-bottom:4px">${statusLabel} · ${age}</div>
                 <div style="color:#e6e6e6;font-size:12px;margin-bottom:4px">${safeNote}</div>
                 <div style="color:#888;font-size:11px">@${safeBy}</div>
-                <div style="color:#666;font-size:10px;margin-top:4px;font-style:italic">M1 = hide for this session · M2 = status (stub)</div>
+                <div style="color:#666;font-size:10px;margin-top:4px;font-style:italic">${hideHint}</div>
             </div>
         `;
     }
@@ -894,17 +981,36 @@
         } catch (e) { return iso; }
     }
 
-    function sessionHideIssue(id) {
-        if (hiddenIds.has(id)) return;
-        hiddenIds.add(id);
-        const map = getLeafletMap();
-        const layers = issueLayers.get(id);
-        if (layers && map) {
-            try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
-            try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+    function toggleSessionHide(id) {
+        const issue = currentSiteIssues.find(i => i.id === id);
+        if (!issue) return;
+        const willHide = !hiddenIds.has(id);
+        if (willHide) hiddenIds.add(id);
+        else hiddenIds.delete(id);
+        // v0.2: don't remove layers — re-render with the new style. When
+        // showHidden=OFF and we're hiding, renderOneIssue would still draw
+        // it dimmed, so we have to honor the global flag here too.
+        if (willHide && !showHidden) {
+            // Truly remove
+            const map = getLeafletMap();
+            const layers = issueLayers.get(id);
+            if (layers && map) {
+                try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
+                try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+            }
+            issueLayers.delete(id);
+        } else {
+            renderOneIssue(issue, { isHidden: willHide });
         }
-        issueLayers.delete(id);
-        showToast('Issue hidden for this session — refresh to bring it back.', 3500);
+        renderButtonState();
+        if (willHide) {
+            showToast(showHidden
+                ? 'Issue hidden (dimmed). M1 the small icon to un-hide. M2 🚩 to hide all hidden completely.'
+                : 'Issue hidden completely. M2 🚩 to show dimmed.',
+                4500);
+        } else {
+            showToast('Issue un-hidden.', 2000);
+        }
     }
 
     // ------- Stub status modal (Phase 1) -------
@@ -996,11 +1102,11 @@
             // Still watch site changes from TOP for completeness, in case
             // future phases want to coordinate across frames.
             setCurrentSite(readSiteIdFromHash());
-            window.addEventListener('hashchange', () => setCurrentSite(readSiteIdFromHash()));
+            attachHashListener();
             return;
         }
         setCurrentSite(readSiteIdFromHash());
-        window.addEventListener('hashchange', () => setCurrentSite(readSiteIdFromHash()));
+        attachHashListener();
         ensureButton();
         // First render attempt after a short delay so Leaflet has time to
         // mount the map for the current site.
