@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.12 (re-open resolved)
+
+Resolved is no longer terminal. Adds a `re-open` transition from Resolved back to Open — anyone can do it (trust-based, like every other transition), note required for the audit log.
+
+Single-line state-machine extension; the existing modal already renders `STATUS_TRANSITIONS[status]` buttons dynamically so the `↺ Re-open` button appears automatically when M2 is clicked on a resolved issue. On confirm: appends a history entry `{from: 'resolved', to: 'open', note}`, switches status, re-renders the issue back to red, commits to GitHub with `@user: resolved → open`. The issue's polygon comes out of the dimmed-background style automatically (via the existing `isIssueDimmed` helper — resolved was the trigger).
+
+Diverges slightly from the original design doc (which had Resolved → terminal). User override — practical experience says things come back and need to be re-flagged.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.11 + Asset Inspector v3.54 (tooltip width + click-priority)
 
 Two-script fix for the lingering v0.10 issues. The polygon and Asset Inspector were both fighting for clicks; now only the icon is the interactive surface.

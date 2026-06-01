@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.11
+// @version      0.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.11';
+    const SCRIPT_VERSION = '0.12';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1626,7 +1626,12 @@
             { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000' },
             { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff' },
         ],
-        'resolved': [],
+        // v0.12: resolved is no longer terminal. Trust-based — anyone can
+        // re-open a resolved issue if something comes back. Note required
+        // (why it's being re-opened) for the audit log.
+        'resolved': [
+            { to: 'open',     label: '↺ Re-open',                  noteRequired: true, color: '#ff4d4d', textColor: '#fff' },
+        ],
         'ignored': [
             { to: 'open',     label: '↺ Un-ignore (back to Open)', noteRequired: true, color: '#ff4d4d', textColor: '#fff' },
         ],
