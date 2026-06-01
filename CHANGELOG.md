@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.7 (local-only is truly local)
+
+Local-only issues (those created with no GitHub token cached) now have clean semantics:
+
+- **Never sync to GitHub.** `commitIssuesToGitHub` filters `createdBy === 'local-only'` out of the PUT payload. The shared `Ned-Yap/aim-userscripts-data/issues/<sid>-issues.json` only ever contains real-identity reports.
+- **Always deletable.** v0.6 required `!cachedUsername` for local-only delete — meaning the moment you had a token, you could no longer remove old local-only test issues from the map. v0.7 drops that gate. Anyone can delete a local-only issue (it has no real owner).
+- **Auto-purge on load.** `loadIssuesFromStorage` strips `local-only` entries on every load and writes the cleaned list back. Stale test issues from v0.1-v0.4 evaporate on next refresh.
+- **Delete of local-only is local-only.** Skips the GitHub PUT (the issue was never there). Toast says "Local-only issue deleted (not synced to GitHub)".
+- **404 migration is smarter.** Only counts authored issues when deciding whether to push as the initial commit — won't re-pollute a wiped file with stragglers.
+
+Also wiped the existing `issues/1245-issues.json` from the data repo (commit `6b063aa`) so the user starts clean with no test contamination.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.6 (Phase 2 polish + creator-delete)
 
 Three follow-ups from v0.5 testing:

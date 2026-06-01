@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -205,7 +205,19 @@
             if (!raw) return [];
             const parsed = JSON.parse(raw);
             if (!parsed || !Array.isArray(parsed.issues)) return [];
-            return parsed.issues;
+            // v0.7: purge local-only stragglers on load. These were
+            // created in v0.1-v0.4 testing (before GitHub identity) and
+            // shouldn't follow the user around forever. Going forward
+            // local-only issues never sync to GitHub anyway (see
+            // commitIssuesToGitHub's filter) so persisting them locally
+            // just clutters the map.
+            const cleaned = parsed.issues.filter(i => i.createdBy !== 'local-only');
+            if (cleaned.length !== parsed.issues.length) {
+                const removed = parsed.issues.length - cleaned.length;
+                console.log(`${TAG} purged ${removed} stale local-only issue${removed === 1 ? '' : 's'} from site ${id} on load`);
+                try { saveIssuesToStorage(id, cleaned); } catch (e) {}
+            }
+            return cleaned;
         } catch (e) {
             console.warn(`${TAG} loadIssuesFromStorage threw:`, e);
             return [];
@@ -375,13 +387,12 @@
             const remote = await fetchRemoteIssues(sid);
             if (sid !== siteID) return;                      // site changed mid-flight
             if (remote === null) {
-                // No file on GitHub yet. Keep whatever's local. If local
-                // has issues, they'll be uploaded on next createIssue (or
-                // we can push now to migrate). For first-deploy migration,
-                // push immediately so the file exists for other CSMs.
+                // No file on GitHub yet. Push local issues to create it —
+                // but only authored ones (v0.7: local-only never syncs).
                 delete shaBySite[sid];
-                if (currentSiteIssues.length > 0) {
-                    console.log(`${TAG} no remote file for site ${sid} but ${currentSiteIssues.length} local issue${currentSiteIssues.length === 1 ? '' : 's'} — pushing to create file`);
+                const authoredCount = currentSiteIssues.filter(i => i.createdBy !== 'local-only').length;
+                if (authoredCount > 0) {
+                    console.log(`${TAG} no remote file for site ${sid} but ${authoredCount} authored issue${authoredCount === 1 ? '' : 's'} local — pushing to create file`);
                     await commitIssuesToGitHub('initial push to migrate local issues');
                 } else {
                     setSyncStatus('ok');
@@ -430,10 +441,16 @@
         try {
             const path = ISSUES_PATH(sid);
             const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(path)}`;
-            const payload = { version: 1, siteID: sid, issues: currentSiteIssues };
+            // v0.7: local-only issues never leave the user's browser. They
+            // have no real author and shouldn't pollute the shared file —
+            // either drop them entirely on next refresh (loadIssuesFromStorage
+            // purge) or wait for the user to delete via UI. Either way,
+            // commits to GitHub exclude them.
+            const issuesToSync = currentSiteIssues.filter(i => i.createdBy !== 'local-only');
+            const payload = { version: 1, siteID: sid, issues: issuesToSync };
             const b64 = textToB64(JSON.stringify(payload, null, 2));
             const sha = shaBySite[sid];
-            const reason = reasonOverride || `update (${currentSiteIssues.length} total)`;
+            const reason = reasonOverride || `update (${issuesToSync.length} total)`;
             const body = {
                 message: `[AIM site ${sid}] issues: ${reason}`,
                 content: b64,
@@ -455,7 +472,7 @@
                 const ret = JSON.parse(resp.responseText);
                 if (ret && ret.content && ret.content.sha) shaBySite[sid] = ret.content.sha;
                 setSyncStatus('ok');
-                showToast(`✓ Synced to GitHub (${currentSiteIssues.length} issue${currentSiteIssues.length === 1 ? '' : 's'}).`, 2500);
+                showToast(`✓ Synced to GitHub (${issuesToSync.length} issue${issuesToSync.length === 1 ? '' : 's'}).`, 2500);
                 return true;
             }
             if (resp.status === 409 || resp.status === 422) {
@@ -1200,7 +1217,9 @@
         const issue = currentSiteIssues.find(i => i.id === id);
         if (!issue) return;
         const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
-        const isLocalOnly = (issue.createdBy === 'local-only' && !cachedUsername);
+        // v0.7: anyone can delete a local-only issue regardless of token
+        // state — they're throwaway entries with no real owner.
+        const isLocalOnly = (issue.createdBy === 'local-only');
         if (!isCreator && !isLocalOnly) {
             showToast(`Only @${issue.createdBy} can delete this issue.`, 4500);
             return;
@@ -1218,9 +1237,14 @@
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderButtonState();
         console.log(`${TAG} deleted issue ${id} by @${cachedUsername || 'local-only'}`);
-        if (cachedToken) {
+        // v0.7: local-only issues never went to GitHub (see commitIssuesToGitHub
+        // filter), so no commit is needed when one is deleted.
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
             showToast('Issue deleted — pushing to GitHub…', 2500);
             commitIssuesToGitHub(`delete issue by @${cachedUsername || 'local-only'}`);
+        } else if (wasLocalOnly) {
+            showToast('Local-only issue deleted (not synced to GitHub).', 3000);
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
         }
@@ -1567,7 +1591,9 @@
         // delete-able when cachedUsername is also empty — that handles
         // the offline / pre-Phase-2 testing case.
         const isCreator = !!(issue.createdBy && cachedUsername && issue.createdBy === cachedUsername);
-        const isLocalOnly = (issue.createdBy === 'local-only' && !cachedUsername);
+        // v0.7: anyone can delete a local-only issue regardless of token
+        // state — they're throwaway entries with no real owner.
+        const isLocalOnly = (issue.createdBy === 'local-only');
         const canDelete = isCreator || isLocalOnly;
         const deleteBtnHtml = canDelete
             ? `<button id="aim-issues-stub-delete"
