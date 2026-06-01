@@ -6,6 +6,30 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — Bug-fix patch (Asset Inspector v3.55 + AIM Issues v0.21)
+
+Two field-reported bugs from morning testing. Shipped directly to prod.
+
+### Asset Inspector v3.55 — phantom rename on no-op blur
+Clicking a Name cell and tabbing/clicking out without typing a change was queueing a phantom rename — original strikethrough, same value in yellow as the "new" — with no way to undo just that one entry in the middle of a batch.
+
+Root cause: `queueNameEdit` trimmed `newRaw` but not `entity.name`. Percepto data occasionally has trailing whitespace; the trimmed new value didn't match the untrimmed current value, so the equality check passed when it shouldn't have.
+
+Fix: trim `entity.name` too. One-line change.
+
+### AIM Issues v0.21 — duplicate creates from broken Create button
+Coworker drew an issue, hit Create — modal didn't close, polygon rendered but icon didn't. They hit Create twice more and got 2 duplicate issues.
+
+Two compounding bugs:
+- **`createIssue` could throw mid-execution** (somewhere in `renderOneIssue`'s marker code, likely; specific failure not yet identified). The `closeNoteModal()` call in `save.onclick` ran AFTER `createIssue` so when `createIssue` threw, modal stayed open + button stayed enabled.
+- **`save.onclick` had no double-click guard**, so subsequent clicks each ran a full create cycle.
+
+Fix:
+- `save.onclick` now locks the button on first click (`data-locked` + `disabled` + "Creating…" label), closes the modal IMMEDIATELY, then runs `createIssue` inside `try/catch`. Any thrown error is logged + a toast asks the user to refresh.
+- Wrapped the marker block in `renderOneIssue` with try/catch so the polygon at least registers if marker code fails, and we get a console error to diagnose the next occurrence.
+
+---
+
 ## 2026-06-01 — Production rollout
 
 Promoted today's accumulated dev/`latest` work to the repo root so coworker installs (which point at the root via `@updateURL`) pick up the changes on their next Tampermonkey auto-check (~24h).

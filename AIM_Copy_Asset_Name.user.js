@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.54
+// @version      3.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     console.log(`${TAG} v2.0 loading`);
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.54';
+    const SCRIPT_VERSION = '3.55';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
@@ -1902,7 +1902,12 @@
         if (!entity) return false;
         const newValue = String(newRaw || '').trim();
         if (!newValue) return false;
-        const current = entity.name || '';
+        // v3.55: trim entity.name too — Percepto data sometimes has trailing
+        // whitespace. Without this trim, newValue ("Tank 14B") didn't match
+        // current ("Tank 14B ") and the cell queued a phantom rename to the
+        // same visible value (strikethrough original + same value in yellow,
+        // with no way to undo just that one edit in the middle of a batch).
+        const current = (entity.name || '').trim();
         if (newValue === current) {
             if (getPendingName(entity.id)) {
                 discardPendingEdit(entity.id, null, 'name');

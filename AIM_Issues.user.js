@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1254,11 +1254,28 @@
         setTimeout(() => { try { input.focus(); } catch (e) {} }, 30);
         cancel.onclick = () => { closeNoteModal(); showToast('Issue discarded.', 1800); };
         save.onclick = () => {
+            // v0.21: lock + close-first guard. Coworker hit Create, modal
+            // didn't close (createIssue threw before closeNoteModal), they
+            // hit Create twice more and got 2 duplicate issues. Now: lock
+            // the button on first click + close the modal IMMEDIATELY,
+            // then run createIssue inside try so any thrown error is
+            // logged but the user can't double-fire.
+            if (save.dataset.locked === '1') return;
             const note = (input.value || '').trim();
             if (!note) { err.textContent = 'Note is required.'; return; }
             err.textContent = '';
-            createIssue({ shape, latlngsObjs, note });
+            save.dataset.locked = '1';
+            save.disabled = true;
+            save.textContent = 'Creating…';
+            save.style.opacity = '0.7';
+            save.style.cursor = 'not-allowed';
             closeNoteModal();
+            try {
+                createIssue({ shape, latlngsObjs, note });
+            } catch (e) {
+                console.error(`${TAG} createIssue threw:`, e);
+                showToast('Issue created — render failed, refresh to recover. See console.', 5000);
+            }
         };
         // Esc to cancel, Ctrl/Cmd+Enter to save
         const keyH = (e) => {
@@ -1915,7 +1932,13 @@
 
         const c = centroidOfLatLngs(issue.polygon);
         let marker = null;
-        if (c) {
+        // v0.21: wrap marker code in try/catch. A coworker hit "polygon
+        // renders but icon doesn't" — meant something in here threw silently
+        // and aborted both the marker AND the modal close (createIssue
+        // never reached the post-render lines). With this try, the polygon
+        // at least gets registered + we get a console error to diagnose
+        // the specific failure if it happens again.
+        try { if (c) {
             const vMarker = Number(getT('render.visible-marker-size')) || 26;
             const hMarker = Number(getT('render.hidden-marker-size')) || 20;
             const markerOpacity = isHidden ? 0.45 : 1;
@@ -1977,6 +2000,9 @@
                 openStatusModal(issue);
             });
             marker.addTo(map);
+        } } catch (e) {
+            console.error(`${TAG} marker render failed for issue ${issue.id}:`, e);
+            marker = null;
         }
         issueLayers.set(issue.id, { polygon, marker });
     }
