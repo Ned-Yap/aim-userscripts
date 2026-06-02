@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.24
+// @version      0.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.24';
+    const SCRIPT_VERSION = '0.25';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -491,7 +491,24 @@
         // createdBy / id) don't change after creation, so both copies hold
         // the same values — taking from either side is fine. Use spread
         // with `a` first for stable ordering of fields.
-        return { ...a, ...b, history, status };
+        const merged = { ...a, ...b, history, status };
+        // v0.25: delete-wins. If EITHER copy is tombstoned, the merged
+        // result is tombstoned. Keep whichever tombstone happened first
+        // (canonical record of when the delete actually occurred).
+        if (a.deleted || b.deleted) {
+            merged.deleted = true;
+            // Prefer earliest deletedAt — first delete is the canonical one
+            const aAt = a.deletedAt ? new Date(a.deletedAt).getTime() : Infinity;
+            const bAt = b.deletedAt ? new Date(b.deletedAt).getTime() : Infinity;
+            if (aAt <= bAt) {
+                merged.deletedAt = a.deletedAt || b.deletedAt;
+                merged.deletedBy = a.deletedBy || b.deletedBy;
+            } else {
+                merged.deletedAt = b.deletedAt;
+                merged.deletedBy = b.deletedBy;
+            }
+        }
+        return merged;
     }
 
     function mergeIssueLists(localList, remoteList) {
@@ -878,9 +895,9 @@
                 ? `Issues: FLAG MODE armed — click-drag rect, Shift+click polygon, Esc to exit${hiddenSuffix}${syncSuffix}`
                 : `Issues · M1 toggle flag mode · M2 open Issues panel${hiddenSuffix}${syncSuffix}`;
 
-        // Badge: count for current site (top-right corner)
+        // Badge: count for current site (top-right corner). v0.25: live count only.
         let badge = buttonEl.querySelector('.aim-issues-badge');
-        const n = currentSiteIssues.length;
+        const n = liveIssues(currentSiteIssues).length;
         if (n > 0) {
             if (!badge) {
                 badge = document.createElement('span');
@@ -1355,7 +1372,7 @@
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderOneIssue(issue);
         renderButtonState();
-        const localCount = currentSiteIssues.length;
+        const localCount = liveIssues(currentSiteIssues).length;
         if (cachedToken) {
             showToast(`Issue created — pushing to GitHub…`, 2500);
             commitIssuesToGitHub(`add issue by @${by}`);
@@ -1382,7 +1399,7 @@
             showToast(`Only @${issue.createdBy} can delete this issue.`, 4500);
             return;
         }
-        // Drop layers
+        // Drop visual layers
         const map = getLeafletMap();
         const layers = issueLayers.get(id);
         if (layers && map) {
@@ -1391,21 +1408,51 @@
         }
         issueLayers.delete(id);
         hiddenIds.delete(id);
-        currentSiteIssues = currentSiteIssues.filter(i => i.id !== id);
+
+        // v0.25: TOMBSTONE for synced issues. Removing-and-committing didn't
+        // survive: Tab 2 (with the issue still present in its stale local
+        // state) would race and re-upload it during a 409 retry. Tombstones
+        // make delete a state CHANGE not a state REMOVAL — survives merges
+        // via delete-wins. Local-only issues never sync so we just yank
+        // them outright (no tombstone needed).
+        if (isLocalOnly) {
+            currentSiteIssues = currentSiteIssues.filter(i => i.id !== id);
+            saveIssuesToStorage(siteID, currentSiteIssues);
+            renderButtonState();
+            console.log(`${TAG} deleted local-only issue ${id}`);
+            showToast('Local-only issue deleted (not synced to GitHub).', 3000);
+            return;
+        }
+        // Mark in place — preserves the entry for distributed-sync safety.
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        issue.deleted = true;
+        issue.deletedAt = nowIso;
+        issue.deletedBy = by;
+        // Append a history entry too so the audit log shows the deletion
+        // (matches our pattern of preserving every action in history[]).
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: 'deleted',
+            note: '(deleted)',
+        });
         saveIssuesToStorage(siteID, currentSiteIssues);
         renderButtonState();
-        console.log(`${TAG} deleted issue ${id} by @${cachedUsername || 'local-only'}`);
-        // v0.7: local-only issues never went to GitHub (see commitIssuesToGitHub
-        // filter), so no commit is needed when one is deleted.
-        const wasLocalOnly = (issue.createdBy === 'local-only');
-        if (cachedToken && !wasLocalOnly) {
+        console.log(`${TAG} tombstoned issue ${id} by @${by}`);
+        if (cachedToken) {
             showToast('Issue deleted — pushing to GitHub…', 2500);
-            commitIssuesToGitHub(`delete issue by @${cachedUsername || 'local-only'}`);
-        } else if (wasLocalOnly) {
-            showToast('Local-only issue deleted (not synced to GitHub).', 3000);
+            commitIssuesToGitHub(`tombstone issue by @${by}`);
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
         }
+    }
+
+    // v0.25: helper. Filters tombstoned issues from any list before render.
+    function liveIssues(list) {
+        return (list || []).filter(i => i && !i.deleted);
     }
 
     // ------- Rendering issues -------
@@ -1441,7 +1488,9 @@
         renderRetryTimer = null;
         clearIssueLayers();
         if (!masterEnabled) return;
-        if (currentSiteIssues.length === 0) return;
+        // v0.25: skip tombstoned issues entirely
+        const live = liveIssues(currentSiteIssues);
+        if (live.length === 0) return;
         const map = getLeafletMap();
         const L = getL();
         if (!map || !L) {
@@ -1456,7 +1505,7 @@
             console.log(`${TAG} renderAllIssues: map ready after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`);
         }
         ensureCustomPanes(map);
-        currentSiteIssues.forEach((issue) => {
+        live.forEach((issue) => {
             renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
         });
     }
@@ -2706,15 +2755,18 @@
         const wasSearchFocused = ae && ae.id === 'aim-issues-panel-search';
         const prevSelStart = wasSearchFocused ? ae.selectionStart : null;
         const prevSelEnd   = wasSearchFocused ? ae.selectionEnd   : null;
-        const issuesSorted = currentSiteIssues
+        // v0.25: filter tombstones from the panel — sort + per-status counts
+        // both operate on the live list.
+        const liveSiteIssues = liveIssues(currentSiteIssues);
+        const issuesSorted = liveSiteIssues
             .slice()
             .sort((a, b) => new Date(lastEventAt(b)).getTime() - new Date(lastEventAt(a)).getTime());
         const visibleIssues = issuesSorted.filter(panelMatchesIssue);
 
-        // Per-status counts (always all issues, ignoring search — counts
-        // tell the user how many are in each bucket)
+        // Per-status counts (always all live issues, ignoring search —
+        // counts tell the user how many are in each bucket)
         const countsByStatus = { open: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
-        currentSiteIssues.forEach(i => {
+        liveSiteIssues.forEach(i => {
             const s = i.status || 'open';
             if (countsByStatus[s] !== undefined) countsByStatus[s]++;
         });
@@ -2751,7 +2803,7 @@
 
         // Rows
         let rowsHtml;
-        if (currentSiteIssues.length === 0) {
+        if (liveSiteIssues.length === 0) {
             rowsHtml = `<div style="padding:30px 12px;color:#888;text-align:center;font-style:italic">
                 No issues on this site yet. Toggle 🚩 → flag mode → click-drag to create one.
             </div>`;
@@ -2852,7 +2904,7 @@
                 <span style="color:#888;font-size:11px">·</span>
                 <span style="color:#888;font-size:11px">Site ${escHtml(siteID || '—')}${siteName ? ` <span style="color:#a8c4ff">· ${escHtml(siteName)}</span>` : ''}</span>
                 <span style="color:#888;font-size:11px">·</span>
-                <span style="color:#aaa;font-size:11px">${currentSiteIssues.length} total</span>
+                <span style="color:#aaa;font-size:11px">${liveSiteIssues.length} total</span>
                 <span style="color:#888;font-size:11px">·</span>
                 <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
                     <span style="display:inline-block;width:8px;height:8px;border-radius:4px;background:${syncDot}"></span>

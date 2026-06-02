@@ -6,6 +6,22 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-01 — AIM Issues v0.25 — tombstone-based delete (survives merges)
+
+User deleted the same issue 3 times; each refresh brought it back. Classic distributed-sync bug — when one tab deletes and another tab still has the issue + commits something else, the conflict-merge sees "remote: gone, local: present → keep it (local-only)" and the delete gets undone.
+
+Fix: **tombstones**. Deleting a synced issue now sets `deleted: true` + `deletedAt` + `deletedBy` on the issue object instead of removing it from the list. The tombstone propagates to GitHub like any other change and survives subsequent merges via a **delete-wins** rule in `mergeIssueObjects` — if either copy has `deleted: true`, the merged result is also tombstoned (with the earliest `deletedAt` as the canonical record).
+
+Tombstones are also appended as a history entry (`fromStatus: <prev>, toStatus: 'deleted'`) so the audit log shows the deletion.
+
+Display: tombstoned issues are filtered out everywhere they'd be visible — map render, panel rows, chip counts, badge, "N total" header, empty-state check, createIssue toast count. A new `liveIssues(list)` helper does the filter.
+
+Storage + GitHub: tombstones STAY in `currentSiteIssues` and in the PUT payload (that's the whole point — they need to propagate). Only `local-only` issues (which never sync at all) are still removed outright on delete.
+
+**Note on the 2-tab ignore-overwrite bug**: that was v0.24's history-union fix. If you tested before v0.24 landed in Tampermonkey, the fix wasn't live yet. After v0.25 auto-updates (or you manually trigger update), both bugs should be resolved together.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.24 — concurrent transitions both kept
 
 Two CSMs each opened the same issue from stale views and ignored it with different notes. One transition was kept, the other discarded.
