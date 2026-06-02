@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -487,6 +487,15 @@
         const status = history.length
             ? history[history.length - 1].toStatus
             : (a.status || b.status || 'open');
+        // v0.26: diagnostic so we can SEE merges happening when users
+        // report data loss. Logs the per-issue merge with history counts.
+        try {
+            const aLen = (a.history || []).length;
+            const bLen = (b.history || []).length;
+            if (aLen !== history.length || bLen !== history.length) {
+                console.log(`${TAG} mergeIssueObjects(${a.id}): local hist=${aLen} + remote hist=${bLen} → merged=${history.length}, status=${status}`);
+            }
+        } catch (e) {}
         // Immutable fields (polygon / note / surface / shape / createdAt /
         // createdBy / id) don't change after creation, so both copies hold
         // the same values — taking from either side is fine. Use spread
@@ -520,7 +529,12 @@
             if (!r) { byId.set(l.id, l); return; }
             byId.set(l.id, mergeIssueObjects(l, r));
         });
-        return Array.from(byId.values());
+        const out = Array.from(byId.values());
+        // v0.26: diagnostic for the union counts
+        try {
+            console.log(`${TAG} mergeIssueLists: local=${(localList || []).length} + remote=${(remoteList || []).length} → ${out.length}`);
+        } catch (e) {}
+        return out;
     }
 
     async function refetchIssues() {
@@ -598,6 +612,14 @@
             const b64 = textToB64(JSON.stringify(payload, null, 2));
             const sha = shaBySite[sid];
             const reason = reasonOverride || `update (${issuesToSync.length} total)`;
+            // v0.26: log the per-issue history counts going into the PUT so
+            // we can see exactly what's being uploaded. If user reports
+            // "the 2nd overwrote the 1st", this log line will show
+            // whether the merged history actually made it into the PUT.
+            try {
+                const hcounts = issuesToSync.map(i => `${i.id.slice(0, 14)}…:${(i.history || []).length}h${i.deleted ? ',DEL' : ''}`).join(' ');
+                console.log(`${TAG} PUT (${reason}) sha=${(sha || 'NEW').slice(0, 7)} hist counts: ${hcounts || '(empty)'}`);
+            } catch (e) {}
             const body = {
                 message: `[AIM site ${sid}] issues: ${reason}`,
                 content: b64,
