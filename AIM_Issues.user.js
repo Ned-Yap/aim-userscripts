@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.26
+// @version      0.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -566,14 +566,37 @@
             const localOnlyCount = merged.filter(m =>
                 !remote.issues.some(r => r.id === m.id)
             ).length;
+            // v0.27: ALSO push back if a merged issue has more history
+            // entries than its remote counterpart, OR a local-tombstone that
+            // remote doesn't have. v0.26's diagnostic caught this — Tab 2
+            // had [created, Ignored-2] locally, GitHub had [created, Ignore-1]
+            // (pushed by Tab 1 between Tab 2's commit and Tab 2's refetch).
+            // Merge produced 3 entries. Old code's `localOnlyCount` was 0
+            // (issue exists in both) → no push → Tab 2's "Ignored-2"
+            // stayed local forever. Now we detect history-delta and push.
+            let historyDeltaCount = 0;
+            let tombstoneDeltaCount = 0;
+            merged.forEach(m => {
+                const r = remote.issues.find(x => x.id === m.id);
+                if (!r) return; // counted in localOnlyCount
+                const mLen = (m.history || []).length;
+                const rLen = (r.history || []).length;
+                if (mLen > rLen) historyDeltaCount++;
+                if (m.deleted && !r.deleted) tombstoneDeltaCount++;
+            });
+            const needsPush = (localOnlyCount + historyDeltaCount + tombstoneDeltaCount) > 0;
             shaBySite[sid] = remote.sha;
             currentSiteIssues = merged;
             saveIssuesToStorage(sid, currentSiteIssues);
             renderAllIssues();
             renderButtonState();
-            if (localOnlyCount > 0) {
-                console.log(`${TAG} merged remote (${remote.issues.length}) with local (${beforeLocalCount}) → ${merged.length} total; ${localOnlyCount} local-only being pushed`);
-                await commitIssuesToGitHub(`merge ${localOnlyCount} local-only issue${localOnlyCount === 1 ? '' : 's'}`);
+            if (needsPush) {
+                const parts = [];
+                if (localOnlyCount) parts.push(`${localOnlyCount} local-only`);
+                if (historyDeltaCount) parts.push(`${historyDeltaCount} with extra history`);
+                if (tombstoneDeltaCount) parts.push(`${tombstoneDeltaCount} tombstoned`);
+                console.log(`${TAG} merged remote (${remote.issues.length}) with local (${beforeLocalCount}) → ${merged.length} total; pushing: ${parts.join(', ')}`);
+                await commitIssuesToGitHub(`merge: ${parts.join(', ')}`);
             } else {
                 setSyncStatus('ok');
                 console.log(`${TAG} synced from GitHub: ${remote.issues.length} issue${remote.issues.length === 1 ? '' : 's'} on site ${sid}`);
