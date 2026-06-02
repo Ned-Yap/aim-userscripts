@@ -6,6 +6,54 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-02 — AIM Issues v0.28 (DEV ONLY) — Comments + Priority
+
+Two requested features. `latest/` only — prod still on v0.27.
+
+### Comments
+- New `💬 Add comment` button in the status modal alongside transition buttons
+- Required note; doesn't change status
+- Appends a history entry with `kind: 'comment'` and `fromStatus === toStatus`
+- Renders as `💬 Commented` in the audit log + last-event label
+
+### Priority (high / medium / low / none)
+- New `priority` field on each issue (default `null`)
+- Picker chips in the create modal (None / Low / Medium / High)
+- Priority chips in the status modal — click to arm a change, optional note, Confirm
+- History entry on change: `kind: 'priority'` + `fromPriority` + `toPriority`
+- Display: tooltip header chip, status modal header chip, panel row chip, Sheets export adds `Priority` (color-coded) + `Comments #` columns
+
+### Internal
+- `PRIORITY_LABEL` map (color / textColor / rank / short)
+- `applyComment(issueId, note)` + `applyPriorityChange(issueId, newPriority, note)` — same audit + sync shape as `applyTransition`
+- Status modal's `armed` state polymorphic: transition object | `{kind:'comment'}` | `{kind:'priority', to:X}` | null
+- `lastEventLabel` + history rendering distinguish 5 entry types: created / transition / comment / priority / deleted
+
+### Skipped
+- **Notifications** — punted this session. Real push needs a backend (Slack webhook or similar); browser-only via polling could come later.
+
+---
+
+## 2026-06-01 — AIM Issues v0.27 — push-back-after-merge for history deltas
+
+Two-tab ignore: after both tabs ignored a shared issue, Tab 2's "Ignored 2" stayed local-only and never propagated. Root: `refetchIssues` only pushed back when `localOnlyCount > 0` (entirely-missing issues). Didn't detect **history deltas** — issues that exist in both local and remote but local has MORE entries.
+
+Fix: also count `historyDeltaCount` (any merged issue's history longer than remote's) and `tombstoneDeltaCount` (local-deleted, remote-not). Push back if any are non-zero. Now both tabs converge on the unified history after either refreshes.
+
+---
+
+## 2026-06-01 — AIM Issues v0.26 — merge diagnostics
+
+User reported 2-tab ignore-overwrite still happening after v0.24's history-union fix. Code path looked correct on paper but data wasn't showing the issue clearly. Added three diagnostic log lines so the next test reveals exactly what's happening:
+
+- `mergeIssueObjects(id): local hist=A + remote hist=B → merged=C, status=X` — per-issue merge
+- `mergeIssueLists: local=A + remote=B → C` — totals
+- `PUT (reason) sha=X hist counts: id1:Nh id2:Mh` — what's actually being uploaded
+
+Logs helped pin v0.27's root cause: merge was correct but the result was never PUSHED back.
+
+---
+
 ## 2026-06-01 — AIM Issues v0.25 — tombstone-based delete (survives merges)
 
 User deleted the same issue 3 times; each refresh brought it back. Classic distributed-sync bug — when one tab deletes and another tab still has the issue + commits something else, the conflict-merge sees "remote: gone, local: present → keep it (local-only)" and the delete gets undone.

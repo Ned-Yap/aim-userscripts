@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1322,6 +1322,21 @@
             border-radius:10px;padding:18px 22px;width:480px;max-width:90vw;
             color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
         `;
+        // v0.28: priority chips inside the note modal — None/Low/Med/High.
+        // No selection means priority stays null.
+        const priorityChipsHtml = ['none', 'low', 'medium', 'high'].map(p => {
+            if (p === 'none') {
+                return `<button type="button" class="aim-issues-pri-chip" data-priority=""
+                    style="padding:5px 12px;background:#1a1d23;color:#888;border:1.5px solid #555;border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    None
+                </button>`;
+            }
+            const m = priorityMeta(p);
+            return `<button type="button" class="aim-issues-pri-chip" data-priority="${p}"
+                style="padding:5px 12px;background:transparent;color:${m.color};border:1.5px solid ${m.color};border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                ${m.text}
+            </button>`;
+        }).join('');
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:10px">
                 New issue · ${shape} · ${latlngsObjs.length} vertex${latlngsObjs.length === 1 ? '' : 'es'}
@@ -1335,7 +1350,13 @@
                        border:1px solid rgba(255,255,255,0.15);border-radius:6px;
                        padding:8px 10px;font:inherit;font-size:13px;resize:vertical;box-sizing:border-box"></textarea>
             <div id="aim-issues-note-err" style="color:#ff8585;font-size:12px;margin-top:6px;min-height:16px"></div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+            <div style="font-size:12px;color:#aaa;margin-top:6px;margin-bottom:6px">
+                Priority (optional)
+            </div>
+            <div id="aim-issues-pri-row" style="display:flex;gap:6px;flex-wrap:wrap">
+                ${priorityChipsHtml}
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
                 <button id="aim-issues-note-cancel"
                     style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
                     Cancel
@@ -1354,6 +1375,30 @@
         const cancel = card.querySelector('#aim-issues-note-cancel');
         const save = card.querySelector('#aim-issues-note-save');
         setTimeout(() => { try { input.focus(); } catch (e) {} }, 30);
+        // v0.28: priority chip selection — null by default. Filled bg = selected.
+        let selectedPriority = null;
+        const chips = card.querySelectorAll('.aim-issues-pri-chip');
+        const paintChips = () => {
+            chips.forEach(c => {
+                const p = c.dataset.priority || null;
+                const isSel = (selectedPriority === (p || null));
+                const m = p ? priorityMeta(p) : { color: '#888', textColor: '#888' };
+                if (isSel) {
+                    c.style.background = p ? m.color : '#555';
+                    c.style.color = p ? m.textColor : '#fff';
+                } else {
+                    c.style.background = 'transparent';
+                    c.style.color = p ? m.color : '#888';
+                }
+            });
+        };
+        chips.forEach(c => {
+            c.onclick = () => {
+                const p = c.dataset.priority || null;
+                selectedPriority = p || null;
+                paintChips();
+            };
+        });
         cancel.onclick = () => { closeNoteModal(); showToast('Issue discarded.', 1800); };
         save.onclick = () => {
             // v0.21: lock + close-first guard. Coworker hit Create, modal
@@ -1373,7 +1418,7 @@
             save.style.cursor = 'not-allowed';
             closeNoteModal();
             try {
-                createIssue({ shape, latlngsObjs, note });
+                createIssue({ shape, latlngsObjs, note, priority: selectedPriority });
             } catch (e) {
                 console.error(`${TAG} createIssue threw:`, e);
                 showToast('Issue created — render failed, refresh to recover. See console.', 5000);
@@ -1392,7 +1437,7 @@
         noteModalEl = null;
     }
 
-    function createIssue({ shape, latlngsObjs, note }) {
+    function createIssue({ shape, latlngsObjs, note, priority }) {
         if (!siteID) { showToast('No site loaded — issue discarded.', 4000); return; }
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1400,6 +1445,9 @@
         // v0.5: createdBy is the GitHub login when authenticated; falls
         // back to 'local-only' when there's no PAT.
         const by = cachedUsername || 'local-only';
+        // v0.28: priority is optional. null = no priority set. Picker in
+        // the note modal lets user pick HIGH/MED/LOW or skip.
+        const pri = (priority && PRIORITY_LABEL[priority]) ? priority : null;
         const issue = {
             id,
             surface: 'site-setup',
@@ -1407,6 +1455,7 @@
             polygon,
             note,
             status: 'open',
+            priority: pri,
             createdAt: nowIso,
             createdBy: by,
             history: [
@@ -1904,10 +1953,11 @@
 
     function buildIssuesHtmlForSheets(issues, siteId, siteName_) {
         // Inline-styled table — Sheets/Excel honor most inline CSS.
+        // v0.28: + Priority + Comment Count columns
         const headers = [
-            'Status', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
-            'Affects #', 'Affected Entities', 'Full History',
+            'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
         ];
         const out = [];
@@ -1932,21 +1982,36 @@
             const affected = affectedEntitiesFor(issue);
             const affectedCount = affected.length;
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join('<br>');
+            // v0.28: comment count + priority cells
+            const commentCount = (issue.history || []).filter(h =>
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+            ).length;
+            const priM = issue.priority ? priorityMeta(issue.priority) : null;
             const histText = (issue.history || []).map(h => {
                 const note = h.note ? ' — "' + h.note + '"' : '';
-                const trans = h.fromStatus
-                    ? `${h.fromStatus} → ${h.toStatus}`
-                    : `created (${h.toStatus})`;
+                let trans;
+                if (h.kind === 'priority' || h.toPriority !== undefined) {
+                    trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
+                } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
+                else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
+                else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
             }).join('<br>');
             out.push('<tr>');
             out.push(`<td style="background:${meta.color};color:${statusFg};font-weight:bold;padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(meta.text)}</td>`);
+            if (priM) {
+                out.push(`<td style="background:${priM.color};color:${priM.textColor};font-weight:bold;padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center">${escHtml(priM.text)}</td>`);
+            } else {
+                out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;color:#999"><i>—</i></td>`);
+            }
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(issue.note)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(createdWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(createdBy)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-weight:bold;color:${meta.color}">${escHtml(lastEventLabel_)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(lastEventWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(lastEventBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;font-weight:bold">${commentCount}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;font-weight:bold">${affectedCount}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${affectedList || '<i style="color:#888">(none)</i>'}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
@@ -1961,14 +2026,12 @@
 
     function buildIssuesTsv(issues, siteId, siteName_) {
         const headers = [
-            'Status', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
-            'Affects #', 'Affected Entities', 'Full History',
+            'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
         ];
         const lines = [headers.join('\t')];
-        // TSV-safe: collapse tabs / newlines in cell text (no Sheets fancy
-        // formatting in TSV mode — plain text only).
         const safe = (s) => String(s == null ? '' : s).replace(/[\t\r\n]+/g, ' ');
         issues.forEach(issue => {
             const status = issue.status || 'open';
@@ -1978,19 +2041,31 @@
             const lastEventBy = lastH ? (lastH.by || '?') : (issue.createdBy || '?');
             const affected = affectedEntitiesFor(issue);
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join(' | ');
+            const commentCount = (issue.history || []).filter(h =>
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+            ).length;
+            const priLabel = issue.priority ? priorityMeta(issue.priority).text : '';
             const histText = (issue.history || []).map(h => {
                 const note = h.note ? ' — "' + h.note + '"' : '';
-                const trans = h.fromStatus ? `${h.fromStatus} → ${h.toStatus}` : `created (${h.toStatus})`;
+                let trans;
+                if (h.kind === 'priority' || h.toPriority !== undefined) {
+                    trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
+                } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
+                else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
+                else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
             }).join(' | ');
             lines.push([
                 meta.text,
+                priLabel,
                 issue.note,
                 fmtDateTime(issue.createdAt),
                 '@' + (issue.createdBy || '?'),
                 lastEventLabel(issue),
                 lastEventWhen,
                 '@' + lastEventBy,
+                String(commentCount),
                 String(affected.length),
                 affectedList,
                 histText,
@@ -2223,10 +2298,18 @@
             return (STATUS_LABEL[issue.status || 'open'] || { text: 'OPEN' }).text;
         }
         const last = hist[hist.length - 1];
+        // v0.28: comment + priority kinds
+        if (last.kind === 'priority' || last.toPriority !== undefined) {
+            const toP = last.toPriority ? priorityMeta(last.toPriority).text : 'NONE';
+            return `Priority → ${toP}`;
+        }
+        if (last.kind === 'comment' || (last.fromStatus && last.fromStatus === last.toStatus)) {
+            return `💬 Commented`;
+        }
         if (!last.fromStatus) {
-            // Creation entry
             return (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || 'open').toUpperCase() }).text;
         }
+        if (last.toStatus === 'deleted') return 'Deleted';
         // Transition — describe semantically
         const key = `${last.fromStatus}|${last.toStatus}`;
         const map = {
@@ -2274,9 +2357,13 @@
                 <span style="color:#ffd54f;font-weight:700">Affects ${affected.length}:</span> ${parts}
             </div>`;
         }
+        // v0.28: priority chip inline with the header line
+        const priHtml = issue.priority
+            ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${priorityMeta(issue.priority).color};color:${priorityMeta(issue.priority).textColor};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🎯 ${priorityMeta(issue.priority).text}</span>`
+            : '';
         return `
             <div style="line-height:1.35">
-                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}</div>
+                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${priHtml}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
                 ${affectsHtml}
@@ -2410,6 +2497,18 @@
         'ignored':           { text: 'IGNORED',           color: '#788cb4' },
     };
 
+    // v0.28: priority. Independent of status. Default null (no priority set).
+    // Ordered low → high for sort comparisons (LOW=1, MEDIUM=2, HIGH=3, null=0).
+    const PRIORITY_LABEL = {
+        'high':   { text: 'HIGH',   short: 'H', color: '#ff4d4d', textColor: '#fff', rank: 3 },
+        'medium': { text: 'MEDIUM', short: 'M', color: '#ffa726', textColor: '#000', rank: 2 },
+        'low':    { text: 'LOW',    short: 'L', color: '#42a5f5', textColor: '#fff', rank: 1 },
+    };
+    const PRIORITY_ORDER = ['high', 'medium', 'low'];
+    function priorityMeta(p) {
+        return PRIORITY_LABEL[p] || { text: '—', short: '—', color: '#555', textColor: '#bbb', rank: 0 };
+    }
+
     function applyTransition(issueId, transition, note) {
         const issue = currentSiteIssues.find(i => i.id === issueId);
         if (!issue) return false;
@@ -2452,6 +2551,75 @@
         return (s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     }
 
+    // v0.28: comments. Don't change status — just append a history entry
+    // where fromStatus === toStatus. Required note. Same audit / sync
+    // pipeline as transitions.
+    function applyComment(issueId, note) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const trimmedNote = (note || '').trim();
+        if (!trimmedNote) return false;
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',  // same → comment
+            kind: 'comment',
+            note: trimmedNote,
+        });
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderButtonState();
+        console.log(`${TAG} comment on ${issueId} by @${by}: ${trimmedNote.slice(0, 80)}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(`Comment added — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`@${by}: comment`);
+        } else {
+            showToast('Comment added (local only).', 2500);
+        }
+        return true;
+    }
+
+    // v0.28: priority change. Doesn't change status. Audited via a history
+    // entry with kind='priority' + fromPriority/toPriority fields.
+    function applyPriorityChange(issueId, newPriority, optionalNote) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const fromPriority = issue.priority || null;
+        if (fromPriority === newPriority) return false;  // no-op
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'priority',
+            fromPriority,
+            toPriority: newPriority,
+            note: (optionalNote || '').trim(),
+        });
+        issue.priority = newPriority;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        const fromLabel = fromPriority ? priorityMeta(fromPriority).text : 'NONE';
+        const toLabel = newPriority ? priorityMeta(newPriority).text : 'NONE';
+        console.log(`${TAG} priority ${issueId}: ${fromLabel} → ${toLabel} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(`Priority → ${toLabel} — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`@${by}: priority ${fromLabel} → ${toLabel}`);
+        } else {
+            showToast(`Priority → ${toLabel} (local only).`, 2500);
+        }
+        return true;
+    }
+
     // ------- Real status modal (Phase 3) -------
     //
     // Two visual states:
@@ -2489,15 +2657,35 @@
             const status = liveIssue.status || 'open';
             const statusMeta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#ff8585' };
             const transitions = STATUS_TRANSITIONS[status] || [];
+            // v0.28: history rendering distinguishes kinds.
+            //   created: "created (OPEN)"
+            //   comment (kind==='comment' or fromStatus===toStatus && !priority): "💬 commented"
+            //   priority (kind==='priority' or has priority fields): "🎯 priority: LOW → HIGH"
+            //   deleted (toStatus==='deleted'): "🗑 deleted"
+            //   transition: "OPEN → IGNORED"
             const histRows = (liveIssue.history || []).map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
-                const trans = h.fromStatus
-                    ? `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`
-                    : `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                let label, labelColor = '#e6e6e6';
+                if (h.kind === 'priority' || (h.fromPriority !== undefined || h.toPriority !== undefined)) {
+                    const fromP = h.fromPriority ? priorityMeta(h.fromPriority).text : 'NONE';
+                    const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+                    const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
+                    label = `🎯 priority: ${fromP} → <span style="color:${toMeta.color};font-weight:700">${toP}</span>`;
+                } else if (!h.fromStatus) {
+                    label = `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                } else if (h.toStatus === 'deleted') {
+                    label = `🗑 deleted`;
+                    labelColor = '#ff8585';
+                } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
+                    label = `💬 commented`;
+                    labelColor = '#a8c4ff';
+                } else {
+                    label = `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`;
+                }
                 return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
-                    <div style="color:#e6e6e6;margin-top:2px">${trans}</div>
+                    <div style="color:${labelColor};margin-top:2px">${label}</div>
                     ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
                 </div>`;
             }).join('');
@@ -2512,9 +2700,60 @@
                    </button>`
                 : '';
 
-            // Transitions section OR armed-note section
+            // v0.28: armed can be one of:
+            //   transition object: { to, color, textColor, noteRequired, notePrompt, label } — status change
+            //   { kind: 'comment' } — add a comment (required note)
+            //   { kind: 'priority', to: 'high' | 'medium' | 'low' | null } — priority change (optional note)
+            //   null — show all action buttons (transitions + comment + priority chips)
             let actionSectionHtml = '';
-            if (armed) {
+            if (armed && armed.kind === 'comment') {
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid rgba(168,196,255,0.30);border-radius:6px">
+                        <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
+                            💬 Add a comment <span style="color:#888;font-weight:400">(no status change)</span>
+                        </div>
+                        <div style="color:#aaa;font-size:11px;margin-bottom:4px">Comment <span style="color:#ff8585">(required)</span></div>
+                        <textarea id="aim-issues-modal-note"
+                            placeholder="Add a comment without changing status"
+                            style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
+                        <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+                            <button id="aim-issues-modal-cancel-transition"
+                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                                Cancel
+                            </button>
+                            <button id="aim-issues-modal-confirm-transition"
+                                style="padding:6px 12px;background:#a8c4ff;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                                Confirm comment
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (armed && armed.kind === 'priority') {
+                const tgt = armed.to ? priorityMeta(armed.to) : { text: 'NONE', color: '#555', textColor: '#fff' };
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid ${armed.to ? tgt.color : '#555'}55;border-radius:6px">
+                        <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
+                            🎯 Set priority to <span style="color:${tgt.color};font-weight:700">${tgt.text}</span>
+                        </div>
+                        <div style="color:#aaa;font-size:11px;margin-bottom:4px">Reason <span style="color:#888">(optional)</span></div>
+                        <textarea id="aim-issues-modal-note"
+                            placeholder="Why are you changing the priority? (optional)"
+                            style="width:100%;min-height:60px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
+                        <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+                            <button id="aim-issues-modal-cancel-transition"
+                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                                Cancel
+                            </button>
+                            <button id="aim-issues-modal-confirm-transition"
+                                style="padding:6px 12px;background:${tgt.color};color:${tgt.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                                Confirm priority → ${tgt.text}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (armed) {
                 const tgtLabel = (STATUS_LABEL[armed.to] || { text: armed.to.toUpperCase() }).text;
                 const reqText = armed.noteRequired ? '<span style="color:#ff8585">(required)</span>' : '<span style="color:#888">(optional)</span>';
                 actionSectionHtml = `
@@ -2539,24 +2778,45 @@
                         </div>
                     </div>
                 `;
-            } else if (transitions.length === 0) {
-                actionSectionHtml = `
-                    <div style="margin-top:14px;color:#888;font-size:11px;font-style:italic">
-                        Terminal status — no further transitions.
-                    </div>
-                `;
             } else {
-                const btns = transitions.map((t, i) => `
-                    <button data-tidx="${i}"
-                        class="aim-issues-modal-transbtn"
-                        style="padding:7px 12px;background:${t.color};color:${t.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                        ${t.label}
-                    </button>
-                `).join('');
+                // Not armed — show all action buttons (transitions + comment + priority)
+                const transBtns = transitions.length
+                    ? transitions.map((t, i) => `
+                        <button data-tidx="${i}"
+                            class="aim-issues-modal-transbtn"
+                            style="padding:7px 12px;background:${t.color};color:${t.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                            ${t.label}
+                        </button>
+                    `).join('')
+                    : `<span style="color:#888;font-style:italic;font-size:11px">Terminal status</span>`;
+                // v0.28: priority chips in unarmed view — clicking arms a priority change.
+                const currentPri = liveIssue.priority || null;
+                const priChips = ['high', 'medium', 'low', null].map(p => {
+                    const m = p ? priorityMeta(p) : { text: 'NONE', color: '#888', textColor: '#fff' };
+                    const isCur = currentPri === p;
+                    const label = p ? m.text : 'None';
+                    return `<button data-priority="${p || ''}"
+                        class="aim-issues-modal-pribtn"
+                        ${isCur ? 'disabled' : ''}
+                        title="${isCur ? 'Current priority' : `Set priority to ${label}`}"
+                        style="padding:5px 10px;background:${isCur ? m.color : 'transparent'};color:${isCur ? m.textColor : m.color};border:1.5px solid ${m.color};border-radius:14px;cursor:${isCur ? 'default' : 'pointer'};font:inherit;font-size:11px;font-weight:700;opacity:${isCur ? 1 : 0.85}">
+                        ${label}${isCur ? ' ●' : ''}
+                    </button>`;
+                }).join('');
                 actionSectionHtml = `
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
-                        ${btns}
+                        ${transBtns}
+                    </div>
+                    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                        <span style="color:#aaa;font-size:12px;margin-right:4px">🎯 Priority:</span>
+                        ${priChips}
+                    </div>
+                    <div style="margin-top:10px">
+                        <button id="aim-issues-modal-commentbtn"
+                            style="padding:6px 12px;background:#1a2333;color:#a8c4ff;border:1px solid #a8c4ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                            💬 Add comment
+                        </button>
                     </div>
                 `;
             }
@@ -2595,10 +2855,15 @@
                     </div>
                 </div>
             `;
+            // v0.28: priority chip in the header next to status
+            const headerPri = liveIssue.priority
+                ? `<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;background:${priorityMeta(liveIssue.priority).color};color:${priorityMeta(liveIssue.priority).textColor};font-size:10px;font-weight:700;letter-spacing:0.5px">🎯 ${priorityMeta(liveIssue.priority).text}</span>`
+                : '';
             card.innerHTML = `
-                <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:baseline;gap:8px">
+                <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:8px">
                     <span style="color:#aaa">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700">${statusMeta.text}</span>
+                    ${headerPri}
                 </div>
                 <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
                 ${entitiesSectionHtml}
@@ -2653,7 +2918,36 @@
                 };
             });
 
-            // Armed-mode buttons
+            // v0.28: Comment button — arms a comment-mode (required note)
+            const commentBtn = card.querySelector('#aim-issues-modal-commentbtn');
+            if (commentBtn) {
+                commentBtn.onclick = () => {
+                    armed = { kind: 'comment' };
+                    pendingNote = '';
+                    render();
+                    setTimeout(() => {
+                        const ta = card.querySelector('#aim-issues-modal-note');
+                        if (ta) ta.focus();
+                    }, 30);
+                };
+            }
+
+            // v0.28: Priority chips — arms a priority change (optional note)
+            card.querySelectorAll('.aim-issues-modal-pribtn').forEach(btn => {
+                if (btn.disabled) return;
+                btn.onclick = () => {
+                    const p = btn.dataset.priority || null;
+                    armed = { kind: 'priority', to: p || null };
+                    pendingNote = '';
+                    render();
+                    setTimeout(() => {
+                        const ta = card.querySelector('#aim-issues-modal-note');
+                        if (ta) ta.focus();
+                    }, 30);
+                };
+            });
+
+            // Armed-mode buttons (shared across transition / comment / priority)
             const cancelBtn = card.querySelector('#aim-issues-modal-cancel-transition');
             if (cancelBtn) {
                 cancelBtn.onclick = () => { armed = null; pendingNote = ''; render(); };
@@ -2673,6 +2967,24 @@
                 confirmBtn.onclick = () => {
                     if (!armed) return;
                     const note = (noteInput ? noteInput.value : pendingNote).trim();
+                    // v0.28: dispatch by armed.kind
+                    if (armed.kind === 'comment') {
+                        if (!note) {
+                            const err = card.querySelector('#aim-issues-modal-noteerr');
+                            if (err) err.textContent = 'Comment text required.';
+                            if (noteInput) noteInput.focus();
+                            return;
+                        }
+                        const ok = applyComment(liveIssue.id, note);
+                        if (ok) closeStatusModal();
+                        return;
+                    }
+                    if (armed.kind === 'priority') {
+                        const ok = applyPriorityChange(liveIssue.id, armed.to || null, note);
+                        if (ok) closeStatusModal();
+                        return;
+                    }
+                    // Default: status transition
                     if (armed.noteRequired && !note) {
                         const err = card.querySelector('#aim-issues-modal-noteerr');
                         if (err) err.textContent = 'Note required for this transition.';
@@ -2914,6 +3226,11 @@
                         ${stackedHtml}
                     </div>`;
                 }
+                // v0.28: priority chip under the status pill if set
+                const priM = issue.priority ? priorityMeta(issue.priority) : null;
+                const priChip = priM
+                    ? `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>`
+                    : '';
                 return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
                     style="padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);
                            cursor:pointer;opacity:${rowOpacity};
@@ -2923,6 +3240,7 @@
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;
                                      background:${meta.color};color:${(issue.status === 'ready-for-review' || issue.status === 'resolved') ? '#000' : '#fff'};
                                      font-size:10px;font-weight:700">${meta.text}</span>
+                        ${priChip}
                         ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
                     </div>
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">
