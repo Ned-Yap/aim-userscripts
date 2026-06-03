@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      1.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
-// @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
+// @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -16,21 +16,32 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// Design ref: see memory/project_aim_issues_design.md for full spec.
+// Design ref: see memory/project_aim_issues_design.md for the original
+// spec; v1.00 oversight redesign described in project_aim_issues_arch.md.
 //
-// Phase 1 scope (this version):
-// - 🚩 button in .map-tools — M1 toggles flag mode, M2 stub (no-op in P1)
-// - In flag mode: M1 click-drag on map = rectangle.
-//   Shift+M1 click = polygon mode (sticky — subsequent clicks add vertices
-//   without holding Shift; Enter or double-click finishes; Esc cancels).
-// - Required note modal after draw completes
-// - localStorage per-site persistence (key: aim-issues-site-<siteID>)
-// - Render: dashed red polygon + ⚠ divIcon at centroid
-// - M1 on issue marker/polygon = toggle session-hide (resets on refresh)
-// - M2 on issue = stub modal showing the note + current status (no transitions)
+// v1.00 scope:
+// - Two-tier state machine with approver oversight:
+//     CSMs PROPOSE → pending_fix (yellow) / pending_ignore (purple)
+//     Approvers APPROVE → resolved / ignored, or REJECT → back to open.
+//     Approvers can also direct-resolve/ignore from open (bypass pending).
+// - Approver allowlist in aim-userscripts-data/approvers.json
+//     Loaded with PAT, cached in GM storage. Edit the file to add/remove.
+// - Self-approval block scaffolded but DISABLED by default
+//     (SELF_APPROVAL_BLOCK_ENABLED=false) — flip when team grows past
+//     single-active-reviewer.
+// - Per-user activity indicator (pulsing green ?)
+//     Map-marker badge + panel-row chip when OTHERS post events you
+//     haven't seen. Clears on modal open. lastSeen state in localStorage.
+// - Panel: pending status chips added, "Pending my review" shortcut
+//     (approvers only), toolbar badge morphs to orange + pending count
+//     when approver has work waiting.
+// - Legacy `ready-for-review` status grandfathered (still renders + can
+//     transition; chip hidden when count=0).
 //
-// NOT in Phase 1: GitHub sync, real status state machine, dedicated 🚩 panel,
-// SUM table integration, surface filter, history audit log.
+// Carried from prior versions: tombstone deletes, history-union + push-back
+// merge, dedicated panel, affected-entities via /map_objects, entity-pill
+// M1 copy / M2 sidebar paste, Sheets HTML clipboard, priority field,
+// floating draggable status modal.
 //
 // Log tag: [AIM ISSUES]
 //
@@ -44,7 +55,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '1.00';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -57,8 +68,68 @@
     const ISSUES_REPO = 'Ned-Yap/aim-userscripts-data';
     const ISSUES_BRANCH = 'main';
     const ISSUES_PATH = (sid) => `issues/${sid}-issues.json`;
+    const APPROVERS_PATH = 'approvers.json';
     const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
     const USERNAME_KEY = 'aim-issues-github-login'; // ours
+    const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
+
+    // ------- v1.00 approver oversight + activity-indicator constants -------
+    //
+    // SELF_APPROVAL_BLOCK_ENABLED: false today (per user decision — only one
+    // active reviewer + admin bypass means self-approval would block the
+    // common case). Flip to true when the team grows + you want to enforce
+    // a second-pair-of-eyes rule on every pending issue.
+    const SELF_APPROVAL_BLOCK_ENABLED = false;
+
+    // Last-seen activity tracking — per-user, per-issue timestamp in
+    // localStorage. Opening the status modal marks the issue "seen" up
+    // to the latest history entry's timestamp. Unseen history entries
+    // pulse a green ? badge on the marker + panel row.
+    const LAST_SEEN_KEY_PREFIX = 'aim-issues-lastseen-';
+    function lastSeenKey() {
+        return LAST_SEEN_KEY_PREFIX + (cachedUsername || 'local');
+    }
+    function loadLastSeenMap() {
+        try {
+            const raw = localStorage.getItem(lastSeenKey());
+            if (!raw) return {};
+            const obj = JSON.parse(raw);
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (e) { return {}; }
+    }
+    function saveLastSeenMap(map) {
+        try { localStorage.setItem(lastSeenKey(), JSON.stringify(map)); }
+        catch (e) {}
+    }
+    function markIssueSeen(issueId) {
+        if (!issueId) return;
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return;
+        const lastAt = lastEventAt(issue);
+        const t = new Date(lastAt || 0).getTime();
+        if (!Number.isFinite(t)) return;
+        const map = loadLastSeenMap();
+        map[issueId] = t;
+        saveLastSeenMap(map);
+    }
+    function unseenHistoryFor(issue) {
+        if (!issue || !Array.isArray(issue.history)) return [];
+        const map = loadLastSeenMap();
+        const seenAt = map[issue.id];
+        // Never seen → all history is unseen, EXCEPT entries authored by
+        // the current user (you've "seen" your own actions by definition).
+        return issue.history.filter(h => {
+            if (!h || !h.at) return false;
+            if (h.by && cachedUsername && h.by === cachedUsername) return false;
+            const t = new Date(h.at).getTime();
+            if (!Number.isFinite(t)) return false;
+            if (seenAt == null) return true;
+            return t > seenAt;
+        });
+    }
+    function hasUnseenActivity(issue) {
+        return unseenHistoryFor(issue).length > 0;
+    }
 
     // ------- GM helpers (silently no-op if grants unconfirmed) -------
     function gmGet(key, def) {
@@ -163,6 +234,22 @@
     // GitHub sync state (v0.5)
     let cachedToken = gmGet(TOKEN_KEY, '') || '';       // recovered after refresh; also via TOKEN_VALUE broadcast
     let cachedUsername = gmGet(USERNAME_KEY, '') || ''; // fetched once on first token, persisted
+    // v1.00: approver allowlist. Loaded once per session from
+    // aim-userscripts-data/approvers.json. Mirrored to GM storage so
+    // refresh-without-network still recognizes the user's role.
+    let approversList = (function() {
+        try { const raw = gmGet(APPROVERS_KEY, ''); if (!raw) return [];
+              const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : []; }
+        catch (e) { return []; }
+    })();
+    let approversSha = null;                              // for future write-back
+    function isApprover() {
+        if (!cachedUsername) return false;                // local-only / no token
+        return approversList.includes(cachedUsername);
+    }
+    function currentRole() {
+        return isApprover() ? 'approver' : 'csm';
+    }
     const shaBySite = {};                                // {[siteID]: 'sha-from-last-GET-or-PUT'}
     // syncStatus drives the small dot on the 🚩 button:
     //   'no-token' (grey)  — no PAT yet, local-only
@@ -188,7 +275,13 @@
     // v0.15: dedicated 🚩 panel (M2 on the toolbar 🚩 button opens it)
     let panelEl = null;
     // Filter chips — Set of allowed statuses. Empty == all hidden (rare).
-    const panelFilters = new Set(['open', 'ready-for-review', 'resolved', 'ignored']);
+    // v1.00: include pending_fix + pending_ignore by default; keep legacy
+    // ready-for-review for grandfathered issues.
+    const panelFilters = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored']);
+    // v0.29: priority filter chips. Uses the literal string 'none' for
+    // issues with no priority (issue.priority === null/undefined). All
+    // four active by default. M1 toggle, M2 solo (same as status chips).
+    const panelPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
     let panelSearch = '';
     // v0.16: persisted size + position. Loaded from localStorage on open,
     // saved on drag/resize release. Use viewport-anchored top/left so the
@@ -221,6 +314,38 @@
         out.top  = Math.max(10, Math.min(out.top, vh - titleBar));
         return out;
     }
+
+    // v0.30: same layout-persistence model for the status modal so it
+    // behaves like a real floating window (no backdrop dim, draggable
+    // header, resizable corner, sticks where the user left it). Default
+    // bottom-right since map content is usually centered.
+    const STATUS_MODAL_LAYOUT_KEY = 'aim-issues-statusmodal-layout';
+    let statusModalLayout = null;
+    let statusModalDragInFlight = false;
+    function loadStatusModalLayout() {
+        try {
+            const raw = localStorage.getItem(STATUS_MODAL_LAYOUT_KEY);
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== 'object') return null;
+            return obj;
+        } catch (e) { return null; }
+    }
+    function saveStatusModalLayout(layout) {
+        try { localStorage.setItem(STATUS_MODAL_LAYOUT_KEY, JSON.stringify(layout)); }
+        catch (e) {}
+    }
+    function clampStatusModalLayout(l) {
+        const minW = 420, minH = 360;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const out = { ...l };
+        out.width  = Math.max(minW, Math.min(out.width  || 560, vw - 20));
+        out.height = Math.max(minH, Math.min(out.height || 600, vh - 20));
+        out.left = Math.max(10 - out.width + 120, Math.min(out.left, vw - 120));
+        out.top  = Math.max(10, Math.min(out.top, vh - 40));
+        return out;
+    }
+
     let buttonEl = null;
     let controlChannel = null;
     let leafletMapRef = null;
@@ -387,6 +512,8 @@
         }
         // New / changed token. Ensure username + (re-)fetch current site.
         fetchGithubUsername().then(() => {
+            // v1.00: also fetch approver allowlist alongside username
+            fetchApproversList();
             if (siteID) refetchIssues();
             else { syncStatus = 'ok'; renderButtonState(); }
         });
@@ -417,6 +544,51 @@
             }
         } catch (e) {
             console.warn(`${TAG} GET /user threw:`, e);
+        }
+    }
+
+    // v1.00: pull the approver allowlist from
+    // aim-userscripts-data/approvers.json. Defines who can ACCEPT/REJECT
+    // pending proposals + skip the pending step on direct ignore/resolve.
+    // Missing file = no approvers; everyone uses CSM flow. Cached in GM
+    // storage so refresh-without-network preserves role across reloads.
+    async function fetchApproversList() {
+        if (IS_TOP) return;
+        if (!cachedToken) return;
+        try {
+            const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(APPROVERS_PATH)}?ref=${ISSUES_BRANCH}`;
+            const resp = await ghRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+            });
+            if (resp.status === 404) {
+                console.warn(`${TAG} approvers.json missing in data repo — approval flow disabled (everyone uses CSM transitions)`);
+                approversList = [];
+                gmSet(APPROVERS_KEY, JSON.stringify([]));
+                return;
+            }
+            if (resp.status !== 200) {
+                console.warn(`${TAG} GET approvers.json HTTP ${resp.status}`);
+                return;
+            }
+            const meta = JSON.parse(resp.responseText);
+            approversSha = meta.sha || null;
+            const text = b64ToText(meta.content || '');
+            const data = JSON.parse(text);
+            const list = (data && Array.isArray(data.approvers)) ? data.approvers : [];
+            approversList = list;
+            gmSet(APPROVERS_KEY, JSON.stringify(list));
+            console.log(`${TAG} approvers loaded (${list.length}): ${list.join(', ')} — you are ${isApprover() ? 'an APPROVER ✓' : 'a CSM'}`);
+            // Refresh UI that depends on role
+            if (panelEl) renderIssuesPanel();
+            renderButtonState();
+        } catch (e) {
+            console.warn(`${TAG} fetchApproversList threw:`, e);
         }
     }
 
@@ -940,17 +1112,27 @@
                 ? `Issues: FLAG MODE armed — click-drag rect, Shift+click polygon, Esc to exit${hiddenSuffix}${syncSuffix}`
                 : `Issues · M1 toggle flag mode · M2 open Issues panel${hiddenSuffix}${syncSuffix}`;
 
-        // Badge: count for current site (top-right corner). v0.25: live count only.
+        // Badge: count for current site (top-right corner). v1.00 — if
+        // the user is an approver AND there are pending issues, the badge
+        // morphs to ORANGE + pending count (your-attention-needed cue).
+        // Otherwise plain red total count, as before.
         let badge = buttonEl.querySelector('.aim-issues-badge');
-        const n = liveIssues(currentSiteIssues).length;
-        if (n > 0) {
+        const live = liveIssues(currentSiteIssues);
+        const n = live.length;
+        const pending = isApprover()
+            ? live.filter(i => i.status === 'pending_fix' || i.status === 'pending_ignore').length
+            : 0;
+        const showAttention = pending > 0;
+        const badgeText = showAttention ? String(pending) : (n > 0 ? String(n) : '');
+        const badgeBg = showAttention ? '#ffa726' : '#ff4d4d';
+        const badgeFg = showAttention ? '#000' : '#fff';
+        if (badgeText) {
             if (!badge) {
                 badge = document.createElement('span');
                 badge.className = 'aim-issues-badge';
                 badge.style.cssText = [
                     'position:absolute', 'top:-4px', 'right:-4px',
                     'min-width:16px', 'height:16px', 'border-radius:8px',
-                    'background:#ff4d4d', 'color:#fff',
                     'font-size:10px', 'font-weight:700',
                     'display:flex', 'align-items:center', 'justify-content:center',
                     'padding:0 4px',
@@ -959,7 +1141,12 @@
                 ].join(';');
                 buttonEl.appendChild(badge);
             }
-            badge.textContent = String(n);
+            badge.textContent = badgeText;
+            badge.style.background = badgeBg;
+            badge.style.color = badgeFg;
+            badge.title = showAttention
+                ? `${pending} pending your review`
+                : `${n} issue${n === 1 ? '' : 's'} on this site`;
         } else if (badge) {
             badge.remove();
         }
@@ -1322,6 +1509,21 @@
             border-radius:10px;padding:18px 22px;width:480px;max-width:90vw;
             color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
         `;
+        // v0.28: priority chips inside the note modal — None/Low/Med/High.
+        // No selection means priority stays null.
+        const priorityChipsHtml = ['none', 'low', 'medium', 'high'].map(p => {
+            if (p === 'none') {
+                return `<button type="button" class="aim-issues-pri-chip" data-priority=""
+                    style="padding:5px 12px;background:#1a1d23;color:#888;border:1.5px solid #555;border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    None
+                </button>`;
+            }
+            const m = priorityMeta(p);
+            return `<button type="button" class="aim-issues-pri-chip" data-priority="${p}"
+                style="padding:5px 12px;background:transparent;color:${m.color};border:1.5px solid ${m.color};border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                ${m.text}
+            </button>`;
+        }).join('');
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:10px">
                 New issue · ${shape} · ${latlngsObjs.length} vertex${latlngsObjs.length === 1 ? '' : 'es'}
@@ -1335,7 +1537,13 @@
                        border:1px solid rgba(255,255,255,0.15);border-radius:6px;
                        padding:8px 10px;font:inherit;font-size:13px;resize:vertical;box-sizing:border-box"></textarea>
             <div id="aim-issues-note-err" style="color:#ff8585;font-size:12px;margin-top:6px;min-height:16px"></div>
-            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+            <div style="font-size:12px;color:#aaa;margin-top:6px;margin-bottom:6px">
+                Priority (optional)
+            </div>
+            <div id="aim-issues-pri-row" style="display:flex;gap:6px;flex-wrap:wrap">
+                ${priorityChipsHtml}
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
                 <button id="aim-issues-note-cancel"
                     style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
                     Cancel
@@ -1354,6 +1562,30 @@
         const cancel = card.querySelector('#aim-issues-note-cancel');
         const save = card.querySelector('#aim-issues-note-save');
         setTimeout(() => { try { input.focus(); } catch (e) {} }, 30);
+        // v0.28: priority chip selection — null by default. Filled bg = selected.
+        let selectedPriority = null;
+        const chips = card.querySelectorAll('.aim-issues-pri-chip');
+        const paintChips = () => {
+            chips.forEach(c => {
+                const p = c.dataset.priority || null;
+                const isSel = (selectedPriority === (p || null));
+                const m = p ? priorityMeta(p) : { color: '#888', textColor: '#888' };
+                if (isSel) {
+                    c.style.background = p ? m.color : '#555';
+                    c.style.color = p ? m.textColor : '#fff';
+                } else {
+                    c.style.background = 'transparent';
+                    c.style.color = p ? m.color : '#888';
+                }
+            });
+        };
+        chips.forEach(c => {
+            c.onclick = () => {
+                const p = c.dataset.priority || null;
+                selectedPriority = p || null;
+                paintChips();
+            };
+        });
         cancel.onclick = () => { closeNoteModal(); showToast('Issue discarded.', 1800); };
         save.onclick = () => {
             // v0.21: lock + close-first guard. Coworker hit Create, modal
@@ -1373,7 +1605,7 @@
             save.style.cursor = 'not-allowed';
             closeNoteModal();
             try {
-                createIssue({ shape, latlngsObjs, note });
+                createIssue({ shape, latlngsObjs, note, priority: selectedPriority });
             } catch (e) {
                 console.error(`${TAG} createIssue threw:`, e);
                 showToast('Issue created — render failed, refresh to recover. See console.', 5000);
@@ -1392,7 +1624,7 @@
         noteModalEl = null;
     }
 
-    function createIssue({ shape, latlngsObjs, note }) {
+    function createIssue({ shape, latlngsObjs, note, priority }) {
         if (!siteID) { showToast('No site loaded — issue discarded.', 4000); return; }
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1400,6 +1632,9 @@
         // v0.5: createdBy is the GitHub login when authenticated; falls
         // back to 'local-only' when there's no PAT.
         const by = cachedUsername || 'local-only';
+        // v0.28: priority is optional. null = no priority set. Picker in
+        // the note modal lets user pick HIGH/MED/LOW or skip.
+        const pri = (priority && PRIORITY_LABEL[priority]) ? priority : null;
         const issue = {
             id,
             surface: 'site-setup',
@@ -1407,6 +1642,7 @@
             polygon,
             note,
             status: 'open',
+            priority: pri,
             createdAt: nowIso,
             createdBy: by,
             history: [
@@ -1904,10 +2140,11 @@
 
     function buildIssuesHtmlForSheets(issues, siteId, siteName_) {
         // Inline-styled table — Sheets/Excel honor most inline CSS.
+        // v0.28: + Priority + Comment Count columns
         const headers = [
-            'Status', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
-            'Affects #', 'Affected Entities', 'Full History',
+            'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
         ];
         const out = [];
@@ -1932,27 +2169,49 @@
             const affected = affectedEntitiesFor(issue);
             const affectedCount = affected.length;
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join('<br>');
+            // v0.28: comment count + priority cells
+            const commentCount = (issue.history || []).filter(h =>
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+            ).length;
+            const priM = issue.priority ? priorityMeta(issue.priority) : null;
             const histText = (issue.history || []).map(h => {
                 const note = h.note ? ' — "' + h.note + '"' : '';
-                const trans = h.fromStatus
-                    ? `${h.fromStatus} → ${h.toStatus}`
-                    : `created (${h.toStatus})`;
+                let trans;
+                if (h.kind === 'priority' || h.toPriority !== undefined) {
+                    trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
+                } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
+                else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
+                else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
             }).join('<br>');
             out.push('<tr>');
             out.push(`<td style="background:${meta.color};color:${statusFg};font-weight:bold;padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(meta.text)}</td>`);
+            if (priM) {
+                out.push(`<td style="background:${priM.color};color:${priM.textColor};font-weight:bold;padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center">${escHtml(priM.text)}</td>`);
+            } else {
+                out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;color:#999"><i>—</i></td>`);
+            }
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(issue.note)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(createdWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(createdBy)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-weight:bold;color:${meta.color}">${escHtml(lastEventLabel_)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(lastEventWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(lastEventBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;font-weight:bold">${commentCount}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;text-align:center;font-weight:bold">${affectedCount}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${affectedList || '<i style="color:#888">(none)</i>'}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-family:monospace;font-size:10px;color:#888">${escHtml(issue.id)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteId)}</td>`);
-            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteName_ || '')}</td>`);
+            // v0.29: Site Name is a link to the site-setup URL. Sheets +
+            // Excel both honor <a href> in pasted HTML — cell becomes
+            // clickable, displays the name as link text.
+            const siteUrl = siteId ? `https://percepto.app/#/site/${encodeURIComponent(siteId)}/control-panel/site-setup` : '';
+            const siteNameCell = (siteName_ && siteUrl)
+                ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(siteName_)}</a>`
+                : escHtml(siteName_ || '');
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${siteNameCell}</td>`);
             out.push('</tr>');
         });
         out.push('</tbody></table>');
@@ -1961,14 +2220,12 @@
 
     function buildIssuesTsv(issues, siteId, siteName_) {
         const headers = [
-            'Status', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By',
             'Last Event', 'Last Event When', 'Last Event By',
-            'Affects #', 'Affected Entities', 'Full History',
+            'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
         ];
         const lines = [headers.join('\t')];
-        // TSV-safe: collapse tabs / newlines in cell text (no Sheets fancy
-        // formatting in TSV mode — plain text only).
         const safe = (s) => String(s == null ? '' : s).replace(/[\t\r\n]+/g, ' ');
         issues.forEach(issue => {
             const status = issue.status || 'open';
@@ -1978,19 +2235,31 @@
             const lastEventBy = lastH ? (lastH.by || '?') : (issue.createdBy || '?');
             const affected = affectedEntitiesFor(issue);
             const affectedList = affected.map(a => `${a.typeShort} ${a.name}${a.subtype ? ' (' + a.subtype + ')' : ''}`).join(' | ');
+            const commentCount = (issue.history || []).filter(h =>
+                h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus && h.kind !== 'priority')
+            ).length;
+            const priLabel = issue.priority ? priorityMeta(issue.priority).text : '';
             const histText = (issue.history || []).map(h => {
                 const note = h.note ? ' — "' + h.note + '"' : '';
-                const trans = h.fromStatus ? `${h.fromStatus} → ${h.toStatus}` : `created (${h.toStatus})`;
+                let trans;
+                if (h.kind === 'priority' || h.toPriority !== undefined) {
+                    trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
+                } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
+                else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
+                else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
             }).join(' | ');
             lines.push([
                 meta.text,
+                priLabel,
                 issue.note,
                 fmtDateTime(issue.createdAt),
                 '@' + (issue.createdBy || '?'),
                 lastEventLabel(issue),
                 lastEventWhen,
                 '@' + lastEventBy,
+                String(commentCount),
                 String(affected.length),
                 affectedList,
                 histText,
@@ -2048,9 +2317,13 @@
     }
 
     function styleForStatus(status) {
-        // Phase 1 only renders 'open'; the rest are stubs for Phase 3.
         switch (status) {
-            case 'ready-for-review':
+            // v1.00: pending_fix = yellow (gold), pending_ignore = purple.
+            case 'pending_fix':
+                return { color: '#FFD700', fill: '#FFD700', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
+            case 'pending_ignore':
+                return { color: '#8000FF', fill: '#8000FF', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
+            case 'ready-for-review':   // legacy
                 return { color: '#ffd54f', fill: '#ffd54f', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
             case 'resolved':
                 return { color: '#888', fill: '#888', fillOpacity: 0.08, dashArray: null, weight: 1.5 };
@@ -2064,6 +2337,8 @@
 
     function iconForStatus(status) {
         switch (status) {
+            case 'pending_fix':      return { glyph: '⏳', color: '#FFD700' };
+            case 'pending_ignore':   return { glyph: '⏳', color: '#8000FF' };
             case 'ready-for-review': return { glyph: '⚠', color: '#ffd54f' };
             case 'resolved':         return { glyph: '✓', color: '#888' };
             case 'ignored':          return { glyph: '⊘', color: '#788cb4' };
@@ -2150,6 +2425,21 @@
             const markerSize = isHidden ? hMarker : vMarker;
             const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
+            // v1.00: green ? pulsing badge when the user hasn't seen the
+            // latest events on this issue. unseenHistoryFor excludes the
+            // user's own actions — only OTHERS' activity triggers it.
+            const unseen = unseenHistoryFor(issue);
+            const activityBadge = unseen.length > 0 ? `
+                <span class="aim-issues-activity-dot"
+                      title="${escHtml(`${unseen.length} new event${unseen.length === 1 ? '' : 's'} since you last opened — open to dismiss`)}"
+                      style="position:absolute;top:-5px;right:-5px;
+                             width:14px;height:14px;border-radius:50%;
+                             background:#00FF7F;color:#000;
+                             display:flex;align-items:center;justify-content:center;
+                             font-size:10px;font-weight:900;line-height:1;
+                             border:1.5px solid rgba(0,0,0,0.65);
+                             pointer-events:none;z-index:2">?</span>
+            ` : '';
             // v0.11: data-issue-id lets other AIM scripts (notably Asset
             // Inspector with its window-capture contextmenu handler) detect
             // an issue icon and bail before they steal the click. Class
@@ -2157,6 +2447,7 @@
             const divIcon = L.divIcon({
                 className: 'aim-issues-icon-marker',
                 html: `<div data-issue-id="${issue.id}" style="
+                    position:relative;
                     width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
                     background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
                     border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
@@ -2168,7 +2459,7 @@
                     pointer-events:auto;
                     cursor:pointer;
                     ${isHidden ? 'filter:grayscale(0.3);' : ''}
-                ">${icoMeta.glyph}</div>`,
+                ">${icoMeta.glyph}${activityBadge}</div>`,
                 iconSize: [markerSize, markerSize],
                 iconAnchor: [markerSize / 2, markerSize / 2],
             });
@@ -2223,19 +2514,36 @@
             return (STATUS_LABEL[issue.status || 'open'] || { text: 'OPEN' }).text;
         }
         const last = hist[hist.length - 1];
+        // v0.28: comment + priority kinds
+        if (last.kind === 'priority' || last.toPriority !== undefined) {
+            const toP = last.toPriority ? priorityMeta(last.toPriority).text : 'NONE';
+            return `Priority → ${toP}`;
+        }
+        if (last.kind === 'comment' || (last.fromStatus && last.fromStatus === last.toStatus)) {
+            return `💬 Commented`;
+        }
         if (!last.fromStatus) {
-            // Creation entry
             return (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || 'open').toUpperCase() }).text;
         }
+        if (last.toStatus === 'deleted') return 'Deleted';
         // Transition — describe semantically
         const key = `${last.fromStatus}|${last.toStatus}`;
         const map = {
-            'open|ready-for-review':    'Ready for Review',
-            'open|ignored':             'Ignored',
-            'ready-for-review|resolved': 'Resolved',
-            'ready-for-review|open':    'Rejected',
+            // v1.00 flow
+            'open|pending_fix':         'Proposed Fix',
+            'open|pending_ignore':      'Proposed Ignore',
+            'pending_fix|resolved':     'Approved Fix',
+            'pending_fix|open':         'Rejected Fix',
+            'pending_ignore|ignored':   'Approved Ignore',
+            'pending_ignore|open':      'Rejected Ignore',
+            'open|resolved':            'Resolved (direct)',
+            'open|ignored':             'Ignored (direct)',
             'resolved|open':            'Re-opened',
             'ignored|open':             'Un-ignored',
+            // Legacy
+            'open|ready-for-review':    'Ready for Review',
+            'ready-for-review|resolved': 'Resolved',
+            'ready-for-review|open':    'Rejected',
         };
         return map[key] || (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || '').toUpperCase() }).text;
     }
@@ -2244,6 +2552,29 @@
         const hist = (issue && issue.history) || [];
         if (hist.length === 0) return issue.createdAt;
         return hist[hist.length - 1].at;
+    }
+
+    // v1.00: one-line summary of a history entry for use in tooltips +
+    // activity-indicator hovers. HTML-safe.
+    function describeHistEntry(h) {
+        if (!h) return '';
+        const by = (h.by || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        const note = h.note ? `: <i>"${(h.note).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}"</i>` : '';
+        if (h.kind === 'priority' || h.toPriority !== undefined) {
+            const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+            const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
+            return `<b>@${by}</b> set priority → <span style="color:${toMeta.color}">${toP}</span>${note}`;
+        }
+        if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
+            return `💬 <b>@${by}</b> commented${note}`;
+        }
+        if (!h.fromStatus) {
+            return `<b>@${by}</b> created${note}`;
+        }
+        if (h.toStatus === 'deleted') return `🗑 <b>@${by}</b> deleted`;
+        const fromMeta = STATUS_LABEL[h.fromStatus] || { text: (h.fromStatus || '').toUpperCase(), color: '#aaa' };
+        const toMeta = STATUS_LABEL[h.toStatus] || { text: (h.toStatus || '').toUpperCase(), color: '#aaa' };
+        return `<b>@${by}</b>: <span style="color:${fromMeta.color}">${fromMeta.text}</span> → <span style="color:${toMeta.color}">${toMeta.text}</span>${note}`;
     }
 
     function buildTooltipHtml(issue, opts) {
@@ -2274,12 +2605,37 @@
                 <span style="color:#ffd54f;font-weight:700">Affects ${affected.length}:</span> ${parts}
             </div>`;
         }
+        // v0.28: priority chip inline with the header line
+        const priHtml = issue.priority
+            ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${priorityMeta(issue.priority).color};color:${priorityMeta(issue.priority).textColor};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🎯 ${priorityMeta(issue.priority).text}</span>`
+            : '';
+        // v1.00: unseen-activity callout — green-tinted block listing
+        // what's new since the user last opened this issue. Clears once
+        // the user opens the status modal.
+        let unseenHtml = '';
+        const unseen = unseenHistoryFor(issue);
+        if (unseen.length > 0) {
+            const rows = unseen.slice(-5).map(h =>
+                `<div style="color:#ddd;font-size:11px;margin-top:2px">${describeHistEntry(h)}</div>`
+            ).join('');
+            const moreCount = unseen.length > 5 ? unseen.length - 5 : 0;
+            unseenHtml = `
+                <div style="margin-top:8px;padding:6px 8px;background:rgba(0,255,127,0.10);
+                            border-left:3px solid #00FF7F;border-radius:3px">
+                    <div style="color:#00FF7F;font-size:11px;font-weight:700">
+                        🟢 New since you last looked (${unseen.length})
+                    </div>
+                    ${rows}
+                    ${moreCount > 0 ? `<div style="color:#888;font-size:10px;font-style:italic;margin-top:3px">+ ${moreCount} earlier</div>` : ''}
+                </div>`;
+        }
         return `
             <div style="line-height:1.35">
-                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}</div>
+                <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${priHtml}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
                 ${affectsHtml}
+                ${unseenHtml}
                 <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>
             </div>
         `;
@@ -2357,42 +2713,80 @@
         }
     }
 
-    // ------- Phase 3: status state machine -------
+    // ------- v1.00: status state machine with approver oversight -------
     //
-    // Per design doc (project_aim_issues_design.md):
+    //                       ┌── CSM Propose Ignore ─→ pending_ignore ──→ ignored
+    //                       │  (purple)                                  (grey)
+    //                       │                            │
+    //   open (red) ─────────┤                      Approver: Approve / Reject
+    //                       │                            ↓
+    //                       │                       (Reject → back to open)
+    //                       │
+    //                       ├── CSM Propose Fix ────→ pending_fix ─────→ resolved
+    //                       │  (yellow)                                  (grey)
+    //                       │                            │
+    //                       │                      Approver: Approve / Reject
+    //                       │                            ↓
+    //                       │                       (Reject → back to open)
+    //                       │
+    //                       ├── Approver Direct ────→ ignored | resolved
+    //                       │  (skip pending step)
+    //                       │
+    //                       └── ignored / resolved ──── Reopen ────────→ open
     //
-    //   [create]
-    //     ↓                                                  (Ignored stays
-    //   Open ──→ Ready-for-Review ──→ Resolved (terminal)     hidden by
-    //     ↑      │                                            design)
-    //     ├──────┘ (Rejected — note required)
-    //     ↑
-    //   Ignored ──→ Open (un-ignore — note required)
+    // `roles` field on each transition gates UI visibility:
+    //   ['csm']      → only non-approvers see this button
+    //   ['approver'] → only approvers see this button
+    //   undefined    → everyone sees it (e.g. Re-open)
     //
-    // Trust-based: anyone can do any transition. Audit log shows everything.
-    // No `delete` transition — delete lives separately (creator-only).
+    // `approvalCheck: true` runs the self-approval guard — when
+    // SELF_APPROVAL_BLOCK_ENABLED is true, blocks approving your own
+    // proposal. Disabled by default (single-active-reviewer team).
     //
-    // Each transition: target status, button label, whether note is required,
-    // and a button color matching the destination's render color.
-    // v0.13: notePrompt drives the textarea placeholder so the prompt
-    // matches what we're asking the user about. Was a single generic line
-    // before — confusing on transitions like Re-open.
+    // Legacy `ready-for-review` kept in STATUS_LABEL + STATUS_TRANSITIONS
+    // so pre-v1.00 issues still render + can transition. New flow uses
+    // pending_fix in its place.
     const STATUS_TRANSITIONS = {
         'open': [
-            { to: 'ready-for-review', label: '→ Ready for Review', noteRequired: true,  color: '#ffd54f', textColor: '#000',
-              notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"' },
-            { to: 'ignored',          label: '→ Ignore',            noteRequired: true,  color: '#788cb4', textColor: '#fff',
-              notePrompt: 'Why are you ignoring this? e.g. "Not within our scope" or "Duplicate of #..."' },
+            // CSM proposal path
+            { to: 'pending_fix',    label: '→ Propose Fix',     noteRequired: true,  color: '#FFD700', textColor: '#000',
+              notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"',
+              roles: ['csm'] },
+            { to: 'pending_ignore', label: '→ Propose Ignore',  noteRequired: true,  color: '#8000FF', textColor: '#fff',
+              notePrompt: 'Why should this be ignored? e.g. "Not within our scope" or "Duplicate of #..."',
+              roles: ['csm'] },
+            // Approver direct-action (skips pending step)
+            { to: 'resolved',       label: '✓ Resolve (direct)',  noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional comment on resolution',
+              roles: ['approver'] },
+            { to: 'ignored',        label: '⊘ Ignore (direct)',   noteRequired: true,  color: '#788cb4', textColor: '#fff',
+              notePrompt: 'Why are you ignoring this? Required for the audit log.',
+              roles: ['approver'] },
         ],
+        'pending_ignore': [
+            { to: 'ignored', label: '✓ Approve Ignore',           noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional comment on the approval',
+              roles: ['approver'], approvalCheck: true },
+            { to: 'open',    label: '✗ Reject (back to Open)',    noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being rejected? What still needs to be done?',
+              roles: ['approver'], approvalCheck: true },
+        ],
+        'pending_fix': [
+            { to: 'resolved', label: '✓ Approve Fix',             noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional acceptance comment',
+              roles: ['approver'], approvalCheck: true },
+            { to: 'open',     label: '✗ Reject (back to Open)',   noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being rejected? What still needs to be done?',
+              roles: ['approver'], approvalCheck: true },
+        ],
+        // Legacy — pre-v1.00 issues use this status. Keep transition list
+        // available so grandfathered issues can flow forward.
         'ready-for-review': [
-            { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000',
-              notePrompt: 'Optional acceptance comment (e.g. "Verified, looks good")' },
-            { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+            { to: 'resolved', label: '→ Resolve (legacy)',        noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional acceptance comment' },
+            { to: 'open',     label: '↺ Reject (back to Open)',   noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
               notePrompt: 'Why is this being rejected? What still needs to be done?' },
         ],
-        // v0.12: resolved is no longer terminal. Trust-based — anyone can
-        // re-open a resolved issue if something comes back. Note required
-        // (why it's being re-opened) for the audit log.
         'resolved': [
             { to: 'open',     label: '↺ Re-open',                  noteRequired: true, color: '#ff4d4d', textColor: '#fff',
               notePrompt: 'Why is this being re-opened? What came back or what was missed?' },
@@ -2404,11 +2798,25 @@
     };
 
     const STATUS_LABEL = {
-        'open':              { text: 'OPEN',              color: '#ff4d4d' },
-        'ready-for-review':  { text: 'READY FOR REVIEW',  color: '#ffd54f' },
-        'resolved':          { text: 'RESOLVED',          color: '#888'    },
-        'ignored':           { text: 'IGNORED',           color: '#788cb4' },
+        'open':             { text: 'OPEN',             color: '#ff4d4d' },
+        'pending_fix':      { text: 'PENDING FIX',      color: '#FFD700' },
+        'pending_ignore':   { text: 'PENDING IGNORE',   color: '#8000FF' },
+        'ready-for-review': { text: 'READY FOR REVIEW', color: '#ffd54f' }, // legacy
+        'resolved':         { text: 'RESOLVED',         color: '#888'    },
+        'ignored':          { text: 'IGNORED',          color: '#788cb4' },
     };
+
+    // v0.28: priority. Independent of status. Default null (no priority set).
+    // Ordered low → high for sort comparisons (LOW=1, MEDIUM=2, HIGH=3, null=0).
+    const PRIORITY_LABEL = {
+        'high':   { text: 'HIGH',   short: 'H', color: '#ff4d4d', textColor: '#fff', rank: 3 },
+        'medium': { text: 'MEDIUM', short: 'M', color: '#ffa726', textColor: '#000', rank: 2 },
+        'low':    { text: 'LOW',    short: 'L', color: '#42a5f5', textColor: '#fff', rank: 1 },
+    };
+    const PRIORITY_ORDER = ['high', 'medium', 'low'];
+    function priorityMeta(p) {
+        return PRIORITY_LABEL[p] || { text: '—', short: '—', color: '#555', textColor: '#bbb', rank: 0 };
+    }
 
     function applyTransition(issueId, transition, note) {
         const issue = currentSiteIssues.find(i => i.id === issueId);
@@ -2452,6 +2860,75 @@
         return (s || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     }
 
+    // v0.28: comments. Don't change status — just append a history entry
+    // where fromStatus === toStatus. Required note. Same audit / sync
+    // pipeline as transitions.
+    function applyComment(issueId, note) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const trimmedNote = (note || '').trim();
+        if (!trimmedNote) return false;
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',  // same → comment
+            kind: 'comment',
+            note: trimmedNote,
+        });
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderButtonState();
+        console.log(`${TAG} comment on ${issueId} by @${by}: ${trimmedNote.slice(0, 80)}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(`Comment added — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`@${by}: comment`);
+        } else {
+            showToast('Comment added (local only).', 2500);
+        }
+        return true;
+    }
+
+    // v0.28: priority change. Doesn't change status. Audited via a history
+    // entry with kind='priority' + fromPriority/toPriority fields.
+    function applyPriorityChange(issueId, newPriority, optionalNote) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const fromPriority = issue.priority || null;
+        if (fromPriority === newPriority) return false;  // no-op
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'priority',
+            fromPriority,
+            toPriority: newPriority,
+            note: (optionalNote || '').trim(),
+        });
+        issue.priority = newPriority;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        const fromLabel = fromPriority ? priorityMeta(fromPriority).text : 'NONE';
+        const toLabel = newPriority ? priorityMeta(newPriority).text : 'NONE';
+        console.log(`${TAG} priority ${issueId}: ${fromLabel} → ${toLabel} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(`Priority → ${toLabel} — pushing to GitHub…`, 2500);
+            commitIssuesToGitHub(`@${by}: priority ${fromLabel} → ${toLabel}`);
+        } else {
+            showToast(`Priority → ${toLabel} (local only).`, 2500);
+        }
+        return true;
+    }
+
     // ------- Real status modal (Phase 3) -------
     //
     // Two visual states:
@@ -2462,42 +2939,101 @@
     // re-renders the modal innerHTML on state change.
     function openStatusModal(issue) {
         closeStatusModal();
-        const overlay = document.createElement('div');
-        overlay.id = 'aim-issues-status-modal-overlay';
-        overlay.style.cssText = `
-            position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:100000;
-            display:flex;align-items:center;justify-content:center;
-            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-        `;
+        // v0.30: no more overlay. The modal is a floating window so it
+        // doesn't darken the map and the user can move it out of the way
+        // while reviewing the issue. Default position bottom-right;
+        // layout persists per the panel pattern.
+        const stored = loadStatusModalLayout();
+        if (stored) statusModalLayout = clampStatusModalLayout(stored);
+        else statusModalLayout = clampStatusModalLayout({
+            width: 560,
+            height: Math.min(620, window.innerHeight - 100),
+            left: window.innerWidth - 580,
+            top: window.innerHeight - Math.min(640, window.innerHeight - 60),
+        });
         const card = document.createElement('div');
+        card.id = 'aim-issues-status-modal';
         card.style.cssText = `
+            position:fixed;
+            left:${statusModalLayout.left}px;top:${statusModalLayout.top}px;
+            width:${statusModalLayout.width}px;height:${statusModalLayout.height}px;
             background:#1f2228;border:1px solid rgba(255,77,77,0.45);
-            border-radius:10px;padding:18px 22px;width:540px;max-width:94vw;
-            color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
+            border-radius:10px;
+            color:#e6e6e6;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+            box-shadow:0 8px 32px rgba(0,0,0,0.6);
+            z-index:99500;
+            display:flex;flex-direction:column;overflow:hidden;
         `;
-        overlay.appendChild(card);
+        // Stop map/leaflet events from intercepting clicks/wheel on the modal
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => {
+            card.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
 
         // Local UI state — armed transition (null = pick a transition;
         // non-null = note prompt for that transition).
         let armed = null;
         let pendingNote = '';     // preserved across re-renders if user typed something
+        // v0.30: history sort direction. Default: oldest first (false).
+        // Click "History" header to toggle.
+        let historySortDesc = false;
 
         function render() {
+            // v0.30: skip re-renders mid-drag so stale handlers don't get
+            // re-wired and the layout-state stays consistent during the
+            // drag operation.
+            if (statusModalDragInFlight) return;
             // Re-resolve issue from current state in case it changed
             const liveIssue = currentSiteIssues.find(i => i.id === issue.id) || issue;
             const safeNote = escHtml(liveIssue.note);
             const status = liveIssue.status || 'open';
             const statusMeta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#ff8585' };
-            const transitions = STATUS_TRANSITIONS[status] || [];
-            const histRows = (liveIssue.history || []).map(h => {
+            // v1.00: role-gated transition list. CSMs see Propose buttons;
+            // approvers see Direct + Approve/Reject. Transitions with no
+            // `roles` field are shown to everyone (e.g. Re-open).
+            const role = currentRole();
+            const allTransitions = STATUS_TRANSITIONS[status] || [];
+            const transitions = allTransitions.filter(t =>
+                !t.roles || t.roles.includes(role)
+            );
+            // v0.28: history rendering distinguishes kinds.
+            //   created: "created (OPEN)"
+            //   comment (kind==='comment' or fromStatus===toStatus && !priority): "💬 commented"
+            //   priority (kind==='priority' or has priority fields): "🎯 priority: LOW → HIGH"
+            //   deleted (toStatus==='deleted'): "🗑 deleted"
+            //   transition: "OPEN → IGNORED"
+            // v0.30: sort history per user preference. Default oldest first.
+            const sortedHistory = (liveIssue.history || []).slice().sort((a, b) => {
+                const at = new Date(a.at).getTime();
+                const bt = new Date(b.at).getTime();
+                if (isNaN(at) && isNaN(bt)) return 0;
+                if (isNaN(at)) return 1;
+                if (isNaN(bt)) return -1;
+                return historySortDesc ? bt - at : at - bt;
+            });
+            const histRows = sortedHistory.map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
-                const trans = h.fromStatus
-                    ? `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`
-                    : `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                let label, labelColor = '#e6e6e6';
+                if (h.kind === 'priority' || (h.fromPriority !== undefined || h.toPriority !== undefined)) {
+                    const fromP = h.fromPriority ? priorityMeta(h.fromPriority).text : 'NONE';
+                    const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+                    const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
+                    label = `🎯 priority: ${fromP} → <span style="color:${toMeta.color};font-weight:700">${toP}</span>`;
+                } else if (!h.fromStatus) {
+                    label = `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                } else if (h.toStatus === 'deleted') {
+                    label = `🗑 deleted`;
+                    labelColor = '#ff8585';
+                } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
+                    label = `💬 commented`;
+                    labelColor = '#a8c4ff';
+                } else {
+                    label = `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`;
+                }
                 return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
-                    <div style="color:#e6e6e6;margin-top:2px">${trans}</div>
+                    <div style="color:${labelColor};margin-top:2px">${label}</div>
                     ${safeHistNote ? `<div style="color:#bbb;font-size:11px;margin-top:2px">"${safeHistNote}"</div>` : ''}
                 </div>`;
             }).join('');
@@ -2512,9 +3048,60 @@
                    </button>`
                 : '';
 
-            // Transitions section OR armed-note section
+            // v0.28: armed can be one of:
+            //   transition object: { to, color, textColor, noteRequired, notePrompt, label } — status change
+            //   { kind: 'comment' } — add a comment (required note)
+            //   { kind: 'priority', to: 'high' | 'medium' | 'low' | null } — priority change (optional note)
+            //   null — show all action buttons (transitions + comment + priority chips)
             let actionSectionHtml = '';
-            if (armed) {
+            if (armed && armed.kind === 'comment') {
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid rgba(168,196,255,0.30);border-radius:6px">
+                        <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
+                            💬 Add a comment <span style="color:#888;font-weight:400">(no status change)</span>
+                        </div>
+                        <div style="color:#aaa;font-size:11px;margin-bottom:4px">Comment <span style="color:#ff8585">(required)</span></div>
+                        <textarea id="aim-issues-modal-note"
+                            placeholder="Add a comment without changing status"
+                            style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
+                        <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+                            <button id="aim-issues-modal-cancel-transition"
+                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                                Cancel
+                            </button>
+                            <button id="aim-issues-modal-confirm-transition"
+                                style="padding:6px 12px;background:#a8c4ff;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                                Confirm comment
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (armed && armed.kind === 'priority') {
+                const tgt = armed.to ? priorityMeta(armed.to) : { text: 'NONE', color: '#555', textColor: '#fff' };
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid ${armed.to ? tgt.color : '#555'}55;border-radius:6px">
+                        <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
+                            🎯 Set priority to <span style="color:${tgt.color};font-weight:700">${tgt.text}</span>
+                        </div>
+                        <div style="color:#aaa;font-size:11px;margin-bottom:4px">Reason <span style="color:#888">(optional)</span></div>
+                        <textarea id="aim-issues-modal-note"
+                            placeholder="Why are you changing the priority? (optional)"
+                            style="width:100%;min-height:60px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
+                        <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+                            <button id="aim-issues-modal-cancel-transition"
+                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                                Cancel
+                            </button>
+                            <button id="aim-issues-modal-confirm-transition"
+                                style="padding:6px 12px;background:${tgt.color};color:${tgt.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                                Confirm priority → ${tgt.text}
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (armed) {
                 const tgtLabel = (STATUS_LABEL[armed.to] || { text: armed.to.toUpperCase() }).text;
                 const reqText = armed.noteRequired ? '<span style="color:#ff8585">(required)</span>' : '<span style="color:#888">(optional)</span>';
                 actionSectionHtml = `
@@ -2539,24 +3126,55 @@
                         </div>
                     </div>
                 `;
-            } else if (transitions.length === 0) {
-                actionSectionHtml = `
-                    <div style="margin-top:14px;color:#888;font-size:11px;font-style:italic">
-                        Terminal status — no further transitions.
-                    </div>
-                `;
             } else {
-                const btns = transitions.map((t, i) => `
-                    <button data-tidx="${i}"
-                        class="aim-issues-modal-transbtn"
-                        style="padding:7px 12px;background:${t.color};color:${t.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                        ${t.label}
-                    </button>
-                `).join('');
+                // Not armed — show all action buttons (transitions + comment + priority)
+                // v1.00: when the issue is in a pending state but the
+                // current user is a CSM (not an approver), no transition
+                // buttons are visible to them. Show a banner explaining
+                // why instead of the misleading "Terminal status" message.
+                let noTransitionsMsg = '<span style="color:#888;font-style:italic;font-size:11px">Terminal status</span>';
+                if ((status === 'pending_fix' || status === 'pending_ignore') && role === 'csm') {
+                    noTransitionsMsg = `<span style="color:#8be1ff;font-style:italic;font-size:11px">
+                        ⏳ Awaiting approver review — only approvers can accept or reject pending proposals.
+                    </span>`;
+                }
+                const transBtns = transitions.length
+                    ? transitions.map((t, i) => `
+                        <button data-tidx="${i}"
+                            class="aim-issues-modal-transbtn"
+                            style="padding:7px 12px;background:${t.color};color:${t.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                            ${t.label}
+                        </button>
+                    `).join('')
+                    : noTransitionsMsg;
+                // v0.28: priority chips in unarmed view — clicking arms a priority change.
+                const currentPri = liveIssue.priority || null;
+                const priChips = ['high', 'medium', 'low', null].map(p => {
+                    const m = p ? priorityMeta(p) : { text: 'NONE', color: '#888', textColor: '#fff' };
+                    const isCur = currentPri === p;
+                    const label = p ? m.text : 'None';
+                    return `<button data-priority="${p || ''}"
+                        class="aim-issues-modal-pribtn"
+                        ${isCur ? 'disabled' : ''}
+                        title="${isCur ? 'Current priority' : `Set priority to ${label}`}"
+                        style="padding:5px 10px;background:${isCur ? m.color : 'transparent'};color:${isCur ? m.textColor : m.color};border:1.5px solid ${m.color};border-radius:14px;cursor:${isCur ? 'default' : 'pointer'};font:inherit;font-size:11px;font-weight:700;opacity:${isCur ? 1 : 0.85}">
+                        ${label}${isCur ? ' ●' : ''}
+                    </button>`;
+                }).join('');
                 actionSectionHtml = `
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
-                        ${btns}
+                        ${transBtns}
+                    </div>
+                    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                        <span style="color:#aaa;font-size:12px;margin-right:4px">🎯 Priority:</span>
+                        ${priChips}
+                    </div>
+                    <div style="margin-top:10px">
+                        <button id="aim-issues-modal-commentbtn"
+                            style="padding:6px 12px;background:#1a2333;color:#a8c4ff;border:1px solid #a8c4ff66;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
+                            💬 Add comment
+                        </button>
                     </div>
                 `;
             }
@@ -2595,22 +3213,73 @@
                     </div>
                 </div>
             `;
+            // v0.28: priority chip in the header next to status
+            const headerPri = liveIssue.priority
+                ? `<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;background:${priorityMeta(liveIssue.priority).color};color:${priorityMeta(liveIssue.priority).textColor};font-size:10px;font-weight:700;letter-spacing:0.5px">🎯 ${priorityMeta(liveIssue.priority).text}</span>`
+                : '';
+            // v0.30: floating-window structure — draggable header / scrollable
+            // body / fixed footer / resize handle. Header doubles as drag
+            // handle. History title is clickable to toggle sort.
+            const sortArrow = historySortDesc ? '▼' : '▲';
+            const sortLabel = historySortDesc ? 'newest first' : 'oldest first';
+            // v1.00: role chip in header (approver vs CSM) so the user
+            // sees at a glance what buttons they have access to.
+            const roleChip = role === 'approver'
+                ? `<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:9px;
+                                background:#1a3a5a;color:#5fff5f;font-size:9px;font-weight:700;
+                                border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px"
+                         title="You're on the approver allowlist — you can directly resolve/ignore and approve/reject pending issues">
+                       ✓ APPROVER
+                   </span>`
+                : `<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:9px;
+                                background:#222;color:#aaa;font-size:9px;font-weight:700;
+                                border:1px solid rgba(255,255,255,0.15);letter-spacing:0.5px"
+                         title="You're a CSM — propose changes for approver review.">
+                       CSM
+                   </span>`;
             card.innerHTML = `
-                <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:baseline;gap:8px">
-                    <span style="color:#aaa">Issue ·</span>
-                    <span style="color:${statusMeta.color};font-weight:700">${statusMeta.text}</span>
+                <div id="aim-issues-modal-header"
+                     style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
+                            display:flex;align-items:center;gap:10px;cursor:move;user-select:none;flex-shrink:0"
+                     title="Drag to move the popup">
+                    <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
+                    <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
+                    ${headerPri}
+                    ${roleChip}
+                    <button id="aim-issues-modal-headerclose" title="Close"
+                        style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
+                               border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                        ✕
+                    </button>
                 </div>
-                <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
-                ${entitiesSectionHtml}
-                <div style="color:#888;font-size:11px;margin:12px 0 4px 0">History</div>
-                <div style="max-height:180px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
-                ${actionSectionHtml}
-                <div style="display:flex;gap:8px;align-items:center;margin-top:14px">
+                <div id="aim-issues-modal-body"
+                     style="padding:14px 18px;overflow:auto;flex:1;min-height:0">
+                    <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
+                    ${entitiesSectionHtml}
+                    <div id="aim-issues-modal-historyheader"
+                         title="Click to toggle sort direction"
+                         style="color:#888;font-size:11px;margin:12px 0 4px 0;cursor:pointer;user-select:none;
+                                display:inline-flex;align-items:center;gap:5px;padding:2px 6px;
+                                border-radius:4px;border:1px solid transparent;transition:border-color 150ms">
+                        History
+                        <span style="color:#a8c4ff;font-weight:600">${sortArrow}</span>
+                        <span style="color:#888;font-style:italic">${sortLabel}</span>
+                    </div>
+                    <div style="border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
+                    ${actionSectionHtml}
+                </div>
+                <div style="padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
+                            display:flex;gap:8px;align-items:center;flex-shrink:0">
                     ${deleteBtnHtml}
                     <button id="aim-issues-modal-close"
                         style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
                         Close
                     </button>
+                </div>
+                <div id="aim-issues-modal-resize"
+                     title="Drag to resize"
+                     style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
+                            background:linear-gradient(135deg,transparent 0%,transparent 45%,rgba(255,77,77,0.55) 45%,rgba(255,77,77,0.55) 60%,transparent 60%,transparent 75%,rgba(255,77,77,0.55) 75%,rgba(255,77,77,0.55) 90%,transparent 90%);">
                 </div>
             `;
             wireHandlers(liveIssue, transitions);
@@ -2618,6 +3287,23 @@
 
         function wireHandlers(liveIssue, transitions) {
             card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+            const headerCloseBtn = card.querySelector('#aim-issues-modal-headerclose');
+            if (headerCloseBtn) headerCloseBtn.onclick = closeStatusModal;
+
+            // v0.30: history sort toggle
+            const histHeader = card.querySelector('#aim-issues-modal-historyheader');
+            if (histHeader) {
+                histHeader.onclick = (e) => {
+                    e.stopPropagation();
+                    historySortDesc = !historySortDesc;
+                    render();
+                };
+                histHeader.onmouseenter = () => { histHeader.style.borderColor = 'rgba(168,196,255,0.4)'; };
+                histHeader.onmouseleave = () => { histHeader.style.borderColor = 'transparent'; };
+            }
+
+            // v0.30: drag + resize
+            wireModalDragAndResize();
 
             // v0.18: entity pills — M1 copy, M2 find-in-sidebar
             card.querySelectorAll('.aim-issues-entity-pill').forEach(pill => {
@@ -2653,7 +3339,36 @@
                 };
             });
 
-            // Armed-mode buttons
+            // v0.28: Comment button — arms a comment-mode (required note)
+            const commentBtn = card.querySelector('#aim-issues-modal-commentbtn');
+            if (commentBtn) {
+                commentBtn.onclick = () => {
+                    armed = { kind: 'comment' };
+                    pendingNote = '';
+                    render();
+                    setTimeout(() => {
+                        const ta = card.querySelector('#aim-issues-modal-note');
+                        if (ta) ta.focus();
+                    }, 30);
+                };
+            }
+
+            // v0.28: Priority chips — arms a priority change (optional note)
+            card.querySelectorAll('.aim-issues-modal-pribtn').forEach(btn => {
+                if (btn.disabled) return;
+                btn.onclick = () => {
+                    const p = btn.dataset.priority || null;
+                    armed = { kind: 'priority', to: p || null };
+                    pendingNote = '';
+                    render();
+                    setTimeout(() => {
+                        const ta = card.querySelector('#aim-issues-modal-note');
+                        if (ta) ta.focus();
+                    }, 30);
+                };
+            });
+
+            // Armed-mode buttons (shared across transition / comment / priority)
             const cancelBtn = card.querySelector('#aim-issues-modal-cancel-transition');
             if (cancelBtn) {
                 cancelBtn.onclick = () => { armed = null; pendingNote = ''; render(); };
@@ -2673,11 +3388,52 @@
                 confirmBtn.onclick = () => {
                     if (!armed) return;
                     const note = (noteInput ? noteInput.value : pendingNote).trim();
+                    // v0.28: dispatch by armed.kind
+                    if (armed.kind === 'comment') {
+                        if (!note) {
+                            const err = card.querySelector('#aim-issues-modal-noteerr');
+                            if (err) err.textContent = 'Comment text required.';
+                            if (noteInput) noteInput.focus();
+                            return;
+                        }
+                        const ok = applyComment(liveIssue.id, note);
+                        if (ok) closeStatusModal();
+                        return;
+                    }
+                    if (armed.kind === 'priority') {
+                        const ok = applyPriorityChange(liveIssue.id, armed.to || null, note);
+                        if (ok) closeStatusModal();
+                        return;
+                    }
+                    // Default: status transition
                     if (armed.noteRequired && !note) {
                         const err = card.querySelector('#aim-issues-modal-noteerr');
                         if (err) err.textContent = 'Note required for this transition.';
                         if (noteInput) noteInput.focus();
                         return;
+                    }
+                    // v1.00: self-approval block. Disabled by default
+                    // (SELF_APPROVAL_BLOCK_ENABLED=false). When enabled,
+                    // blocks an approver from approving/rejecting a
+                    // proposal they themselves authored — second pair of
+                    // eyes enforcement.
+                    if (armed.approvalCheck && SELF_APPROVAL_BLOCK_ENABLED) {
+                        const fromStatus = liveIssue.status;
+                        // Walk history backwards to find the most recent
+                        // entry that put us INTO the current pending state.
+                        // That entry's `by` is the proposer we're checking
+                        // against the current user.
+                        const proposalEntry = (liveIssue.history || [])
+                            .slice().reverse()
+                            .find(h => h && h.toStatus === fromStatus
+                                && h.fromStatus && h.fromStatus !== h.toStatus);
+                        const proposer = proposalEntry ? proposalEntry.by : null;
+                        if (proposer && cachedUsername && proposer === cachedUsername) {
+                            showToast(
+                                "You can't approve your own proposed change — another approver needs to review this.",
+                                5500);
+                            return;
+                        }
                     }
                     const ok = applyTransition(liveIssue.id, armed, note);
                     if (ok) closeStatusModal();
@@ -2708,21 +3464,94 @@
             }
         }
 
+        // v0.30: drag/resize for the modal. Closure-scoped so it sees `card`,
+        // `render`, `statusModalLayout` directly. Re-wired on every render
+        // since innerHTML wipes the mousedown handlers on the header/handle.
+        function wireModalDragAndResize() {
+            const header = card.querySelector('#aim-issues-modal-header');
+            const handle = card.querySelector('#aim-issues-modal-resize');
+            if (header) {
+                header.addEventListener('mousedown', (e) => {
+                    if (e.target.closest('button, input, textarea')) return;
+                    if (e.button !== 0) return;
+                    e.preventDefault(); e.stopPropagation();
+                    startModalDrag(e, 'move');
+                });
+            }
+            if (handle) {
+                handle.addEventListener('mousedown', (e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault(); e.stopPropagation();
+                    startModalDrag(e, 'resize');
+                });
+            }
+        }
+        function startModalDrag(downEvent, mode) {
+            if (!card || !statusModalLayout) return;
+            statusModalDragInFlight = true;
+            const sx = downEvent.clientX, sy = downEvent.clientY;
+            const sLeft = statusModalLayout.left, sTop = statusModalLayout.top;
+            const sW = statusModalLayout.width, sH = statusModalLayout.height;
+            const onMove = (e) => {
+                const dx = e.clientX - sx, dy = e.clientY - sy;
+                let next;
+                if (mode === 'move') next = { ...statusModalLayout, left: sLeft + dx, top: sTop + dy };
+                else next = { ...statusModalLayout, width: sW + dx, height: sH + dy };
+                const clamped = clampStatusModalLayout(next);
+                statusModalLayout = clamped;
+                card.style.left   = `${clamped.left}px`;
+                card.style.top    = `${clamped.top}px`;
+                card.style.width  = `${clamped.width}px`;
+                card.style.height = `${clamped.height}px`;
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove, true);
+                document.removeEventListener('mouseup', onUp, true);
+                statusModalDragInFlight = false;
+                saveStatusModalLayout(statusModalLayout);
+                render();
+            };
+            document.addEventListener('mousemove', onMove, true);
+            document.addEventListener('mouseup', onUp, true);
+        }
+
         render();
-        document.body.appendChild(overlay);
-        statusModalEl = overlay;
+        document.body.appendChild(card);
+        statusModalEl = card;
+        // v1.00: opening the modal counts as "seen". Mark the issue,
+        // then re-render the marker + panel rows so the green ? badge
+        // clears immediately.
+        try {
+            markIssueSeen(issue.id);
+            renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+            if (panelEl) renderIssuesPanel();
+        } catch (e) { console.warn(`${TAG} mark-seen on modal open threw:`, e); }
+        // v0.30: Esc on document (no overlay anymore). Use capture so
+        // we beat any other Esc handlers.
         const keyH = (e) => {
             if (e.key !== 'Escape') return;
-            // Escape during armed cancels back to transition list; from
-            // transition list it closes the modal.
-            if (armed) { armed = null; pendingNote = ''; render(); }
-            else closeStatusModal();
+            // Only act if we're the focus context — but in practice any
+            // Esc while modal open should toggle armed or close.
+            if (!statusModalEl) return;
+            if (armed) { e.preventDefault(); armed = null; pendingNote = ''; render(); }
+            else { e.preventDefault(); closeStatusModal(); }
         };
-        overlay.addEventListener('keydown', keyH, true);
+        document.addEventListener('keydown', keyH, true);
+        // Save reference for cleanup
+        card._aim_keyhandler = keyH;
     }
 
     function closeStatusModal() {
-        if (statusModalEl) { try { statusModalEl.remove(); } catch (e) {} }
+        if (statusModalEl) {
+            // v0.30: clean up the document-level Esc listener attached in
+            // openStatusModal — otherwise leftover handlers stack up across
+            // open/close cycles.
+            try {
+                const keyH = statusModalEl._aim_keyhandler;
+                if (keyH) document.removeEventListener('keydown', keyH, true);
+            } catch (e) {}
+            try { statusModalEl.remove(); } catch (e) {}
+        }
         statusModalEl = null;
     }
 
@@ -2775,11 +3604,17 @@
 
     // Status meta — extends STATUS_LABEL with chip-color hints. Resolved
     // is "dim" by status so its chip is faded too.
-    const PANEL_STATUS_ORDER = ['open', 'ready-for-review', 'resolved', 'ignored'];
+    // v1.00: pending_fix + pending_ignore added between open and resolved.
+    // ready-for-review chip is hidden in render unless a legacy issue is
+    // actually in that status (count > 0).
+    const PANEL_STATUS_ORDER = ['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored'];
 
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
         if (!panelFilters.has(st)) return false;
+        // v0.29: priority filter — 'none' represents null/undefined.
+        const priKey = issue.priority || 'none';
+        if (!panelPriorityFilters.has(priKey)) return false;
         const q = panelSearch.trim().toLowerCase();
         if (!q) return true;
         const note = (issue.note || '').toLowerCase();
@@ -2810,11 +3645,18 @@
 
         // Per-status counts (always all live issues, ignoring search —
         // counts tell the user how many are in each bucket)
-        const countsByStatus = { open: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
+        const countsByStatus = {
+            'open': 0, 'pending_fix': 0, 'pending_ignore': 0,
+            'ready-for-review': 0, 'resolved': 0, 'ignored': 0,
+        };
         liveSiteIssues.forEach(i => {
             const s = i.status || 'open';
             if (countsByStatus[s] !== undefined) countsByStatus[s]++;
         });
+        // v1.00: pending count for the "Pending my review" shortcut
+        // (approvers only — gated below).
+        const pendingCount = (countsByStatus['pending_fix'] || 0)
+                           + (countsByStatus['pending_ignore'] || 0);
 
         const safeSearch = escHtml(panelSearch);
         const syncDot = ({
@@ -2827,22 +3669,76 @@
             'pending': 'pending', 'error': 'error',
         })[syncStatus] || '';
 
+        // v1.00: status chip needs dark text only when its background is
+        // bright enough that white text would be unreadable. pending_fix
+        // (gold) + ready-for-review (light yellow) + resolved (light grey)
+        // → dark text. All others → white.
+        const STATUSES_NEEDING_DARK_TEXT = new Set(['pending_fix', 'ready-for-review', 'resolved']);
         // Chips row
         const chipsHtml = PANEL_STATUS_ORDER.map(st => {
             const meta = STATUS_LABEL[st] || { text: st.toUpperCase(), color: '#888' };
+            const n = countsByStatus[st] || 0;
+            // Hide legacy ready-for-review chip if no issues in it
+            if (st === 'ready-for-review' && n === 0) return '';
             const active = panelFilters.has(st);
-            const n = countsByStatus[st];
+            const activeFg = STATUSES_NEEDING_DARK_TEXT.has(st) ? '#000' : '#fff';
             return `<button class="aim-issues-panel-chip" data-status="${st}"
-                title="${active ? 'Click to hide' : 'Click to show'} ${meta.text.toLowerCase()} issues"
+                title="${active ? 'Click to hide' : 'Click to show'} ${meta.text.toLowerCase()} issues — M2 to solo"
                 style="
                     padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
                     border:1.5px solid ${meta.color};
                     background:${active ? meta.color : 'transparent'};
-                    color:${active ? (st === 'ready-for-review' || st === 'resolved' ? '#000' : '#fff') : meta.color};
+                    color:${active ? activeFg : meta.color};
                     cursor:pointer;opacity:${active ? 1 : 0.55};
                     display:inline-flex;align-items:center;gap:6px">
                 <span>${meta.text}</span>
                 <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${n}</span>
+            </button>`;
+        }).filter(Boolean).join('');
+
+        // v1.00: "Pending my review" shortcut chip — approvers only.
+        // M1 click: solo pending_fix + pending_ignore (hide everything else).
+        // Always visible when role=approver, even if count is 0.
+        const role = currentRole();
+        const pendingShortcutHtml = (role === 'approver') ? `
+            <button id="aim-issues-panel-pending-shortcut"
+                title="Solo pending issues (Pending Fix + Pending Ignore) — for your review"
+                style="
+                    padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                    border:1.5px dashed #5fff5f;
+                    background:transparent;color:#5fff5f;
+                    cursor:pointer;opacity:${pendingCount > 0 ? 1 : 0.7};
+                    display:inline-flex;align-items:center;gap:6px">
+                <span>⚡ Pending my review</span>
+                <span style="background:${pendingCount > 0 ? '#ffa726' : 'rgba(0,0,0,0.25)'};
+                             color:${pendingCount > 0 ? '#000' : '#bbb'};
+                             padding:1px 5px;border-radius:8px;font-size:10px">${pendingCount}</span>
+            </button>` : '';
+        // v0.29: priority filter chips. Same M1 toggle / M2 solo semantics.
+        // 'none' represents issues with no priority set.
+        const priCountsByKey = { high: 0, medium: 0, low: 0, none: 0 };
+        liveSiteIssues.forEach(i => {
+            const k = i.priority || 'none';
+            if (priCountsByKey[k] !== undefined) priCountsByKey[k]++;
+        });
+        const priChipsHtml = ['high', 'medium', 'low', 'none'].map(p => {
+            const m = (p === 'none')
+                ? { text: 'No priority', color: '#888', textColor: '#fff' }
+                : priorityMeta(p);
+            const active = panelPriorityFilters.has(p);
+            const n = priCountsByKey[p];
+            const labelText = p === 'none' ? 'NONE' : m.text;
+            return `<button class="aim-issues-panel-prichip" data-priority="${p}"
+                title="${active ? 'Click to hide' : 'Click to show'} ${labelText.toLowerCase()}-priority issues (M2 = solo)"
+                style="
+                    padding:4px 9px;border-radius:12px;font:inherit;font-size:10px;font-weight:700;
+                    border:1.5px solid ${m.color};
+                    background:${active ? m.color : 'transparent'};
+                    color:${active ? m.textColor : m.color};
+                    cursor:pointer;opacity:${active ? 1 : 0.55};
+                    display:inline-flex;align-items:center;gap:5px">
+                <span>${p === 'none' ? '—' : '🎯'} ${labelText}</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 4px;border-radius:7px;font-size:9px">${n}</span>
             </button>`;
         }).join('');
 
@@ -2914,6 +3810,48 @@
                         ${stackedHtml}
                     </div>`;
                 }
+                // v0.28: priority chip under the status pill if set
+                const priM = issue.priority ? priorityMeta(issue.priority) : null;
+                const priChip = priM
+                    ? `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>`
+                    : '';
+                // v1.00: status badge needs dark text for bright backgrounds.
+                const darkText = (issue.status === 'pending_fix'
+                    || issue.status === 'ready-for-review'
+                    || issue.status === 'resolved');
+                // v1.00: pulsing green ? indicator + native tooltip summary
+                // of unseen events. Click row opens modal which clears it.
+                const unseen = unseenHistoryFor(issue);
+                let activityChip = '';
+                if (unseen.length > 0) {
+                    // Plain-text title — strip the HTML formatting from
+                    // describeHistEntry. Native title attribute can't render HTML.
+                    const plainSummary = unseen.slice(-5).map(h => {
+                        const by = h.by || '?';
+                        if (h.kind === 'priority' || h.toPriority !== undefined) {
+                            const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+                            return `@${by}: priority → ${toP}`;
+                        }
+                        if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
+                            return `@${by}: 💬 ${(h.note || '').slice(0, 80)}`;
+                        }
+                        if (!h.fromStatus) return `@${by}: created`;
+                        if (h.toStatus === 'deleted') return `@${by}: deleted`;
+                        const fromLbl = (STATUS_LABEL[h.fromStatus] || {text: h.fromStatus}).text;
+                        const toLbl = (STATUS_LABEL[h.toStatus] || {text: h.toStatus}).text;
+                        return `@${by}: ${fromLbl} → ${toLbl}`;
+                    }).join('\n');
+                    const moreCount = unseen.length > 5 ? `\n+ ${unseen.length - 5} earlier` : '';
+                    const titleText = `${unseen.length} new event${unseen.length === 1 ? '' : 's'}:\n${plainSummary}${moreCount}\n\nClick row to view + dismiss.`;
+                    activityChip = `<span class="aim-issues-activity-dot"
+                        title="${escHtml(titleText)}"
+                        style="display:inline-flex;align-items:center;justify-content:center;
+                               width:16px;height:16px;border-radius:50%;
+                               background:#00FF7F;color:#000;
+                               font-size:11px;font-weight:900;line-height:1;
+                               border:1px solid rgba(0,0,0,0.45);
+                               margin-left:6px;vertical-align:middle">?</span>`;
+                }
                 return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
                     style="padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);
                            cursor:pointer;opacity:${rowOpacity};
@@ -2921,12 +3859,13 @@
                     title="Click to zoom to issue + open status modal">
                     <div>
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;
-                                     background:${meta.color};color:${(issue.status === 'ready-for-review' || issue.status === 'resolved') ? '#000' : '#fff'};
+                                     background:${meta.color};color:${darkText ? '#000' : '#fff'};
                                      font-size:10px;font-weight:700">${meta.text}</span>
+                        ${priChip}
                         ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
                     </div>
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">
-                        ${escHtml(headerLabel)}
+                        ${escHtml(headerLabel)}${activityChip}
                         <div style="color:#888;font-weight:400;font-size:10px;margin-top:1px">${age}</div>
                     </div>
                     <div>
@@ -2964,6 +3903,7 @@
             <div style="padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
+                ${pendingShortcutHtml}
                 <div style="margin-left:auto;display:flex;gap:6px">
                     ${hiddenIds.size > 0
                         ? `<button id="aim-issues-panel-unhide"
@@ -2992,6 +3932,11 @@
                     </button>
                 </div>
             </div>
+            <div style="padding:6px 14px 8px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+                        border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                <span style="color:#888;font-size:10px;margin-right:2px;font-weight:600">PRIORITY:</span>
+                ${priChipsHtml}
+            </div>
             <div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 <input id="aim-issues-panel-search" type="text"
                     placeholder="Search notes / authors / history…"
@@ -3002,7 +3947,7 @@
             <div style="padding:0;overflow:auto;flex:1;min-height:120px">${rowsHtml}</div>
             <div style="padding:6px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
                         color:#666;font-size:10px;font-style:italic">
-                Row: zoom + open modal · M1 chip: toggle · M2 chip: solo · ▶ expand entities · M1 pill: copy · M2 pill: sidebar
+                Row: zoom + open modal · M1 chip: toggle · M2 chip: solo (status + priority) · ▶ expand entities · M1 pill: copy · M2 pill: sidebar
             </div>
             <div id="aim-issues-panel-resize"
                  title="Drag to resize"
@@ -3050,6 +3995,25 @@
                 t = setTimeout(() => { if (panelEl) renderIssuesPanel(); }, 150);
             };
         }
+        // v1.00: "Pending my review" shortcut — solo the two pending
+        // statuses. Toggle: clicking again restores the prior full set.
+        const pendingShortcut = panelEl.querySelector('#aim-issues-panel-pending-shortcut');
+        if (pendingShortcut) {
+            pendingShortcut.onclick = () => {
+                const isAlreadySolo = (panelFilters.size === 2
+                    && panelFilters.has('pending_fix')
+                    && panelFilters.has('pending_ignore'));
+                panelFilters.clear();
+                if (isAlreadySolo) {
+                    // Restore everything
+                    PANEL_STATUS_ORDER.forEach(s => panelFilters.add(s));
+                } else {
+                    panelFilters.add('pending_fix');
+                    panelFilters.add('pending_ignore');
+                }
+                renderIssuesPanel();
+            };
+        }
         panelEl.querySelectorAll('.aim-issues-panel-chip').forEach(chip => {
             chip.onclick = () => {
                 const st = chip.dataset.status;
@@ -3070,6 +4034,26 @@
                 } else {
                     panelFilters.add(st);
                 }
+                renderIssuesPanel();
+            };
+        });
+        // v0.29: priority chips — same M1 toggle / M2 solo semantics
+        const ALL_PRIORITIES = ['high', 'medium', 'low', 'none'];
+        panelEl.querySelectorAll('.aim-issues-panel-prichip').forEach(chip => {
+            chip.onclick = () => {
+                const p = chip.dataset.priority;
+                if (panelPriorityFilters.has(p)) panelPriorityFilters.delete(p);
+                else panelPriorityFilters.add(p);
+                renderIssuesPanel();
+            };
+            chip.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const p = chip.dataset.priority;
+                const isCurrentlySolo = (panelPriorityFilters.size === 1 && panelPriorityFilters.has(p));
+                panelPriorityFilters.clear();
+                if (isCurrentlySolo) ALL_PRIORITIES.forEach(x => panelPriorityFilters.add(x));
+                else panelPriorityFilters.add(p);
                 renderIssuesPanel();
             };
         });
@@ -3262,6 +4246,25 @@
             .leaflet-tooltip-bottom.aim-issues-tooltip::before { border-bottom-color: rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-left.aim-issues-tooltip::before   { border-left-color:   rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-right.aim-issues-tooltip::before  { border-right-color:  rgba(15,18,22,0.96) !important; }
+            /* v1.00: pulsing green ? badge for unseen activity. Used on
+               both the map marker (absolute child of divIcon wrapper) and
+               panel row indicator. The animation runs forever until the
+               user opens the issue's status modal (which marks it seen). */
+            @keyframes aim-issues-pulse-glow {
+                0%, 100% {
+                    box-shadow: 0 0 3px rgba(0, 255, 127, 0.6),
+                                0 0 7px  rgba(0, 255, 127, 0.30);
+                    transform: scale(1);
+                }
+                50% {
+                    box-shadow: 0 0 10px rgba(0, 255, 127, 0.95),
+                                0 0 18px rgba(0, 255, 127, 0.55);
+                    transform: scale(1.12);
+                }
+            }
+            .aim-issues-activity-dot {
+                animation: aim-issues-pulse-glow 1.6s ease-in-out infinite;
+            }
         `;
         (document.head || document.documentElement).appendChild(style);
     }
@@ -3278,6 +4281,9 @@
             syncStatus = cachedUsername ? 'ok' : 'syncing';
             // Refresh username in the background — handles PAT rotation.
             fetchGithubUsername();
+            // v1.00: refresh approver list in the background — handles
+            // boss-just-added-me scenario without requiring a script reload.
+            fetchApproversList();
         } else {
             syncStatus = 'no-token';
         }

@@ -6,7 +6,23 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-03 — AIM Issues v1.00 (DEV ONLY) — Approver oversight + activity indicator
+## 2026-06-03 — AIM Issues v1.00 PROMOTED TO PROD
+
+Big release — coworkers update at the next Tampermonkey check (or use the dashboard's "Check for userscript updates" to grab it now). Jumps prod from v0.27 → v1.00 in one bundle. Includes everything from v0.28 → v0.31 PLUS the v1.00 oversight redesign + activity indicator (see entries below for full feature lists).
+
+**Heads up for coworkers when you update:**
+
+- **The flow is different now.** Instead of clicking Ignore or Resolve directly, you'll see **Propose Ignore** (purple) or **Propose Fix** (yellow). The issue stays visible (in its new pending color) until an approver accepts or rejects it. This is intentional — it gives someone a second pair of eyes before issues are silently dismissed.
+- **If you're an approver** (currently: PaydenW-Percepto, Ned-Yap — add yours by editing `approvers.json` in the data repo or asking Iden), you'll see direct-action buttons that skip the pending step, plus Approve / Reject on whatever others have proposed.
+- **Green ? badges**: when something happens on an issue you haven't looked at since (comment, transition, priority change), a pulsing green ? badge appears on the map marker and the panel row. Open the issue to clear it.
+- **Comments + Priority**: new in this batch. Add comments without changing status. Set priority high/medium/low; filter the panel by priority.
+- **Floating status modal**: M2 on an issue no longer dims the whole map — it pops a draggable / resizable window in the bottom-right by default. Move it where you want; its position persists.
+
+**If you preferred the old direct flow** — open an issue and tell Iden. Either you can be added to `approvers.json` (you'll have the direct-action buttons) or we can rethink the oversight rule.
+
+---
+
+## 2026-06-03 — AIM Issues v1.00 (DEV) — Approver oversight + activity indicator
 
 Major redesign of the AIM Issues state machine. CSMs no longer directly ignore or resolve issues — they **propose** changes and an approver accepts or rejects them. Switches the version scheme to X.YY (`major.minor`) starting now; this is v1.00 because it's a sweeping interface change.
 
