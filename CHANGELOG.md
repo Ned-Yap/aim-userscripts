@@ -6,6 +6,46 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-03 — AIM Issues v1.00 (DEV ONLY) — Approver oversight + activity indicator
+
+Major redesign of the AIM Issues state machine. CSMs no longer directly ignore or resolve issues — they **propose** changes and an approver accepts or rejects them. Switches the version scheme to X.YY (`major.minor`) starting now; this is v1.00 because it's a sweeping interface change.
+
+**New state machine:**
+- `open` (red) — initial state, also where rejections land
+- `pending_fix` (yellow #FFD700) — CSM proposed fix, awaiting approver review
+- `pending_ignore` (purple #8000FF) — CSM proposed ignore, awaiting approver review
+- `resolved` / `ignored` (grey) — approved by an approver
+- Existing `ready-for-review` issues are grandfathered (still render, can transition); chip is hidden in the panel when count is 0.
+
+**Role gating:**
+- Approver allowlist lives in `aim-userscripts-data/approvers.json` (seeded with Iden; add boss + others via PR or GitHub web UI). Loaded with the existing PAT, cached in GM storage so role survives refresh-without-network.
+- **CSMs** see `→ Propose Fix` (yellow) and `→ Propose Ignore` (purple) buttons on open issues. On pending issues they see a "⏳ Awaiting approver review" banner instead of action buttons.
+- **Approvers** see direct-action `✓ Resolve (direct)` and `⊘ Ignore (direct)` on open issues — bypassing the pending step. On pending issues they see `✓ Approve` (green) and `✗ Reject` (red) buttons.
+- Modal header now shows a role chip — `✓ APPROVER` (green outline) or `CSM` (grey) — so you know at a glance what buttons you have access to.
+
+**Self-approval block:** scaffolded but disabled (`SELF_APPROVAL_BLOCK_ENABLED = false`). When the team grows past a single active reviewer, flip the constant and approvers will be blocked from approving their own proposals (toast: "You can't approve your own proposed change…"). Today's single-active-reviewer setup keeps it off so the bypass works.
+
+**Activity indicator (pulsing green ?):**
+- Per-user lastSeen timestamp stored in `localStorage` (key `aim-issues-lastseen-<username>`). Excludes your own actions — only OTHERS' events trigger the pulse.
+- Map marker: small pulsing green ? badge in the top-right corner of the icon when there are unseen history entries.
+- Panel row: green ? chip next to the issue's last-event label; native tooltip on hover summarizes the unseen events.
+- Map-marker tooltip on hover: green-bordered "🟢 New since you last looked (N)" block listing the most recent 5 events.
+- Clears the moment you open the issue's status modal.
+
+**Panel changes:**
+- New chips: `PENDING FIX` (gold) and `PENDING IGNORE` (purple).
+- **Pending my review** shortcut chip (approvers only — green dashed border, ⚡ icon). One click solos both pending status filters; click again restores the full set.
+- Filter chips now hide the legacy `READY FOR REVIEW` chip when no issues are in it.
+
+**Toolbar 🚩 badge:**
+- For approvers: when pending issues exist, the badge morphs from red+total-count to **orange+pending-count** so "stuff awaits your review" is visible at a glance from the toolbar. Falls back to plain red total when no pending work.
+
+**Carried forward unchanged:** tombstone deletes, history-union merge, push-back-after-merge sync, dedicated panel, /map_objects affected-entities, entity-pill M1 copy / M2 sidebar, Sheets HTML export, priority field + filter chips, floating draggable status modal, history sort toggle.
+
+**Promotion plan:** v0.31's dev-only batch (Comments, Priority, Priority filter, floating modal) + this v1.00 oversight redesign all stay in `latest/` until tested in dev. Prod stays at v0.27 until promote.
+
+---
+
 ## 2026-06-02 — AIM Issues v0.31 (DEV ONLY) — History grows with modal height
 
 v0.30's status modal was resizable but the history container had a hardcoded `max-height:200px` so resizing the modal taller didn't give you more history rows — just more empty space. v0.31 drops the inner max-height; history now grows with the modal, and the modal body's own scrollbar handles overflow.

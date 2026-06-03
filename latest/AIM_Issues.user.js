@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      1.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
-// @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
+// @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -16,21 +16,32 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// Design ref: see memory/project_aim_issues_design.md for full spec.
+// Design ref: see memory/project_aim_issues_design.md for the original
+// spec; v1.00 oversight redesign described in project_aim_issues_arch.md.
 //
-// Phase 1 scope (this version):
-// - 🚩 button in .map-tools — M1 toggles flag mode, M2 stub (no-op in P1)
-// - In flag mode: M1 click-drag on map = rectangle.
-//   Shift+M1 click = polygon mode (sticky — subsequent clicks add vertices
-//   without holding Shift; Enter or double-click finishes; Esc cancels).
-// - Required note modal after draw completes
-// - localStorage per-site persistence (key: aim-issues-site-<siteID>)
-// - Render: dashed red polygon + ⚠ divIcon at centroid
-// - M1 on issue marker/polygon = toggle session-hide (resets on refresh)
-// - M2 on issue = stub modal showing the note + current status (no transitions)
+// v1.00 scope:
+// - Two-tier state machine with approver oversight:
+//     CSMs PROPOSE → pending_fix (yellow) / pending_ignore (purple)
+//     Approvers APPROVE → resolved / ignored, or REJECT → back to open.
+//     Approvers can also direct-resolve/ignore from open (bypass pending).
+// - Approver allowlist in aim-userscripts-data/approvers.json
+//     Loaded with PAT, cached in GM storage. Edit the file to add/remove.
+// - Self-approval block scaffolded but DISABLED by default
+//     (SELF_APPROVAL_BLOCK_ENABLED=false) — flip when team grows past
+//     single-active-reviewer.
+// - Per-user activity indicator (pulsing green ?)
+//     Map-marker badge + panel-row chip when OTHERS post events you
+//     haven't seen. Clears on modal open. lastSeen state in localStorage.
+// - Panel: pending status chips added, "Pending my review" shortcut
+//     (approvers only), toolbar badge morphs to orange + pending count
+//     when approver has work waiting.
+// - Legacy `ready-for-review` status grandfathered (still renders + can
+//     transition; chip hidden when count=0).
 //
-// NOT in Phase 1: GitHub sync, real status state machine, dedicated 🚩 panel,
-// SUM table integration, surface filter, history audit log.
+// Carried from prior versions: tombstone deletes, history-union + push-back
+// merge, dedicated panel, affected-entities via /map_objects, entity-pill
+// M1 copy / M2 sidebar paste, Sheets HTML clipboard, priority field,
+// floating draggable status modal.
 //
 // Log tag: [AIM ISSUES]
 //
@@ -44,7 +55,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '1.00';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -57,8 +68,68 @@
     const ISSUES_REPO = 'Ned-Yap/aim-userscripts-data';
     const ISSUES_BRANCH = 'main';
     const ISSUES_PATH = (sid) => `issues/${sid}-issues.json`;
+    const APPROVERS_PATH = 'approvers.json';
     const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
     const USERNAME_KEY = 'aim-issues-github-login'; // ours
+    const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
+
+    // ------- v1.00 approver oversight + activity-indicator constants -------
+    //
+    // SELF_APPROVAL_BLOCK_ENABLED: false today (per user decision — only one
+    // active reviewer + admin bypass means self-approval would block the
+    // common case). Flip to true when the team grows + you want to enforce
+    // a second-pair-of-eyes rule on every pending issue.
+    const SELF_APPROVAL_BLOCK_ENABLED = false;
+
+    // Last-seen activity tracking — per-user, per-issue timestamp in
+    // localStorage. Opening the status modal marks the issue "seen" up
+    // to the latest history entry's timestamp. Unseen history entries
+    // pulse a green ? badge on the marker + panel row.
+    const LAST_SEEN_KEY_PREFIX = 'aim-issues-lastseen-';
+    function lastSeenKey() {
+        return LAST_SEEN_KEY_PREFIX + (cachedUsername || 'local');
+    }
+    function loadLastSeenMap() {
+        try {
+            const raw = localStorage.getItem(lastSeenKey());
+            if (!raw) return {};
+            const obj = JSON.parse(raw);
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (e) { return {}; }
+    }
+    function saveLastSeenMap(map) {
+        try { localStorage.setItem(lastSeenKey(), JSON.stringify(map)); }
+        catch (e) {}
+    }
+    function markIssueSeen(issueId) {
+        if (!issueId) return;
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return;
+        const lastAt = lastEventAt(issue);
+        const t = new Date(lastAt || 0).getTime();
+        if (!Number.isFinite(t)) return;
+        const map = loadLastSeenMap();
+        map[issueId] = t;
+        saveLastSeenMap(map);
+    }
+    function unseenHistoryFor(issue) {
+        if (!issue || !Array.isArray(issue.history)) return [];
+        const map = loadLastSeenMap();
+        const seenAt = map[issue.id];
+        // Never seen → all history is unseen, EXCEPT entries authored by
+        // the current user (you've "seen" your own actions by definition).
+        return issue.history.filter(h => {
+            if (!h || !h.at) return false;
+            if (h.by && cachedUsername && h.by === cachedUsername) return false;
+            const t = new Date(h.at).getTime();
+            if (!Number.isFinite(t)) return false;
+            if (seenAt == null) return true;
+            return t > seenAt;
+        });
+    }
+    function hasUnseenActivity(issue) {
+        return unseenHistoryFor(issue).length > 0;
+    }
 
     // ------- GM helpers (silently no-op if grants unconfirmed) -------
     function gmGet(key, def) {
@@ -163,6 +234,22 @@
     // GitHub sync state (v0.5)
     let cachedToken = gmGet(TOKEN_KEY, '') || '';       // recovered after refresh; also via TOKEN_VALUE broadcast
     let cachedUsername = gmGet(USERNAME_KEY, '') || ''; // fetched once on first token, persisted
+    // v1.00: approver allowlist. Loaded once per session from
+    // aim-userscripts-data/approvers.json. Mirrored to GM storage so
+    // refresh-without-network still recognizes the user's role.
+    let approversList = (function() {
+        try { const raw = gmGet(APPROVERS_KEY, ''); if (!raw) return [];
+              const arr = JSON.parse(raw); return Array.isArray(arr) ? arr : []; }
+        catch (e) { return []; }
+    })();
+    let approversSha = null;                              // for future write-back
+    function isApprover() {
+        if (!cachedUsername) return false;                // local-only / no token
+        return approversList.includes(cachedUsername);
+    }
+    function currentRole() {
+        return isApprover() ? 'approver' : 'csm';
+    }
     const shaBySite = {};                                // {[siteID]: 'sha-from-last-GET-or-PUT'}
     // syncStatus drives the small dot on the 🚩 button:
     //   'no-token' (grey)  — no PAT yet, local-only
@@ -188,7 +275,9 @@
     // v0.15: dedicated 🚩 panel (M2 on the toolbar 🚩 button opens it)
     let panelEl = null;
     // Filter chips — Set of allowed statuses. Empty == all hidden (rare).
-    const panelFilters = new Set(['open', 'ready-for-review', 'resolved', 'ignored']);
+    // v1.00: include pending_fix + pending_ignore by default; keep legacy
+    // ready-for-review for grandfathered issues.
+    const panelFilters = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored']);
     // v0.29: priority filter chips. Uses the literal string 'none' for
     // issues with no priority (issue.priority === null/undefined). All
     // four active by default. M1 toggle, M2 solo (same as status chips).
@@ -423,6 +512,8 @@
         }
         // New / changed token. Ensure username + (re-)fetch current site.
         fetchGithubUsername().then(() => {
+            // v1.00: also fetch approver allowlist alongside username
+            fetchApproversList();
             if (siteID) refetchIssues();
             else { syncStatus = 'ok'; renderButtonState(); }
         });
@@ -453,6 +544,51 @@
             }
         } catch (e) {
             console.warn(`${TAG} GET /user threw:`, e);
+        }
+    }
+
+    // v1.00: pull the approver allowlist from
+    // aim-userscripts-data/approvers.json. Defines who can ACCEPT/REJECT
+    // pending proposals + skip the pending step on direct ignore/resolve.
+    // Missing file = no approvers; everyone uses CSM flow. Cached in GM
+    // storage so refresh-without-network preserves role across reloads.
+    async function fetchApproversList() {
+        if (IS_TOP) return;
+        if (!cachedToken) return;
+        try {
+            const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(APPROVERS_PATH)}?ref=${ISSUES_BRANCH}`;
+            const resp = await ghRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+            });
+            if (resp.status === 404) {
+                console.warn(`${TAG} approvers.json missing in data repo — approval flow disabled (everyone uses CSM transitions)`);
+                approversList = [];
+                gmSet(APPROVERS_KEY, JSON.stringify([]));
+                return;
+            }
+            if (resp.status !== 200) {
+                console.warn(`${TAG} GET approvers.json HTTP ${resp.status}`);
+                return;
+            }
+            const meta = JSON.parse(resp.responseText);
+            approversSha = meta.sha || null;
+            const text = b64ToText(meta.content || '');
+            const data = JSON.parse(text);
+            const list = (data && Array.isArray(data.approvers)) ? data.approvers : [];
+            approversList = list;
+            gmSet(APPROVERS_KEY, JSON.stringify(list));
+            console.log(`${TAG} approvers loaded (${list.length}): ${list.join(', ')} — you are ${isApprover() ? 'an APPROVER ✓' : 'a CSM'}`);
+            // Refresh UI that depends on role
+            if (panelEl) renderIssuesPanel();
+            renderButtonState();
+        } catch (e) {
+            console.warn(`${TAG} fetchApproversList threw:`, e);
         }
     }
 
@@ -976,17 +1112,27 @@
                 ? `Issues: FLAG MODE armed — click-drag rect, Shift+click polygon, Esc to exit${hiddenSuffix}${syncSuffix}`
                 : `Issues · M1 toggle flag mode · M2 open Issues panel${hiddenSuffix}${syncSuffix}`;
 
-        // Badge: count for current site (top-right corner). v0.25: live count only.
+        // Badge: count for current site (top-right corner). v1.00 — if
+        // the user is an approver AND there are pending issues, the badge
+        // morphs to ORANGE + pending count (your-attention-needed cue).
+        // Otherwise plain red total count, as before.
         let badge = buttonEl.querySelector('.aim-issues-badge');
-        const n = liveIssues(currentSiteIssues).length;
-        if (n > 0) {
+        const live = liveIssues(currentSiteIssues);
+        const n = live.length;
+        const pending = isApprover()
+            ? live.filter(i => i.status === 'pending_fix' || i.status === 'pending_ignore').length
+            : 0;
+        const showAttention = pending > 0;
+        const badgeText = showAttention ? String(pending) : (n > 0 ? String(n) : '');
+        const badgeBg = showAttention ? '#ffa726' : '#ff4d4d';
+        const badgeFg = showAttention ? '#000' : '#fff';
+        if (badgeText) {
             if (!badge) {
                 badge = document.createElement('span');
                 badge.className = 'aim-issues-badge';
                 badge.style.cssText = [
                     'position:absolute', 'top:-4px', 'right:-4px',
                     'min-width:16px', 'height:16px', 'border-radius:8px',
-                    'background:#ff4d4d', 'color:#fff',
                     'font-size:10px', 'font-weight:700',
                     'display:flex', 'align-items:center', 'justify-content:center',
                     'padding:0 4px',
@@ -995,7 +1141,12 @@
                 ].join(';');
                 buttonEl.appendChild(badge);
             }
-            badge.textContent = String(n);
+            badge.textContent = badgeText;
+            badge.style.background = badgeBg;
+            badge.style.color = badgeFg;
+            badge.title = showAttention
+                ? `${pending} pending your review`
+                : `${n} issue${n === 1 ? '' : 's'} on this site`;
         } else if (badge) {
             badge.remove();
         }
@@ -2166,9 +2317,13 @@
     }
 
     function styleForStatus(status) {
-        // Phase 1 only renders 'open'; the rest are stubs for Phase 3.
         switch (status) {
-            case 'ready-for-review':
+            // v1.00: pending_fix = yellow (gold), pending_ignore = purple.
+            case 'pending_fix':
+                return { color: '#FFD700', fill: '#FFD700', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
+            case 'pending_ignore':
+                return { color: '#8000FF', fill: '#8000FF', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
+            case 'ready-for-review':   // legacy
                 return { color: '#ffd54f', fill: '#ffd54f', fillOpacity: 0.20, dashArray: '10,6', weight: 3 };
             case 'resolved':
                 return { color: '#888', fill: '#888', fillOpacity: 0.08, dashArray: null, weight: 1.5 };
@@ -2182,6 +2337,8 @@
 
     function iconForStatus(status) {
         switch (status) {
+            case 'pending_fix':      return { glyph: '⏳', color: '#FFD700' };
+            case 'pending_ignore':   return { glyph: '⏳', color: '#8000FF' };
             case 'ready-for-review': return { glyph: '⚠', color: '#ffd54f' };
             case 'resolved':         return { glyph: '✓', color: '#888' };
             case 'ignored':          return { glyph: '⊘', color: '#788cb4' };
@@ -2268,6 +2425,21 @@
             const markerSize = isHidden ? hMarker : vMarker;
             const fontSize = Math.max(9, Math.round(markerSize * 0.55));
             const borderWidth = isHidden ? 1 : 2;
+            // v1.00: green ? pulsing badge when the user hasn't seen the
+            // latest events on this issue. unseenHistoryFor excludes the
+            // user's own actions — only OTHERS' activity triggers it.
+            const unseen = unseenHistoryFor(issue);
+            const activityBadge = unseen.length > 0 ? `
+                <span class="aim-issues-activity-dot"
+                      title="${escHtml(`${unseen.length} new event${unseen.length === 1 ? '' : 's'} since you last opened — open to dismiss`)}"
+                      style="position:absolute;top:-5px;right:-5px;
+                             width:14px;height:14px;border-radius:50%;
+                             background:#00FF7F;color:#000;
+                             display:flex;align-items:center;justify-content:center;
+                             font-size:10px;font-weight:900;line-height:1;
+                             border:1.5px solid rgba(0,0,0,0.65);
+                             pointer-events:none;z-index:2">?</span>
+            ` : '';
             // v0.11: data-issue-id lets other AIM scripts (notably Asset
             // Inspector with its window-capture contextmenu handler) detect
             // an issue icon and bail before they steal the click. Class
@@ -2275,6 +2447,7 @@
             const divIcon = L.divIcon({
                 className: 'aim-issues-icon-marker',
                 html: `<div data-issue-id="${issue.id}" style="
+                    position:relative;
                     width:${markerSize}px;height:${markerSize}px;border-radius:${markerSize / 2}px;
                     background:rgba(20,23,27,${isHidden ? 0.6 : 0.92});
                     border:${borderWidth}px ${isHidden ? 'dashed' : 'solid'} ${icoMeta.color};
@@ -2286,7 +2459,7 @@
                     pointer-events:auto;
                     cursor:pointer;
                     ${isHidden ? 'filter:grayscale(0.3);' : ''}
-                ">${icoMeta.glyph}</div>`,
+                ">${icoMeta.glyph}${activityBadge}</div>`,
                 iconSize: [markerSize, markerSize],
                 iconAnchor: [markerSize / 2, markerSize / 2],
             });
@@ -2356,12 +2529,21 @@
         // Transition — describe semantically
         const key = `${last.fromStatus}|${last.toStatus}`;
         const map = {
-            'open|ready-for-review':    'Ready for Review',
-            'open|ignored':             'Ignored',
-            'ready-for-review|resolved': 'Resolved',
-            'ready-for-review|open':    'Rejected',
+            // v1.00 flow
+            'open|pending_fix':         'Proposed Fix',
+            'open|pending_ignore':      'Proposed Ignore',
+            'pending_fix|resolved':     'Approved Fix',
+            'pending_fix|open':         'Rejected Fix',
+            'pending_ignore|ignored':   'Approved Ignore',
+            'pending_ignore|open':      'Rejected Ignore',
+            'open|resolved':            'Resolved (direct)',
+            'open|ignored':             'Ignored (direct)',
             'resolved|open':            'Re-opened',
             'ignored|open':             'Un-ignored',
+            // Legacy
+            'open|ready-for-review':    'Ready for Review',
+            'ready-for-review|resolved': 'Resolved',
+            'ready-for-review|open':    'Rejected',
         };
         return map[key] || (STATUS_LABEL[last.toStatus] || { text: (last.toStatus || '').toUpperCase() }).text;
     }
@@ -2370,6 +2552,29 @@
         const hist = (issue && issue.history) || [];
         if (hist.length === 0) return issue.createdAt;
         return hist[hist.length - 1].at;
+    }
+
+    // v1.00: one-line summary of a history entry for use in tooltips +
+    // activity-indicator hovers. HTML-safe.
+    function describeHistEntry(h) {
+        if (!h) return '';
+        const by = (h.by || '?').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+        const note = h.note ? `: <i>"${(h.note).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}"</i>` : '';
+        if (h.kind === 'priority' || h.toPriority !== undefined) {
+            const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+            const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
+            return `<b>@${by}</b> set priority → <span style="color:${toMeta.color}">${toP}</span>${note}`;
+        }
+        if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
+            return `💬 <b>@${by}</b> commented${note}`;
+        }
+        if (!h.fromStatus) {
+            return `<b>@${by}</b> created${note}`;
+        }
+        if (h.toStatus === 'deleted') return `🗑 <b>@${by}</b> deleted`;
+        const fromMeta = STATUS_LABEL[h.fromStatus] || { text: (h.fromStatus || '').toUpperCase(), color: '#aaa' };
+        const toMeta = STATUS_LABEL[h.toStatus] || { text: (h.toStatus || '').toUpperCase(), color: '#aaa' };
+        return `<b>@${by}</b>: <span style="color:${fromMeta.color}">${fromMeta.text}</span> → <span style="color:${toMeta.color}">${toMeta.text}</span>${note}`;
     }
 
     function buildTooltipHtml(issue, opts) {
@@ -2404,12 +2609,33 @@
         const priHtml = issue.priority
             ? `<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:${priorityMeta(issue.priority).color};color:${priorityMeta(issue.priority).textColor};font-size:9px;font-weight:700;letter-spacing:0.5px;margin-left:6px">🎯 ${priorityMeta(issue.priority).text}</span>`
             : '';
+        // v1.00: unseen-activity callout — green-tinted block listing
+        // what's new since the user last opened this issue. Clears once
+        // the user opens the status modal.
+        let unseenHtml = '';
+        const unseen = unseenHistoryFor(issue);
+        if (unseen.length > 0) {
+            const rows = unseen.slice(-5).map(h =>
+                `<div style="color:#ddd;font-size:11px;margin-top:2px">${describeHistEntry(h)}</div>`
+            ).join('');
+            const moreCount = unseen.length > 5 ? unseen.length - 5 : 0;
+            unseenHtml = `
+                <div style="margin-top:8px;padding:6px 8px;background:rgba(0,255,127,0.10);
+                            border-left:3px solid #00FF7F;border-radius:3px">
+                    <div style="color:#00FF7F;font-size:11px;font-weight:700">
+                        🟢 New since you last looked (${unseen.length})
+                    </div>
+                    ${rows}
+                    ${moreCount > 0 ? `<div style="color:#888;font-size:10px;font-style:italic;margin-top:3px">+ ${moreCount} earlier</div>` : ''}
+                </div>`;
+        }
         return `
             <div style="line-height:1.35">
                 <div style="font-weight:700;color:${headerColor};font-size:13px;margin-bottom:6px">${headerLabel} &middot; ${age}${priHtml}</div>
                 <div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">${safeNote}</div>
                 <div style="color:#a8c4ff;font-size:11px;font-weight:600">@${safeBy}</div>
                 ${affectsHtml}
+                ${unseenHtml}
                 <div style="color:#888;font-size:10px;margin-top:6px;font-style:italic">${hideHint}</div>
             </div>
         `;
@@ -2487,42 +2713,80 @@
         }
     }
 
-    // ------- Phase 3: status state machine -------
+    // ------- v1.00: status state machine with approver oversight -------
     //
-    // Per design doc (project_aim_issues_design.md):
+    //                       ┌── CSM Propose Ignore ─→ pending_ignore ──→ ignored
+    //                       │  (purple)                                  (grey)
+    //                       │                            │
+    //   open (red) ─────────┤                      Approver: Approve / Reject
+    //                       │                            ↓
+    //                       │                       (Reject → back to open)
+    //                       │
+    //                       ├── CSM Propose Fix ────→ pending_fix ─────→ resolved
+    //                       │  (yellow)                                  (grey)
+    //                       │                            │
+    //                       │                      Approver: Approve / Reject
+    //                       │                            ↓
+    //                       │                       (Reject → back to open)
+    //                       │
+    //                       ├── Approver Direct ────→ ignored | resolved
+    //                       │  (skip pending step)
+    //                       │
+    //                       └── ignored / resolved ──── Reopen ────────→ open
     //
-    //   [create]
-    //     ↓                                                  (Ignored stays
-    //   Open ──→ Ready-for-Review ──→ Resolved (terminal)     hidden by
-    //     ↑      │                                            design)
-    //     ├──────┘ (Rejected — note required)
-    //     ↑
-    //   Ignored ──→ Open (un-ignore — note required)
+    // `roles` field on each transition gates UI visibility:
+    //   ['csm']      → only non-approvers see this button
+    //   ['approver'] → only approvers see this button
+    //   undefined    → everyone sees it (e.g. Re-open)
     //
-    // Trust-based: anyone can do any transition. Audit log shows everything.
-    // No `delete` transition — delete lives separately (creator-only).
+    // `approvalCheck: true` runs the self-approval guard — when
+    // SELF_APPROVAL_BLOCK_ENABLED is true, blocks approving your own
+    // proposal. Disabled by default (single-active-reviewer team).
     //
-    // Each transition: target status, button label, whether note is required,
-    // and a button color matching the destination's render color.
-    // v0.13: notePrompt drives the textarea placeholder so the prompt
-    // matches what we're asking the user about. Was a single generic line
-    // before — confusing on transitions like Re-open.
+    // Legacy `ready-for-review` kept in STATUS_LABEL + STATUS_TRANSITIONS
+    // so pre-v1.00 issues still render + can transition. New flow uses
+    // pending_fix in its place.
     const STATUS_TRANSITIONS = {
         'open': [
-            { to: 'ready-for-review', label: '→ Ready for Review', noteRequired: true,  color: '#ffd54f', textColor: '#000',
-              notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"' },
-            { to: 'ignored',          label: '→ Ignore',            noteRequired: true,  color: '#788cb4', textColor: '#fff',
-              notePrompt: 'Why are you ignoring this? e.g. "Not within our scope" or "Duplicate of #..."' },
+            // CSM proposal path
+            { to: 'pending_fix',    label: '→ Propose Fix',     noteRequired: true,  color: '#FFD700', textColor: '#000',
+              notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"',
+              roles: ['csm'] },
+            { to: 'pending_ignore', label: '→ Propose Ignore',  noteRequired: true,  color: '#8000FF', textColor: '#fff',
+              notePrompt: 'Why should this be ignored? e.g. "Not within our scope" or "Duplicate of #..."',
+              roles: ['csm'] },
+            // Approver direct-action (skips pending step)
+            { to: 'resolved',       label: '✓ Resolve (direct)',  noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional comment on resolution',
+              roles: ['approver'] },
+            { to: 'ignored',        label: '⊘ Ignore (direct)',   noteRequired: true,  color: '#788cb4', textColor: '#fff',
+              notePrompt: 'Why are you ignoring this? Required for the audit log.',
+              roles: ['approver'] },
         ],
+        'pending_ignore': [
+            { to: 'ignored', label: '✓ Approve Ignore',           noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional comment on the approval',
+              roles: ['approver'], approvalCheck: true },
+            { to: 'open',    label: '✗ Reject (back to Open)',    noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being rejected? What still needs to be done?',
+              roles: ['approver'], approvalCheck: true },
+        ],
+        'pending_fix': [
+            { to: 'resolved', label: '✓ Approve Fix',             noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional acceptance comment',
+              roles: ['approver'], approvalCheck: true },
+            { to: 'open',     label: '✗ Reject (back to Open)',   noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+              notePrompt: 'Why is this being rejected? What still needs to be done?',
+              roles: ['approver'], approvalCheck: true },
+        ],
+        // Legacy — pre-v1.00 issues use this status. Keep transition list
+        // available so grandfathered issues can flow forward.
         'ready-for-review': [
-            { to: 'resolved', label: '→ Resolve',                noteRequired: false, color: '#5fff5f', textColor: '#000',
-              notePrompt: 'Optional acceptance comment (e.g. "Verified, looks good")' },
-            { to: 'open',     label: '↺ Reject (back to Open)',  noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
+            { to: 'resolved', label: '→ Resolve (legacy)',        noteRequired: false, color: '#5fff5f', textColor: '#000',
+              notePrompt: 'Optional acceptance comment' },
+            { to: 'open',     label: '↺ Reject (back to Open)',   noteRequired: true,  color: '#ff4d4d', textColor: '#fff',
               notePrompt: 'Why is this being rejected? What still needs to be done?' },
         ],
-        // v0.12: resolved is no longer terminal. Trust-based — anyone can
-        // re-open a resolved issue if something comes back. Note required
-        // (why it's being re-opened) for the audit log.
         'resolved': [
             { to: 'open',     label: '↺ Re-open',                  noteRequired: true, color: '#ff4d4d', textColor: '#fff',
               notePrompt: 'Why is this being re-opened? What came back or what was missed?' },
@@ -2534,10 +2798,12 @@
     };
 
     const STATUS_LABEL = {
-        'open':              { text: 'OPEN',              color: '#ff4d4d' },
-        'ready-for-review':  { text: 'READY FOR REVIEW',  color: '#ffd54f' },
-        'resolved':          { text: 'RESOLVED',          color: '#888'    },
-        'ignored':           { text: 'IGNORED',           color: '#788cb4' },
+        'open':             { text: 'OPEN',             color: '#ff4d4d' },
+        'pending_fix':      { text: 'PENDING FIX',      color: '#FFD700' },
+        'pending_ignore':   { text: 'PENDING IGNORE',   color: '#8000FF' },
+        'ready-for-review': { text: 'READY FOR REVIEW', color: '#ffd54f' }, // legacy
+        'resolved':         { text: 'RESOLVED',         color: '#888'    },
+        'ignored':          { text: 'IGNORED',          color: '#788cb4' },
     };
 
     // v0.28: priority. Independent of status. Default null (no priority set).
@@ -2722,7 +2988,14 @@
             const safeNote = escHtml(liveIssue.note);
             const status = liveIssue.status || 'open';
             const statusMeta = STATUS_LABEL[status] || { text: status.toUpperCase(), color: '#ff8585' };
-            const transitions = STATUS_TRANSITIONS[status] || [];
+            // v1.00: role-gated transition list. CSMs see Propose buttons;
+            // approvers see Direct + Approve/Reject. Transitions with no
+            // `roles` field are shown to everyone (e.g. Re-open).
+            const role = currentRole();
+            const allTransitions = STATUS_TRANSITIONS[status] || [];
+            const transitions = allTransitions.filter(t =>
+                !t.roles || t.roles.includes(role)
+            );
             // v0.28: history rendering distinguishes kinds.
             //   created: "created (OPEN)"
             //   comment (kind==='comment' or fromStatus===toStatus && !priority): "💬 commented"
@@ -2855,6 +3128,16 @@
                 `;
             } else {
                 // Not armed — show all action buttons (transitions + comment + priority)
+                // v1.00: when the issue is in a pending state but the
+                // current user is a CSM (not an approver), no transition
+                // buttons are visible to them. Show a banner explaining
+                // why instead of the misleading "Terminal status" message.
+                let noTransitionsMsg = '<span style="color:#888;font-style:italic;font-size:11px">Terminal status</span>';
+                if ((status === 'pending_fix' || status === 'pending_ignore') && role === 'csm') {
+                    noTransitionsMsg = `<span style="color:#8be1ff;font-style:italic;font-size:11px">
+                        ⏳ Awaiting approver review — only approvers can accept or reject pending proposals.
+                    </span>`;
+                }
                 const transBtns = transitions.length
                     ? transitions.map((t, i) => `
                         <button data-tidx="${i}"
@@ -2863,7 +3146,7 @@
                             ${t.label}
                         </button>
                     `).join('')
-                    : `<span style="color:#888;font-style:italic;font-size:11px">Terminal status</span>`;
+                    : noTransitionsMsg;
                 // v0.28: priority chips in unarmed view — clicking arms a priority change.
                 const currentPri = liveIssue.priority || null;
                 const priChips = ['high', 'medium', 'low', null].map(p => {
@@ -2939,6 +3222,21 @@
             // handle. History title is clickable to toggle sort.
             const sortArrow = historySortDesc ? '▼' : '▲';
             const sortLabel = historySortDesc ? 'newest first' : 'oldest first';
+            // v1.00: role chip in header (approver vs CSM) so the user
+            // sees at a glance what buttons they have access to.
+            const roleChip = role === 'approver'
+                ? `<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:9px;
+                                background:#1a3a5a;color:#5fff5f;font-size:9px;font-weight:700;
+                                border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px"
+                         title="You're on the approver allowlist — you can directly resolve/ignore and approve/reject pending issues">
+                       ✓ APPROVER
+                   </span>`
+                : `<span style="display:inline-flex;align-items:center;padding:2px 7px;border-radius:9px;
+                                background:#222;color:#aaa;font-size:9px;font-weight:700;
+                                border:1px solid rgba(255,255,255,0.15);letter-spacing:0.5px"
+                         title="You're a CSM — propose changes for approver review.">
+                       CSM
+                   </span>`;
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
                      style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
@@ -2947,6 +3245,7 @@
                     <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
                     ${headerPri}
+                    ${roleChip}
                     <button id="aim-issues-modal-headerclose" title="Close"
                         style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
                                border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
@@ -3113,6 +3412,29 @@
                         if (noteInput) noteInput.focus();
                         return;
                     }
+                    // v1.00: self-approval block. Disabled by default
+                    // (SELF_APPROVAL_BLOCK_ENABLED=false). When enabled,
+                    // blocks an approver from approving/rejecting a
+                    // proposal they themselves authored — second pair of
+                    // eyes enforcement.
+                    if (armed.approvalCheck && SELF_APPROVAL_BLOCK_ENABLED) {
+                        const fromStatus = liveIssue.status;
+                        // Walk history backwards to find the most recent
+                        // entry that put us INTO the current pending state.
+                        // That entry's `by` is the proposer we're checking
+                        // against the current user.
+                        const proposalEntry = (liveIssue.history || [])
+                            .slice().reverse()
+                            .find(h => h && h.toStatus === fromStatus
+                                && h.fromStatus && h.fromStatus !== h.toStatus);
+                        const proposer = proposalEntry ? proposalEntry.by : null;
+                        if (proposer && cachedUsername && proposer === cachedUsername) {
+                            showToast(
+                                "You can't approve your own proposed change — another approver needs to review this.",
+                                5500);
+                            return;
+                        }
+                    }
                     const ok = applyTransition(liveIssue.id, armed, note);
                     if (ok) closeStatusModal();
                 };
@@ -3196,6 +3518,14 @@
         render();
         document.body.appendChild(card);
         statusModalEl = card;
+        // v1.00: opening the modal counts as "seen". Mark the issue,
+        // then re-render the marker + panel rows so the green ? badge
+        // clears immediately.
+        try {
+            markIssueSeen(issue.id);
+            renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+            if (panelEl) renderIssuesPanel();
+        } catch (e) { console.warn(`${TAG} mark-seen on modal open threw:`, e); }
         // v0.30: Esc on document (no overlay anymore). Use capture so
         // we beat any other Esc handlers.
         const keyH = (e) => {
@@ -3274,7 +3604,10 @@
 
     // Status meta — extends STATUS_LABEL with chip-color hints. Resolved
     // is "dim" by status so its chip is faded too.
-    const PANEL_STATUS_ORDER = ['open', 'ready-for-review', 'resolved', 'ignored'];
+    // v1.00: pending_fix + pending_ignore added between open and resolved.
+    // ready-for-review chip is hidden in render unless a legacy issue is
+    // actually in that status (count > 0).
+    const PANEL_STATUS_ORDER = ['open', 'pending_fix', 'pending_ignore', 'ready-for-review', 'resolved', 'ignored'];
 
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
@@ -3312,11 +3645,18 @@
 
         // Per-status counts (always all live issues, ignoring search —
         // counts tell the user how many are in each bucket)
-        const countsByStatus = { open: 0, 'ready-for-review': 0, resolved: 0, ignored: 0 };
+        const countsByStatus = {
+            'open': 0, 'pending_fix': 0, 'pending_ignore': 0,
+            'ready-for-review': 0, 'resolved': 0, 'ignored': 0,
+        };
         liveSiteIssues.forEach(i => {
             const s = i.status || 'open';
             if (countsByStatus[s] !== undefined) countsByStatus[s]++;
         });
+        // v1.00: pending count for the "Pending my review" shortcut
+        // (approvers only — gated below).
+        const pendingCount = (countsByStatus['pending_fix'] || 0)
+                           + (countsByStatus['pending_ignore'] || 0);
 
         const safeSearch = escHtml(panelSearch);
         const syncDot = ({
@@ -3329,24 +3669,51 @@
             'pending': 'pending', 'error': 'error',
         })[syncStatus] || '';
 
+        // v1.00: status chip needs dark text only when its background is
+        // bright enough that white text would be unreadable. pending_fix
+        // (gold) + ready-for-review (light yellow) + resolved (light grey)
+        // → dark text. All others → white.
+        const STATUSES_NEEDING_DARK_TEXT = new Set(['pending_fix', 'ready-for-review', 'resolved']);
         // Chips row
         const chipsHtml = PANEL_STATUS_ORDER.map(st => {
             const meta = STATUS_LABEL[st] || { text: st.toUpperCase(), color: '#888' };
+            const n = countsByStatus[st] || 0;
+            // Hide legacy ready-for-review chip if no issues in it
+            if (st === 'ready-for-review' && n === 0) return '';
             const active = panelFilters.has(st);
-            const n = countsByStatus[st];
+            const activeFg = STATUSES_NEEDING_DARK_TEXT.has(st) ? '#000' : '#fff';
             return `<button class="aim-issues-panel-chip" data-status="${st}"
-                title="${active ? 'Click to hide' : 'Click to show'} ${meta.text.toLowerCase()} issues"
+                title="${active ? 'Click to hide' : 'Click to show'} ${meta.text.toLowerCase()} issues — M2 to solo"
                 style="
                     padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
                     border:1.5px solid ${meta.color};
                     background:${active ? meta.color : 'transparent'};
-                    color:${active ? (st === 'ready-for-review' || st === 'resolved' ? '#000' : '#fff') : meta.color};
+                    color:${active ? activeFg : meta.color};
                     cursor:pointer;opacity:${active ? 1 : 0.55};
                     display:inline-flex;align-items:center;gap:6px">
                 <span>${meta.text}</span>
                 <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${n}</span>
             </button>`;
-        }).join('');
+        }).filter(Boolean).join('');
+
+        // v1.00: "Pending my review" shortcut chip — approvers only.
+        // M1 click: solo pending_fix + pending_ignore (hide everything else).
+        // Always visible when role=approver, even if count is 0.
+        const role = currentRole();
+        const pendingShortcutHtml = (role === 'approver') ? `
+            <button id="aim-issues-panel-pending-shortcut"
+                title="Solo pending issues (Pending Fix + Pending Ignore) — for your review"
+                style="
+                    padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                    border:1.5px dashed #5fff5f;
+                    background:transparent;color:#5fff5f;
+                    cursor:pointer;opacity:${pendingCount > 0 ? 1 : 0.7};
+                    display:inline-flex;align-items:center;gap:6px">
+                <span>⚡ Pending my review</span>
+                <span style="background:${pendingCount > 0 ? '#ffa726' : 'rgba(0,0,0,0.25)'};
+                             color:${pendingCount > 0 ? '#000' : '#bbb'};
+                             padding:1px 5px;border-radius:8px;font-size:10px">${pendingCount}</span>
+            </button>` : '';
         // v0.29: priority filter chips. Same M1 toggle / M2 solo semantics.
         // 'none' represents issues with no priority set.
         const priCountsByKey = { high: 0, medium: 0, low: 0, none: 0 };
@@ -3448,6 +3815,43 @@
                 const priChip = priM
                     ? `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 5px;border-radius:6px;background:${priM.color};color:${priM.textColor};font-size:9px;font-weight:700">🎯 ${priM.text}</span></div>`
                     : '';
+                // v1.00: status badge needs dark text for bright backgrounds.
+                const darkText = (issue.status === 'pending_fix'
+                    || issue.status === 'ready-for-review'
+                    || issue.status === 'resolved');
+                // v1.00: pulsing green ? indicator + native tooltip summary
+                // of unseen events. Click row opens modal which clears it.
+                const unseen = unseenHistoryFor(issue);
+                let activityChip = '';
+                if (unseen.length > 0) {
+                    // Plain-text title — strip the HTML formatting from
+                    // describeHistEntry. Native title attribute can't render HTML.
+                    const plainSummary = unseen.slice(-5).map(h => {
+                        const by = h.by || '?';
+                        if (h.kind === 'priority' || h.toPriority !== undefined) {
+                            const toP = h.toPriority ? priorityMeta(h.toPriority).text : 'NONE';
+                            return `@${by}: priority → ${toP}`;
+                        }
+                        if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) {
+                            return `@${by}: 💬 ${(h.note || '').slice(0, 80)}`;
+                        }
+                        if (!h.fromStatus) return `@${by}: created`;
+                        if (h.toStatus === 'deleted') return `@${by}: deleted`;
+                        const fromLbl = (STATUS_LABEL[h.fromStatus] || {text: h.fromStatus}).text;
+                        const toLbl = (STATUS_LABEL[h.toStatus] || {text: h.toStatus}).text;
+                        return `@${by}: ${fromLbl} → ${toLbl}`;
+                    }).join('\n');
+                    const moreCount = unseen.length > 5 ? `\n+ ${unseen.length - 5} earlier` : '';
+                    const titleText = `${unseen.length} new event${unseen.length === 1 ? '' : 's'}:\n${plainSummary}${moreCount}\n\nClick row to view + dismiss.`;
+                    activityChip = `<span class="aim-issues-activity-dot"
+                        title="${escHtml(titleText)}"
+                        style="display:inline-flex;align-items:center;justify-content:center;
+                               width:16px;height:16px;border-radius:50%;
+                               background:#00FF7F;color:#000;
+                               font-size:11px;font-weight:900;line-height:1;
+                               border:1px solid rgba(0,0,0,0.45);
+                               margin-left:6px;vertical-align:middle">?</span>`;
+                }
                 return `<div class="aim-issues-panel-row" data-issue-id="${issue.id}"
                     style="padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);
                            cursor:pointer;opacity:${rowOpacity};
@@ -3455,13 +3859,13 @@
                     title="Click to zoom to issue + open status modal">
                     <div>
                         <span style="display:inline-block;padding:2px 6px;border-radius:8px;
-                                     background:${meta.color};color:${(issue.status === 'ready-for-review' || issue.status === 'resolved') ? '#000' : '#fff'};
+                                     background:${meta.color};color:${darkText ? '#000' : '#fff'};
                                      font-size:10px;font-weight:700">${meta.text}</span>
                         ${priChip}
                         ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
                     </div>
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">
-                        ${escHtml(headerLabel)}
+                        ${escHtml(headerLabel)}${activityChip}
                         <div style="color:#888;font-weight:400;font-size:10px;margin-top:1px">${age}</div>
                     </div>
                     <div>
@@ -3499,6 +3903,7 @@
             <div style="padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
+                ${pendingShortcutHtml}
                 <div style="margin-left:auto;display:flex;gap:6px">
                     ${hiddenIds.size > 0
                         ? `<button id="aim-issues-panel-unhide"
@@ -3588,6 +3993,25 @@
                 panelSearch = searchInput.value;
                 clearTimeout(t);
                 t = setTimeout(() => { if (panelEl) renderIssuesPanel(); }, 150);
+            };
+        }
+        // v1.00: "Pending my review" shortcut — solo the two pending
+        // statuses. Toggle: clicking again restores the prior full set.
+        const pendingShortcut = panelEl.querySelector('#aim-issues-panel-pending-shortcut');
+        if (pendingShortcut) {
+            pendingShortcut.onclick = () => {
+                const isAlreadySolo = (panelFilters.size === 2
+                    && panelFilters.has('pending_fix')
+                    && panelFilters.has('pending_ignore'));
+                panelFilters.clear();
+                if (isAlreadySolo) {
+                    // Restore everything
+                    PANEL_STATUS_ORDER.forEach(s => panelFilters.add(s));
+                } else {
+                    panelFilters.add('pending_fix');
+                    panelFilters.add('pending_ignore');
+                }
+                renderIssuesPanel();
             };
         }
         panelEl.querySelectorAll('.aim-issues-panel-chip').forEach(chip => {
@@ -3822,6 +4246,25 @@
             .leaflet-tooltip-bottom.aim-issues-tooltip::before { border-bottom-color: rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-left.aim-issues-tooltip::before   { border-left-color:   rgba(15,18,22,0.96) !important; }
             .leaflet-tooltip-right.aim-issues-tooltip::before  { border-right-color:  rgba(15,18,22,0.96) !important; }
+            /* v1.00: pulsing green ? badge for unseen activity. Used on
+               both the map marker (absolute child of divIcon wrapper) and
+               panel row indicator. The animation runs forever until the
+               user opens the issue's status modal (which marks it seen). */
+            @keyframes aim-issues-pulse-glow {
+                0%, 100% {
+                    box-shadow: 0 0 3px rgba(0, 255, 127, 0.6),
+                                0 0 7px  rgba(0, 255, 127, 0.30);
+                    transform: scale(1);
+                }
+                50% {
+                    box-shadow: 0 0 10px rgba(0, 255, 127, 0.95),
+                                0 0 18px rgba(0, 255, 127, 0.55);
+                    transform: scale(1.12);
+                }
+            }
+            .aim-issues-activity-dot {
+                animation: aim-issues-pulse-glow 1.6s ease-in-out infinite;
+            }
         `;
         (document.head || document.documentElement).appendChild(style);
     }
@@ -3838,6 +4281,9 @@
             syncStatus = cachedUsername ? 'ok' : 'syncing';
             // Refresh username in the background — handles PAT rotation.
             fetchGithubUsername();
+            // v1.00: refresh approver list in the background — handles
+            // boss-just-added-me scenario without requiring a script reload.
+            fetchApproversList();
         } else {
             syncStatus = 'no-token';
         }
