@@ -6,6 +6,23 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-02 — AIM Issues v0.30 (DEV ONLY) — Status modal is now a floating window
+
+The M2 status modal was a full-screen overlay that dimmed the map and blocked review. v0.30 turns it into a real floating window:
+
+- **No more backdrop dim** — the map stays visible behind the modal
+- **Draggable** — header bar (Issue / status / priority chip / ✕) is a drag handle. `cursor:move` on hover.
+- **Resizable** — red striped corner handle at the bottom-right (same look as the panel)
+- **Defaults to bottom-right** corner of the viewport so it doesn't cover whatever you just right-clicked
+- **Persists size + position** to `localStorage` (key `aim-issues-statusmodal-layout`) so it opens where you left it across refreshes
+- **Body is scrollable** with a fixed header + footer — long histories don't push the action buttons off-screen
+- New small ✕ button in the header (in addition to the Close button in the footer)
+- Esc still works — armed → cancel, otherwise close
+
+**History sort toggle**: clicking the "History" title cycles the sort direction. Default = oldest first (▲); click → newest first (▼); click again → oldest first. The arrow + "oldest first / newest first" label shows current direction. Direction is per-modal-session (not persisted — defaults to oldest-first on each open).
+
+---
+
 ## 2026-06-02 — AIM Issues v0.29 (DEV ONLY) — Priority filter + clickable Site Name
 
 Two tweaks. `latest/` only.

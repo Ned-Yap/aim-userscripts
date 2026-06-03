@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -225,6 +225,38 @@
         out.top  = Math.max(10, Math.min(out.top, vh - titleBar));
         return out;
     }
+
+    // v0.30: same layout-persistence model for the status modal so it
+    // behaves like a real floating window (no backdrop dim, draggable
+    // header, resizable corner, sticks where the user left it). Default
+    // bottom-right since map content is usually centered.
+    const STATUS_MODAL_LAYOUT_KEY = 'aim-issues-statusmodal-layout';
+    let statusModalLayout = null;
+    let statusModalDragInFlight = false;
+    function loadStatusModalLayout() {
+        try {
+            const raw = localStorage.getItem(STATUS_MODAL_LAYOUT_KEY);
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== 'object') return null;
+            return obj;
+        } catch (e) { return null; }
+    }
+    function saveStatusModalLayout(layout) {
+        try { localStorage.setItem(STATUS_MODAL_LAYOUT_KEY, JSON.stringify(layout)); }
+        catch (e) {}
+    }
+    function clampStatusModalLayout(l) {
+        const minW = 420, minH = 360;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const out = { ...l };
+        out.width  = Math.max(minW, Math.min(out.width  || 560, vw - 20));
+        out.height = Math.max(minH, Math.min(out.height || 600, vh - 20));
+        out.left = Math.max(10 - out.width + 120, Math.min(out.left, vw - 120));
+        out.top  = Math.max(10, Math.min(out.top, vh - 40));
+        return out;
+    }
+
     let buttonEl = null;
     let controlChannel = null;
     let leafletMapRef = null;
@@ -2641,27 +2673,50 @@
     // re-renders the modal innerHTML on state change.
     function openStatusModal(issue) {
         closeStatusModal();
-        const overlay = document.createElement('div');
-        overlay.id = 'aim-issues-status-modal-overlay';
-        overlay.style.cssText = `
-            position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:100000;
-            display:flex;align-items:center;justify-content:center;
-            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-        `;
+        // v0.30: no more overlay. The modal is a floating window so it
+        // doesn't darken the map and the user can move it out of the way
+        // while reviewing the issue. Default position bottom-right;
+        // layout persists per the panel pattern.
+        const stored = loadStatusModalLayout();
+        if (stored) statusModalLayout = clampStatusModalLayout(stored);
+        else statusModalLayout = clampStatusModalLayout({
+            width: 560,
+            height: Math.min(620, window.innerHeight - 100),
+            left: window.innerWidth - 580,
+            top: window.innerHeight - Math.min(640, window.innerHeight - 60),
+        });
         const card = document.createElement('div');
+        card.id = 'aim-issues-status-modal';
         card.style.cssText = `
+            position:fixed;
+            left:${statusModalLayout.left}px;top:${statusModalLayout.top}px;
+            width:${statusModalLayout.width}px;height:${statusModalLayout.height}px;
             background:#1f2228;border:1px solid rgba(255,77,77,0.45);
-            border-radius:10px;padding:18px 22px;width:540px;max-width:94vw;
-            color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.6);
+            border-radius:10px;
+            color:#e6e6e6;
+            font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+            box-shadow:0 8px 32px rgba(0,0,0,0.6);
+            z-index:99500;
+            display:flex;flex-direction:column;overflow:hidden;
         `;
-        overlay.appendChild(card);
+        // Stop map/leaflet events from intercepting clicks/wheel on the modal
+        ['mousedown','pointerdown','wheel','dblclick','click','contextmenu','touchstart'].forEach(evt => {
+            card.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
 
         // Local UI state — armed transition (null = pick a transition;
         // non-null = note prompt for that transition).
         let armed = null;
         let pendingNote = '';     // preserved across re-renders if user typed something
+        // v0.30: history sort direction. Default: oldest first (false).
+        // Click "History" header to toggle.
+        let historySortDesc = false;
 
         function render() {
+            // v0.30: skip re-renders mid-drag so stale handlers don't get
+            // re-wired and the layout-state stays consistent during the
+            // drag operation.
+            if (statusModalDragInFlight) return;
             // Re-resolve issue from current state in case it changed
             const liveIssue = currentSiteIssues.find(i => i.id === issue.id) || issue;
             const safeNote = escHtml(liveIssue.note);
@@ -2674,7 +2729,16 @@
             //   priority (kind==='priority' or has priority fields): "🎯 priority: LOW → HIGH"
             //   deleted (toStatus==='deleted'): "🗑 deleted"
             //   transition: "OPEN → IGNORED"
-            const histRows = (liveIssue.history || []).map(h => {
+            // v0.30: sort history per user preference. Default oldest first.
+            const sortedHistory = (liveIssue.history || []).slice().sort((a, b) => {
+                const at = new Date(a.at).getTime();
+                const bt = new Date(b.at).getTime();
+                if (isNaN(at) && isNaN(bt)) return 0;
+                if (isNaN(at)) return 1;
+                if (isNaN(bt)) return -1;
+                return historySortDesc ? bt - at : at - bt;
+            });
+            const histRows = sortedHistory.map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
                 let label, labelColor = '#e6e6e6';
@@ -2870,23 +2934,53 @@
             const headerPri = liveIssue.priority
                 ? `<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;background:${priorityMeta(liveIssue.priority).color};color:${priorityMeta(liveIssue.priority).textColor};font-size:10px;font-weight:700;letter-spacing:0.5px">🎯 ${priorityMeta(liveIssue.priority).text}</span>`
                 : '';
+            // v0.30: floating-window structure — draggable header / scrollable
+            // body / fixed footer / resize handle. Header doubles as drag
+            // handle. History title is clickable to toggle sort.
+            const sortArrow = historySortDesc ? '▼' : '▲';
+            const sortLabel = historySortDesc ? 'newest first' : 'oldest first';
             card.innerHTML = `
-                <div style="font-size:15px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:8px">
-                    <span style="color:#aaa">Issue ·</span>
-                    <span style="color:${statusMeta.color};font-weight:700">${statusMeta.text}</span>
+                <div id="aim-issues-modal-header"
+                     style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
+                            display:flex;align-items:center;gap:10px;cursor:move;user-select:none;flex-shrink:0"
+                     title="Drag to move the popup">
+                    <span style="color:#aaa;font-size:14px;font-weight:600">Issue ·</span>
+                    <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
                     ${headerPri}
+                    <button id="aim-issues-modal-headerclose" title="Close"
+                        style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
+                               border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
+                        ✕
+                    </button>
                 </div>
-                <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
-                ${entitiesSectionHtml}
-                <div style="color:#888;font-size:11px;margin:12px 0 4px 0">History</div>
-                <div style="max-height:180px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
-                ${actionSectionHtml}
-                <div style="display:flex;gap:8px;align-items:center;margin-top:14px">
+                <div id="aim-issues-modal-body"
+                     style="padding:14px 18px;overflow:auto;flex:1;min-height:0">
+                    <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
+                    ${entitiesSectionHtml}
+                    <div id="aim-issues-modal-historyheader"
+                         title="Click to toggle sort direction"
+                         style="color:#888;font-size:11px;margin:12px 0 4px 0;cursor:pointer;user-select:none;
+                                display:inline-flex;align-items:center;gap:5px;padding:2px 6px;
+                                border-radius:4px;border:1px solid transparent;transition:border-color 150ms">
+                        History
+                        <span style="color:#a8c4ff;font-weight:600">${sortArrow}</span>
+                        <span style="color:#888;font-style:italic">${sortLabel}</span>
+                    </div>
+                    <div style="max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
+                    ${actionSectionHtml}
+                </div>
+                <div style="padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
+                            display:flex;gap:8px;align-items:center;flex-shrink:0">
                     ${deleteBtnHtml}
                     <button id="aim-issues-modal-close"
                         style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
                         Close
                     </button>
+                </div>
+                <div id="aim-issues-modal-resize"
+                     title="Drag to resize"
+                     style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
+                            background:linear-gradient(135deg,transparent 0%,transparent 45%,rgba(255,77,77,0.55) 45%,rgba(255,77,77,0.55) 60%,transparent 60%,transparent 75%,rgba(255,77,77,0.55) 75%,rgba(255,77,77,0.55) 90%,transparent 90%);">
                 </div>
             `;
             wireHandlers(liveIssue, transitions);
@@ -2894,6 +2988,23 @@
 
         function wireHandlers(liveIssue, transitions) {
             card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+            const headerCloseBtn = card.querySelector('#aim-issues-modal-headerclose');
+            if (headerCloseBtn) headerCloseBtn.onclick = closeStatusModal;
+
+            // v0.30: history sort toggle
+            const histHeader = card.querySelector('#aim-issues-modal-historyheader');
+            if (histHeader) {
+                histHeader.onclick = (e) => {
+                    e.stopPropagation();
+                    historySortDesc = !historySortDesc;
+                    render();
+                };
+                histHeader.onmouseenter = () => { histHeader.style.borderColor = 'rgba(168,196,255,0.4)'; };
+                histHeader.onmouseleave = () => { histHeader.style.borderColor = 'transparent'; };
+            }
+
+            // v0.30: drag + resize
+            wireModalDragAndResize();
 
             // v0.18: entity pills — M1 copy, M2 find-in-sidebar
             card.querySelectorAll('.aim-issues-entity-pill').forEach(pill => {
@@ -3031,21 +3142,86 @@
             }
         }
 
+        // v0.30: drag/resize for the modal. Closure-scoped so it sees `card`,
+        // `render`, `statusModalLayout` directly. Re-wired on every render
+        // since innerHTML wipes the mousedown handlers on the header/handle.
+        function wireModalDragAndResize() {
+            const header = card.querySelector('#aim-issues-modal-header');
+            const handle = card.querySelector('#aim-issues-modal-resize');
+            if (header) {
+                header.addEventListener('mousedown', (e) => {
+                    if (e.target.closest('button, input, textarea')) return;
+                    if (e.button !== 0) return;
+                    e.preventDefault(); e.stopPropagation();
+                    startModalDrag(e, 'move');
+                });
+            }
+            if (handle) {
+                handle.addEventListener('mousedown', (e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault(); e.stopPropagation();
+                    startModalDrag(e, 'resize');
+                });
+            }
+        }
+        function startModalDrag(downEvent, mode) {
+            if (!card || !statusModalLayout) return;
+            statusModalDragInFlight = true;
+            const sx = downEvent.clientX, sy = downEvent.clientY;
+            const sLeft = statusModalLayout.left, sTop = statusModalLayout.top;
+            const sW = statusModalLayout.width, sH = statusModalLayout.height;
+            const onMove = (e) => {
+                const dx = e.clientX - sx, dy = e.clientY - sy;
+                let next;
+                if (mode === 'move') next = { ...statusModalLayout, left: sLeft + dx, top: sTop + dy };
+                else next = { ...statusModalLayout, width: sW + dx, height: sH + dy };
+                const clamped = clampStatusModalLayout(next);
+                statusModalLayout = clamped;
+                card.style.left   = `${clamped.left}px`;
+                card.style.top    = `${clamped.top}px`;
+                card.style.width  = `${clamped.width}px`;
+                card.style.height = `${clamped.height}px`;
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove, true);
+                document.removeEventListener('mouseup', onUp, true);
+                statusModalDragInFlight = false;
+                saveStatusModalLayout(statusModalLayout);
+                render();
+            };
+            document.addEventListener('mousemove', onMove, true);
+            document.addEventListener('mouseup', onUp, true);
+        }
+
         render();
-        document.body.appendChild(overlay);
-        statusModalEl = overlay;
+        document.body.appendChild(card);
+        statusModalEl = card;
+        // v0.30: Esc on document (no overlay anymore). Use capture so
+        // we beat any other Esc handlers.
         const keyH = (e) => {
             if (e.key !== 'Escape') return;
-            // Escape during armed cancels back to transition list; from
-            // transition list it closes the modal.
-            if (armed) { armed = null; pendingNote = ''; render(); }
-            else closeStatusModal();
+            // Only act if we're the focus context — but in practice any
+            // Esc while modal open should toggle armed or close.
+            if (!statusModalEl) return;
+            if (armed) { e.preventDefault(); armed = null; pendingNote = ''; render(); }
+            else { e.preventDefault(); closeStatusModal(); }
         };
-        overlay.addEventListener('keydown', keyH, true);
+        document.addEventListener('keydown', keyH, true);
+        // Save reference for cleanup
+        card._aim_keyhandler = keyH;
     }
 
     function closeStatusModal() {
-        if (statusModalEl) { try { statusModalEl.remove(); } catch (e) {} }
+        if (statusModalEl) {
+            // v0.30: clean up the document-level Esc listener attached in
+            // openStatusModal — otherwise leftover handlers stack up across
+            // open/close cycles.
+            try {
+                const keyH = statusModalEl._aim_keyhandler;
+                if (keyH) document.removeEventListener('keydown', keyH, true);
+            } catch (e) {}
+            try { statusModalEl.remove(); } catch (e) {}
+        }
         statusModalEl = null;
     }
 
