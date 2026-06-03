@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-02 — AIM Issues v0.31 (DEV ONLY) — History grows with modal height
+
+v0.30's status modal was resizable but the history container had a hardcoded `max-height:200px` so resizing the modal taller didn't give you more history rows — just more empty space. v0.31 drops the inner max-height; history now grows with the modal, and the modal body's own scrollbar handles overflow.
+
+---
+
 ## 2026-06-02 — AIM Issues v0.30 (DEV ONLY) — Status modal is now a floating window
 
 The M2 status modal was a full-screen overlay that dimmed the map and blocked review. v0.30 turns it into a real floating window:
