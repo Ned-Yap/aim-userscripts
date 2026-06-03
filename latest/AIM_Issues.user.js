@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging. 🚩 button in .map-tools. M1 ⚡ flag mode → click-drag rectangle or Shift+click polygon → required note. Renders dashed red. M1 on issue = session-hide. M2 on issue = stub status modal (Phase 1 — full state machine arrives in Phase 3). Phase 1 LOCAL-ONLY (localStorage); Phase 2 swaps to GitHub.
@@ -44,7 +44,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -189,6 +189,10 @@
     let panelEl = null;
     // Filter chips — Set of allowed statuses. Empty == all hidden (rare).
     const panelFilters = new Set(['open', 'ready-for-review', 'resolved', 'ignored']);
+    // v0.29: priority filter chips. Uses the literal string 'none' for
+    // issues with no priority (issue.priority === null/undefined). All
+    // four active by default. M1 toggle, M2 solo (same as status chips).
+    const panelPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
     let panelSearch = '';
     // v0.16: persisted size + position. Loaded from localStorage on open,
     // saved on drag/resize release. Use viewport-anchored top/left so the
@@ -2017,7 +2021,14 @@
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-size:11px">${histText}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-family:monospace;font-size:10px;color:#888">${escHtml(issue.id)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteId)}</td>`);
-            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(siteName_ || '')}</td>`);
+            // v0.29: Site Name is a link to the site-setup URL. Sheets +
+            // Excel both honor <a href> in pasted HTML — cell becomes
+            // clickable, displays the name as link text.
+            const siteUrl = siteId ? `https://percepto.app/#/site/${encodeURIComponent(siteId)}/control-panel/site-setup` : '';
+            const siteNameCell = (siteName_ && siteUrl)
+                ? `<a href="${siteUrl}" style="color:#1a73e8;text-decoration:underline">${escHtml(siteName_)}</a>`
+                : escHtml(siteName_ || '');
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${siteNameCell}</td>`);
             out.push('</tr>');
         });
         out.push('</tbody></table>');
@@ -3092,6 +3103,9 @@
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
         if (!panelFilters.has(st)) return false;
+        // v0.29: priority filter — 'none' represents null/undefined.
+        const priKey = issue.priority || 'none';
+        if (!panelPriorityFilters.has(priKey)) return false;
         const q = panelSearch.trim().toLowerCase();
         if (!q) return true;
         const note = (issue.note || '').toLowerCase();
@@ -3155,6 +3169,33 @@
                     display:inline-flex;align-items:center;gap:6px">
                 <span>${meta.text}</span>
                 <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${n}</span>
+            </button>`;
+        }).join('');
+        // v0.29: priority filter chips. Same M1 toggle / M2 solo semantics.
+        // 'none' represents issues with no priority set.
+        const priCountsByKey = { high: 0, medium: 0, low: 0, none: 0 };
+        liveSiteIssues.forEach(i => {
+            const k = i.priority || 'none';
+            if (priCountsByKey[k] !== undefined) priCountsByKey[k]++;
+        });
+        const priChipsHtml = ['high', 'medium', 'low', 'none'].map(p => {
+            const m = (p === 'none')
+                ? { text: 'No priority', color: '#888', textColor: '#fff' }
+                : priorityMeta(p);
+            const active = panelPriorityFilters.has(p);
+            const n = priCountsByKey[p];
+            const labelText = p === 'none' ? 'NONE' : m.text;
+            return `<button class="aim-issues-panel-prichip" data-priority="${p}"
+                title="${active ? 'Click to hide' : 'Click to show'} ${labelText.toLowerCase()}-priority issues (M2 = solo)"
+                style="
+                    padding:4px 9px;border-radius:12px;font:inherit;font-size:10px;font-weight:700;
+                    border:1.5px solid ${m.color};
+                    background:${active ? m.color : 'transparent'};
+                    color:${active ? m.textColor : m.color};
+                    cursor:pointer;opacity:${active ? 1 : 0.55};
+                    display:inline-flex;align-items:center;gap:5px">
+                <span>${p === 'none' ? '—' : '🎯'} ${labelText}</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 4px;border-radius:7px;font-size:9px">${n}</span>
             </button>`;
         }).join('');
 
@@ -3310,6 +3351,11 @@
                     </button>
                 </div>
             </div>
+            <div style="padding:6px 14px 8px 14px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+                        border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
+                <span style="color:#888;font-size:10px;margin-right:2px;font-weight:600">PRIORITY:</span>
+                ${priChipsHtml}
+            </div>
             <div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 <input id="aim-issues-panel-search" type="text"
                     placeholder="Search notes / authors / history…"
@@ -3320,7 +3366,7 @@
             <div style="padding:0;overflow:auto;flex:1;min-height:120px">${rowsHtml}</div>
             <div style="padding:6px 14px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
                         color:#666;font-size:10px;font-style:italic">
-                Row: zoom + open modal · M1 chip: toggle · M2 chip: solo · ▶ expand entities · M1 pill: copy · M2 pill: sidebar
+                Row: zoom + open modal · M1 chip: toggle · M2 chip: solo (status + priority) · ▶ expand entities · M1 pill: copy · M2 pill: sidebar
             </div>
             <div id="aim-issues-panel-resize"
                  title="Drag to resize"
@@ -3388,6 +3434,26 @@
                 } else {
                     panelFilters.add(st);
                 }
+                renderIssuesPanel();
+            };
+        });
+        // v0.29: priority chips — same M1 toggle / M2 solo semantics
+        const ALL_PRIORITIES = ['high', 'medium', 'low', 'none'];
+        panelEl.querySelectorAll('.aim-issues-panel-prichip').forEach(chip => {
+            chip.onclick = () => {
+                const p = chip.dataset.priority;
+                if (panelPriorityFilters.has(p)) panelPriorityFilters.delete(p);
+                else panelPriorityFilters.add(p);
+                renderIssuesPanel();
+            };
+            chip.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const p = chip.dataset.priority;
+                const isCurrentlySolo = (panelPriorityFilters.size === 1 && panelPriorityFilters.has(p));
+                panelPriorityFilters.clear();
+                if (isCurrentlySolo) ALL_PRIORITIES.forEach(x => panelPriorityFilters.add(x));
+                else panelPriorityFilters.add(p);
                 renderIssuesPanel();
             };
         });

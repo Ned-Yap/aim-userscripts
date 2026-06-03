@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-02 — AIM Issues v0.29 (DEV ONLY) — Priority filter + clickable Site Name
+
+Two tweaks. `latest/` only.
+
+- **Priority filter chips row** in the panel under the status chips. Four chips: `🎯 HIGH` / `🎯 MEDIUM` / `🎯 LOW` / `— NONE` (for issues with no priority set). Same UX as status chips: M1 toggle individual, M2 solo. Default all 4 active. Counts in each chip update live.
+- **Sheets export — Site Name is now a clickable link** to the site-setup URL (`https://percepto.app/#/site/<id>/control-panel/site-setup`). Pasting into Google Sheets or Excel produces a hyperlink cell that displays the friendly name (`Exxon - Lille Midkiff 5`) but clicks through to the site. TSV fallback stays plain text.
+
+---
+
 ## 2026-06-02 — AIM Issues v0.28 (DEV ONLY) — Comments + Priority
 
 Two requested features. `latest/` only — prod still on v0.27.
