@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.58
+// @version      3.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.58';
+    const SCRIPT_VERSION = '3.59';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3635,6 +3635,11 @@
             '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
+            // GM radius circles — purple outline (ties to the purple GM
+            // icon), faint purple fill so the ring reads without hiding
+            // what's underneath. KML aabbggrr: ff f020a0 = full-alpha
+            // purple outline; 30 f020a0 = ~19% fill.
+            '<Style id="gmradius_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><color>30f020a0</color></PolyStyle></Style>',
             // V-Buffer: BLUE (moved from yellow — yellow is now reserved
             // for distro power lines per Exxon Powerlines KML standard).
             // KML color aabbggrr: ffff0000 = full alpha + pure blue.
@@ -3666,6 +3671,32 @@
         const first = points[0], last = points[points.length - 1];
         if (first.lat === last.lat && first.lng === last.lng) return points;
         return points.concat([first]);
+    }
+    // Closed polygon ring approximating a circle of `radiusM` meters
+    // around (lat,lng). Equirectangular projection — accurate to well
+    // under a meter at site scale (sub-km radii). Returns segments+1
+    // points (last == first, already closed). 48 segments reads as a
+    // smooth circle in Google Earth.
+    function kmlCircleRing(lat, lng, radiusM, segments) {
+        const n = segments || 48;
+        const mPerDegLat = 111320;
+        const mPerDegLng = 111320 * Math.cos(lat * Math.PI / 180) || 1e-9;
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+            const theta = (i / n) * 2 * Math.PI;
+            const dx = radiusM * Math.sin(theta); // east
+            const dy = radiusM * Math.cos(theta); // north
+            pts.push({ lat: lat + dy / mPerDegLat, lng: lng + dx / mPerDegLng });
+        }
+        return pts;
+    }
+    // GM radius circle as a ground-clamped Polygon. Flat circle on the
+    // ground regardless of 2D/3D mode — it's a horizontal buffer.
+    function kmlGmCircleGeometry(item, radiusM) {
+        const c = (Array.isArray(item.coords) && item.coords[0]) || null;
+        if (!c) return '';
+        const ring = kmlCircleRing(c.lat, c.lng, radiusM, 48);
+        return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
     // Format a dual-line "Label (AGL): ftAGL / mAGL | (MSL): ftMSL / mMSL"
     // entry — matches Python's _format_alt_line output exactly. Bold ft
@@ -4011,6 +4042,24 @@
                 xml.push('</Folder>');
             });
         }
+        // General Marker radius circles — OFF by default. A horizontal
+        // buffer ring (clamped to ground) around every GM regardless of
+        // subtype. Radius is user-configurable (default 0.5 mi). Its own
+        // top-level folder so it's filterable in the Google Earth tree.
+        if (include.gmCircles) {
+            const radiusM = (typeof options.gmRadiusMeters === 'number' && options.gmRadiusMeters > 0) ? options.gmRadiusMeters : 804.672;
+            const radLabel = options.gmRadiusLabel || `${(radiusM / 1609.344).toFixed(2)} mi`;
+            const allGms = byType[19].general.concat(byType[19].tower, byType[19].hazard);
+            if (allGms.length > 0) {
+                xml.push(`<Folder><name>General Marker Radius Circles (${xmlEscape(radLabel)})</name>`);
+                allGms.forEach(e => {
+                    const geom = kmlGmCircleGeometry(e, radiusM);
+                    if (!geom) return;
+                    xml.push(`<Placemark id="gmcircle_${e.id}"><name>${xmlEscape(e.name)} - ${xmlEscape(radLabel)} radius</name><styleUrl>#gmradius_style</styleUrl>${geom}</Placemark>`);
+                });
+                xml.push('</Folder>');
+            }
+        }
         // Power Lines — pulled from Map Styler's loaded KML data via
         // BroadcastChannel. Two separate folders (Distribution, Trans-
         // mission) matching Map Styler's category split. Only emitted
@@ -4153,6 +4202,7 @@
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="ffzs" checked style="accent-color:#7adfe6"> Free-Fly Zones (${counts.ffzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="nfzs" checked style="accent-color:#7adfe6"> No-Fly Zones (${counts.nfzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="markers" checked style="accent-color:#7adfe6"> General Markers (${counts.markers})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-gmcircles-label"><input type="checkbox" data-inc="gmCircles" style="accent-color:#7adfe6"> GM Radius Circles</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-vbuffers-label"><input type="checkbox" data-inc="vbuffers" checked style="accent-color:#7adfe6"> Vertical Buffers (3D only)</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-powerlines-label"><input type="checkbox" data-inc="powerlines" checked style="accent-color:#7adfe6"> Power Lines <span id="aim-ai-pl-status" style="color:#888;font-size:10px">(requesting…)</span></label>
                 </div>
@@ -4164,6 +4214,17 @@
                     <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Transmission:</span><input type="number" id="aim-ai-trans-ht" value="80" min="0" max="300" step="5" style="width:60px;background:#1a1d23;border:1px solid rgba(255,213,79,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888">ft AGL</span></label>
                 </div>
                 <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Permian Basin: distro typically 30-45 ft (35 default), trans 40-150 ft depending on voltage (80 default for safety). Adjust per-site.</div>
+            </div>
+            <div id="aim-ai-gm-radius" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(240,32,160,0.06);border:1px dashed rgba(240,32,160,0.30);border-radius:3px">
+                <div style="font-size:11px;color:#f070c0;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">GM radius circles</div>
+                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11px">
+                    <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Radius:</span><input type="number" id="aim-ai-gm-radius-val" value="0.5" min="0" step="0.1" style="width:70px;background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"></label>
+                    <select id="aim-ai-gm-radius-unit" style="background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px">
+                        <option value="mi" selected>miles</option>
+                        <option value="ft">feet</option>
+                    </select>
+                </div>
+                <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Draws a flat ground circle of this radius around every General Marker. Off by default.</div>
             </div>
             <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
@@ -4186,10 +4247,19 @@
             const transIn = box.querySelector('#aim-ai-trans-ht');
             const distroHeightFt = distroIn ? parseFloat(distroIn.value) : 35;
             const transHeightFt = transIn ? parseFloat(transIn.value) : 80;
+            // GM radius circles — convert the user value+unit to meters.
+            const gmRadIn = box.querySelector('#aim-ai-gm-radius-val');
+            const gmUnitSel = box.querySelector('#aim-ai-gm-radius-unit');
+            const gmUnit = gmUnitSel ? gmUnitSel.value : 'mi';
+            const gmRadRaw = gmRadIn ? parseFloat(gmRadIn.value) : 0.5;
+            const gmRadVal = (isFinite(gmRadRaw) && gmRadRaw > 0) ? gmRadRaw : 0.5;
+            const gmRadiusMeters = gmUnit === 'ft' ? gmRadVal / KML_FT : gmRadVal * 1609.344;
+            const gmRadiusLabel = gmUnit === 'ft' ? `${gmRadVal} ft` : `${gmRadVal} mi`;
             return {
                 mode, include,
                 distroHeightFt: isFinite(distroHeightFt) ? distroHeightFt : 35,
                 transHeightFt: isFinite(transHeightFt) ? transHeightFt : 80,
+                gmRadiusMeters, gmRadiusLabel,
                 siteName: `Site ${siteID} Map - ${siteName}`,
             };
         };
@@ -4210,13 +4280,24 @@
             if (phts) phts.style.display = mode === '3D' ? '' : 'none';
             updateStats();
         };
+        // GM radius control block only shown when GM Radius Circles is on.
+        const updateGmRadiusVis = () => {
+            const cb = box.querySelector('input[data-inc="gmCircles"]');
+            const blk = box.querySelector('#aim-ai-gm-radius');
+            if (blk) blk.style.display = (cb && cb.checked) ? '' : 'none';
+        };
         // Live preview on height input changes.
         const dh = box.querySelector('#aim-ai-distro-ht');
         const th = box.querySelector('#aim-ai-trans-ht');
         if (dh) dh.oninput = updateStats;
         if (th) th.oninput = updateStats;
+        const gmRadVal = box.querySelector('#aim-ai-gm-radius-val');
+        const gmRadUnit = box.querySelector('#aim-ai-gm-radius-unit');
+        if (gmRadVal) gmRadVal.oninput = updateStats;
+        if (gmRadUnit) gmRadUnit.onchange = updateStats;
         box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
-        box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = updateStats);
+        box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = () => { updateGmRadiusVis(); updateStats(); });
+        updateGmRadiusVis();
         updateVbufferVis();
 
         // Power Lines: request from Map Styler + poll for response.

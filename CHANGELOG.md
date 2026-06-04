@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-04 — Asset Inspector v3.59 (DEV / Latest) — GM radius circles in KML export
+
+Site Setup Analyzer (Site setup → KML) gains an **off-by-default "GM Radius Circles"** option. When enabled, a configurable-radius flat ground circle is drawn around every General Marker and emitted in its own `General Marker Radius Circles` folder. Radius defaults to **0.5 mi** and accepts **miles or feet** via a unit dropdown; the control block only appears when the toggle is on. Circles are clamped to ground (horizontal buffer) in both 2D and 3D exports. Dev-only in `latest/` — not yet promoted to coworkers.
+
+---
+
 ## 2026-06-03 — AIM Issues v1.00 PROMOTED TO PROD
 
 Big release — coworkers update at the next Tampermonkey check (or use the dashboard's "Check for userscript updates" to grab it now). Jumps prod from v0.27 → v1.00 in one bundle. Includes everything from v0.28 → v0.31 PLUS the v1.00 oversight redesign + activity indicator (see entries below for full feature lists).
