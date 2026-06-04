@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.59
+// @version      3.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.59';
+    const SCRIPT_VERSION = '3.60';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3640,6 +3640,9 @@
             // what's underneath. KML aabbggrr: ff f020a0 = full-alpha
             // purple outline; 30 f020a0 = ~19% fill.
             '<Style id="gmradius_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><color>30f020a0</color></PolyStyle></Style>',
+            // Same purple outline, no fill — used when multiple rings are
+            // drawn so overlapping fills don't muddy the map.
+            '<Style id="gmradius_outline_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             // V-Buffer: BLUE (moved from yellow — yellow is now reserved
             // for distro power lines per Exxon Powerlines KML standard).
             // KML color aabbggrr: ffff0000 = full alpha + pure blue.
@@ -4042,20 +4045,30 @@
                 xml.push('</Folder>');
             });
         }
-        // General Marker radius circles — OFF by default. A horizontal
-        // buffer ring (clamped to ground) around every GM regardless of
-        // subtype. Radius is user-configurable (default 0.5 mi). Its own
-        // top-level folder so it's filterable in the Google Earth tree.
+        // General Marker radius circles — OFF by default. One or more
+        // horizontal buffer rings (clamped to ground) around every GM
+        // regardless of subtype. Radii are user-configurable (default a
+        // single 0.5-mi ring). Each radius gets its own subfolder so the
+        // Google Earth tree is filterable per ring. A single ring gets a
+        // faint fill; multiple rings render as outlines only.
         if (include.gmCircles) {
-            const radiusM = (typeof options.gmRadiusMeters === 'number' && options.gmRadiusMeters > 0) ? options.gmRadiusMeters : 804.672;
-            const radLabel = options.gmRadiusLabel || `${(radiusM / 1609.344).toFixed(2)} mi`;
+            const rings = (Array.isArray(options.gmRings) && options.gmRings.length > 0)
+                ? options.gmRings
+                : [{ meters: 804.672, label: '0.5 mi' }];
             const allGms = byType[19].general.concat(byType[19].tower, byType[19].hazard);
             if (allGms.length > 0) {
-                xml.push(`<Folder><name>General Marker Radius Circles (${xmlEscape(radLabel)})</name>`);
-                allGms.forEach(e => {
-                    const geom = kmlGmCircleGeometry(e, radiusM);
-                    if (!geom) return;
-                    xml.push(`<Placemark id="gmcircle_${e.id}"><name>${xmlEscape(e.name)} - ${xmlEscape(radLabel)} radius</name><styleUrl>#gmradius_style</styleUrl>${geom}</Placemark>`);
+                const styleId = rings.length > 1 ? 'gmradius_outline_style' : 'gmradius_style';
+                xml.push('<Folder><name>General Marker Radius Circles</name>');
+                rings.forEach((ring, ri) => {
+                    const radiusM = (typeof ring.meters === 'number' && ring.meters > 0) ? ring.meters : 804.672;
+                    const radLabel = ring.label || `${(radiusM / 1609.344).toFixed(2)} mi`;
+                    xml.push(`<Folder><name>${xmlEscape(radLabel)}</name>`);
+                    allGms.forEach(e => {
+                        const geom = kmlGmCircleGeometry(e, radiusM);
+                        if (!geom) return;
+                        xml.push(`<Placemark id="gmcircle_${e.id}_r${ri}"><name>${xmlEscape(e.name)} - ${xmlEscape(radLabel)} radius</name><styleUrl>#${styleId}</styleUrl>${geom}</Placemark>`);
+                    });
+                    xml.push('</Folder>');
                 });
                 xml.push('</Folder>');
             }
@@ -4217,14 +4230,9 @@
             </div>
             <div id="aim-ai-gm-radius" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(240,32,160,0.06);border:1px dashed rgba(240,32,160,0.30);border-radius:3px">
                 <div style="font-size:11px;color:#f070c0;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">GM radius circles</div>
-                <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11px">
-                    <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Radius:</span><input type="number" id="aim-ai-gm-radius-val" value="0.5" min="0" step="0.1" style="width:70px;background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"></label>
-                    <select id="aim-ai-gm-radius-unit" style="background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px">
-                        <option value="mi" selected>miles</option>
-                        <option value="ft">feet</option>
-                    </select>
-                </div>
-                <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Draws a flat ground circle of this radius around every General Marker. Off by default.</div>
+                <div id="aim-ai-gm-rings"></div>
+                <button id="aim-ai-gm-add-ring" type="button" style="margin-top:2px;background:rgba(240,32,160,0.12);color:#f070c0;border:1px solid rgba(240,32,160,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">+ Add ring</button>
+                <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Each ring draws a flat ground circle of that radius around every General Marker. With one ring it gets a faint fill; with multiple, rings render as outlines only. Off by default.</div>
             </div>
             <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
@@ -4247,19 +4255,22 @@
             const transIn = box.querySelector('#aim-ai-trans-ht');
             const distroHeightFt = distroIn ? parseFloat(distroIn.value) : 35;
             const transHeightFt = transIn ? parseFloat(transIn.value) : 80;
-            // GM radius circles — convert the user value+unit to meters.
-            const gmRadIn = box.querySelector('#aim-ai-gm-radius-val');
-            const gmUnitSel = box.querySelector('#aim-ai-gm-radius-unit');
-            const gmUnit = gmUnitSel ? gmUnitSel.value : 'mi';
-            const gmRadRaw = gmRadIn ? parseFloat(gmRadIn.value) : 0.5;
-            const gmRadVal = (isFinite(gmRadRaw) && gmRadRaw > 0) ? gmRadRaw : 0.5;
-            const gmRadiusMeters = gmUnit === 'ft' ? gmRadVal / KML_FT : gmRadVal * 1609.344;
-            const gmRadiusLabel = gmUnit === 'ft' ? `${gmRadVal} ft` : `${gmRadVal} mi`;
+            // GM radius circles — collect every ring row, convert value+unit
+            // to meters. Skip blank/invalid rows. Fall back to one 0.5-mi ring.
+            const gmRings = [];
+            box.querySelectorAll('#aim-ai-gm-rings .aim-ai-gm-ring').forEach(row => {
+                const raw = parseFloat(row.querySelector('.aim-ai-gm-ring-val').value);
+                if (!isFinite(raw) || raw <= 0) return;
+                const unit = row.querySelector('.aim-ai-gm-ring-unit').value;
+                const meters = unit === 'ft' ? raw / KML_FT : raw * 1609.344;
+                gmRings.push({ meters, label: unit === 'ft' ? `${raw} ft` : `${raw} mi` });
+            });
+            if (gmRings.length === 0) gmRings.push({ meters: 0.5 * 1609.344, label: '0.5 mi' });
             return {
                 mode, include,
                 distroHeightFt: isFinite(distroHeightFt) ? distroHeightFt : 35,
                 transHeightFt: isFinite(transHeightFt) ? transHeightFt : 80,
-                gmRadiusMeters, gmRadiusLabel,
+                gmRings,
                 siteName: `Site ${siteID} Map - ${siteName}`,
             };
         };
@@ -4286,15 +4297,52 @@
             const blk = box.querySelector('#aim-ai-gm-radius');
             if (blk) blk.style.display = (cb && cb.checked) ? '' : 'none';
         };
+        // GM radius rings — dynamic list. Each + adds a row defaulting to
+        // the next preset (0.5 / 1 / 5 / 10 mi), then 10 mi thereafter.
+        // The × removes a row; the last remaining row can't be removed.
+        const GM_RING_PRESETS = [0.5, 1, 5, 10];
+        const ringsHost = box.querySelector('#aim-ai-gm-rings');
+        const syncRingDelButtons = () => {
+            const rows = ringsHost.querySelectorAll('.aim-ai-gm-ring');
+            rows.forEach(r => {
+                const del = r.querySelector('.aim-ai-gm-ring-del');
+                if (del) del.style.visibility = rows.length > 1 ? 'visible' : 'hidden';
+            });
+        };
+        const addRingRow = (value, unit) => {
+            const idx = ringsHost.querySelectorAll('.aim-ai-gm-ring').length;
+            const v = (value != null) ? value : (GM_RING_PRESETS[idx] != null ? GM_RING_PRESETS[idx] : 10);
+            const u = unit || 'mi';
+            const row = document.createElement('div');
+            row.className = 'aim-ai-gm-ring';
+            row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:11px';
+            row.innerHTML = `
+                <span style="color:#cfd6dc">Radius:</span>
+                <input type="number" class="aim-ai-gm-ring-val" value="${v}" min="0" step="0.1" style="width:70px;background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right">
+                <select class="aim-ai-gm-ring-unit" style="background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px">
+                    <option value="mi"${u === 'mi' ? ' selected' : ''}>miles</option>
+                    <option value="ft"${u === 'ft' ? ' selected' : ''}>feet</option>
+                </select>
+                <button type="button" class="aim-ai-gm-ring-del" title="Remove ring" style="background:transparent;color:#f070c0;border:1px solid rgba(240,32,160,0.45);border-radius:3px;width:22px;height:22px;line-height:1;cursor:pointer;font:inherit;font-size:13px;padding:0">×</button>
+            `;
+            row.querySelector('.aim-ai-gm-ring-val').oninput = updateStats;
+            row.querySelector('.aim-ai-gm-ring-unit').onchange = updateStats;
+            row.querySelector('.aim-ai-gm-ring-del').onclick = () => {
+                if (ringsHost.querySelectorAll('.aim-ai-gm-ring').length <= 1) return;
+                row.remove();
+                syncRingDelButtons();
+                updateStats();
+            };
+            ringsHost.appendChild(row);
+            syncRingDelButtons();
+        };
+        addRingRow(0.5, 'mi'); // seed first ring
+        box.querySelector('#aim-ai-gm-add-ring').onclick = () => { addRingRow(); updateStats(); };
         // Live preview on height input changes.
         const dh = box.querySelector('#aim-ai-distro-ht');
         const th = box.querySelector('#aim-ai-trans-ht');
         if (dh) dh.oninput = updateStats;
         if (th) th.oninput = updateStats;
-        const gmRadVal = box.querySelector('#aim-ai-gm-radius-val');
-        const gmRadUnit = box.querySelector('#aim-ai-gm-radius-unit');
-        if (gmRadVal) gmRadVal.oninput = updateStats;
-        if (gmRadUnit) gmRadUnit.onchange = updateStats;
         box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
         box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = () => { updateGmRadiusVis(); updateStats(); });
         updateGmRadiusVis();

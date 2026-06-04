@@ -6,9 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-04 — Asset Inspector v3.59 (DEV / Latest) — GM radius circles in KML export
+## 2026-06-04 — Asset Inspector v3.60 (DEV / Latest) — GM radius circles in KML export
 
-Site Setup Analyzer (Site setup → KML) gains an **off-by-default "GM Radius Circles"** option. When enabled, a configurable-radius flat ground circle is drawn around every General Marker and emitted in its own `General Marker Radius Circles` folder. Radius defaults to **0.5 mi** and accepts **miles or feet** via a unit dropdown; the control block only appears when the toggle is on. Circles are clamped to ground (horizontal buffer) in both 2D and 3D exports. Dev-only in `latest/` — not yet promoted to coworkers.
+Site Setup Analyzer (Site setup → KML) gains an **off-by-default "GM Radius Circles"** option. When enabled, configurable-radius flat ground circles are drawn around every General Marker and emitted in their own `General Marker Radius Circles` folder. Each radius defaults to **0.5 mi** and accepts **miles or feet** via a unit dropdown; the control block only appears when the toggle is on.
+
+**v3.60 — multiple rings.** A **+ Add ring** button adds more radii (new rows default to the next preset: 0.5 / 1 / 5 / 10 mi). Each ring is its own GE subfolder. A single ring keeps its faint fill; **multiple rings render as outlines only** (same purple) so overlaps stay readable. Each row has a × to remove it (last row can't be removed). Circles are clamped to ground (horizontal buffer) in both 2D and 3D exports. Dev-only in `latest/` — not yet promoted to coworkers.
 
 ---
 
