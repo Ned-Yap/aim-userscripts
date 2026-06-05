@@ -13,7 +13,7 @@ Three annoyances fixed:
 - **Asset Inspector v3.61** — right-clicking the **gear / 🚩 Issues / ⚡ Power buttons** (in `.map-tools`) no longer pops the asset inspector for the entity *behind* the button; the button's own M1/M2 action runs. The inspector also bails when you right-click a **power-line** (`path[data-kml-type]`), so Map Styler owns that contextmenu (vertex delete / hide menu) even when an asset/FFZ/FP overlaps the line. Two new DOM-target guards on the capture-phase contextmenu handler, mirroring the existing Issues-icon bail.
 - **Perf Shield v1.12** — new **"Mission notifications → Kill mission toasts"** toggle (off by default). Hides Percepto's pilot toasts ("Drone took off", "Snapshot taken", …) that stole focus, blocked button clicks, and chimed. CSS hides the toast stack; an `HTMLAudioElement.play()` patch silences the chime while the toggle is on. For site builders who aren't flying.
 
-Dev-only in `latest/`. Asset Inspector right-click guards are a bugfix coworkers hit too (gear/Issues button steal + power-line steal) — promote to root when validated.
+**Update (same day):** the right-click guards are now **promoted to PROD as Asset Inspector v3.59** — coworkers get the fix at their next Tampermonkey check (the gear/🚩 button steal + power-line steal both affected them too). The mission-notification kill stays dev-only for now. **Perf Shield bumped to v1.13 (DEV)**: fixed a load-time TDZ error (`NOTIF_BLOCK_STYLE_ID` referenced before init), and the chime suppressor is now **scoped to the toast** — it only mutes audio coinciding with a notification appearing, so your other audio keeps playing.
 
 ## 2026-06-04 — Asset Inspector v3.60 (DEV / Latest) — GM radius circles in KML export
 

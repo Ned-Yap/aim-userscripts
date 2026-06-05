@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.58
+// @version      3.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.58';
+    const SCRIPT_VERSION = '3.59';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1579,6 +1579,20 @@
             // inspector popup over an entity that happens to be beneath the
             // issue icon.
             if (target && target.closest && target.closest('.aim-issues-icon-marker')) return;
+            // v3.59: Don't steal right-clicks meant for UI controls. The
+            // Control Panel gear, Issues 🚩, and Power ⚡ buttons all inject
+            // into .map-tools and each have their own M2 (right-click)
+            // action. Our capture-phase handler otherwise hit-tests the
+            // entity *behind* the button by lat/lng and pops the inspector
+            // instead of letting the button toggle. Bail on any toolbar
+            // button / Leaflet control / generic button.
+            if (target && target.closest && target.closest('.map-tools, .map-tools__button, .leaflet-control, button, .ant-btn')) return;
+            // v3.59: Power-line paths are owned by Map Styler's contextmenu
+            // handler (vertex delete / hide menu in edit mode). We hit-test
+            // by lat/lng, so whenever an asset/FFZ/FP polygon overlapped a
+            // power line we'd steal the right-click. If the click landed on
+            // a KML power-line path, bail and let Map Styler handle it.
+            if (target && target.closest && target.closest('path[data-kml-type]')) return;
             const map = getLeafletMap();
             if (!map) return;
             const container = map.getContainer();

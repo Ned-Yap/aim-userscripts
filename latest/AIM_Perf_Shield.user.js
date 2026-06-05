@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -123,6 +123,24 @@
     const STORAGE_KEY_KILL_NOTIFS = 'aim-perf-kill-mission-notifs';
     let killNotifs = false;
     try { killNotifs = GM_getValue(STORAGE_KEY_KILL_NOTIFS, false) === true; } catch (e) {}
+    // Declared here (not next to their functions) so applyNotifBlockCss can run
+    // from the init block below without a temporal-dead-zone error — same rule
+    // as CHAT_BLOCK_* above. display:none also kills the focus-steal + click-
+    // blocking (a hidden element captures no pointer events).
+    const NOTIF_BLOCK_STYLE_ID = 'aim-perf-notif-block-css';
+    const NOTIF_DOM_SELECTOR = 'pr-notifications, .popup-notifications, .notification-item';
+    const NOTIF_BLOCK_CSS = `
+        pr-notifications,
+        .popup-notifications,
+        .notification-item {
+            display: none !important;
+            pointer-events: none !important;
+        }
+    `;
+    // Sound scoping: a mounting toast opens this forward window during which an
+    // audio play() is treated as the chime. Keeps unrelated audio playing.
+    let notifSoundWindowUntil = 0;
+    const NOTIF_SOUND_WINDOW_MS = 2500;
 
     // Predicate list. Each entry: [name, fn(args) → boolean]. v1.10 rewrite:
     // - Patterns use regex on either args[0] OR the joined-string form so
@@ -252,7 +270,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.12';
+    const SCRIPT_VERSION = '1.13';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -281,6 +299,7 @@
     // Mission-notification kill — apply the CSS hide immediately (so a toast
     // already on screen at load disappears) and install the chime suppressor.
     try { applyNotifBlockCss(killNotifs); } catch (e) { console.warn(`${TAG} notif CSS apply failed:`, e); }
+    try { installNotifObserver(); } catch (e) { console.warn(`${TAG} notif observer failed:`, e); }
     try { installNotifSoundSuppressor(); } catch (e) { console.warn(`${TAG} notif sound suppressor failed:`, e); }
     try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
     try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
@@ -424,18 +443,11 @@
     }
 
     // ---- Mission-notification kill (visual + sound) ----
-    const NOTIF_BLOCK_STYLE_ID = 'aim-perf-notif-block-css';
-    // display:none removes the toast from layout entirely, which also kills
-    // the focus-steal + click-blocking (a hidden element captures no pointer
-    // events). pointer-events:none is belt-and-suspenders.
-    const NOTIF_BLOCK_CSS = `
-        pr-notifications,
-        .popup-notifications,
-        .notification-item {
-            display: none !important;
-            pointer-events: none !important;
-        }
-    `;
+    // NOTE: NOTIF_BLOCK_STYLE_ID / NOTIF_BLOCK_CSS / sound-scoping state are
+    // declared up top (near killNotifs) so applyNotifBlockCss can run from the
+    // init block without hitting a temporal-dead-zone error. See the
+    // perf-shield-TDZ rule. The functions below are hoisted so their position
+    // doesn't matter.
     function applyNotifBlockCss(on) {
         if (on) {
             if (document.getElementById(NOTIF_BLOCK_STYLE_ID)) return;
@@ -448,20 +460,55 @@
             if (el) el.remove();
         }
     }
-    // Hiding the DOM doesn't stop the chime — Percepto plays it via an
-    // <audio>/new Audio() element. Patch HTMLAudioElement.prototype.play once
-    // and no-op it WHILE killNotifs is on. Scoped to AUDIO only (not video),
-    // gated on the live toggle. Tradeoff: this silences ALL <audio> playback
-    // while ON — fine on the site-setup dashboard (no audio we want), and the
-    // toggle is off by default. Returns a resolved promise to honor play()'s
-    // contract so Percepto's caller doesn't throw on the rejection.
+    // Watch for mission-toast insertions. When one mounts, open a short
+    // suppression window so the chime that fires on mount is muted WITHOUT
+    // muting the user's other audio. Cheap — only reacts to added nodes that
+    // match the notification selector. Installed once; gated on killNotifs.
+    let notifObserverInstalled = false;
+    function installNotifObserver() {
+        if (notifObserverInstalled) return;
+        const setup = () => {
+            const obs = new MutationObserver((muts) => {
+                if (!killNotifs) return;
+                for (const m of muts) {
+                    for (const node of m.addedNodes) {
+                        if (!node || node.nodeType !== 1) continue;
+                        const isNotif = (node.matches && node.matches(NOTIF_DOM_SELECTOR)) ||
+                                        (node.querySelector && node.querySelector(NOTIF_DOM_SELECTOR));
+                        if (isNotif) { notifSoundWindowUntil = Date.now() + NOTIF_SOUND_WINDOW_MS; return; }
+                    }
+                }
+            });
+            const root = document.documentElement || document.body || document;
+            obs.observe(root, { childList: true, subtree: true });
+        };
+        if (document.documentElement) setup();
+        else document.addEventListener('readystatechange', setup, { once: true });
+        notifObserverInstalled = true;
+    }
+    // Is this play() the notification chime (vs. audio the user wants)? True if:
+    //  (a) we're inside the post-toast window the observer opened, OR
+    //  (b) a notification node is currently in the DOM (covers a chime that
+    //      plays synchronously in the same tick the toast was appended, before
+    //      the observer microtask runs), OR
+    //  (c) the <audio> element lives inside the notification DOM subtree.
+    // Otherwise the audio is unrelated and plays normally.
+    function isNotifSound(el) {
+        if (Date.now() < notifSoundWindowUntil) return true;
+        try { if (document.querySelector(NOTIF_DOM_SELECTOR)) return true; } catch (e) {}
+        try { if (el && el.closest && el.closest(NOTIF_DOM_SELECTOR)) return true; } catch (e) {}
+        return false;
+    }
+    // Patch HTMLAudioElement.play once. Suppress ONLY when killNotifs is on AND
+    // isNotifSound() says this play coincides with a toast. Returns a resolved
+    // promise to honor play()'s contract so Percepto's caller doesn't throw.
     function installNotifSoundSuppressor() {
         const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
         const proto = win.HTMLAudioElement && win.HTMLAudioElement.prototype;
         if (!proto || proto.__aim_notif_play_patched) return;
         const origPlay = proto.play;
         proto.play = function() {
-            if (killNotifs) {
+            if (killNotifs && isNotifSound(this)) {
                 try { this.muted = true; this.pause(); } catch (e) {}
                 return Promise.resolve();
             }
