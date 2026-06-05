@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-05 — Right-click fixes + mission-notification kill (DEV / Latest)
+
+Three annoyances fixed:
+
+- **Asset Inspector v3.61** — right-clicking the **gear / 🚩 Issues / ⚡ Power buttons** (in `.map-tools`) no longer pops the asset inspector for the entity *behind* the button; the button's own M1/M2 action runs. The inspector also bails when you right-click a **power-line** (`path[data-kml-type]`), so Map Styler owns that contextmenu (vertex delete / hide menu) even when an asset/FFZ/FP overlaps the line. Two new DOM-target guards on the capture-phase contextmenu handler, mirroring the existing Issues-icon bail.
+- **Perf Shield v1.12** — new **"Mission notifications → Kill mission toasts"** toggle (off by default). Hides Percepto's pilot toasts ("Drone took off", "Snapshot taken", …) that stole focus, blocked button clicks, and chimed. CSS hides the toast stack; an `HTMLAudioElement.play()` patch silences the chime while the toggle is on. For site builders who aren't flying.
+
+Dev-only in `latest/`. Asset Inspector right-click guards are a bugfix coworkers hit too (gear/Issues button steal + power-line steal) — promote to root when validated.
+
 ## 2026-06-04 — Asset Inspector v3.60 (DEV / Latest) — GM radius circles in KML export
 
 Site Setup Analyzer (Site setup → KML) gains an **off-by-default "GM Radius Circles"** option. When enabled, configurable-radius flat ground circles are drawn around every General Marker and emitted in their own `General Marker Radius Circles` folder. Each radius defaults to **0.5 mi** and accepts **miles or feet** via a unit dropdown; the control block only appears when the toggle is on.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -113,6 +113,16 @@
     const STORAGE_KEY_SUPPRESS_LOGS = 'aim-perf-suppress-debug-logs';
     let suppressDebugLogs = true;
     try { suppressDebugLogs = GM_getValue(STORAGE_KEY_SUPPRESS_LOGS, true) === true; } catch (e) {}
+
+    // Mission-notification kill. Percepto's pilot toasts ("Drone took off",
+    // "Snapshot taken", …) render in the TOP frame as
+    // pr-notifications > .popup-notifications > .notification-item. For site
+    // builders who aren't flying they're pure noise — they steal focus, block
+    // button clicks, and play a chime. OFF by default; CSS hides the toast and
+    // a play() patch silences the chime when ON.
+    const STORAGE_KEY_KILL_NOTIFS = 'aim-perf-kill-mission-notifs';
+    let killNotifs = false;
+    try { killNotifs = GM_getValue(STORAGE_KEY_KILL_NOTIFS, false) === true; } catch (e) {}
 
     // Predicate list. Each entry: [name, fn(args) → boolean]. v1.10 rewrite:
     // - Patterns use regex on either args[0] OR the joined-string form so
@@ -242,7 +252,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.12';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -268,6 +278,10 @@
     // already-rendered bubble — apply now so any pre-loaded launcher
     // disappears immediately.
     try { applyChatBlockCss(blockEnabled['block-intercom']); } catch (e) { console.warn(`${TAG} chat CSS apply failed:`, e); }
+    // Mission-notification kill — apply the CSS hide immediately (so a toast
+    // already on screen at load disappears) and install the chime suppressor.
+    try { applyNotifBlockCss(killNotifs); } catch (e) { console.warn(`${TAG} notif CSS apply failed:`, e); }
+    try { installNotifSoundSuppressor(); } catch (e) { console.warn(`${TAG} notif sound suppressor failed:`, e); }
     try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
     try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
 
@@ -409,6 +423,53 @@
         }
     }
 
+    // ---- Mission-notification kill (visual + sound) ----
+    const NOTIF_BLOCK_STYLE_ID = 'aim-perf-notif-block-css';
+    // display:none removes the toast from layout entirely, which also kills
+    // the focus-steal + click-blocking (a hidden element captures no pointer
+    // events). pointer-events:none is belt-and-suspenders.
+    const NOTIF_BLOCK_CSS = `
+        pr-notifications,
+        .popup-notifications,
+        .notification-item {
+            display: none !important;
+            pointer-events: none !important;
+        }
+    `;
+    function applyNotifBlockCss(on) {
+        if (on) {
+            if (document.getElementById(NOTIF_BLOCK_STYLE_ID)) return;
+            const style = document.createElement('style');
+            style.id = NOTIF_BLOCK_STYLE_ID;
+            style.textContent = NOTIF_BLOCK_CSS;
+            (document.head || document.documentElement).appendChild(style);
+        } else {
+            const el = document.getElementById(NOTIF_BLOCK_STYLE_ID);
+            if (el) el.remove();
+        }
+    }
+    // Hiding the DOM doesn't stop the chime — Percepto plays it via an
+    // <audio>/new Audio() element. Patch HTMLAudioElement.prototype.play once
+    // and no-op it WHILE killNotifs is on. Scoped to AUDIO only (not video),
+    // gated on the live toggle. Tradeoff: this silences ALL <audio> playback
+    // while ON — fine on the site-setup dashboard (no audio we want), and the
+    // toggle is off by default. Returns a resolved promise to honor play()'s
+    // contract so Percepto's caller doesn't throw on the rejection.
+    function installNotifSoundSuppressor() {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const proto = win.HTMLAudioElement && win.HTMLAudioElement.prototype;
+        if (!proto || proto.__aim_notif_play_patched) return;
+        const origPlay = proto.play;
+        proto.play = function() {
+            if (killNotifs) {
+                try { this.muted = true; this.pause(); } catch (e) {}
+                return Promise.resolve();
+            }
+            return origPlay.apply(this, arguments);
+        };
+        proto.__aim_notif_play_patched = true;
+    }
+
     // Push current Perf Shield toggle state out to anyone listening (currently
     // just Map Styler, which mirrors `hide-satellite`). Called on init, on
     // toggle change, and in response to REQUEST_PERF_SETTINGS.
@@ -471,6 +532,15 @@
                     console.log(`${TAG} log suppressor ${newVal ? 'ON' : 'OFF'}`);
                     return;
                 }
+                if (msg.toggleId === 'kill-notifs') {
+                    if (newVal === killNotifs) return; // IDEMPOTENT no-op
+                    killNotifs = newVal;
+                    try { GM_setValue(STORAGE_KEY_KILL_NOTIFS, newVal); } catch (e) {}
+                    try { applyNotifBlockCss(newVal); } catch (e) {}
+                    // Sound suppressor reads killNotifs live; no re-patch needed.
+                    console.log(`${TAG} mission-notification kill ${newVal ? 'ON' : 'OFF'}`);
+                    return;
+                }
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
@@ -512,6 +582,13 @@
                     label: 'Suppress noisy Percepto debug logs',
                     type: 'boolean',
                     default: true,
+                },
+                { type: 'header', label: 'Mission notifications' },
+                {
+                    id: 'kill-notifs',
+                    label: 'Kill mission toasts (takeoff / snapshot / etc — silences chime too)',
+                    type: 'boolean',
+                    default: false,
                 },
                 { type: 'header', label: 'Map performance' },
                 {
