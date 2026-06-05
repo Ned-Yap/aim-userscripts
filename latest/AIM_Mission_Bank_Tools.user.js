@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.51
+// @version      0.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '0.52';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2857,11 +2857,19 @@ ${placemarks}
     // assignment doesn't trigger React's controlled-input update —
     // we have to use the underlying HTMLInputElement setter and
     // dispatch input + change events.
+    //
+    // v0.52: the trailing BLUR is the critical bit. Ant InputNumber keeps
+    // the value you type in an internal "editing" buffer and only COMMITS it
+    // to the form's React state on blur (or Enter). Without it, our value
+    // showed in the box but Save read the original — so snapshot altitudes
+    // reverted to 0 the moment the instruction saved. The Asset Inspector's
+    // working Apply does exactly this; ported here.
     function setReactInputValue(input, value) {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     }
 
     function findEditDialogInputByLabel(...labelTexts) {

@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-05 — Mission Bank Tools v0.52 (DEV) — snapshot altitude actually saves
+
+Fixed SUM-table altitude commits not sticking — the step would revert to its original value (0) the moment the instruction saved, before you even saved the mission. Root cause: Ant InputNumber holds the typed value in an internal buffer and only commits it to the form on **blur**; MBT's value-setter dispatched `input`+`change` but no blur, so Save read the original. Added the trailing `blur` (matching the Asset Inspector's working Apply). Note: you still save the overall mission yourself after the queue finishes — MBT commits each step into the mission draft. Dev-only in `latest/`.
+
 ## 2026-06-05 — Asset Inspector v3.62 (DEV) — SUM Apply picks the exact entity
 
 Fixed SUM-table **Apply** opening the wrong entity when names share a prefix. Searching the sidebar for `freezone_2` filters to everything *containing* it (`freezone_2`, `freezone_20`, `freezone_21`, …), and the old code clicked the first row — often the longer name — so the edit landed on / was rejected for the wrong FFZ (red toast). Apply now matches the row whose **name exactly equals** the target (comparing the inner name span, not the whole row), falling back only to a lone filtered row. Affects every type with prefix-overlapping names (FFZs, assets, FPs), not just FFZs. Dev-only in `latest/` — promote to root with the other apply fixes.
