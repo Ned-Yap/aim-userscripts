@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-05 — Asset Inspector v3.62 (DEV) — SUM Apply picks the exact entity
+
+Fixed SUM-table **Apply** opening the wrong entity when names share a prefix. Searching the sidebar for `freezone_2` filters to everything *containing* it (`freezone_2`, `freezone_20`, `freezone_21`, …), and the old code clicked the first row — often the longer name — so the edit landed on / was rejected for the wrong FFZ (red toast). Apply now matches the row whose **name exactly equals** the target (comparing the inner name span, not the whole row), falling back only to a lone filtered row. Affects every type with prefix-overlapping names (FFZs, assets, FPs), not just FFZs. Dev-only in `latest/` — promote to root with the other apply fixes.
+
 ## 2026-06-05 — Right-click fixes + mission-notification kill (DEV / Latest)
 
 Three annoyances fixed:

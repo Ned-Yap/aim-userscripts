@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.61
+// @version      3.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.61';
+    const SCRIPT_VERSION = '3.62';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2295,16 +2295,32 @@
         }
 
         // Wait for the filter to apply, then find the matching item.
-        // Try includes-match first (handles "FOO" matching "FOO BAR" if
-        // names share prefixes); fall back to "the only visible row"
-        // when the filter narrowed down to exactly one entity.
+        // v3.62: EXACT name match wins. The old code took the first row whose
+        // full text merely *included* the query — so searching "freezone_2"
+        // could grab "freezone_21" (or any longer name sharing the prefix),
+        // open the wrong entity, and trip the name-mismatch guard → red toast.
+        // We now compare against each row's inner NAME span (not the whole
+        // row text, which also carries subtype/altitude badges), pick the
+        // exact match, and only fall back to "the single remaining row" when
+        // the filter narrowed to exactly one. No substring guessing.
+        const itemNameLower = (item) => {
+            const nm = item.querySelector('.map-entities__entity-name')
+                || item.querySelector('.entity-name')
+                || item.querySelector('[class*="entity-name"]');
+            return (((nm && nm.textContent) || item.textContent || '').trim().toLowerCase());
+        };
         const matched = await waitForCondition(() => {
             const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+            if (items.length === 0) return null;
+            // 1. Exact name match — the only safe choice when names share a prefix.
             for (const item of items) {
-                const txt = (item.textContent || '').trim().toLowerCase();
-                if (txt.includes(matchLower)) return { el: item, doc: inputDoc };
+                if (itemNameLower(item) === matchLower) return { el: item, doc: inputDoc };
             }
+            // 2. Filter narrowed to a single row — unambiguous, take it (covers
+            //    minor name-extraction differences like a trailing badge).
             if (items.length === 1) return { el: items[0], doc: inputDoc };
+            // 3. Multiple rows, none exact yet — keep waiting; the filter may
+            //    still be settling. Never fall back to a substring pick.
             return null;
         }, 2000, 100);
 
