@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-06 — AIM Bulk User Sites v1.10 (NEW SCRIPT) — bulk-fill the admin User↔Site page
+
+Brand-new script for the Django admin **User Site batch create** page (`/admin/percepto/usersite/batch_create/`). That page's Users/Sites pickers are giant native multi-selects with no real search — you had to click-and-type fast or Ctrl+F your way through. This replaces all of that with a floating panel (**⚡ Bulk Fill** button next to Create, or **Shift+B**):
+
+- **Paste** emails (Users) and site names (Sites), one per line → **Apply** selects every exact match in the real lists (case/space-insensitive). Unmatched lines are reported, never silently dropped. **Apply & Create** also clicks the page's Create.
+- **Live search** for both lists — substring match, so `@example.com` surfaces every user on that domain. Click / Enter to add one, **➕ Add all matches** to add every match at once, **✗ Clear box** to reset.
+- **Favorites** per list — pin the people/sites you add over and over; checked pins go in on every Apply. **✓ All / ✗ None** to toggle, **Edit** mode for delete (✕) + drag-to-reorder.
+- **Presets** — save a named group of users + role; Load checks matching pins and drops the rest in the box. For onboarding the same teams repeatedly.
+- **Role** defaults to *Percepto Admin*.
+
+Personal-only (favorites/presets live in your Tampermonkey storage; nothing synced). Admin-page only — does nothing elsewhere. Dev copy in `latest/` as well.
+
 ## 2026-06-05 — Mission Bank Tools v0.52 (DEV) — snapshot altitude actually saves
 
 Fixed SUM-table altitude commits not sticking — the step would revert to its original value (0) the moment the instruction saved, before you even saved the mission. Root cause: Ant InputNumber holds the typed value in an internal buffer and only commits it to the form on **blur**; MBT's value-setter dispatched `input`+`change` but no blur, so Save read the original. Added the trailing `blur` (matching the Asset Inspector's working Apply). Note: you still save the overall mission yourself after the queue finishes — MBT commits each step into the mission draft. Dev-only in `latest/`.
