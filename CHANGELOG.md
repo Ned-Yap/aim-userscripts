@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-06 — Install pages revamp — guided setup wizard + plain-English tool guide
+
+No script changes — the GitHub Pages site (https://ned-yap.github.io/aim-userscripts/) got a big friendliness overhaul for non-technical coworkers.
+
+- **Install page** slimmed to a simple, dummy-proof 3-step layout (Tampermonkey → tools → token) with screenshot drop-zones, the full 19-script list tucked behind one expander, and all the fiddly bits in a quiet "More help" area.
+- **New guided setup wizard** — the "Set it up →" button now launches a one-question-at-a-time walkthrough that asks "did it work?" at each step: **Yes** advances, **No** drops into an automated troubleshooting mini-chat. Shows only the current step, nothing else.
+- **New tool guide** (`guide.html`) — every tool as a tappable card grouped by job (drawing/measuring, looking things up, bulk editing, getting around, etc.), each with **How to use it**, **Everything it can do**, and **Good for**. Expand-all / collapse-all included.
+
 ## 2026-06-06 — AIM Defaults v1.0 (NEW SCRIPT) — smart site navigation + map-layer defaults
 
 Brand-new script that automates the repetitive navigation + layer chores. Configurable in the AIM Control Panel (new "AIM Defaults" section, Navigation / Map Layers).

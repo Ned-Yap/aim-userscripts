@@ -19,6 +19,7 @@
     --cyan-dim: #3a999f;
     --green: #5fff5f;
     --yellow: #ffd700;
+    --red: #ff6b6b;
     --code-bg: #010409;
   }
   * { box-sizing: border-box; }
@@ -56,6 +57,7 @@
     padding: 13px 26px; background: var(--cyan); color: #0d1117;
     border-radius: 8px; font-weight: 700; border: none; cursor: pointer;
     font-size: 1.02rem; transition: transform 0.1s ease, box-shadow 0.1s ease;
+    font-family: inherit;
   }
   .btn:hover { text-decoration: none; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(95, 221, 229, 0.3); }
   .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
@@ -163,11 +165,100 @@
   footer a { color: var(--cyan); }
   .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
 
+  /* ===== Guided setup wizard ===== */
+  .wiz-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(2, 4, 9, 0.82); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px; animation: wizFade 0.18s ease;
+  }
+  .wiz-overlay[hidden] { display: none; }
+  @keyframes wizFade { from { opacity: 0; } to { opacity: 1; } }
+  .wiz-card {
+    background: var(--bg-card); border: 1px solid var(--border-strong);
+    border-radius: 18px; width: 100%; max-width: 560px;
+    max-height: calc(100vh - 40px); display: flex; flex-direction: column;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+    animation: wizPop 0.18s ease;
+  }
+  @keyframes wizPop { from { transform: translateY(10px) scale(0.98); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  .wiz-top {
+    display: flex; align-items: center; gap: 12px;
+    padding: 18px 22px; border-bottom: 1px solid var(--border);
+  }
+  .wiz-progress { display: flex; align-items: center; gap: 6px; flex: 1; }
+  .wiz-dot { display: flex; align-items: center; gap: 7px; }
+  .wiz-dot-n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+    font-size: 0.8rem; font-weight: 700;
+    background: var(--bg-elevated); color: var(--text-faint); border: 1px solid var(--border);
+  }
+  .wiz-dot-l { font-size: 0.82rem; color: var(--text-faint); }
+  .wiz-dot.active .wiz-dot-n { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
+  .wiz-dot.active .wiz-dot-l { color: var(--text); font-weight: 600; }
+  .wiz-dot.done .wiz-dot-n { background: rgba(95,255,95,0.15); color: var(--green); border-color: var(--green); }
+  .wiz-dot-sep { flex: 1; height: 1px; background: var(--border); min-width: 8px; }
+  .wiz-close {
+    background: transparent; border: none; color: var(--text-faint);
+    font-size: 1.2rem; cursor: pointer; padding: 4px 8px; border-radius: 6px; line-height: 1;
+  }
+  .wiz-close:hover { color: var(--text); background: var(--bg-elevated); }
+
+  .wiz-content { padding: 26px 26px 20px; overflow-y: auto; }
+  .wiz-title { font-size: 1.45rem; margin: 0 0 14px; font-weight: 700; }
+  .wiz-body { font-size: 1.02rem; color: var(--text); margin-bottom: 18px; }
+  .wiz-body p { margin: 0 0 12px; }
+  .wiz-body ol, .wiz-body ul { margin: 8px 0; }
+  .wiz-body .shot { margin: 16px 0; min-height: 120px; }
+  .wiz-q { font-size: 1.08rem; font-weight: 600; margin: 4px 0 16px; }
+  .wiz-answers { display: flex; flex-direction: column; gap: 10px; }
+  .wiz-ans {
+    display: block; width: 100%; text-align: left;
+    padding: 15px 18px; border-radius: 10px; cursor: pointer;
+    font-size: 1.02rem; font-weight: 600; font-family: inherit;
+    background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border-strong);
+    transition: border-color 0.12s, background 0.12s, transform 0.08s;
+  }
+  .wiz-ans:hover { transform: translateY(-1px); border-color: var(--cyan); }
+  .wiz-ans.yes { border-color: var(--green); }
+  .wiz-ans.yes:hover { background: rgba(95,255,95,0.08); }
+  .wiz-ans.no:hover { background: rgba(255,107,107,0.07); border-color: var(--red); }
+  .wiz-ans::before { margin-right: 10px; }
+  .wiz-ans.yes::before { content: "✓"; color: var(--green); }
+  .wiz-ans.no::before { content: "✕"; color: var(--red); }
+
+  .wiz-inline-install {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--green); color: #0d1117; font-weight: 700;
+    padding: 11px 22px; border-radius: 8px; margin: 4px 0; font-size: 1rem;
+  }
+  .wiz-inline-install:hover { text-decoration: none; box-shadow: 0 4px 16px rgba(95,255,95,0.3); }
+  .wiz-copy {
+    background: var(--bg); border: 1px solid var(--border-strong); color: var(--cyan);
+    padding: 8px 14px; border-radius: 7px; cursor: pointer; font-family: inherit;
+    font-size: 0.9rem; font-weight: 600; margin-top: 8px;
+  }
+  .wiz-copy:hover { border-color: var(--cyan); }
+
+  .wiz-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 22px; border-top: 1px solid var(--border);
+  }
+  .wiz-back {
+    background: transparent; border: none; color: var(--text-muted);
+    cursor: pointer; font-family: inherit; font-size: 0.95rem; padding: 6px 4px;
+  }
+  .wiz-back:hover { color: var(--text); }
+  .wiz-foot-note { font-size: 0.82rem; color: var(--text-faint); }
+
   @media (max-width: 600px) {
     .hero h1 { font-size: 2.1rem; }
     .bigstep { padding: 24px 20px; }
     .install-row { flex-wrap: wrap; }
     .install-row .btn { width: 100%; margin-left: 0; justify-content: center; }
+    .wiz-dot-l { display: none; }
   }
 </style>
 </head>
@@ -179,9 +270,10 @@
     <h1>AIM Userscripts</h1>
     <p>Handy tools that make <code>percepto.app</code> faster. Set up once — they keep themselves updated.</p>
     <div class="hero-actions">
-      <a href="#steps" class="btn">Set it up →</a>
+      <button class="btn" id="launchWizard">Set it up →</button>
       <a href="guide.html" class="btn btn-secondary">What can these do?</a>
     </div>
+    <p class="muted" style="font-size:0.9rem; margin-top:14px;">Prefer to read it all yourself? <a href="#steps">Scroll to the full guide ↓</a></p>
   </div>
 </header>
 
@@ -444,6 +536,403 @@
     <div class="muted">Built by Payden · keeps itself updated via Tampermonkey</div>
   </div>
 </footer>
+
+<!-- ===== GUIDED SETUP WIZARD ===== -->
+<div class="wiz-overlay" id="wiz" hidden>
+  <div class="wiz-card" role="dialog" aria-modal="true" aria-label="Guided setup">
+    <div class="wiz-top">
+      <div class="wiz-progress" id="wizProgress"></div>
+      <button class="wiz-close" id="wizClose" aria-label="Close setup">✕</button>
+    </div>
+    <div class="wiz-content" id="wizContent"></div>
+    <div class="wiz-foot">
+      <button class="wiz-back" id="wizBack">← Back</button>
+      <span class="wiz-foot-note">You can close this anytime</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var CP_URL = "https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js";
+  var MS_URL = "https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js";
+  var PS_URL = "https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js";
+
+  function shot(cap) {
+    return '<div class="shot"><span class="shot-icon">📷</span><span class="shot-cap">' + cap + '</span></div>';
+  }
+
+  // Decision tree. phase: 1 Tampermonkey, 2 Tools, 3 Token, 4 = all done.
+  var NODES = {
+    // ---------- STEP 1: TAMPERMONKEY ----------
+    "tm-check": {
+      phase: 1,
+      title: "Get Tampermonkey",
+      body: "<p>Tampermonkey is a free browser add-on that runs the AIM tools. Its icon is a black square with a little monkey face — usually near your address bar (you may have to click the puzzle-piece 🧩 menu to find it).</p>" + shot("The Tampermonkey icon in the toolbar"),
+      q: "Do you already see the Tampermonkey icon in your browser?",
+      answers: [
+        { label: "Yes, I see it", tone: "yes", next: "tools-start" },
+        { label: "No / not sure", tone: "no", next: "tm-install" }
+      ]
+    },
+    "tm-install": {
+      phase: 1,
+      title: "Install Tampermonkey",
+      body: "<p>Click your browser, then click <strong>Add</strong> / <strong>Install</strong> in the store page that opens.</p>" +
+        '<div class="browsers">' +
+        '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Chrome / Edge / Brave</a>' +
+        '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>' +
+        '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>' +
+        "</div>",
+      q: "Done — do you see the Tampermonkey icon in your browser now?",
+      answers: [
+        { label: "Yes, it's there", tone: "yes", next: "tools-start" },
+        { label: "No, I don't see it", tone: "no", next: "tm-trouble" }
+      ]
+    },
+    "tm-trouble": {
+      phase: 1,
+      title: "Let's get it showing",
+      body: "<p>Try these one at a time:</p><ul>" +
+        "<li>Click the puzzle-piece 🧩 near your address bar — it may be hiding there. Pin it.</li>" +
+        "<li>Fully refresh the store page and click <strong>Add</strong> again.</li>" +
+        "<li>Make sure you confirmed the “Add extension” popup.</li></ul>",
+      q: "See the icon now?",
+      answers: [
+        { label: "Yes!", tone: "yes", next: "tools-start" },
+        { label: "Still don't see it", tone: "no", next: "tm-trouble2" }
+      ]
+    },
+    "tm-trouble2": {
+      phase: 1,
+      title: "A couple more things",
+      body: "<ul>" +
+        "<li>Restart your browser completely (close every window), then look again.</li>" +
+        "<li>Try a different browser from the list — some work computers block extensions.</li>" +
+        "<li>If it still won't install, your browser may be locked down by a work policy.</li></ul>",
+      q: "Want to try once more, or get a hand?",
+      answers: [
+        { label: "Try installing again", tone: "neutral", next: "tm-install" },
+        { label: "I'll ask Payden", tone: "neutral", next: "help" }
+      ]
+    },
+
+    // ---------- STEP 2: TOOLS ----------
+    "tools-start": {
+      phase: 2,
+      title: "Install the Control Panel",
+      body: "<p>Start with the <strong>Control Panel</strong> — it's the home base every other tool plugs into. Click the green button; when a Tampermonkey tab opens, click its big <strong>Install</strong> button too.</p>" +
+        '<a class="wiz-inline-install" target="_blank" rel="noopener" href="' + CP_URL + '">⬇ Install Control Panel</a>' +
+        shot("The Tampermonkey install page with its Install button"),
+      q: "Did a Tampermonkey install page open when you clicked?",
+      answers: [
+        { label: "Yes, I installed it", tone: "yes", next: "tools-more" },
+        { label: "No, nothing opened", tone: "no", next: "tools-trouble" }
+      ]
+    },
+    "tools-trouble": {
+      phase: 2,
+      title: "Install it manually",
+      body: "<p>No problem — add it by hand:</p><ol>" +
+        "<li>Copy this link:<br><button class=\"wiz-copy\" data-copy=\"" + CP_URL + "\">📋 Copy Control Panel link</button></li>" +
+        "<li>Open Tampermonkey → <strong>Dashboard</strong> → <strong>Utilities</strong> tab.</li>" +
+        "<li>Under <strong>Import from URL</strong>, paste the link and click <strong>Install</strong>.</li></ol>",
+      q: "Installed now?",
+      answers: [
+        { label: "Yes, got it", tone: "yes", next: "tools-more" },
+        { label: "Still not working", tone: "no", next: "tools-trouble2" }
+      ]
+    },
+    "tools-trouble2": {
+      phase: 2,
+      title: "Check Tampermonkey is on",
+      body: "<ul>" +
+        "<li>Open the Tampermonkey <strong>Dashboard</strong> — it should open without errors.</li>" +
+        "<li>Make sure Tampermonkey is <strong>enabled</strong> (its icon shouldn't be greyed out).</li>" +
+        "<li>Then try the green Install button again.</li></ul>",
+      q: "How'd it go?",
+      answers: [
+        { label: "Installed now", tone: "yes", next: "tools-more" },
+        { label: "I need help", tone: "neutral", next: "help" }
+      ]
+    },
+    "tools-more": {
+      phase: 2,
+      title: "Add the other tools (optional)",
+      body: "<p>Control Panel's in — nice. Most people also grab these two. Install now, or skip and add more later from the main page.</p>" +
+        '<div style="display:flex;flex-direction:column;gap:8px;margin:6px 0 4px;">' +
+        '<a class="wiz-inline-install" target="_blank" rel="noopener" href="' + MS_URL + '">⬇ Install Map Styler</a>' +
+        '<a class="wiz-inline-install" target="_blank" rel="noopener" href="' + PS_URL + '">⬇ Install Performance Shield</a>' +
+        "</div>" +
+        '<p class="muted" style="font-size:0.9rem;">Want the rest? Open the <a href="guide.html" target="_blank" rel="noopener">tool guide</a> to see them all.</p>',
+      q: "Ready to check it's working?",
+      answers: [
+        { label: "Yes, check it", tone: "yes", next: "tools-verify" }
+      ]
+    },
+    "tools-verify": {
+      phase: 2,
+      title: "Make sure it's working",
+      body: "<p>Open a site on <code>percepto.app</code> and look at the map toolbar.</p>" + shot("The ⚙ gear icon in the map toolbar"),
+      q: "Do you see a gear icon ⚙ in the map toolbar?",
+      answers: [
+        { label: "Yes, there's a gear", tone: "yes", next: "token-intro" },
+        { label: "No gear icon", tone: "no", next: "tools-verify-trouble" }
+      ]
+    },
+    "tools-verify-trouble": {
+      phase: 2,
+      title: "Let's wake it up",
+      body: "<ol>" +
+        "<li>Open Tampermonkey → <strong>Dashboard</strong> and make sure <strong>Control Panel</strong> is switched ON.</li>" +
+        "<li>Back on Percepto, hard-reload: <code>Ctrl+Shift+R</code> (<code>⌘+Shift+R</code> on Mac).</li></ol>",
+      q: "See the gear now?",
+      answers: [
+        { label: "Yes, there it is", tone: "yes", next: "token-intro" },
+        { label: "Still no gear", tone: "no", next: "help" }
+      ]
+    },
+
+    // ---------- STEP 3: TOKEN (optional) ----------
+    "token-intro": {
+      phase: 3,
+      title: "Power-line overlays (optional)",
+      body: "<p>Last step. The Map Styler can show power-line shielding overlays — that needs a one-time GitHub “key” (a token). If you don't work with those overlays, you're already done.</p>",
+      q: "Set up the overlays now?",
+      answers: [
+        { label: "Yes, set it up", tone: "yes", next: "token-account" },
+        { label: "Skip — I'm done", tone: "neutral", next: "done" }
+      ]
+    },
+    "token-account": {
+      phase: 3,
+      title: "GitHub account",
+      body: "<p>The token lives in a free GitHub account.</p>",
+      q: "Do you already have a GitHub account?",
+      answers: [
+        { label: "Yes, I have one", tone: "yes", next: "token-repo" },
+        { label: "No, I need one", tone: "no", next: "token-make" }
+      ]
+    },
+    "token-make": {
+      phase: 3,
+      title: "Make a free account",
+      body: "<ol>" +
+        '<li>Go to <a href="https://github.com/signup" target="_blank" rel="noopener">github.com/signup</a>.</li>' +
+        "<li>Use any email (it isn't shown publicly).</li>" +
+        "<li>Pick a username like <code>aim-johnd</code>.</li>" +
+        "<li>Verify your email when GitHub messages you.</li></ol>",
+      q: "Account created and email verified?",
+      answers: [
+        { label: "Yes, done", tone: "yes", next: "token-repo" },
+        { label: "Having trouble signing up", tone: "no", next: "help" }
+      ]
+    },
+    "token-repo": {
+      phase: 3,
+      title: "Get access to the map files",
+      body: "<ol>" +
+        "<li>Send <strong>Payden</strong> your GitHub username.</li>" +
+        "<li>Watch your email for a GitHub invite → click <strong>Accept invitation</strong>.</li></ol>",
+      q: "Have you accepted the invite?",
+      answers: [
+        { label: "Yes, accepted", tone: "yes", next: "token-create" },
+        { label: "Not yet", tone: "neutral", next: "token-wait" }
+      ]
+    },
+    "token-wait": {
+      phase: 3,
+      title: "No rush",
+      body: "<p>Come back and reopen this setup once you've accepted the email invite. You can close this for now — nothing else is needed yet.</p>",
+      q: "What next?",
+      answers: [
+        { label: "Back to the invite step", tone: "neutral", next: "token-repo" },
+        { label: "Close for now", tone: "neutral", act: "close" }
+      ]
+    },
+    "token-create": {
+      phase: 3,
+      title: "Create your token",
+      body: '<div class="callout warn"><strong>Use a “classic” token</strong> (not fine-grained) — fine-grained ones can\'t read this repo.</div>' +
+        "<ol>" +
+        '<li>Go to <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> → <strong>Tokens (classic)</strong>.</li>' +
+        "<li>Click <strong>Generate new token (classic)</strong>.</li>" +
+        "<li>Note: <code>AIM KML reader</code> · Expiration: 1 year · tick the <code>repo</code> box.</li>" +
+        "<li><strong>Generate</strong>, then <strong>copy</strong> the token (starts with <code>ghp_…</code>) — it's shown only once.</li></ol>",
+      q: "Token generated and copied?",
+      answers: [
+        { label: "Yes, copied it", tone: "yes", next: "token-paste" },
+        { label: "I'm stuck here", tone: "no", next: "token-create-trouble" }
+      ]
+    },
+    "token-create-trouble": {
+      phase: 3,
+      title: "Token tips",
+      body: "<ul>" +
+        "<li>Make sure you chose <strong>Tokens (classic)</strong>, not fine-grained.</li>" +
+        "<li>Tick the <code>repo</code> checkbox before generating.</li>" +
+        "<li>The token shows only once — if you lost it, just generate a new one.</li></ul>",
+      q: "Got it now?",
+      answers: [
+        { label: "Yes, copied", tone: "yes", next: "token-paste" },
+        { label: "Still stuck", tone: "neutral", next: "help" }
+      ]
+    },
+    "token-paste": {
+      phase: 3,
+      title: "Paste it into AIM Controls",
+      body: "<ol>" +
+        "<li>Reload Percepto and click the gear (⚙).</li>" +
+        "<li>Scroll to <strong>GitHub Connection (KMLs)</strong> → expand.</li>" +
+        "<li>Paste your token → <strong>Save &amp; Test</strong>.</li></ol>" +
+        shot("The GitHub Connection box with a green Connected dot"),
+      q: "Did the dot turn green / say Connected?",
+      answers: [
+        { label: "Yes, it's green!", tone: "yes", next: "done" },
+        { label: "It's red or gray", tone: "no", next: "token-paste-trouble" }
+      ]
+    },
+    "token-paste-trouble": {
+      phase: 3,
+      title: "Let's fix the connection",
+      body: "<ul>" +
+        "<li>Re-copy the full token (starts <code>ghp_</code>, no spaces) and paste again.</li>" +
+        "<li>Make sure the token had the <code>repo</code> scope ticked.</li>" +
+        "<li>After Save &amp; Test, hard-reload: <code>Ctrl+Shift+R</code>.</li></ul>",
+      q: "Green now?",
+      answers: [
+        { label: "Yes, connected!", tone: "yes", next: "done" },
+        { label: "Still red/gray", tone: "no", next: "help" }
+      ]
+    },
+
+    // ---------- FINAL ----------
+    "done": {
+      phase: 4,
+      title: "🎉 You're all set!",
+      body: "<p>Everything's installed and ready. Open any site on <code>percepto.app</code> and your tools are there.</p>" +
+        '<p>Curious what they all do? Tap any tool in the <a href="guide.html">tool guide</a> for how to use it.</p>',
+      answers: [
+        { label: "Finish", tone: "yes", act: "close" }
+      ]
+    },
+    "help": {
+      phase: 0,
+      title: "Let's get you a hand",
+      body: "<p>This one's easier with a human. Send <strong>Payden</strong> a quick message about where you got stuck — a screenshot helps a lot.</p>" +
+        '<p>You can also post it on the <a href="https://github.com/Ned-Yap/aim-userscripts-issues/issues/new/choose" target="_blank" rel="noopener">issues page</a>.</p>',
+      answers: [
+        { label: "Start over", tone: "neutral", next: "tm-check" },
+        { label: "Close", tone: "neutral", act: "close" }
+      ]
+    }
+  };
+
+  var PHASES = [
+    { n: 1, label: "Tampermonkey" },
+    { n: 2, label: "Tools" },
+    { n: 3, label: "Token" }
+  ];
+
+  var overlay = document.getElementById("wiz");
+  var progressEl = document.getElementById("wizProgress");
+  var contentEl = document.getElementById("wizContent");
+  var backEl = document.getElementById("wizBack");
+  var closeEl = document.getElementById("wizClose");
+  var launchEl = document.getElementById("launchWizard");
+
+  var hist = [];
+  var curId = null;
+
+  function renderProgress(phase) {
+    var html = "";
+    for (var i = 0; i < PHASES.length; i++) {
+      var p = PHASES[i];
+      var state = phase > p.n ? "done" : (phase === p.n ? "active" : "todo");
+      var mark = phase > p.n ? "✓" : p.n;
+      html += '<div class="wiz-dot ' + state + '"><span class="wiz-dot-n">' + mark + '</span><span class="wiz-dot-l">' + p.label + "</span></div>";
+      if (i < PHASES.length - 1) html += '<div class="wiz-dot-sep"></div>';
+    }
+    progressEl.innerHTML = html;
+  }
+
+  function render(id) {
+    var node = NODES[id];
+    if (!node) return;
+    curId = id;
+    renderProgress(node.phase);
+
+    var html = "";
+    if (node.title) html += '<h3 class="wiz-title">' + node.title + "</h3>";
+    if (node.body) html += '<div class="wiz-body">' + node.body + "</div>";
+    if (node.q) html += '<p class="wiz-q">' + node.q + "</p>";
+    html += '<div class="wiz-answers">';
+    var ans = node.answers || [];
+    for (var i = 0; i < ans.length; i++) {
+      var a = ans[i];
+      html += '<button class="wiz-ans ' + (a.tone || "neutral") + '" data-next="' + (a.next || "") + '" data-act="' + (a.act || "") + '">' + a.label + "</button>";
+    }
+    html += "</div>";
+    contentEl.innerHTML = html;
+    contentEl.scrollTop = 0;
+
+    var btns = contentEl.querySelectorAll(".wiz-ans");
+    for (var j = 0; j < btns.length; j++) {
+      btns[j].addEventListener("click", function () {
+        var act = this.getAttribute("data-act");
+        if (act === "close") { closeWizard(); return; }
+        var nx = this.getAttribute("data-next");
+        if (nx) go(nx);
+      });
+    }
+    var copies = contentEl.querySelectorAll("[data-copy]");
+    for (var k = 0; k < copies.length; k++) {
+      copies[k].addEventListener("click", function () {
+        var self = this;
+        var text = self.getAttribute("data-copy");
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            var orig = self.textContent;
+            self.textContent = "✓ Copied!";
+            setTimeout(function () { self.textContent = orig; }, 1600);
+          });
+        }
+      });
+    }
+
+    backEl.style.visibility = hist.length ? "visible" : "hidden";
+  }
+
+  function go(next) {
+    hist.push(curId);
+    render(next);
+  }
+  function back() {
+    var prev = hist.pop();
+    if (prev) render(prev);
+  }
+  function openWizard() {
+    hist = [];
+    render("tm-check");
+    overlay.hidden = false;
+    document.body.style.overflow = "hidden";
+  }
+  function closeWizard() {
+    overlay.hidden = true;
+    document.body.style.overflow = "";
+  }
+
+  if (launchEl) launchEl.addEventListener("click", openWizard);
+  if (closeEl) closeEl.addEventListener("click", closeWizard);
+  if (backEl) backEl.addEventListener("click", back);
+  overlay.addEventListener("click", function (e) { if (e.target === overlay) closeWizard(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !overlay.hidden) closeWizard();
+  });
+})();
+</script>
 
 </body>
 </html>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="What each AIM userscript does, in plain English. Tap any tool for how to use it and what it's good for.">
+<meta name="description" content="What each AIM userscript does, in plain English. Tap any tool for how to use it, everything it can do, and what it's good for.">
 <title>AIM Userscripts — What Each Tool Does</title>
 <style>
   :root {
@@ -39,16 +39,16 @@
     font-size: 0.82em; border: 1px solid var(--border-strong);
     white-space: nowrap;
   }
-  .wrap { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
 
   /* Hero */
   .hero {
     background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
     border-bottom: 1px solid var(--border);
-    padding: 64px 0 48px; text-align: center;
+    padding: 64px 0 44px; text-align: center;
   }
   .hero h1 { font-size: 2.4rem; margin: 0 0 10px; font-weight: 700; letter-spacing: -0.02em; }
-  .hero p { font-size: 1.1rem; color: var(--text-muted); max-width: 560px; margin: 0 auto 24px; }
+  .hero p { font-size: 1.1rem; color: var(--text-muted); max-width: 580px; margin: 0 auto 22px; }
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
     padding: 11px 22px; border-radius: 8px; font-weight: 600;
@@ -56,16 +56,23 @@
     cursor: pointer; font-size: 0.98rem;
   }
   .btn:hover { text-decoration: none; background: var(--bg-card); }
+  .hero-tools { margin-top: 18px; }
+  .hero-tools button {
+    background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+    padding: 7px 14px; border-radius: 999px; cursor: pointer; font-family: inherit;
+    font-size: 0.85rem; margin: 0 4px;
+  }
+  .hero-tools button:hover { border-color: var(--cyan); color: var(--text); }
 
   /* Group */
-  .group { margin: 56px 0 0; }
+  .group { margin: 52px 0 0; }
   .group-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
   .group-emoji { font-size: 1.6rem; }
   .group h2 { font-size: 1.5rem; margin: 0; color: var(--cyan); font-weight: 600; }
   .group-sub { color: var(--text-muted); margin: 0 0 20px; font-size: 1rem; }
 
   /* Card grid */
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
 
   /* Card is an expandable */
   .card {
@@ -73,9 +80,7 @@
     border-radius: 12px; overflow: hidden; transition: border-color 0.15s;
   }
   .card[open] { border-color: var(--cyan-dim); }
-  .card > summary {
-    padding: 20px; cursor: pointer; user-select: none; list-style: none;
-  }
+  .card > summary { padding: 20px; cursor: pointer; user-select: none; list-style: none; }
   .card > summary::-webkit-details-marker { display: none; }
   .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
   .card-emoji { font-size: 1.4rem; }
@@ -98,16 +103,16 @@
   .tap-hint { font-size: 0.78rem; color: var(--text-faint); margin-top: 10px; }
   .card[open] .tap-hint { display: none; }
 
-  /* Detail panel revealed on expand */
-  .card-detail {
-    padding: 0 20px 20px; border-top: 1px solid var(--border); margin-top: -1px;
-  }
+  /* Detail panel */
+  .card-detail { padding: 0 20px 22px; border-top: 1px solid var(--border); margin-top: -1px; }
   .card-detail h4 {
-    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.07em;
-    color: var(--cyan); margin: 18px 0 8px;
+    font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--cyan); margin: 20px 0 8px;
   }
   .card-detail ol, .card-detail ul { margin: 0; padding-left: 20px; }
-  .card-detail li { margin: 5px 0; font-size: 0.94rem; }
+  .card-detail li { margin: 6px 0; font-size: 0.94rem; }
+  .card-detail .everything li { color: var(--text); }
+  .card-detail .everything li b { color: var(--text); font-weight: 600; }
 
   /* Footer */
   footer {
@@ -117,6 +122,7 @@
   }
   footer a { color: var(--cyan); }
   .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .muted { color: var(--text-muted); }
 
   @media (max-width: 600px) {
     .hero h1 { font-size: 1.9rem; }
@@ -130,8 +136,12 @@
 <header class="hero">
   <div class="wrap">
     <h1>What each tool does</h1>
-    <p>Every AIM tool, in plain English — grouped by what you're trying to get done. <strong>Tap any tool</strong> for how to use it.</p>
+    <p>Every AIM tool, in plain English — grouped by what you're trying to get done. <strong>Tap any tool</strong> for how to use it and everything it can do.</p>
     <a href="index.html" class="btn">← Back to install</a>
+    <div class="hero-tools">
+      <button id="expandAll">Expand all</button>
+      <button id="collapseAll">Collapse all</button>
+    </div>
   </div>
 </header>
 
@@ -145,7 +155,7 @@
       <details class="card">
         <summary>
           <div class="card-top"><span class="card-emoji">⚙️</span><span class="card-name">Control Panel</span><span class="card-chev">▾</span></div>
-          <p class="card-what">One settings window for all the tools. Turn things on/off, change hotkeys, and paste your GitHub token here.</p>
+          <p class="card-what">One settings window for every tool. Turn things on/off, change hotkeys, set colors, and paste your GitHub token.</p>
           <div class="card-how"><span class="how-label">Open</span> click the <strong>⚙ gear</strong> in the map toolbar</div>
           <div class="tap-hint">Tap for details ▾</div>
         </summary>
@@ -154,13 +164,24 @@
           <ol>
             <li>Click the <strong>⚙ gear</strong> in the map toolbar to open it.</li>
             <li>Each tool has its own section — flip a switch to turn a feature on or off.</li>
-            <li>Changed something by accident? Click the <strong>↺</strong> arrow to reset just that setting.</li>
+            <li>Changed something by accident? Click the <strong>↺</strong> arrow next to it to reset just that setting.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>One place for every tool's settings</b> — each script registers itself and appears as its own section.</li>
+            <li><b>Turn any feature on or off</b> with simple switches (and master on/off per tool).</li>
+            <li><b>Rebind hotkeys</b> — change any shortcut if it clashes with something else.</li>
+            <li><b>Pick colors &amp; opacity, numbers, and dropdown options</b> for tools that support them.</li>
+            <li><b>↺ Reset</b> any single setting back to its default without touching the rest.</li>
+            <li><b>Tidy layout</b> — sections are grouped and ordered (Outlines, Performance, Hotkeys…) with sub-headers.</li>
+            <li><b>Holds your GitHub token</b> and shares it with the tools that need it (Map Styler, Issues).</li>
+            <li><b>Works on the map and the main page</b> at the same time, staying in sync.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Turning off a tool you're not using right now.</li>
-            <li>Changing a hotkey if it clashes with something else.</li>
-            <li>Pasting your GitHub token (bottom of the panel).</li>
+            <li>Fixing a hotkey conflict.</li>
+            <li>One-stop spot to manage everything.</li>
           </ul>
         </div>
       </details>
@@ -176,7 +197,7 @@
       <details class="card">
         <summary>
           <div class="card-top"><span class="card-emoji">🗺️</span><span class="card-name">Map Styler</span><span class="card-chev">▾</span></div>
-          <p class="card-what">Shows the power-line shielding overlays and checks that everything is covered. The big one most people use daily.</p>
+          <p class="card-what">Shows the power-line shielding overlays and checks coverage. The big one most people use daily.</p>
           <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+O</kbd> to toggle</div>
           <div class="tap-hint">Tap for details ▾</div>
         </summary>
@@ -187,11 +208,23 @@
             <li>Open the <strong>Outlines</strong> section in the ⚙ panel to turn distribution / transmission lines on or off.</li>
             <li>Run the <strong>Coverage check</strong> to drop numbered pins anywhere that's too far from shielding.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Draws shielding overlays &amp; buffers</b> for distribution and transmission power lines, pulled from the site's map files.</li>
+            <li><b>Coverage Validator</b> — finds spots more than ~200&nbsp;ft from shielding and drops numbered red pins on each, measuring to the whole line (not just its corners).</li>
+            <li><b>Per-category control</b> — separate color, opacity, and on/off for distribution vs. transmission.</li>
+            <li><b>Hide lines you don't care about</b> (right-click) as a personal view — it never changes the real data or affects anyone else.</li>
+            <li><b>Show-hidden toggle &amp; hidden-line color</b>, plus "clear all my hides for this site."</li>
+            <li><b>Split multi-segment lines</b> for finer hide control (this one is a real data improvement and is saved for everyone).</li>
+            <li><b>Flight-path vertex dots</b> toggle for precise editing.</li>
+            <li><b>Handles map files in several formats</b> (.kml / .kmz, different capitalizations) automatically.</li>
+            <li><b>Kick fix</b> (<kbd>Shift+K</kbd>) to snap things back if the map gets stuck after a refresh.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Confirming a site's missions cover all the power lines.</li>
-            <li>Spotting gaps more than ~200&nbsp;ft from shielding.</li>
-            <li>Recoloring or hiding lines to cut clutter.</li>
+            <li>Spotting coverage gaps before a flight.</li>
+            <li>Cutting visual clutter down to just the lines you care about.</li>
           </ul>
         </div>
       </details>
@@ -210,6 +243,12 @@
             <li>Click a start point, then click an end point.</li>
             <li>Read the distance; press <kbd>Shift+R</kbd> again to exit.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Point-to-point distance</b> measuring right on the map.</li>
+            <li><b>Cleanly starts and stops</b> with one hotkey, without leaving stray marks behind.</li>
+            <li><b>Works inside Percepto's map</b> where the built-in tools can be fiddly.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Checking the distance between two assets.</li>
@@ -232,6 +271,12 @@
             <li>The pin shows the altitude there.</li>
             <li>Right-click a pin to delete it.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Drops altitude pins</b> anywhere you click on the map.</li>
+            <li><b>Right-click to delete</b> a pin cleanly.</li>
+            <li><b>Quiet by default</b> — the popup starts closed so it stays out of your way until you need it.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Checking the ground height before setting a mission altitude.</li>
@@ -251,9 +296,17 @@
           <h4>How to use it</h4>
           <ol>
             <li>Press a number <kbd>1</kbd>–<kbd>6</kbd> to instantly start that entity type.</li>
-            <li>Use the shift shortcuts for actions (e.g. save).</li>
-            <li>Delete is double-press (<kbd>Shift+D</kbd> twice) so you can't do it by accident.</li>
+            <li>Use the shift shortcuts for actions like save.</li>
+            <li>Delete is a double-press (<kbd>Shift+D</kbd> twice) so it can't happen by accident.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>One-key entity creation</b> — keys <kbd>1</kbd>–<kbd>6</kbd> each start a specific entity type.</li>
+            <li><b>Action shortcuts</b> (<kbd>Shift+S</kbd>/<kbd>Z</kbd>/<kbd>X</kbd>, etc.) for save and other steps.</li>
+            <li><b>Safe delete</b> — <kbd>Shift+D</kbd> twice within a moment; the first press just warns you.</li>
+            <li><b>Turn individual entity keys on/off</b> in the ⚙ panel, with color-coded labels so you remember which key is which.</li>
+            <li><b>Stays out of the way while you type</b> — shortcuts don't fire when you're in a name field.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Stamping out lots of entities quickly on a new site.</li>
@@ -274,6 +327,11 @@
           <ol>
             <li>Press <kbd>Shift+C</kbd> to clear your drawings, measurements, and pins.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>One-press cleanup</b> of the temporary marks the other tools leave behind.</li>
+            <li><b>Leaves the real site data alone</b> — only your scratch marks go away.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Resetting the map after measuring or sketching.</li>
@@ -305,11 +363,24 @@
             <li>Use <strong>Find in Map Entities</strong> to jump to it in Percepto's sidebar.</li>
             <li>Click <strong>SUM</strong> (next to ALT/VAL) for the full table; click <strong>📊</strong> for charts and stats.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Right-click inspector</b> for any entity — asset, flight path, no-fly zone, free-flight zone, or marker — showing name, ID, subtype, notes, and validation.</li>
+            <li><b>Altitudes &amp; elevations in both feet and meters</b>; click any number to copy it.</li>
+            <li><b>Find in Map Entities</b> — pastes the name into Percepto's own sidebar search and filters to it.</li>
+            <li><b>SUM panel</b> — a full, floating, resizable table of every entity on the site with <b>search, type-color chips, validation filters, ft↔m toggle, show/hide columns, multi-select, and 3-way column sorting</b>.</li>
+            <li><b>Click a row</b> to pan the map to it and open its inspector.</li>
+            <li><b>Export</b> the list (or just your selection) as <b>CSV, TSV, or JSON</b>.</li>
+            <li><b>📊 Site Summary stats</b> — donut charts of entity types and validation, keyword breakdowns, auto-detected asset equipment &amp; states, an Asset-Health-by-Equipment matrix, and grouped markers.</li>
+            <li><b>Copy → Sheets</b> — pastes a fully formatted, colored table straight into Google Sheets or Excel.</li>
+            <li><b>Inline editing with a pending-changes queue</b> and an Apply step that pushes them through for you.</li>
+            <li><b>Flight-path segments listed as their own rows</b> for fine detail.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Grabbing an asset name or altitude in one click.</li>
-            <li>Auditing a whole site at a glance.</li>
-            <li>Exporting the entity list to a spreadsheet (CSV / Sheets).</li>
+            <li>Auditing or QA-ing a whole site at a glance.</li>
+            <li>Handing a site summary to your boss in a spreadsheet.</li>
           </ul>
         </div>
       </details>
@@ -326,8 +397,15 @@
           <ol>
             <li>Open the Mission Bank — the summary panel appears automatically.</li>
             <li>Right-click a mission for its details.</li>
-            <li>Use the batch tools to view/adjust altitude and see ground height per step.</li>
+            <li>Use the batch tools to view and adjust altitude, and see ground height per step.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Summary panel</b> of all the missions in the bank, like the Asset Inspector's table but for missions.</li>
+            <li><b>Right-click inspector</b> for an individual mission.</li>
+            <li><b>Batch altitude editor</b> — adjust altitudes across multiple mission steps at once.</li>
+            <li><b>Ground elevation &amp; height-above-ground per step</b>, using Percepto's own elevation data.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Reviewing all of a site's missions in one place.</li>
@@ -358,6 +436,12 @@
             <li>Press <kbd>Shift+B</kbd> to open the panel.</li>
             <li>Set up your missions and run it — they're added together.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Creates many missions in one pass</b> instead of one-at-a-time clicking.</li>
+            <li><b>Settings live in the ⚙ panel</b> so you can tune how it behaves.</li>
+            <li><b>Sequences the save steps safely</b> so each mission lands correctly.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Standing up a brand-new site with lots of missions.</li>
@@ -378,6 +462,12 @@
             <li>Press <kbd>Shift+E</kbd>.</li>
             <li>Pick the missions and the new altitude, then apply.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Updates altitude across many missions</b> in one operation.</li>
+            <li><b>Settings live in the ⚙ panel.</b></li>
+            <li><b>Handles the repeated save/confirm steps for you.</b></li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>A site-wide altitude change without editing each mission by hand.</li>
@@ -397,6 +487,11 @@
           <ol>
             <li>Press <kbd>Shift+V</kbd> to run a validation pass.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Runs validation across many entities at once.</b></li>
+            <li><b>Settings live in the ⚙ panel.</b></li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Validating a whole site quickly.</li>
@@ -418,9 +513,15 @@
             <li><kbd>Ctrl+Click</kbd> the step handles to pick them.</li>
             <li>Press <kbd>Enter</kbd> to move them into place.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Fast multi-step reordering</b> without slow drag-and-drop.</li>
+            <li><b>Pick several steps</b> with <kbd>Ctrl+Click</kbd>, then move them together.</li>
+            <li><b>Waits for Percepto to finish</b> each change so the order always saves correctly.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
-            <li>Re-sequencing a mission without slow drag-and-drop.</li>
+            <li>Re-sequencing a long mission in seconds.</li>
           </ul>
         </div>
       </details>
@@ -448,11 +549,20 @@
             <li>In the ⚙ panel, pick the section you want to land on (e.g. Site Setup).</li>
             <li>Switching sites keeps you on the same section instead of bouncing to Data Map.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Land on your section</b> when you open a site from the landing search (you choose which — Site Setup, Data Map, Mission Bank, Insight Manager, or Dashboard).</li>
+            <li><b>Keep your current section when you switch sites</b> — no more getting dumped on Data Map every time.</li>
+            <li><b>Auto-redirect dead links</b> — old "past mission" URLs jump straight to the mission log.</li>
+            <li><b>Auto-tidy map layers</b> on every new site — turn off the ones you never want.</li>
+            <li><b>Feeder Line on top</b> — flips it off and back on so it draws above the ortho instead of hiding under it.</li>
+            <li><b>All configurable</b> in the ⚙ panel, including a session-memory on/off.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Always landing on your usual page when you open a site.</li>
-            <li>Old "past mission" links auto-jumping to the mission log.</li>
-            <li>Turning off layers you never want, and keeping the Feeder Line on top.</li>
+            <li>Stopping the constant "wrong page" detour when switching sites.</li>
+            <li>Skipping the same layer-cleanup clicks on every site.</li>
           </ul>
         </div>
       </details>
@@ -471,9 +581,18 @@
             <li>Hold <kbd>Alt</kbd> to move faster (sprint).</li>
             <li>Press <kbd>Space</kbd> to fit the whole site in view.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Keyboard panning</b> with <kbd>W A S D</kbd>.</li>
+            <li><b>Keyboard zoom</b> with <kbd>Q</kbd> / <kbd>E</kbd>.</li>
+            <li><b>Sprint</b> — hold <kbd>Alt</kbd> to move across the map faster.</li>
+            <li><b>Fit-to-site</b> — <kbd>Space</kbd> zooms out to show the whole site.</li>
+            <li><b>Box-zoom still works</b> — <kbd>Shift</kbd>+drag uses Leaflet's native zoom-to-rectangle.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Zipping around a big site while reviewing.</li>
+            <li>Keeping both hands on the keyboard.</li>
           </ul>
         </div>
       </details>
@@ -502,10 +621,21 @@
             <li><kbd>Ctrl+Click</kbd> a point to branch off it; lines snap to nearby ones.</li>
             <li>Save to commit the change for the whole team.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Move vertices</b> — drag any point of an existing line.</li>
+            <li><b>Add &amp; delete vertices</b> along a line.</li>
+            <li><b>Draw brand-new lines</b> and <b>delete whole lines</b>.</li>
+            <li><b>Branch from a vertex</b> — <kbd>Ctrl+Click</kbd> a handle to start a new branch off it.</li>
+            <li><b>Snapping</b> — points snap to nearby vertices and segments (a purple ring shows the snap).</li>
+            <li><b>Edits both file lines and "green" lines</b>, distribution and transmission.</li>
+            <li><b>Saves back to GitHub</b> so everyone gets the corrected data.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Fixing a power line that's in the wrong place.</li>
             <li>Adding a new branch or splitting a line.</li>
+            <li>Keeping the shielding data accurate.</li>
           </ul>
         </div>
       </details>
@@ -533,10 +663,22 @@
             <li>Add a note and a priority.</li>
             <li>Track it through Open → Ready → Resolved (it can be re-opened).</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Draw an area on the map</b> and attach a note describing the problem.</li>
+            <li><b>Status workflow</b> — Open → Ready → Resolved / Ignored, and you can re-open.</li>
+            <li><b>Priority</b> on each issue, with a filter to focus on the urgent ones.</li>
+            <li><b>Auto-detects affected entities</b> inside your shape and tags them as pills.</li>
+            <li><b>Shared with the team</b> — synced through GitHub under your own GitHub identity.</li>
+            <li><b>Approver flow</b> — reviewers get an activity indicator and a "pending my review" shortcut.</li>
+            <li><b>Comments &amp; history</b> on every issue.</li>
+            <li><b>Dedicated panel</b> with search, filter, and sort, plus <b>export to Google Sheets</b>.</li>
+            <li><b>Clickable site name</b> to jump straight to the right site.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Flagging a coverage gap or data error with its exact location.</li>
-            <li>Keeping a shared to-do list of site fixes.</li>
+            <li>A shared to-do list of site fixes the whole team can see.</li>
           </ul>
         </div>
       </details>
@@ -561,11 +703,18 @@
           <h4>How to use it</h4>
           <ol>
             <li>It works automatically once installed.</li>
-            <li>In the ⚙ panel, the <strong>Performance</strong> section lets you toggle what's blocked (screen recording, chat, weather).</li>
+            <li>In the ⚙ panel, the <strong>Performance</strong> section lets you toggle what's blocked.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Network blocks</b> — stops the session-replay recorder (a big CPU + memory hog), plus chat and weather requests.</li>
+            <li><b>Map performance</b> — option to hide the satellite layer and load the ortho at lower resolution with a zoom cap.</li>
+            <li><b>Each block is its own switch</b> in the ⚙ panel, so you decide what to keep.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>A laggy or memory-hungry site — keep the background blocks on.</li>
+            <li>Older or slower computers.</li>
           </ul>
         </div>
       </details>
@@ -580,14 +729,25 @@
         <div class="card-detail">
           <h4>How to use it</h4>
           <ol>
-            <li>Open the admin User↔Site batch page and press <kbd>Shift+B</kbd>.</li>
+            <li>Open the admin User↔Site batch page and press <kbd>Shift+B</kbd> (or click <strong>Bulk Fill</strong>).</li>
             <li>Paste or search a list of people and a list of sites.</li>
-            <li>Click <strong>Add all matches</strong>; pin favorites and save presets for next time.</li>
-            <li>Role defaults to Percepto Admin.</li>
+            <li>Click <strong>Add all matches</strong>, then create.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Paste lists</b> of users and sites (one per line) and auto-select the matches.</li>
+            <li><b>Search box with "Add all matches"</b> for both users and sites.</li>
+            <li><b>Pin favorites</b> you use often, with an Edit mode so you don't delete a pin by accident.</li>
+            <li><b>Drag to reorder</b> your pinned favorites.</li>
+            <li><b>Save presets</b> — a named set of people + role for groups that always get the same access.</li>
+            <li><b>Select-all / clear-all</b> for your pins.</li>
+            <li><b>Role defaults to Percepto Admin</b> (changeable).</li>
+            <li><b>Personal &amp; private</b> — your pins and presets stay on your machine; nothing is shared.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Onboarding a batch of new users to lots of sites at once.</li>
+            <li>Repeating the same access setup for a team.</li>
           </ul>
         </div>
       </details>
@@ -605,9 +765,15 @@
             <li>Press <kbd>Shift+I</kbd> to open the diagnostic panel.</li>
             <li>Use it to check the map state when reporting a bug.</li>
           </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Shows the live map &amp; AIM state</b> across both the page and the map frame.</li>
+            <li><b>Helps pin down why a tool isn't behaving</b> when you file a bug.</li>
+          </ul>
           <h4>Good for</h4>
           <ul>
             <li>Figuring out why something isn't working.</li>
+            <li>Giving Payden the details he needs to fix a bug.</li>
           </ul>
         </div>
       </details>
@@ -628,6 +794,20 @@
     <div class="muted">Built by Payden · keeps itself updated via Tampermonkey</div>
   </div>
 </footer>
+
+<script>
+(function () {
+  var cards = document.querySelectorAll("details.card");
+  var ex = document.getElementById("expandAll");
+  var col = document.getElementById("collapseAll");
+  if (ex) ex.addEventListener("click", function () {
+    for (var i = 0; i < cards.length; i++) cards[i].open = true;
+  });
+  if (col) col.addEventListener("click", function () {
+    for (var i = 0; i < cards.length; i++) cards[i].open = false;
+  });
+})();
+</script>
 
 </body>
 </html>
