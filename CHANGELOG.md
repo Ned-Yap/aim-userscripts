@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-06 — AIM Defaults v1.0 (NEW SCRIPT) — smart site navigation + map-layer defaults
+
+Brand-new script that automates the repetitive navigation + layer chores. Configurable in the AIM Control Panel (new "AIM Defaults" section, Navigation / Map Layers).
+
+**Smart navigation:**
+- Pick a site from the **landing search** → lands straight on your default section (Site Setup for CSMs), skipping the slow Data Map detour.
+- **Switch sites via the in-page dropdown** → keeps you in the *same* section on the new site (Mission Bank → Mission Bank, etc.). Session memory; toggle it off to always use the default.
+- Smart enough to redirect site-unique deep links — e.g. switching sites from a specific **past mission** sends you to that site's **Mission Log** instead of a dead link.
+- Default section is configurable (Site Setup / Data Map / Mission Bank / Insight Manager / Dashboard), so non-CSM roles can pick their own.
+
+**Map-layer defaults** (on each new site): auto-turn-off any layers you choose (Street labels / Site setup / General markers / Assets / Feeder Line / Map) and the **Feeder Line bring-to-top** fix (off→on so it draws over the ortho) — done automatically instead of by hand every time.
+
+Notes: settings are personal (Control Panel). The nav fix relies on `localStorage` (Percepto wipes `sessionStorage` mid-session). Dev copy in `latest/` too.
+
 ## 2026-06-06 — AIM Bulk User Sites v1.10 (NEW SCRIPT) — bulk-fill the admin User↔Site page
 
 Brand-new script for the Django admin **User Site batch create** page (`/admin/percepto/usersite/batch_create/`). That page's Users/Sites pickers are giant native multi-selects with no real search — you had to click-and-type fast or Ctrl+F your way through. This replaces all of that with a floating panel (**⚡ Bulk Fill** button next to Create, or **Shift+B**):
