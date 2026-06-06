@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Quick Mission Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @description  Bulk-reorder mission instructions via React fiber walk. Ctrl+Click handles to select, Enter to open the move dialog.
@@ -44,7 +44,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-quick-mission-editor';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const LARGE_MOVE_THRESHOLD = 20; // moves of this many or more get a confirm() prompt
     const TAG = '[AIM MB EDITOR]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -513,6 +513,9 @@
         const bolt = document.createElement('div');
         bolt.innerHTML = `<svg width="12" height="18" viewBox="0 0 12 20" fill="none"><path d="M7 0L0 11H5.5L4.5 20L12 8.5H6.5L7 0Z" fill="#00bcd4"/></svg>`;
         Object.assign(bolt.style, { display: 'flex', alignItems: 'center', cursor: 'pointer' });
+        const launcherLabel = document.createElement('div');
+        Object.assign(launcherLabel.style, { fontSize: '11px', fontWeight: '700', color: '#fff', letterSpacing: '0.07em', textTransform: 'uppercase', whiteSpace: 'nowrap' });
+        launcherLabel.textContent = 'Quick Mission Editor';
         launcherLabel.style.cursor = 'pointer';
         // v0.2 — launcher click opens the modal directly (alternative
         // to Enter). Discoverable for users who don't know about the
@@ -542,9 +545,6 @@
         }
         bolt.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
         launcherLabel.addEventListener('click', (e) => { e.stopPropagation(); openModalFromLauncher(); });
-        const launcherLabel = document.createElement('div');
-        Object.assign(launcherLabel.style, { fontSize: '11px', fontWeight: '700', color: '#fff', letterSpacing: '0.07em', textTransform: 'uppercase', whiteSpace: 'nowrap' });
-        launcherLabel.textContent = 'Quick Mission Editor';
         const launcherDivider = document.createElement('div');
         Object.assign(launcherDivider.style, { width: '1px', height: '14px', background: '#333' });
         const infoBtn = document.createElement('div');

@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="AIM Userscripts — install guide for the Tampermonkey toolkit that streamlines the AIM drone-mission workflow on percepto.app.">
-<title>AIM Userscripts — Install Guide</title>
+<meta name="description" content="AIM Userscripts — the simple, dummy-proof install guide for the Tampermonkey toolkit that streamlines the AIM drone-mission workflow on percepto.app.">
+<title>AIM Userscripts — Install</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -19,309 +19,155 @@
     --cyan-dim: #3a999f;
     --green: #5fff5f;
     --yellow: #ffd700;
-    --red: #ff6b6b;
     --code-bg: #010409;
   }
-
   * { box-sizing: border-box; }
-
   html { scroll-behavior: smooth; }
-
   body {
-    margin: 0;
-    padding: 0;
-    background: var(--bg);
-    color: var(--text);
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-    font-size: 16px;
-    line-height: 1.6;
+    font-size: 18px; line-height: 1.65;
     -webkit-font-smoothing: antialiased;
   }
-
   a { color: var(--cyan); text-decoration: none; }
   a:hover { text-decoration: underline; }
-
   code {
-    background: var(--code-bg);
-    color: var(--green);
-    padding: 2px 6px;
-    border-radius: 4px;
+    background: var(--code-bg); color: var(--green);
+    padding: 2px 6px; border-radius: 4px;
     font-family: "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.9em;
-    border: 1px solid var(--border);
+    font-size: 0.86em; border: 1px solid var(--border);
   }
-
-  /* Layout */
-  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 0 24px; }
 
   /* Hero */
   .hero {
     background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
     border-bottom: 1px solid var(--border);
-    padding: 80px 0 60px;
-    text-align: center;
+    padding: 76px 0 60px; text-align: center;
   }
-  .hero-tag {
-    display: inline-block;
-    font-size: 0.8rem;
-    color: var(--cyan);
-    background: rgba(95, 221, 229, 0.08);
-    border: 1px solid var(--cyan-dim);
-    padding: 4px 12px;
-    border-radius: 999px;
-    margin-bottom: 16px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-  }
-  .hero h1 {
-    font-size: 3rem;
-    margin: 0 0 12px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-  }
-  .hero p {
-    font-size: 1.15rem;
-    color: var(--text-muted);
-    max-width: 620px;
-    margin: 0 auto 32px;
-  }
-  .hero-actions {
-    display: flex;
-    gap: 12px;
-    justify-content: center;
-    flex-wrap: wrap;
-  }
+  .hero h1 { font-size: 2.7rem; margin: 0 0 12px; font-weight: 700; letter-spacing: -0.02em; }
+  .hero p { font-size: 1.2rem; color: var(--text-muted); max-width: 480px; margin: 0 auto 30px; }
+  .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
   /* Buttons */
   .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 24px;
-    background: var(--cyan);
-    color: #0d1117;
-    border-radius: 8px;
-    font-weight: 600;
-    border: none;
-    cursor: pointer;
-    font-size: 1rem;
-    transition: transform 0.1s ease, box-shadow 0.1s ease;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 13px 26px; background: var(--cyan); color: #0d1117;
+    border-radius: 8px; font-weight: 700; border: none; cursor: pointer;
+    font-size: 1.02rem; transition: transform 0.1s ease, box-shadow 0.1s ease;
   }
   .btn:hover { text-decoration: none; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(95, 221, 229, 0.3); }
-  .btn-secondary {
-    background: transparent;
-    color: var(--text);
-    border: 1px solid var(--border-strong);
-  }
+  .btn-secondary { background: transparent; color: var(--text); border: 1px solid var(--border-strong); }
   .btn-secondary:hover { box-shadow: none; background: var(--bg-card); }
   .btn-install {
-    background: var(--green);
-    color: #0d1117;
-    padding: 8px 16px;
-    font-size: 0.9rem;
-    border-radius: 6px;
+    background: var(--green); color: #0d1117;
+    padding: 9px 20px; font-size: 0.92rem; border-radius: 6px; font-weight: 700;
   }
   .btn-install:hover { box-shadow: 0 4px 16px rgba(95, 255, 95, 0.3); }
   .btn-browser {
-    background: var(--bg-card);
-    color: var(--text);
-    border: 1px solid var(--border);
-    padding: 14px 20px;
-    flex: 1;
-    min-width: 180px;
-    justify-content: center;
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+    padding: 14px 20px; flex: 1; min-width: 150px; justify-content: center; font-weight: 600;
   }
   .btn-browser:hover { border-color: var(--cyan); }
 
-  /* Sections */
-  section { padding: 64px 0; border-bottom: 1px solid var(--border); }
-  section:last-of-type { border-bottom: none; }
-  section h2 {
-    font-size: 1.75rem;
-    margin: 0 0 8px;
-    color: var(--cyan);
-    font-weight: 600;
+  /* Big step blocks (always visible) */
+  .bigsteps { padding: 56px 0 8px; display: flex; flex-direction: column; gap: 28px; }
+  .bigstep {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 32px 30px;
   }
-  section .lede {
-    color: var(--text-muted);
-    margin-bottom: 32px;
-    font-size: 1.05rem;
+  .bigstep-head { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+  .bigstep-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 48px; height: 48px; border-radius: 50%; flex-shrink: 0;
+    background: var(--cyan); color: var(--bg); font-weight: 800; font-size: 1.5rem;
   }
-  section h3 {
-    font-size: 1.2rem;
-    margin: 32px 0 12px;
-    color: var(--text);
-  }
+  .bigstep-head h2 { font-size: 1.55rem; margin: 0; font-weight: 700; }
+  .bigstep p { font-size: 1.05rem; margin: 0 0 18px; }
+  .bigstep p.lead { color: var(--text); }
 
-  /* Step cards */
-  .steps {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 16px;
-    margin: 32px 0;
-  }
-  .step {
-    display: block;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 20px;
-    text-align: center;
-    transition: border-color 0.15s, transform 0.1s;
-    color: var(--text);
-  }
-  .step:hover {
-    border-color: var(--cyan);
-    text-decoration: none;
-    transform: translateY(-2px);
-    color: var(--text);
-  }
-  .step-num {
-    display: inline-block;
-    width: 32px;
-    height: 32px;
-    line-height: 32px;
-    border-radius: 50%;
-    background: var(--cyan);
-    color: var(--bg);
-    font-weight: 700;
-    margin-bottom: 12px;
-  }
-  .step-title { font-weight: 600; margin-bottom: 6px; }
-  .step-desc { font-size: 0.88rem; color: var(--text-muted); }
-
-  /* Browser buttons */
-  .browsers {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin: 24px 0;
-  }
-
-  /* Install table */
-  .install-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin: 24px 0;
-  }
-  .install-row {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px 18px;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .install-row:hover { border-color: var(--cyan-dim); background: var(--bg-elevated); }
-  .install-row.recommended {
-    border-color: var(--cyan-dim);
-    background: rgba(95, 221, 229, 0.05);
-  }
-  .install-num {
+  /* Screenshot placeholder */
+  .shot {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; text-align: center;
+    min-height: 150px; margin: 18px 0;
+    border: 2px dashed var(--border-strong); border-radius: 12px;
+    background: repeating-linear-gradient(45deg, transparent, transparent 12px, rgba(255,255,255,0.015) 12px, rgba(255,255,255,0.015) 24px);
     color: var(--text-faint);
-    font-family: "SF Mono", Menlo, Consolas, monospace;
-    min-width: 24px;
   }
+  .shot .shot-icon { font-size: 2rem; opacity: 0.7; }
+  .shot .shot-cap { font-size: 0.92rem; }
+  .shot img { max-width: 100%; border-radius: 12px; display: block; }
+
+  /* Browser row */
+  .browsers { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
+
+  /* Install list */
+  .install-list { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+  .install-row {
+    display: flex; align-items: center; gap: 14px;
+    background: var(--bg-elevated); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px;
+  }
+  .install-row.recommended { border-color: var(--cyan-dim); background: rgba(95,221,229,0.05); }
+  .install-num { color: var(--text-faint); font-family: "SF Mono", Menlo, Consolas, monospace; min-width: 22px; }
   .install-info { flex: 1; min-width: 0; }
   .install-name { font-weight: 600; }
-  .install-desc { font-size: 0.88rem; color: var(--text-muted); margin-top: 2px; }
+  .install-desc { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
   .install-row .btn { margin-left: auto; flex-shrink: 0; }
-  .install-row .badge {
-    display: inline-block;
-    font-size: 0.7rem;
-    color: var(--cyan);
-    background: rgba(95, 221, 229, 0.1);
-    border: 1px solid var(--cyan-dim);
-    padding: 2px 6px;
-    border-radius: 4px;
-    margin-left: 8px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+  .badge {
+    display: inline-block; font-size: 0.65rem; color: var(--cyan);
+    background: rgba(95,221,229,0.1); border: 1px solid var(--cyan-dim);
+    padding: 2px 6px; border-radius: 4px; margin-left: 8px;
+    text-transform: uppercase; letter-spacing: 0.05em; vertical-align: middle;
   }
+
+  /* Mini expanders */
+  details.mini {
+    background: var(--bg-elevated); border: 1px solid var(--border);
+    border-radius: 8px; margin: 14px 0; overflow: hidden;
+  }
+  details.mini > summary {
+    padding: 13px 16px; cursor: pointer; user-select: none; font-weight: 600;
+    list-style: none; display: flex; align-items: center; gap: 8px; font-size: 0.98rem;
+  }
+  details.mini > summary::-webkit-details-marker { display: none; }
+  details.mini > summary::before { content: "▶"; color: var(--cyan); font-size: 0.7em; transition: transform 0.15s; }
+  details.mini[open] > summary::before { transform: rotate(90deg); }
+  details.mini > *:not(summary) { padding: 0 16px 14px; }
 
   /* Callouts */
   .callout {
-    background: var(--bg-card);
-    border-left: 3px solid var(--cyan);
-    border-radius: 6px;
-    padding: 16px 20px;
-    margin: 20px 0;
-    font-size: 0.95rem;
+    background: var(--bg-elevated); border-left: 3px solid var(--cyan);
+    border-radius: 6px; padding: 14px 18px; margin: 16px 0; font-size: 0.96rem;
   }
   .callout.warn { border-left-color: var(--yellow); }
   .callout.note { border-left-color: var(--cyan-dim); }
   .callout strong { color: var(--text); }
 
-  /* Details / accordion */
-  details {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    margin: 16px 0;
-    overflow: hidden;
-  }
-  details[open] { border-color: var(--cyan-dim); }
-  summary {
-    padding: 14px 18px;
-    cursor: pointer;
-    font-weight: 600;
-    user-select: none;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  summary::-webkit-details-marker { display: none; }
-  summary::before {
-    content: "▶";
-    color: var(--cyan);
-    font-size: 0.7em;
-    transition: transform 0.15s;
-  }
-  details[open] summary::before { transform: rotate(90deg); }
-  details > *:not(summary) { padding: 0 18px 18px; }
-
-  /* Lists */
-  ol, ul { padding-left: 24px; }
-  li { margin: 6px 0; }
-
-  /* Misc */
+  ol, ul { padding-left: 22px; }
+  li { margin: 7px 0; }
   .muted { color: var(--text-muted); }
-  .hr-short {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 32px auto;
-    max-width: 80px;
-  }
+
+  /* "More help" collapsed area */
+  .more { padding: 16px 0 8px; }
+  .more-title { text-align: center; color: var(--text-faint); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.1em; margin: 40px 0 16px; }
 
   /* Footer */
   footer {
-    background: var(--bg-elevated);
-    border-top: 1px solid var(--border);
-    padding: 40px 0;
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    text-align: center;
+    background: var(--bg-elevated); border-top: 1px solid var(--border);
+    padding: 36px 0; margin-top: 24px;
+    color: var(--text-muted); font-size: 0.9rem; text-align: center;
   }
   footer a { color: var(--cyan); }
-  .footer-links {
-    display: flex;
-    gap: 24px;
-    justify-content: center;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-  }
+  .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
 
-  /* Responsive */
   @media (max-width: 600px) {
-    .hero h1 { font-size: 2.2rem; }
-    .hero p { font-size: 1rem; }
+    .hero h1 { font-size: 2.1rem; }
+    .bigstep { padding: 24px 20px; }
     .install-row { flex-wrap: wrap; }
     .install-row .btn { width: 100%; margin-left: 0; justify-content: center; }
-    section { padding: 48px 0; }
   }
 </style>
 </head>
@@ -330,475 +176,272 @@
 <!-- HERO -->
 <header class="hero">
   <div class="wrap">
-    <span class="hero-tag">Tampermonkey toolkit · v34.9</span>
     <h1>AIM Userscripts</h1>
-    <p>Streamlines the AIM drone-mission workflow on <code>percepto.app</code>. Install once, auto-updates handle the rest.</p>
+    <p>Handy tools that make <code>percepto.app</code> faster. Set up once — they keep themselves updated.</p>
     <div class="hero-actions">
-      <a href="#quick-start" class="btn">Start install →</a>
-      <a href="https://github.com/Ned-Yap/aim-userscripts" class="btn btn-secondary">View on GitHub</a>
+      <a href="#steps" class="btn">Set it up →</a>
+      <a href="guide.html" class="btn btn-secondary">What can these do?</a>
     </div>
   </div>
 </header>
 
-<!-- QUICK START -->
-<section id="quick-start">
-  <div class="wrap">
-    <h2>Quick start</h2>
-    <p class="lede">Five steps, about five minutes. Auto-updates take over after that.</p>
-    <div class="steps">
-      <a class="step" href="#tampermonkey">
-        <div class="step-num">1</div>
-        <div class="step-title">Tampermonkey</div>
-        <div class="step-desc">Browser extension that runs userscripts</div>
-      </a>
-      <a class="step" href="#cleanup">
-        <div class="step-num">2</div>
-        <div class="step-title">Clean up</div>
-        <div class="step-desc">Remove any old AIM scripts (skip if new install)</div>
-      </a>
-      <a class="step" href="#install">
-        <div class="step-num">3</div>
-        <div class="step-title">Install scripts</div>
-        <div class="step-desc">One click each — Tampermonkey prompts you</div>
-      </a>
-      <a class="step" href="#github-token">
-        <div class="step-num">4</div>
-        <div class="step-title">GitHub token</div>
-        <div class="step-desc">Unlocks the shielding KML overlays</div>
-      </a>
-      <a class="step" href="#paste-token">
-        <div class="step-num">5</div>
-        <div class="step-title">Paste &amp; test</div>
-        <div class="step-desc">Drop the token into AIM Controls — done</div>
-      </a>
-    </div>
+<div class="wrap">
+
+  <div class="bigsteps" id="steps">
+
+    <!-- STEP 1 -->
+    <section class="bigstep">
+      <div class="bigstep-head">
+        <span class="bigstep-num">1</span>
+        <h2>Get Tampermonkey</h2>
+      </div>
+      <p class="lead">It's a free browser add-on that runs these little helper tools. Click your browser:</p>
+      <div class="browsers">
+        <a class="btn btn-browser" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Chrome / Edge / Brave</a>
+        <a class="btn btn-browser" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>
+        <a class="btn btn-browser" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>
+      </div>
+      <div class="shot">
+        <!-- Replace this block with: <img src="img/step1-store.png" alt="Tampermonkey in the store"> -->
+        <span class="shot-icon">📷</span>
+        <span class="shot-cap">Screenshot: the "Add to browser" button in the store</span>
+      </div>
+      <details class="mini">
+        <summary>Optional: turn on automatic updates</summary>
+        <ol>
+          <li>Click the Tampermonkey icon → <strong>Dashboard</strong></li>
+          <li><strong>Settings</strong> tab → scroll to <strong>Userscript Update</strong></li>
+          <li>Set <strong>Check Interval</strong> to <strong>Every Day</strong></li>
+        </ol>
+        <p class="muted">New versions then show up on their own.</p>
+      </details>
+    </section>
+
+    <!-- STEP 2 -->
+    <section class="bigstep">
+      <div class="bigstep-head">
+        <span class="bigstep-num">2</span>
+        <h2>Install the tools</h2>
+      </div>
+      <p class="lead">Click an <strong>Install</strong> button below. Tampermonkey pops up — click <strong>Install</strong> there too. That's it.</p>
+      <div class="shot">
+        <!-- Replace with: <img src="img/step2-install-popup.png" alt="Tampermonkey install popup"> -->
+        <span class="shot-icon">📷</span>
+        <span class="shot-cap">Screenshot: the Tampermonkey install popup</span>
+      </div>
+      <div class="callout">
+        <strong>Install Control Panel first</strong> — it's the home base everything else plugs into. You don't need all of them; grab what you want.
+      </div>
+
+      <details class="mini">
+        <summary>Show all the tools to install</summary>
+        <div class="install-list">
+          <div class="install-row recommended">
+            <span class="install-num">1</span>
+            <div class="install-info"><div class="install-name">Control Panel <span class="badge">Install first</span></div><div class="install-desc">Gear icon + settings home for every other tool</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">2</span>
+            <div class="install-info"><div class="install-name">Map Styler</div><div class="install-desc">Power-line shielding overlays + coverage checker — <code>Shift+O</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">3</span>
+            <div class="install-info"><div class="install-name">Performance Shield</div><div class="install-desc">Stops background stuff that slows the page down</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">4</span>
+            <div class="install-info"><div class="install-name">Inspector</div><div class="install-desc">Diagnostic panel for troubleshooting — <code>Shift+I</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">5</span>
+            <div class="install-info"><div class="install-name">Absolute Altitude</div><div class="install-desc">Drop altitude pins on the map — <code>Shift+A</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">6</span>
+            <div class="install-info"><div class="install-name">Measure / Ruler</div><div class="install-desc">Measure distances on the map — <code>Shift+R</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">7</span>
+            <div class="install-info"><div class="install-name">Clear All</div><div class="install-desc">Wipe all your map drawings at once — <code>Shift+C</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">8</span>
+            <div class="install-info"><div class="install-name">Asset Inspector</div><div class="install-desc">Right-click any entity for details; site-wide summary + stats — <code>Shift+Ctrl+Q</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">9</span>
+            <div class="install-info"><div class="install-name">New Entity Macro</div><div class="install-desc">Create entities fast with number keys — <code>1</code>–<code>6</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">10</span>
+            <div class="install-info"><div class="install-name">Bulk Mission Adder</div><div class="install-desc">Add many missions at once — <code>Shift+B</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">11</span>
+            <div class="install-info"><div class="install-name">Bulk Altitude Updater</div><div class="install-desc">Change altitude across many missions — <code>Shift+E</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">12</span>
+            <div class="install-info"><div class="install-name">Bulk Validator</div><div class="install-desc">Validate many entities in one pass — <code>Shift+V</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">13</span>
+            <div class="install-info"><div class="install-name">Mission Bank Tools</div><div class="install-desc">Summary panel + altitude/elevation tools for the Mission Bank</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">14</span>
+            <div class="install-info"><div class="install-name">Quick Mission Editor</div><div class="install-desc">Reorder mission steps quickly</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">15</span>
+            <div class="install-info"><div class="install-name">Power Line Editor</div><div class="install-desc">Edit the power-line map data in place — ⚡ in the map toolbar</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">16</span>
+            <div class="install-info"><div class="install-name">Map Nav</div><div class="install-desc">Move the map with the keyboard — WASD pan, Q/E zoom</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">17</span>
+            <div class="install-info"><div class="install-name">Issues</div><div class="install-desc">Flag problems on the map and track them — 🚩 in the map toolbar</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">18</span>
+            <div class="install-info"><div class="install-name">Bulk User Sites <span class="badge">Admin</span></div><div class="install-desc">Add users to many sites fast (admin batch page only) — <code>Shift+B</code></div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_User_Sites.user.js">Install</a>
+          </div>
+          <div class="install-row">
+            <span class="install-num">19</span>
+            <div class="install-info"><div class="install-name">Defaults</div><div class="install-desc">Land on the right page automatically + tidy map layers on every site</div></div>
+            <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js">Install</a>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:14px;">Not sure what each does? See the <a href="guide.html">plain-English tool guide</a>.</p>
+      </details>
+
+      <div class="callout note">
+        <strong>Did it work?</strong> Open a site on <code>percepto.app</code> — you should see a gear icon (⚙) in the map toolbar.
+      </div>
+      <div class="shot">
+        <!-- Replace with: <img src="img/step2-gear.png" alt="Gear icon in the map toolbar"> -->
+        <span class="shot-icon">📷</span>
+        <span class="shot-cap">Screenshot: the ⚙ gear icon in the map toolbar</span>
+      </div>
+    </section>
+
+    <!-- STEP 3 -->
+    <section class="bigstep">
+      <div class="bigstep-head">
+        <span class="bigstep-num">3</span>
+        <h2>Add a GitHub token</h2>
+      </div>
+      <p class="lead">A one-time "key" that unlocks the power-line overlays. <strong>Don't use those? You can skip this.</strong></p>
+      <div class="shot">
+        <!-- Replace with: <img src="img/step3-paste-token.png" alt="Pasting the token into AIM Controls"> -->
+        <span class="shot-icon">📷</span>
+        <span class="shot-cap">Screenshot: pasting the token into the GitHub Connection box</span>
+      </div>
+
+      <details class="mini">
+        <summary>A — make a free GitHub account (skip if you have one)</summary>
+        <ol>
+          <li>Go to <a href="https://github.com/signup">github.com/signup</a></li>
+          <li>Use any email (it isn't shown publicly), pick a username like <code>aim-johnd</code>, verify your email</li>
+        </ol>
+      </details>
+      <details class="mini">
+        <summary>B — get added to the map-files repo</summary>
+        <ol>
+          <li>Send Payden your GitHub username</li>
+          <li>Accept the email invite GitHub sends you</li>
+        </ol>
+      </details>
+      <details class="mini">
+        <summary>C — create your token</summary>
+        <div class="callout warn"><strong>Use a "classic" token</strong> (not fine-grained) — fine-grained ones can't read this repo.</div>
+        <ol>
+          <li>Go to <a href="https://github.com/settings/tokens">github.com/settings/tokens</a> → <strong>Tokens (classic)</strong></li>
+          <li><strong>Generate new token (classic)</strong></li>
+          <li>Note: <code>AIM KML reader</code> · Expiration: 1 year · check the <code>repo</code> box</li>
+          <li><strong>Generate</strong>, then <strong>copy</strong> it (starts with <code>ghp_…</code>) — shown once</li>
+        </ol>
+      </details>
+      <details class="mini">
+        <summary>D — paste it into AIM Controls</summary>
+        <ol>
+          <li>Reload Percepto, click the gear (⚙)</li>
+          <li>Scroll to <strong>GitHub Connection (KMLs)</strong> → expand → paste → <strong>Save &amp; Test</strong></li>
+          <li>Dot turns <strong style="color:var(--green)">green</strong> = connected</li>
+        </ol>
+        <div class="callout warn">Overlays not showing within ~10s? Hard reload: <code>Ctrl+Shift+R</code> (<code>⌘+Shift+R</code> on Mac).</div>
+      </details>
+    </section>
+
   </div>
-</section>
 
-<!-- STEP 1: TAMPERMONKEY -->
-<section id="tampermonkey">
-  <div class="wrap">
-    <h2>1. Install Tampermonkey</h2>
-    <p class="lede">Pick your browser. One-click install from the official store.</p>
-    <div class="browsers">
-      <a class="btn btn-browser" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Chrome / Edge / Brave</a>
-      <a class="btn btn-browser" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>
-      <a class="btn btn-browser" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>
-    </div>
+  <!-- MORE HELP -->
+  <div class="more">
+    <p class="more-title">More help</p>
 
-    <h3>Set auto-update to "Every Day"</h3>
-    <p>Tampermonkey sometimes defaults this to <strong>Never</strong>, which means you never see new versions until you go check manually. Set it once and forget it:</p>
-    <ol>
-      <li>Click the Tampermonkey icon in your browser toolbar → <strong>Dashboard</strong></li>
-      <li>Top right → <strong>Settings</strong> tab</li>
-      <li>Scroll to <strong>Userscript Update</strong></li>
-      <li>Set <strong>Check Interval</strong> to <strong>Every Day</strong> (recommended) or <strong>Every Hour</strong> if you want updates faster</li>
-      <li>Tick <strong>Update disabled scripts</strong> too if you want disabled scripts kept up to date (optional)</li>
-    </ol>
-    <div class="callout note">
-      <strong>Why this matters:</strong> the install links here use <code>@updateURL</code> + <code>@downloadURL</code> headers so Tampermonkey can pull new versions automatically — but only if the interval isn't set to Never. With "Every Day" you'll get prompted for updates within ~24h of any push, no action needed on your end.
-    </div>
-  </div>
-</section>
-
-<!-- STEP 1a: CLEANUP (optional) -->
-<section id="cleanup">
-  <div class="wrap">
-    <h2>1a. Already have older AIM scripts? <span class="muted" style="font-size: 0.7em; font-weight: 400;">(skip if first-time)</span></h2>
-    <p class="lede">If Payden previously sent you AIM scripts to paste manually into Tampermonkey, those are the old style and won't talk to the new Control Panel. Replace them.</p>
-
-    <details>
-      <summary>Back up first (in case you want to roll back)</summary>
-      <ol>
-        <li>Open the Tampermonkey <strong>Dashboard</strong> (click the Tampermonkey icon → Dashboard)</li>
-        <li>Top toolbar → <strong>Utilities</strong></li>
-        <li>Under <strong>Export</strong>, click <strong>Export to file</strong> or <strong>Export to zip</strong></li>
-        <li>Save somewhere safe — you can re-import if anything goes sideways</li>
-      </ol>
+    <details class="mini">
+      <summary>Already had older AIM scripts?</summary>
+      <p>Replace them — the old hand-pasted ones don't talk to the Control Panel. In the Tampermonkey Dashboard, delete any script starting with <code>AIM</code> or <code>Percepto</code> (trash icon), then reinstall from Step 2. To be safe, <strong>Utilities → Export to zip</strong> first.</p>
     </details>
 
-    <details>
-      <summary>Then delete every AIM-named script</summary>
-      <ol>
-        <li>In the Tampermonkey Dashboard main list, find each script starting with <code>AIM </code> or <code>Percepto </code></li>
-        <li>Click the <strong>trash icon</strong> on each to delete</li>
-        <li>When done, the list should contain no AIM or Percepto scripts — you'll reinstall them all from the next section</li>
-      </ol>
-    </details>
-  </div>
-</section>
-
-<!-- STEP 2: INSTALL SCRIPTS -->
-<section id="install">
-  <div class="wrap">
-    <h2>2. Install the userscripts</h2>
-    <p class="lede">Click each <strong>Install</strong> button. Because filenames end in <code>.user.js</code>, Tampermonkey pops up an install prompt for each — confirm. After install, scripts auto-update on their own.</p>
-
-    <div class="callout">
-      <strong>Install the Control Panel first.</strong> Other scripts register their toggles inside it when they load.
-    </div>
-
-    <div class="install-list">
-      <div class="install-row recommended">
-        <span class="install-num">1</span>
-        <div class="install-info">
-          <div class="install-name">AIM Control Panel <span class="badge">Install first</span></div>
-          <div class="install-desc">Gear icon + settings hub for every other script</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">2</span>
-        <div class="install-info">
-          <div class="install-name">AIM Map Styler</div>
-          <div class="install-desc">Outlines, buffers, KML shielding, Coverage Validator — <code>Shift+O</code></div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">3</span>
-        <div class="install-info">
-          <div class="install-name">AIM Performance Shield</div>
-          <div class="install-desc">Blocks session-replay recorder (CPU + memory leak source); weather/chat blocks; ortho perf toggles</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">4</span>
-        <div class="install-info">
-          <div class="install-name">AIM Inspector</div>
-          <div class="install-desc">Leaflet diagnostic panel — <code>Shift+I</code></div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Inspector.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">5</span>
-        <div class="install-info">
-          <div class="install-name">AIM Absolute Altitude</div>
-          <div class="install-desc"><code>Shift+A</code> to drop altitude pins</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Altitude_Tampermonkey.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">6</span>
-        <div class="install-info">
-          <div class="install-name">AIM Measure / Ruler</div>
-          <div class="install-desc"><code>Shift+R</code> for the measure tool</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Ruler_Tampermonkey.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">7</span>
-        <div class="install-info">
-          <div class="install-name">AIM Clear All</div>
-          <div class="install-desc"><code>Shift+C</code> to clear all map drawings</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Clear_All_Tampermonkey.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">8</span>
-        <div class="install-info">
-          <div class="install-name">AIM Copy Asset Name</div>
-          <div class="install-desc"><code>Shift+Ctrl+Q</code> on a hovered asset</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">9</span>
-        <div class="install-info">
-          <div class="install-name">AIM New Entity Macro</div>
-          <div class="install-desc"><code>1</code>–<code>6</code> to create, <code>Shift+S/D D/Z/X</code> for actions</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_New_Entity_Macro.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">10</span>
-        <div class="install-info">
-          <div class="install-name">AIM Bulk Mission Adder</div>
-          <div class="install-desc"><code>Shift+B</code> for bulk mission setup</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Mission_Adder.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">11</span>
-        <div class="install-info">
-          <div class="install-name">AIM Bulk Altitude Updater</div>
-          <div class="install-desc">Bulk altitude updates across missions</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Altitude_Updater.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">12</span>
-        <div class="install-info">
-          <div class="install-name">AIM Bulk Validator</div>
-          <div class="install-desc">Bulk validation pass</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_Validator.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">13</span>
-        <div class="install-info">
-          <div class="install-name">AIM Mission Bank Tools</div>
-          <div class="install-desc">Placeholder — install now to get future Mission Bank features automatically</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">14</span>
-        <div class="install-info">
-          <div class="install-name">AIM Quick Mission Editor</div>
-          <div class="install-desc">Bulk-reorder mission instructions: Ctrl+Click handles, Enter to move</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Quick_Mission_Editor.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">15</span>
-        <div class="install-info">
-          <div class="install-name">AIM Power Line Editor</div>
-          <div class="install-desc">⚡ button in map toolbar — edit distro + trans KML lines in-place: vertex move, draw, delete-line, branch-from-vertex, snap to other lines. Commits to GitHub.</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">16</span>
-        <div class="install-info">
-          <div class="install-name">AIM Map Nav</div>
-          <div class="install-desc">Keyboard map navigation — WASD pan, Q/E zoom, Alt = sprint, Space = fit-to-site. Shift+drag uses Leaflet's native box-zoom.</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">17</span>
-        <div class="install-info">
-          <div class="install-name">AIM Issues</div>
-          <div class="install-desc">🚩 button in map toolbar — flag manually-discovered issues with a polygon + note. Full status workflow (Open → Ready → Resolved/Ignored, with re-open). GitHub-synced under your GitHub identity. Affected-entities detection. Dedicated panel with filter / search / sort and Google Sheets export.</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">18</span>
-        <div class="install-info">
-          <div class="install-name">AIM Bulk User Sites</div>
-          <div class="install-desc">Admin User↔Site batch-create page only — ⚡ Bulk Fill button (or Shift+B) opens a panel to paste or search Users + Sites, add-all-matches, pin favorites, and save presets. Role defaults to Percepto Admin. Personal settings, nothing synced.</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Bulk_User_Sites.user.js">Install</a>
-      </div>
-
-      <div class="install-row">
-        <span class="install-num">19</span>
-        <div class="install-info">
-          <div class="install-name">AIM Defaults</div>
-          <div class="install-desc">Smart site navigation — pick a site and land on your default section (Site Setup), and keep your current section when switching sites instead of getting dumped on Data Map. Plus auto map-layer defaults (turn chosen layers off, bring Feeder Line on top) on each new site. All configurable in the Control Panel.</div>
-        </div>
-        <a class="btn btn-install" href="https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Defaults.user.js">Install</a>
-      </div>
-
-    </div>
-
-    <div class="callout warn">
-      <strong>Note:</strong> AIM Sidebar Resizer is temporarily unavailable (was breaking AIM load). Existing installs will auto-update to a no-op version on the next Tampermonkey check — safe to leave installed. It'll be re-added here once fixed.
-    </div>
-
-    <div class="callout note">
-      <strong>If a link doesn't auto-prompt:</strong> rare — usually means your Tampermonkey is configured to skip auto-detection. Paste the URL into Tampermonkey Dashboard → Utilities → "Import from URL", or copy the page source and paste into a new userscript (Dashboard → <strong>+</strong> tab → delete template → paste → Save).
-    </div>
-
-    <div class="callout">
-      <strong>Verify:</strong> open <code>percepto.app</code> and a site. You should see a gear icon (⚙) added to the map toolbar. Click it — that's the AIM Controls panel.
-    </div>
-  </div>
-</section>
-
-<!-- STEP 3: GITHUB TOKEN -->
-<section id="github-token">
-  <div class="wrap">
-    <h2>3. Set up the GitHub token</h2>
-    <p class="lede">Required for the Map Styler's shielding KML overlays + Coverage Validator. These features pull per-site KML data from a private GitHub repo.</p>
-
-    <div class="callout note">
-      <strong>Why GitHub?</strong> Free, widely used, owned by Microsoft. Our dev team already uses it. Your account is only used as an identity for repo permissions — no data is shared with your employer, no commits or code from you are required, and the account is yours to keep / delete whenever. The only thing you'll have access to is one private repo of shielding KML files.
-    </div>
-
-    <h3>3a. Create a GitHub account (if you don't have one)</h3>
-    <ol>
-      <li>Go to <a href="https://github.com/signup">github.com/signup</a></li>
-      <li>Use your work or personal email — either works. The email isn't shown publicly.</li>
-      <li>Pick a username (lowercase letters / digits / dashes; permanent).
-        <br><strong>Suggested:</strong> <code>aim-&lt;firstname&gt;&lt;lastInitial&gt;</code> or <code>&lt;initials&gt;-aim</code> (e.g. <code>aim-johnd</code> or <code>jd-aim</code>) — project-scoped, doesn't expose your employer.</li>
-      <li>Verify the email when GitHub sends the verification link.</li>
-    </ol>
-    <p class="muted">No payment, no further setup. <strong>Skip this step if you already have an account.</strong></p>
-
-    <h3>3b. Get added to the private repo</h3>
-    <ol>
-      <li><strong>DM / email Payden your GitHub username</strong> (just the username — usernames are public, no risk)</li>
-      <li>Watch your email for a message from GitHub titled something like <em>"@Ned-Yap invited you to Ned-Yap/aim-userscripts-data"</em>. Click <strong>View invitation</strong> → <strong>Accept invitation</strong>.</li>
-    </ol>
-    <p>After accepting, you can view the repo at <a href="https://github.com/Ned-Yap/aim-userscripts-data">github.com/Ned-Yap/aim-userscripts-data</a> (it'll 404 until then — that's expected; it's private).</p>
-
-    <details>
-      <summary>For Payden: how to add a coworker</summary>
-      <ol>
-        <li>Go to <a href="https://github.com/Ned-Yap/aim-userscripts-data/settings/access">aim-userscripts-data/settings/access</a></li>
-        <li>Click <strong>Add people</strong></li>
-        <li>Type their GitHub username, click their profile when it appears</li>
-        <li>Choose <strong>Read</strong> access (Contents read-only is all that's needed — they don't push)</li>
-        <li>Click <strong>Add NAME to this repository</strong> → GitHub sends them the invite email</li>
-      </ol>
+    <details class="mini">
+      <summary>No gear icon in the map toolbar</summary>
+      <p>Make sure Control Panel is installed and switched on in Tampermonkey, then reload the page.</p>
     </details>
 
-    <h3>3c. Generate a personal access token</h3>
-
-    <div class="callout warn">
-      <strong>Important:</strong> use a <strong>classic</strong> personal access token (not fine-grained). Fine-grained PATs can't access private repos owned by another personal account — that's a GitHub limitation for collaborators. Classic PATs work fine.
-    </div>
-
-    <ol>
-      <li>Go to <a href="https://github.com/settings/tokens">github.com/settings/tokens</a> (Settings → Developer settings → Personal access tokens → <strong>Tokens (classic)</strong>)</li>
-      <li>Click <strong>Generate new token</strong> → <strong>Generate new token (classic)</strong></li>
-      <li>Fill in:
-        <ul>
-          <li><strong>Note:</strong> <code>AIM KML reader</code> (or whatever helps you find it later)</li>
-          <li><strong>Expiration:</strong> 1 year (or whatever you prefer)</li>
-          <li><strong>Scopes:</strong> check the <code>repo</code> box (gives read access to private repos you have access to)</li>
-        </ul>
-      </li>
-      <li>Click <strong>Generate token</strong> at the bottom</li>
-      <li><strong>Copy the token</strong> (starts with <code>ghp_…</code>) — you only see it once. Lose it? Just generate a new one.</li>
-    </ol>
-
-    <details>
-      <summary>Why classic and not fine-grained?</summary>
-      <p>GitHub's newer fine-grained tokens can only access repos owned by <em>your</em> account or organizations you're a member of. Since the KML repo is owned by Payden's personal account, fine-grained tokens won't list it as an option. Classic tokens use scopes that apply across all repos you have access to.</p>
-    </details>
-  </div>
-</section>
-
-<!-- STEP 4: PASTE TOKEN -->
-<section id="paste-token">
-  <div class="wrap">
-    <h2>4. Paste the token into AIM Controls</h2>
-    <ol>
-      <li>Reload Percepto on any site</li>
-      <li>Click the gear icon (⚙) in the map toolbar</li>
-      <li>Scroll to the bottom — find <strong>GitHub Connection (KMLs)</strong></li>
-      <li>Click to expand → paste your token → <strong>Save &amp; Test</strong></li>
-      <li>Status dot should turn <strong style="color: var(--green);">green</strong> with "Connected"</li>
-    </ol>
-
-    <p class="muted">The token stays in Tampermonkey's storage on your machine — it never leaves your browser.</p>
-
-    <div class="callout warn">
-      <strong>If KMLs don't appear within ~10 seconds after a successful Save &amp; Test:</strong> do a hard reload — <code>Ctrl+Shift+R</code> (<code>⌘+Shift+R</code> on Mac). This clears cached script state from the install burst. Once it works the first time, it stays working — no future hard reloads needed.
-    </div>
-  </div>
-</section>
-
-<!-- VERIFICATION -->
-<section id="verify">
-  <div class="wrap">
-    <h2>Verification</h2>
-    <p class="lede">A working install on a site with shielding KMLs configured shows:</p>
-    <ul>
-      <li>⚙ Gear icon in the map toolbar</li>
-      <li>Press <code>Shift+O</code> → map outlines/buffers appear (Map Styler activated)</li>
-      <li>Open the panel, expand <strong>Outlines</strong> → toggle <strong>Distribution Lines</strong> on → orange/yellow power lines render under the map</li>
-      <li>Coverage Validator → <strong>Run coverage check</strong> → numbered red pins appear on any spots &gt;200ft from shielding</li>
-    </ul>
-
-    <h3>If KMLs don't appear</h3>
-    <ul>
-      <li>Check the GitHub Connection dot is <strong style="color: var(--green);">green</strong>, not red/gray</li>
-      <li>Check the browser console for <code>[AIM STYLER …] no GitHub token cached</code> warnings</li>
-      <li>Some sites have no KMLs configured yet — that's normal, you'll see <code>no … KML for site XXXX (404)</code></li>
-    </ul>
-  </div>
-</section>
-
-<!-- TROUBLESHOOTING -->
-<section id="troubleshooting">
-  <div class="wrap">
-    <h2>Troubleshooting</h2>
-
-    <details>
-      <summary>Gear icon doesn't appear in the map toolbar</summary>
-      <p>Make sure AIM Control Panel is installed and enabled in Tampermonkey. Reload the Percepto page.</p>
-    </details>
-
-    <details>
+    <details class="mini">
       <summary>Hotkeys do nothing</summary>
-      <p>Tampermonkey might be paused. Open the dashboard, make sure each AIM script is enabled (toggle in the top row).</p>
+      <p>Open the Tampermonkey Dashboard and check each AIM script is enabled.</p>
     </details>
 
-    <details>
-      <summary>Panel settings out of date / scripts look weird after lots of updates</summary>
-      <p>Hard refresh: empty cache + reload (<code>Ctrl+Shift+Delete</code> → cached images, or DevTools → Network tab → "Disable cache" while devtools open + reload).</p>
+    <details class="mini">
+      <summary>Things act weird after a bunch of updates</summary>
+      <p>Hard reload: <code>Ctrl+Shift+R</code> (<code>⌘+Shift+R</code> on Mac).</p>
     </details>
 
-    <details>
-      <summary>GitHub Connection stays gray / red</summary>
-      <p>Token isn't reaching the script. Re-paste it; make sure you copied the full <code>ghp_…</code> string with no whitespace. Check that the token has <code>repo</code> scope enabled.</p>
+    <details class="mini">
+      <summary>The Install button didn't pop anything up</summary>
+      <p>Copy the link, then in the Tampermonkey Dashboard go to <strong>Utilities → Import from URL</strong> and paste it.</p>
     </details>
 
-    <details>
-      <summary>Power lines render in the wrong place / not at all</summary>
-      <p>The site might not have KMLs uploaded yet. Ask Payden.</p>
+    <details class="mini">
+      <summary>Report a bug or ask for a feature</summary>
+      <p>Go to <a href="https://github.com/Ned-Yap/aim-userscripts-issues/issues/new/choose">the issues page</a> and pick <strong>Bug report</strong> or <strong>Feature request</strong>. You'll need access first — same as the map-files step.</p>
     </details>
   </div>
-</section>
 
-<!-- AUTO-UPDATES -->
-<section id="updates">
-  <div class="wrap">
-    <h2>Auto-updates</h2>
-    <p class="lede">Tampermonkey checks for new versions roughly daily. You'll see an update prompt when a script changes. Most updates take 10 seconds to accept.</p>
-    <p>To check manually: Tampermonkey dashboard → <strong>"Check for userscript updates"</strong> (top toolbar).</p>
-    <div class="callout warn">
-      Some updates request new browser permissions (e.g. for the Map Styler's GitHub fetch). When you see the diff highlighted in yellow, that's expected — accept it.
-    </div>
-  </div>
-</section>
-
-<!-- REPORTING BUGS -->
-<section id="bugs">
-  <div class="wrap">
-    <h2>Reporting bugs &amp; requesting features</h2>
-    <p class="lede">We use a <strong>private</strong> GitHub repo for issue tracking so screenshots, videos, and descriptions can include real site data without ending up indexable on the public internet.</p>
-    <ol>
-      <li>Go to <a href="https://github.com/Ned-Yap/aim-userscripts-issues/issues/new/choose"><strong>aim-userscripts-issues — new issue</strong></a></li>
-      <li>Pick <strong>Bug report</strong> or <strong>Feature request</strong> — both have templates that prompt you for what to include</li>
-      <li>Fill in everything you can. Console logs are the single most useful thing for bugs — open DevTools (F12) → Console → reproduce the bug → copy any <code>[AIM …]</code> lines plus any red errors.</li>
-    </ol>
-    <p>You'll need access to that repo first — same flow as the KMLs repo: send Payden your GitHub username, accept the email invite. (If you've already done that for KMLs, just ask to be added to issues too.)</p>
-  </div>
-</section>
+</div>
 
 <!-- FOOTER -->
 <footer>
   <div class="wrap">
     <div class="footer-links">
+      <a href="guide.html">What each tool does</a>
       <a href="https://github.com/Ned-Yap/aim-userscripts">Source on GitHub</a>
-      <a href="https://github.com/Ned-Yap/aim-userscripts/blob/main/CHANGELOG.md">What's changed (CHANGELOG)</a>
+      <a href="https://github.com/Ned-Yap/aim-userscripts/blob/main/CHANGELOG.md">What's changed</a>
       <a href="https://github.com/Ned-Yap/aim-userscripts-issues/issues">Report a bug</a>
     </div>
-    <div class="muted">Built by Payden · Tampermonkey + GitHub auto-updates · MIT-license-equivalent (do what you want, internally)</div>
+    <div class="muted">Built by Payden · keeps itself updated via Tampermonkey</div>
   </div>
 </footer>
 

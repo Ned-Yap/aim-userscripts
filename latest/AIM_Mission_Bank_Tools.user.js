@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.52
+// @version      0.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.52';
+    const SCRIPT_VERSION = '0.53';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2908,6 +2908,7 @@ ${placemarks}
         if (origDisplayValue != null && !isNaN(origDisplayValue)) {
             const candidates = document.querySelectorAll('.edit-instruction__form input.ant-input-number-input');
             const target = Math.round(Number(origDisplayValue));
+            console.log(`${TAG} [edit][diag] ${candidates.length} number input(s); target≈${target}; current=[${Array.from(candidates).map(i => (i.getAttribute('aria-valuenow') || i.value)).join(', ')}]`);
             for (const inp of candidates) {
                 const raw = inp.getAttribute('aria-valuenow') || inp.value;
                 const num = Math.round(Number(raw));
@@ -2959,8 +2960,17 @@ ${placemarks}
 
     function setAltValue(group, value, done, preferredInput) {
         const numInput = preferredInput || group.querySelector('input.ant-input-number-input');
-        if (!numInput) { done(false); return; }
+        if (!numInput) { console.log(`${TAG} [edit][diag] NO number input in group`); done(false); return; }
+        const before = numInput.value, beforeAria = numInput.getAttribute('aria-valuenow');
+        console.log(`${TAG} [edit][diag] target input disabled=${numInput.disabled} before value="${before}" aria="${beforeAria}" id="${numInput.id || ''}"`);
         setReactInputValue(numInput, value);
+        console.log(`${TAG} [edit][diag] after set → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}" (wanted ${value})`);
+        // Revert check: a controlled InputNumber whose React onChange never
+        // fired will roll the DOM value back to its model on the next render.
+        // If we see it snap back here, that's the smoking gun.
+        setTimeout(() => {
+            console.log(`${TAG} [edit][diag] +400ms recheck → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}"`);
+        }, 400);
         done(true);
     }
 

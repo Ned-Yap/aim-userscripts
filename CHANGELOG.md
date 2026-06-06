@@ -32,6 +32,12 @@ Brand-new script for the Django admin **User Site batch create** page (`/admin/p
 
 Personal-only (favorites/presets live in your Tampermonkey storage; nothing synced). Admin-page only — does nothing elsewhere. Dev copy in `latest/` as well.
 
+## 2026-06-05 — TDZ fixes + MBT save diagnostics (DEV)
+
+- **Perf Shield v1.14** — fixed a second load-time TDZ (`notifObserverInstalled` referenced before init); moved it up with the other pre-init state. The notification kill now initializes cleanly.
+- **Quick Mission Editor v0.3** — fixed a TDZ crash in the launcher (`launcherLabel` used before its `const`), which was throwing on every Mission Bank load and could block the launcher.
+- **Mission Bank Tools v0.53** — snapshot altitude still wasn't saving after v0.52 (value visibly changes but reverts). Added always-on `[edit][diag]` logging to the commit path (candidate inputs + their values, the chosen input's before/after value, and a +400ms revert check) to pinpoint whether it's matching the wrong input, the value reverting, or save not committing. No behavior change yet — diagnostics to nail the fix.
+
 ## 2026-06-05 — Mission Bank Tools v0.52 (DEV) — snapshot altitude actually saves
 
 Fixed SUM-table altitude commits not sticking — the step would revert to its original value (0) the moment the instruction saved, before you even saved the mission. Root cause: Ant InputNumber holds the typed value in an internal buffer and only commits it to the form on **blur**; MBT's value-setter dispatched `input`+`change` but no blur, so Save read the original. Added the trailing `blur` (matching the Asset Inspector's working Apply). Note: you still save the overall mission yourself after the queue finishes — MBT commits each step into the mission draft. Dev-only in `latest/`.

@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="What each AIM userscript does, in plain English. Tap any tool for how to use it and what it's good for.">
+<title>AIM Userscripts — What Each Tool Does</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elevated: #161b22;
+    --bg-card: #1c2128;
+    --border: #30363d;
+    --border-strong: #4d5460;
+    --text: #e6edf3;
+    --text-muted: #8d96a0;
+    --text-faint: #6e7681;
+    --cyan: #5fdde5;
+    --cyan-dim: #3a999f;
+    --green: #5fff5f;
+    --yellow: #ffd700;
+    --code-bg: #010409;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  kbd {
+    background: var(--code-bg); color: var(--green);
+    padding: 2px 8px; border-radius: 5px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.82em; border: 1px solid var(--border-strong);
+    white-space: nowrap;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(180deg, #0d1117 0%, #161b22 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 64px 0 48px; text-align: center;
+  }
+  .hero h1 { font-size: 2.4rem; margin: 0 0 10px; font-weight: 700; letter-spacing: -0.02em; }
+  .hero p { font-size: 1.1rem; color: var(--text-muted); max-width: 560px; margin: 0 auto 24px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 22px; border-radius: 8px; font-weight: 600;
+    background: transparent; color: var(--text); border: 1px solid var(--border-strong);
+    cursor: pointer; font-size: 0.98rem;
+  }
+  .btn:hover { text-decoration: none; background: var(--bg-card); }
+
+  /* Group */
+  .group { margin: 56px 0 0; }
+  .group-head { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .group-emoji { font-size: 1.6rem; }
+  .group h2 { font-size: 1.5rem; margin: 0; color: var(--cyan); font-weight: 600; }
+  .group-sub { color: var(--text-muted); margin: 0 0 20px; font-size: 1rem; }
+
+  /* Card grid */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+
+  /* Card is an expandable */
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden; transition: border-color 0.15s;
+  }
+  .card[open] { border-color: var(--cyan-dim); }
+  .card > summary {
+    padding: 20px; cursor: pointer; user-select: none; list-style: none;
+  }
+  .card > summary::-webkit-details-marker { display: none; }
+  .card-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .card-emoji { font-size: 1.4rem; }
+  .card-name { font-weight: 700; font-size: 1.08rem; }
+  .card-chev { margin-left: auto; color: var(--cyan); transition: transform 0.15s; font-size: 0.85em; }
+  .card[open] .card-chev { transform: rotate(180deg); }
+  .card-what { color: var(--text); margin: 0 0 14px; }
+  .card-how {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 0.9rem; color: var(--text-muted);
+    border-top: 1px solid var(--border); padding-top: 12px;
+  }
+  .card-how .how-label { color: var(--text-faint); text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.06em; }
+  .pill {
+    display: inline-block; font-size: 0.68rem; color: var(--yellow);
+    background: rgba(255,215,0,0.08); border: 1px solid rgba(255,215,0,0.4);
+    padding: 1px 7px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .tap-hint { font-size: 0.78rem; color: var(--text-faint); margin-top: 10px; }
+  .card[open] .tap-hint { display: none; }
+
+  /* Detail panel revealed on expand */
+  .card-detail {
+    padding: 0 20px 20px; border-top: 1px solid var(--border); margin-top: -1px;
+  }
+  .card-detail h4 {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--cyan); margin: 18px 0 8px;
+  }
+  .card-detail ol, .card-detail ul { margin: 0; padding-left: 20px; }
+  .card-detail li { margin: 5px 0; font-size: 0.94rem; }
+
+  /* Footer */
+  footer {
+    background: var(--bg-elevated); border-top: 1px solid var(--border);
+    padding: 36px 0; margin-top: 64px;
+    color: var(--text-muted); font-size: 0.9rem; text-align: center;
+  }
+  footer a { color: var(--cyan); }
+  .footer-links { display: flex; gap: 24px; justify-content: center; margin-bottom: 14px; flex-wrap: wrap; }
+
+  @media (max-width: 600px) {
+    .hero h1 { font-size: 1.9rem; }
+    .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- HERO -->
+<header class="hero">
+  <div class="wrap">
+    <h1>What each tool does</h1>
+    <p>Every AIM tool, in plain English — grouped by what you're trying to get done. <strong>Tap any tool</strong> for how to use it.</p>
+    <a href="index.html" class="btn">← Back to install</a>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- START HERE -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">⚙️</span><h2>Start here</h2></div>
+    <p class="group-sub">The home base. Install this one first — the others plug into it.</p>
+    <div class="cards">
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">⚙️</span><span class="card-name">Control Panel</span><span class="card-chev">▾</span></div>
+          <p class="card-what">One settings window for all the tools. Turn things on/off, change hotkeys, and paste your GitHub token here.</p>
+          <div class="card-how"><span class="how-label">Open</span> click the <strong>⚙ gear</strong> in the map toolbar</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Click the <strong>⚙ gear</strong> in the map toolbar to open it.</li>
+            <li>Each tool has its own section — flip a switch to turn a feature on or off.</li>
+            <li>Changed something by accident? Click the <strong>↺</strong> arrow to reset just that setting.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Turning off a tool you're not using right now.</li>
+            <li>Changing a hotkey if it clashes with something else.</li>
+            <li>Pasting your GitHub token (bottom of the panel).</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ON THE MAP -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">🗺️</span><h2>Drawing &amp; measuring on the map</h2></div>
+    <p class="group-sub">Everyday tools for marking up and measuring the map.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🗺️</span><span class="card-name">Map Styler</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Shows the power-line shielding overlays and checks that everything is covered. The big one most people use daily.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+O</kbd> to toggle</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+O</kbd> to show or hide the overlays.</li>
+            <li>Open the <strong>Outlines</strong> section in the ⚙ panel to turn distribution / transmission lines on or off.</li>
+            <li>Run the <strong>Coverage check</strong> to drop numbered pins anywhere that's too far from shielding.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Confirming a site's missions cover all the power lines.</li>
+            <li>Spotting gaps more than ~200&nbsp;ft from shielding.</li>
+            <li>Recoloring or hiding lines to cut clutter.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">📏</span><span class="card-name">Measure / Ruler</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Measure how far it is between points on the map.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+R</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+R</kbd> to start measuring.</li>
+            <li>Click a start point, then click an end point.</li>
+            <li>Read the distance; press <kbd>Shift+R</kbd> again to exit.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Checking the distance between two assets.</li>
+            <li>Sanity-checking how wide a buffer is.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">📍</span><span class="card-name">Absolute Altitude</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Drop pins that show the real altitude at a spot.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+A</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+A</kbd>, then click the map to drop a pin.</li>
+            <li>The pin shows the altitude there.</li>
+            <li>Right-click a pin to delete it.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Checking the ground height before setting a mission altitude.</li>
+            <li>Comparing altitude across a few spots.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">➕</span><span class="card-name">New Entity Macro</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Create map entities super fast with the number keys instead of clicking through menus.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>1</kbd>–<kbd>6</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press a number <kbd>1</kbd>–<kbd>6</kbd> to instantly start that entity type.</li>
+            <li>Use the shift shortcuts for actions (e.g. save).</li>
+            <li>Delete is double-press (<kbd>Shift+D</kbd> twice) so you can't do it by accident.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Stamping out lots of entities quickly on a new site.</li>
+            <li>Keeping your hands on the keyboard instead of the menus.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🧹</span><span class="card-name">Clear All</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Wipes all your temporary map drawings in one press.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+C</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+C</kbd> to clear your drawings, measurements, and pins.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Resetting the map after measuring or sketching.</li>
+            <li>Clearing clutter before a screenshot.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- LOOK THINGS UP -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">🔍</span><h2>Looking things up</h2></div>
+    <p class="group-sub">Quickly see details about what's on a site.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🔍</span><span class="card-name">Asset Inspector</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Right-click anything on the map to see its details. Also adds a site-wide summary table and a stats page with charts.</p>
+          <div class="card-how"><span class="how-label">Use</span> right-click an entity, or <kbd>Shift+Ctrl+Q</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Right-click any entity for a popup with its name, ID, altitude and notes. Click a number to copy it.</li>
+            <li>Use <strong>Find in Map Entities</strong> to jump to it in Percepto's sidebar.</li>
+            <li>Click <strong>SUM</strong> (next to ALT/VAL) for the full table; click <strong>📊</strong> for charts and stats.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Grabbing an asset name or altitude in one click.</li>
+            <li>Auditing a whole site at a glance.</li>
+            <li>Exporting the entity list to a spreadsheet (CSV / Sheets).</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">📋</span><span class="card-name">Mission Bank Tools</span><span class="card-chev">▾</span></div>
+          <p class="card-what">A summary panel and altitude / ground-height tools for the Mission Bank screen.</p>
+          <div class="card-how"><span class="how-label">Use</span> opens in the Mission Bank</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Open the Mission Bank — the summary panel appears automatically.</li>
+            <li>Right-click a mission for its details.</li>
+            <li>Use the batch tools to view/adjust altitude and see ground height per step.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Reviewing all of a site's missions in one place.</li>
+            <li>Checking altitude-above-ground for each step.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- BULK EDITING -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">✏️</span><h2>Editing lots at once</h2></div>
+    <p class="group-sub">Save time when you'd otherwise repeat the same change over and over.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">📦</span><span class="card-name">Bulk Mission Adder</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Add a whole batch of missions in one go.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+B</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+B</kbd> to open the panel.</li>
+            <li>Set up your missions and run it — they're added together.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Standing up a brand-new site with lots of missions.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">⬆️</span><span class="card-name">Bulk Altitude Updater</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Change the altitude across many missions at once.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+E</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+E</kbd>.</li>
+            <li>Pick the missions and the new altitude, then apply.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>A site-wide altitude change without editing each mission by hand.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">✅</span><span class="card-name">Bulk Validator</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Validate a pile of entities in one pass instead of one at a time.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+V</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+V</kbd> to run a validation pass.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Validating a whole site quickly.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🔀</span><span class="card-name">Quick Mission Editor</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Reorder the steps inside a mission quickly.</p>
+          <div class="card-how"><span class="how-label">Use</span> opens in the mission editor</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Open a mission's instructions.</li>
+            <li><kbd>Ctrl+Click</kbd> the step handles to pick them.</li>
+            <li>Press <kbd>Enter</kbd> to move them into place.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Re-sequencing a mission without slow drag-and-drop.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- GETTING AROUND -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">🧭</span><h2>Getting around faster</h2></div>
+    <p class="group-sub">Less clicking, less waiting, fewer wrong pages.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🧭</span><span class="card-name">Defaults</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Sends you to the right page automatically and tidies up map layers on every site.</p>
+          <div class="card-how"><span class="how-label">Use</span> automatic · settings in the ⚙ panel</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>It just works once installed.</li>
+            <li>In the ⚙ panel, pick the section you want to land on (e.g. Site Setup).</li>
+            <li>Switching sites keeps you on the same section instead of bouncing to Data Map.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Always landing on your usual page when you open a site.</li>
+            <li>Old "past mission" links auto-jumping to the mission log.</li>
+            <li>Turning off layers you never want, and keeping the Feeder Line on top.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🎮</span><span class="card-name">Map Nav</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Move the map with your keyboard like a game.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> · <kbd>Q</kbd>/<kbd>E</kbd> zoom</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li><kbd>W A S D</kbd> to pan, <kbd>Q</kbd>/<kbd>E</kbd> to zoom out/in.</li>
+            <li>Hold <kbd>Alt</kbd> to move faster (sprint).</li>
+            <li>Press <kbd>Space</kbd> to fit the whole site in view.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Zipping around a big site while reviewing.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- POWER LINE DATA -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">⚡</span><h2>Power-line map data</h2></div>
+    <p class="group-sub">For the folks who maintain the shielding lines themselves.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">⚡</span><span class="card-name">Power Line Editor</span><span class="pill">Advanced</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Edit the actual power-line map files right on the map and save changes for everyone.</p>
+          <div class="card-how"><span class="how-label">Open</span> the <strong>⚡</strong> button in the map toolbar</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Click the <strong>⚡</strong> button, then turn on edit mode.</li>
+            <li>Drag points to move them, draw new lines, or delete lines.</li>
+            <li><kbd>Ctrl+Click</kbd> a point to branch off it; lines snap to nearby ones.</li>
+            <li>Save to commit the change for the whole team.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Fixing a power line that's in the wrong place.</li>
+            <li>Adding a new branch or splitting a line.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- FLAGGING -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">🚩</span><h2>Reporting &amp; flagging</h2></div>
+    <p class="group-sub">Mark problems so the team can track them.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🚩</span><span class="card-name">Issues</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Circle a spot on the map and leave a note about a problem. The whole team sees it, with a status.</p>
+          <div class="card-how"><span class="how-label">Open</span> the <strong>🚩</strong> button in the map toolbar</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Click the <strong>🚩</strong> button and draw a shape around the problem area.</li>
+            <li>Add a note and a priority.</li>
+            <li>Track it through Open → Ready → Resolved (it can be re-opened).</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Flagging a coverage gap or data error with its exact location.</li>
+            <li>Keeping a shared to-do list of site fixes.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <!-- BEHIND THE SCENES -->
+  <div class="group">
+    <div class="group-head"><span class="group-emoji">🛠️</span><h2>Setup &amp; behind the scenes</h2></div>
+    <p class="group-sub">Quietly make things faster, smoother, or easier to manage.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🛡️</span><span class="card-name">Performance Shield</span><span class="card-chev">▾</span></div>
+          <p class="card-what">Blocks background stuff that slows the page down and eats memory. Just makes Percepto snappier.</p>
+          <div class="card-how"><span class="how-label">Use</span> automatic · settings in the ⚙ panel</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>It works automatically once installed.</li>
+            <li>In the ⚙ panel, the <strong>Performance</strong> section lets you toggle what's blocked (screen recording, chat, weather).</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>A laggy or memory-hungry site — keep the background blocks on.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">👥</span><span class="card-name">Bulk User Sites</span><span class="pill">Admin</span><span class="card-chev">▾</span></div>
+          <p class="card-what">On the admin batch page, add users to many sites at once.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+B</kbd> on the admin batch page</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Open the admin User↔Site batch page and press <kbd>Shift+B</kbd>.</li>
+            <li>Paste or search a list of people and a list of sites.</li>
+            <li>Click <strong>Add all matches</strong>; pin favorites and save presets for next time.</li>
+            <li>Role defaults to Percepto Admin.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Onboarding a batch of new users to lots of sites at once.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🩺</span><span class="card-name">Inspector</span><span class="pill">Advanced</span><span class="card-chev">▾</span></div>
+          <p class="card-what">A diagnostic panel for troubleshooting when something's acting up — mostly for Payden.</p>
+          <div class="card-how"><span class="how-label">Use</span> <kbd>Shift+I</kbd></div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Press <kbd>Shift+I</kbd> to open the diagnostic panel.</li>
+            <li>Use it to check the map state when reporting a bug.</li>
+          </ol>
+          <h4>Good for</h4>
+          <ul>
+            <li>Figuring out why something isn't working.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="footer-links">
+      <a href="index.html">Install guide</a>
+      <a href="https://github.com/Ned-Yap/aim-userscripts">Source on GitHub</a>
+      <a href="https://github.com/Ned-Yap/aim-userscripts-issues/issues">Report a bug</a>
+    </div>
+    <div class="muted">Built by Payden · keeps itself updated via Tampermonkey</div>
+  </div>
+</footer>
+
+</body>
+</html>
