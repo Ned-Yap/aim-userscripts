@@ -32,6 +32,10 @@ Brand-new script for the Django admin **User Site batch create** page (`/admin/p
 
 Personal-only (favorites/presets live in your Tampermonkey storage; nothing synced). Admin-page only — does nothing elsewhere. Dev copy in `latest/` as well.
 
+## 2026-06-05 — Mission Bank Tools v0.54 (DEV) — force the form-model commit
+
+Diagnostics (v0.53) proved the altitude input was set correctly to the new value and *held* it — but Save still persisted the original. That means the synthetic `input` event wasn't reaching Ant InputNumber's React `onChange`, so the form's committed value never changed (box showed new, model held old). v0.54 calls the input's React `onChange` prop **directly** (same fiber/props trick as the radio handler) and adds an **Enter** keypress to commit + mark the field dirty. Also logs the Save button's disabled state to confirm. Test path unchanged: queue → Commit → check the step holds before saving the mission.
+
 ## 2026-06-05 — TDZ fixes + MBT save diagnostics (DEV)
 
 - **Perf Shield v1.14** — fixed a second load-time TDZ (`notifObserverInstalled` referenced before init); moved it up with the other pre-init state. The notification kill now initializes cleanly.

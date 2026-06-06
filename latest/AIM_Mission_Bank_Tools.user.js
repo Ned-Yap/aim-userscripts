@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.53
+// @version      0.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.53';
+    const SCRIPT_VERSION = '0.54';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2869,6 +2869,25 @@ ${placemarks}
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        // v0.54: the box visibly shows the new value and HOLDS it, but Save was
+        // still persisting the original — diagnostics proved the right input was
+        // set and didn't revert. That means the synthetic 'input' event isn't
+        // reaching Ant InputNumber's React onChange, so the FORM MODEL never
+        // updated (display ≠ committed value). Call the input's React onChange
+        // prop directly (same fiber/props trick clickReactControl uses for
+        // radios) to force the controlled update into the form.
+        try {
+            const k = Object.keys(input).find(key => key.startsWith('__reactProps$'));
+            if (k && input[k] && typeof input[k].onChange === 'function') {
+                input[k].onChange({ target: input, currentTarget: input, preventDefault() {}, stopPropagation() {} });
+            }
+        } catch (e) { /* non-fatal — DOM events above are the fallback */ }
+        // Enter commits Ant InputNumber's typed buffer to the form model AND
+        // marks the field dirty (so a "disabled-until-changed" Save enables).
+        const ent = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+        input.dispatchEvent(new KeyboardEvent('keydown', ent));
+        input.dispatchEvent(new KeyboardEvent('keyup', ent));
+        // Blur is still the canonical Ant commit trigger — keep it last.
         input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
     }
 
@@ -3121,14 +3140,16 @@ ${placemarks}
                             if (!ok) { done(false, 'altitude input not found'); return; }
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
-                                if (!saveBtn) { done(false, 'save button not found'); return; }
+                                if (!saveBtn) { console.log(`${TAG} [edit][diag] save button NOT found`); done(false, 'save button not found'); return; }
+                                console.log(`${TAG} [edit][diag] save btn found disabled=${saveBtn.disabled} aria-disabled=${saveBtn.getAttribute('aria-disabled')} class="${saveBtn.className}"`);
                                 saveBtn.click();
                                 let saveAttempts = 0;
                                 const saveInterval = setInterval(() => {
                                     saveAttempts++;
-                                    if (saveAttempts > 25) { clearInterval(saveInterval); done(false, 'save did not complete'); return; }
+                                    if (saveAttempts > 25) { clearInterval(saveInterval); console.log(`${TAG} [edit][diag] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
                                     if (!document.querySelector('.edit-instruction')) {
                                         clearInterval(saveInterval);
+                                        console.log(`${TAG} [edit][diag] dialog closed after ~${saveAttempts * 200}ms — save click registered`);
                                         done(true);
                                     }
                                 }, 200);
