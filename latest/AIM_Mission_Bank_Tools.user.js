@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.66
+// @version      0.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.66';
+    const SCRIPT_VERSION = '0.67';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3155,7 +3155,11 @@ ${placemarks}
             if ((m.app_id != null && body.app_id != null && m.app_id === body.app_id) ||
                 (m.name != null && body.name != null && m.name === body.name)) { missionId = mid; changes = pendingAltitudes[mid]; break; }
         }
-        if (!changes) return null;
+        if (!changes) {
+            const totalPending = Object.values(pendingAltitudes).reduce((a, o) => a + Object.keys(o || {}).length, 0);
+            console.warn(`${TAG} [fast-save] mission-save seen for "${body.name}" (app_id=${body.app_id}) but NO staged changes matched it (${totalPending} staged across ${Object.keys(pendingAltitudes).length} mission(s)). Did the page reload after staging?`);
+            return null;
+        }
         let applied = 0, skipped = 0; const used = new Set();
         for (const instrId in changes) {
             const ch = changes[instrId];
@@ -3200,6 +3204,7 @@ ${placemarks}
     // Fail-closed: any throw → null (original save goes through untouched).
     function handleMissionSave(bodyStr) {
         if (fastBulkSave) {
+            console.log(`${TAG} [fast-save] mission-save request intercepted — fastBulkSave ON, checking staged changes…`);
             try { return patchMissionSaveBody(bodyStr); }
             catch (e) { console.warn(`${TAG} [fast-save] patch error — sending ORIGINAL save unchanged:`, e); return null; }
         }
