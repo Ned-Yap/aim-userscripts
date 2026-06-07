@@ -293,11 +293,9 @@
         <a class="btn btn-browser" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>
         <a class="btn btn-browser" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>
       </div>
-      <div class="shot">
-        <!-- Replace this block with: <img src="img/step1-store.png" alt="Tampermonkey in the store"> -->
-        <span class="shot-icon">📷</span>
-        <span class="shot-cap">Screenshot: the "Add to browser" button in the store</span>
-      </div>
+      <div class="shot"><img src="img/step1-store.png" alt="The Add to Chrome button on the Tampermonkey store page"></div>
+      <p class="muted" style="font-size:0.95rem; margin: 4px 0 6px;">Once it installs, look for the Tampermonkey icon up near your address bar (click the puzzle-piece 🧩 if it's hidden):</p>
+      <div class="shot"><img src="img/step1-Tampermonkey_Extension_Icon.png" alt="The Tampermonkey icon in the browser toolbar"></div>
       <details class="mini">
         <summary>Optional: turn on automatic updates</summary>
         <ol>
@@ -316,11 +314,7 @@
         <h2>Install the tools</h2>
       </div>
       <p class="lead">Click an <strong>Install</strong> button below. Tampermonkey pops up — click <strong>Install</strong> there too. That's it.</p>
-      <div class="shot">
-        <!-- Replace with: <img src="img/step2-install-popup.png" alt="Tampermonkey install popup"> -->
-        <span class="shot-icon">📷</span>
-        <span class="shot-cap">Screenshot: the Tampermonkey install popup</span>
-      </div>
+      <div class="shot"><img src="img/step2-install-popup.png" alt="The Tampermonkey install page with its Install button"></div>
       <div class="callout">
         <strong>Install Control Panel first</strong> — it's the home base everything else plugs into. You don't need all of them; grab what you want.
       </div>
@@ -430,11 +424,7 @@
       <div class="callout note">
         <strong>Did it work?</strong> Open a site on <code>percepto.app</code> — you should see a gear icon (⚙) in the map toolbar.
       </div>
-      <div class="shot">
-        <!-- Replace with: <img src="img/step2-gear.png" alt="Gear icon in the map toolbar"> -->
-        <span class="shot-icon">📷</span>
-        <span class="shot-cap">Screenshot: the ⚙ gear icon in the map toolbar</span>
-      </div>
+      <div class="shot"><img src="img/step2-gear.png" alt="The gear icon in Percepto's map toolbar"></div>
     </section>
 
     <!-- STEP 3 -->
@@ -444,11 +434,7 @@
         <h2>Add a GitHub token</h2>
       </div>
       <p class="lead">A one-time "key" that unlocks the power-line overlays. <strong>Don't use those? You can skip this.</strong></p>
-      <div class="shot">
-        <!-- Replace with: <img src="img/step3-paste-token.png" alt="Pasting the token into AIM Controls"> -->
-        <span class="shot-icon">📷</span>
-        <span class="shot-cap">Screenshot: pasting the token into the GitHub Connection box</span>
-      </div>
+      <div class="shot"><img src="img/step3-paste-token.png" alt="The GitHub Connection box in AIM Controls showing a green Connected dot"></div>
 
       <details class="mini">
         <summary>A — make a free GitHub account (skip if you have one)</summary>
@@ -560,7 +546,8 @@
   var MS_URL = "https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js";
   var PS_URL = "https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js";
 
-  function shot(cap) {
+  function shot(cap, src) {
+    if (src) return '<div class="shot"><img src="' + src + '" alt="' + cap + '"></div>';
     return '<div class="shot"><span class="shot-icon">📷</span><span class="shot-cap">' + cap + '</span></div>';
   }
 
@@ -570,7 +557,7 @@
     "tm-check": {
       phase: 1,
       title: "Get Tampermonkey",
-      body: "<p>Tampermonkey is a free browser add-on that runs the AIM tools. Its icon is a black square with a little monkey face — usually near your address bar (you may have to click the puzzle-piece 🧩 menu to find it).</p>" + shot("The Tampermonkey icon in the toolbar"),
+      body: "<p>Tampermonkey is a free browser add-on that runs the AIM tools. Its icon is a black square with a little monkey face — usually near your address bar (you may have to click the puzzle-piece 🧩 menu to find it).</p>" + shot("The Tampermonkey icon in the browser toolbar", "img/step1-Tampermonkey_Extension_Icon.png"),
       q: "Do you already see the Tampermonkey icon in your browser?",
       answers: [
         { label: "Yes, I see it", tone: "yes", next: "tools-start" },
@@ -585,7 +572,7 @@
         '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo">Chrome / Edge / Brave</a>' +
         '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/">Firefox</a>' +
         '<a class="btn btn-browser" target="_blank" rel="noopener" href="https://apps.apple.com/app/tampermonkey/id1482490089">Safari</a>' +
-        "</div>",
+        "</div>" + shot("The Add to Chrome button on the Tampermonkey store page", "img/step1-store.png"),
       q: "Done — do you see the Tampermonkey icon in your browser now?",
       answers: [
         { label: "Yes, it's there", tone: "yes", next: "tools-start" },
@@ -625,7 +612,7 @@
       title: "Install the Control Panel",
       body: "<p>Start with the <strong>Control Panel</strong> — it's the home base every other tool plugs into. Click the green button; when a Tampermonkey tab opens, click its big <strong>Install</strong> button too.</p>" +
         '<a class="wiz-inline-install" target="_blank" rel="noopener" href="' + CP_URL + '">⬇ Install Control Panel</a>' +
-        shot("The Tampermonkey install page with its Install button"),
+        shot("The Tampermonkey install page with its Install button", "img/step2-install-popup.png"),
       q: "Did a Tampermonkey install page open when you clicked?",
       answers: [
         { label: "Yes, I installed it", tone: "yes", next: "tools-more" },
@@ -675,7 +662,7 @@
     "tools-verify": {
       phase: 2,
       title: "Make sure it's working",
-      body: "<p>Open a site on <code>percepto.app</code> and look at the map toolbar.</p>" + shot("The ⚙ gear icon in the map toolbar"),
+      body: "<p>Open a site on <code>percepto.app</code> and look at the map toolbar.</p>" + shot("The gear icon in Percepto's map toolbar", "img/step2-gear.png"),
       q: "Do you see a gear icon ⚙ in the map toolbar?",
       answers: [
         { label: "Yes, there's a gear", tone: "yes", next: "token-intro" },
@@ -787,7 +774,7 @@
         "<li>Reload Percepto and click the gear (⚙).</li>" +
         "<li>Scroll to <strong>GitHub Connection (KMLs)</strong> → expand.</li>" +
         "<li>Paste your token → <strong>Save &amp; Test</strong>.</li></ol>" +
-        shot("The GitHub Connection box with a green Connected dot"),
+        shot("The GitHub Connection box in AIM Controls showing a green Connected dot", "img/step3-paste-token.png"),
       q: "Did the dot turn green / say Connected?",
       answers: [
         { label: "Yes, it's green!", tone: "yes", next: "done" },
