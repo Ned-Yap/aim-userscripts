@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.59
+// @version      0.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.59';
+    const SCRIPT_VERSION = '0.60';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2949,7 +2949,7 @@ ${placemarks}
         if (origDisplayValue != null && !isNaN(origDisplayValue)) {
             const candidates = document.querySelectorAll('.edit-instruction__form input.ant-input-number-input');
             const target = Math.round(Number(origDisplayValue));
-            console.log(`${TAG} [edit][diag] ${candidates.length} number input(s); target≈${target}; current=[${Array.from(candidates).map(i => (i.getAttribute('aria-valuenow') || i.value)).join(', ')}]`);
+            dlog(`${TAG} [edit] ${candidates.length} number input(s); target≈${target}; current=[${Array.from(candidates).map(i => (i.getAttribute('aria-valuenow') || i.value)).join(', ')}]`);
             for (const inp of candidates) {
                 const raw = inp.getAttribute('aria-valuenow') || inp.value;
                 const num = Math.round(Number(raw));
@@ -3001,20 +3001,14 @@ ${placemarks}
 
     function setAltValue(group, value, done, preferredInput) {
         const numInput = preferredInput || group.querySelector('input.ant-input-number-input');
-        if (!numInput) { console.log(`${TAG} [edit][diag] NO number input in group`); done(false); return; }
-        const before = numInput.value, beforeAria = numInput.getAttribute('aria-valuenow');
-        console.log(`${TAG} [edit][diag] target input disabled=${numInput.disabled} before value="${before}" aria="${beforeAria}" id="${numInput.id || ''}"`);
+        if (!numInput) { console.warn(`${TAG} [edit] no number input in group`); done(false); return; }
         setReactInputValue(numInput, value);
         // The decisive commit: push the numeric value into the InputNumber
         // component's own onChange so Percepto's form model actually updates.
+        // This is THE fix — Ant v5's display-level events don't reach the form.
         const committed = commitInputNumberViaFiber(numInput, Number(value));
-        console.log(`${TAG} [edit][diag] after set → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}" (wanted ${value}) · componentOnChange=${committed}`);
-        // Revert check: a controlled InputNumber whose React onChange never
-        // fired will roll the DOM value back to its model on the next render.
-        // If we see it snap back here, that's the smoking gun.
-        setTimeout(() => {
-            console.log(`${TAG} [edit][diag] +400ms recheck → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}"`);
-        }, 400);
+        dlog(`${TAG} [edit] set → "${numInput.value}" (wanted ${value}) · componentOnChange=${committed}`);
+        if (!committed) console.warn(`${TAG} [edit] componentOnChange=false — form may not have taken the value`);
         done(true);
     }
 
@@ -3125,7 +3119,7 @@ ${placemarks}
             // the dots element is back in the live DOM.
             clearHoverStateForInstruction(instructionId);
             showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
-            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 600);
+            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 300);
         });
     }
 
@@ -3179,33 +3173,33 @@ ${placemarks}
                         // altitude — much more robust than label text.
                         setAltitudeInEditDialog(change.value, (ok) => {
                             if (!ok) { done(false, 'altitude input not found'); return; }
-                            // v0.58: SLOW DOWN. Give React ~1.1s to commit the new
-                            // value into the form model AND let you watch the value
-                            // land before we save. Saving too fast read the original
-                            // and the dialog blinked shut like a cancel.
-                            showToast(`Set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'} — saving…`, '#14d2dc', 1500);
+                            // v0.60: the commit is synchronous now (componentOnChange
+                            // calls the InputNumber's onChange directly), so we only
+                            // need a short beat for React to re-render before saving —
+                            // not the v0.58 diagnostic 1.1s. The save-close poll below
+                            // is what guarantees correctness, so this can be tight.
+                            dlog(`${TAG} [edit] set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'}, saving…`);
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
-                                if (!saveBtn) { console.log(`${TAG} [edit][diag] save button NOT found`); done(false, 'save button not found'); return; }
-                                console.log(`${TAG} [edit][diag] clicking Save (react onClick) disabled=${saveBtn.disabled}`);
+                                if (!saveBtn) { console.warn(`${TAG} [edit] save button not found`); done(false, 'save button not found'); return; }
                                 // Click through React's onClick — native click can
                                 // close the dialog without firing the save handler.
                                 clickReactButton(saveBtn);
                                 let saveAttempts = 0;
                                 const saveInterval = setInterval(() => {
                                     saveAttempts++;
-                                    if (saveAttempts > 30) { clearInterval(saveInterval); console.log(`${TAG} [edit][diag] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
+                                    if (saveAttempts > 40) { clearInterval(saveInterval); console.warn(`${TAG} [edit] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
                                     if (!document.querySelector('.edit-instruction')) {
                                         clearInterval(saveInterval);
-                                        console.log(`${TAG} [edit][diag] dialog closed after ~${saveAttempts * 200}ms — saved`);
+                                        dlog(`${TAG} [edit] dialog closed after ~${saveAttempts * 100}ms — saved`);
                                         done(true);
                                     }
-                                }, 200);
-                            }, 1100);
+                                }, 100);
+                            }, 250);
                         }, origDisplay);
-                    }, 200);
-                }, 400);
-            }, 200);
+                    }, 150);
+                }, 200);
+            }, 150);
         };
         if (existingEdit) {
             // Close existing dialog first
