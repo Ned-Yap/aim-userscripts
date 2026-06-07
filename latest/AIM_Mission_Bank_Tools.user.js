@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.61
+// @version      0.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.61';
+    const SCRIPT_VERSION = '0.62';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3046,6 +3046,103 @@ ${placemarks}
     }
 
     // ========================================================
+    // Read-only save-diff probe
+    // ========================================================
+    // Watches the outgoing mission save (POST /available_app/) and diffs every
+    // instruction field against the cached original. MODIFIES NOTHING — passes
+    // the save through untouched and only logs. Purpose: learn whether Percepto's
+    // edit form RECOMPUTES dependent fields (value2 / extra_options / …) when you
+    // change a value. If a save ever shows only value1 changing, a fast "patch
+    // the save body" path would produce identical data (safe). If dependent
+    // fields move too, a body-patch would desync — stay per-step. General by
+    // design: diffs ALL fields, so it answers this for any field we bulk-edit later.
+    function findCachedMissionForPayload(body) {
+        for (const sid in missionsBySite) {
+            const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = arr.find(mm => mm && (
+                (mm.app_id != null && body.app_id != null && mm.app_id === body.app_id) ||
+                (mm.name != null && body.name != null && mm.name === body.name)
+            ));
+            if (m) return m;
+        }
+        return null;
+    }
+    function probeSavePayload(bodyStr) {
+        try {
+            const body = JSON.parse(bodyStr);
+            if (!body || !Array.isArray(body.instructions)) return;
+            const m = findCachedMissionForPayload(body);
+            if (!m || !Array.isArray(m.instructions)) {
+                console.log(`${TAG} [diff-probe] save "${body.name}" — no cached original to diff (open the SUM panel for this site first)`);
+                return;
+            }
+            const orig = m.instructions, usedO = new Set(), rows = [];
+            let recompute = false;
+            body.instructions.forEach((bi, i) => {
+                if (!bi || !bi.location || bi.location.lat == null) return;
+                let oi = null;
+                for (let j = 0; j < orig.length; j++) {
+                    if (usedO.has(j)) continue;
+                    const o = orig[j];
+                    if (o && o.location && o.location.lat != null &&
+                        Math.abs(Number(o.location.lat) - Number(bi.location.lat)) < 1e-9 &&
+                        Math.abs(Number(o.location.lng) - Number(bi.location.lng)) < 1e-9) { oi = o; usedO.add(j); break; }
+                }
+                if (!oi) return;
+                const diffs = [];
+                if (oi.value1 != null && Number(oi.value1) !== Number(bi.value1)) diffs.push(`value1 ${oi.value1}→${bi.value1}`);
+                if (oi.value2 != null && Number(oi.value2) !== Number(bi.value2)) diffs.push(`value2 ${oi.value2}→${bi.value2}`);
+                const oe = JSON.stringify(oi.extra_options || {}), be = JSON.stringify(bi.extra_options || {});
+                if (oe !== be) diffs.push(`extra_options ${oe} → ${be}`);
+                const op = JSON.stringify(oi.polygon_points || null), bp = JSON.stringify(bi.polygon_points || null);
+                if (op !== bp) diffs.push(`polygon_points changed`);
+                if (diffs.length) {
+                    if (diffs.some(d => !d.startsWith('value1 '))) recompute = true;
+                    rows.push(`#${i} (${bi.type_name || 'type ' + bi.type}) ${diffs.join(' · ')}`);
+                }
+            });
+            if (!rows.length) { console.log(`${TAG} [diff-probe] save "${body.name}" — no field changes vs cached original`); return; }
+            console.log(`${TAG} [diff-probe] save "${body.name}" — ${rows.length} step(s) changed:`);
+            rows.forEach(r => console.log(`${TAG} [diff-probe]   ${r}`));
+            console.log(`${TAG} [diff-probe] VERDICT: ${recompute
+                ? '⚠ dependent fields ALSO changed → the form recomputes; a body-patch interceptor WOULD DESYNC. Stay per-step (or replicate the recompute).'
+                : '✓ ONLY value1 changed → a body-patch interceptor would produce identical data. Safe to build for speed.'}`);
+        } catch (e) { console.warn(`${TAG} [diff-probe] error`, e); }
+    }
+    let saveProbeInstalled = false;
+    function installSaveDiffProbe() {
+        if (saveProbeInstalled) return;
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        if (win.__aim_mb_diffprobe) { saveProbeInstalled = true; return; }
+        const SAVE_RE = /\/available_app\/(?:$|\?|#)/;
+        try {
+            const origFetch = win.fetch;
+            if (typeof origFetch === 'function') {
+                win.fetch = function(input, init) {
+                    try {
+                        const url = (typeof input === 'string') ? input : (input && input.url);
+                        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+                        if (method === 'POST' && url && SAVE_RE.test(url) && init && typeof init.body === 'string') probeSavePayload(init.body);
+                    } catch (e) {}
+                    return origFetch.apply(this, arguments); // read-only: original args, unchanged
+                };
+            }
+        } catch (e) {}
+        try {
+            const XHR = win.XMLHttpRequest;
+            const origOpen = XHR.prototype.open, origSend = XHR.prototype.send;
+            XHR.prototype.open = function(method, url) { this.__aim_mb_m = (method || '').toUpperCase(); this.__aim_mb_u = url; return origOpen.apply(this, arguments); };
+            XHR.prototype.send = function(b) {
+                try { if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u) && typeof b === 'string') probeSavePayload(b); } catch (e) {}
+                return origSend.apply(this, arguments); // read-only: original body, unchanged
+            };
+        } catch (e) {}
+        win.__aim_mb_diffprobe = true;
+        saveProbeInstalled = true;
+        console.log(`${TAG} save-diff probe armed (READ-ONLY — saves are logged + diffed, never modified)`);
+    }
+
+    // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
     function queueAltitudeChange(missionId, instructionId, value, unit) {
@@ -3421,6 +3518,11 @@ ${placemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
+            // READ-ONLY probe: logs + diffs each mission save vs the cached
+            // original (never modifies the save). Tells us whether the form
+            // recomputes dependent fields, which decides if a fast body-patch
+            // path is safe. Harmless to leave on.
+            installSaveDiffProbe();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
