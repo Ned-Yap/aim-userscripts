@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.67
+// @version      0.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.67';
+    const SCRIPT_VERSION = '0.68';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3257,9 +3257,12 @@ ${placemarks}
     // Pending altitude changes — queue + commit
     // ========================================================
     function findCachedMissionById(missionId) {
+        // String-tolerant: pendingAltitudes keys are strings (object keys), but
+        // mission.id is a number — a strict === never matched, so the fast-save
+        // mission lookup found nothing ("NO staged changes matched"). Compare as strings.
         for (const sid in missionsBySite) {
             const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
-            const m = arr.find(mm => mm && mm.id === missionId);
+            const m = arr.find(mm => mm && String(mm.id) === String(missionId));
             if (m) return m;
         }
         return null;
