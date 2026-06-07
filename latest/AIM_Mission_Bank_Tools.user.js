@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.60
+// @version      0.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.60';
+    const SCRIPT_VERSION = '0.61';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3119,7 +3119,7 @@ ${placemarks}
             // the dots element is back in the live DOM.
             clearHoverStateForInstruction(instructionId);
             showToast(`Committing ${idx + 1}/${entries.length}…`, '#14d2dc');
-            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 300);
+            setTimeout(() => runCommitQueue(missionId, entries, idx + 1), 600);
         });
     }
 
@@ -3173,11 +3173,11 @@ ${placemarks}
                         // altitude — much more robust than label text.
                         setAltitudeInEditDialog(change.value, (ok) => {
                             if (!ok) { done(false, 'altitude input not found'); return; }
-                            // v0.60: the commit is synchronous now (componentOnChange
-                            // calls the InputNumber's onChange directly), so we only
-                            // need a short beat for React to re-render before saving —
-                            // not the v0.58 diagnostic 1.1s. The save-close poll below
-                            // is what guarantees correctness, so this can be tight.
+                            // v0.61: KEEP the ~1.1s beat. It is NOT just for show —
+                            // Percepto's form needs time to process the altitude
+                            // change (recompute/validate) before Save reads it. v0.60
+                            // trimmed this to 250ms and it broke (Save read the old
+                            // value). This is the timing the user confirmed working.
                             dlog(`${TAG} [edit] set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'}, saving…`);
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
@@ -3188,18 +3188,18 @@ ${placemarks}
                                 let saveAttempts = 0;
                                 const saveInterval = setInterval(() => {
                                     saveAttempts++;
-                                    if (saveAttempts > 40) { clearInterval(saveInterval); console.warn(`${TAG} [edit] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
+                                    if (saveAttempts > 30) { clearInterval(saveInterval); console.warn(`${TAG} [edit] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
                                     if (!document.querySelector('.edit-instruction')) {
                                         clearInterval(saveInterval);
-                                        dlog(`${TAG} [edit] dialog closed after ~${saveAttempts * 100}ms — saved`);
+                                        dlog(`${TAG} [edit] dialog closed after ~${saveAttempts * 200}ms — saved`);
                                         done(true);
                                     }
-                                }, 100);
-                            }, 250);
+                                }, 200);
+                            }, 1100);
                         }, origDisplay);
-                    }, 150);
-                }, 200);
-            }, 150);
+                    }, 200);
+                }, 400);
+            }, 200);
         };
         if (existingEdit) {
             // Close existing dialog first
