@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.64
+// @version      0.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.64';
+    const SCRIPT_VERSION = '0.65';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -152,6 +152,12 @@
     // Shape: { [missionId]: { [instructionId]: { value: number, unit: 'imperial'|'metric' } } }
     const pendingAltitudes = {};
     let committingChanges = false;
+    // Fast bulk save: when ON, staged altitude changes are spliced into the
+    // user's outgoing mission save (POST /available_app/) in one shot instead
+    // of the per-step dialog automation. SESSION-SCOPED + default OFF — resets
+    // to false on every reload, so a save is never modified unless the user
+    // deliberately flips it on this session. See installSaveHook / patchMissionSaveBody.
+    let fastBulkSave = false;
 
     // Committed-but-not-yet-refetched altitudes. After a successful
     // queue commit, we update Percepto's per-step state but our
@@ -1948,8 +1954,12 @@
                         if (n === 0) return '';
                         return `<div class="aim-mb-pending-banner">
                             <span><strong>${n}</strong> altitude change${n === 1 ? '' : 's'} pending</span>
-                            <button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n}</button>
+                            <button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n} (per-step)</button>
                             <button class="aim-mb-tbtn" data-discard-pending>Discard</button>
+                            <label style="display:inline-flex;align-items:center;gap:5px;margin-left:auto;cursor:pointer;white-space:nowrap;${fastBulkSave ? 'color:#14d2dc;font-weight:700;' : ''}" title="ON: these staged changes are spliced into your next mission Save in one shot (fast bulk). Snapshot → altitude; Navigate → altitude + drop freezone-min. Strict match, fail-closed. OFF by default; resets each reload.">
+                                <input type="checkbox" data-fast-save ${fastBulkSave ? 'checked' : ''}> ⚡ Fast bulk save
+                            </label>
+                            ${fastBulkSave ? '<span style="color:#14d2dc;font-size:10px;white-space:nowrap;">→ apply on your next mission Save</span>' : ''}
                         </div>`;
                     })()}
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
@@ -2148,6 +2158,14 @@
             };
         });
         // Commit pending changes
+        const fastSaveCb = panelEl.querySelector('[data-fast-save]');
+        if (fastSaveCb) fastSaveCb.onchange = () => {
+            fastBulkSave = !!fastSaveCb.checked;
+            showToast(fastBulkSave
+                ? '⚡ Fast bulk save ON — staged changes apply when you Save the mission'
+                : 'Fast bulk save OFF — back to per-step Commit', fastBulkSave ? '#14d2dc' : '#888', 4000);
+            renderDetailView(missionId);
+        };
         const commitBtn = panelEl.querySelector('[data-commit-pending]');
         if (commitBtn) commitBtn.onclick = () => {
             const n = countPending(missionId);
@@ -3116,6 +3134,78 @@ ${placemarks}
                 : '✓ ONLY value1 changed → a body-patch interceptor would produce identical data. Safe to build for speed.'}`);
         } catch (e) { console.warn(`${TAG} [diff-probe] error`, e); }
     }
+
+    // ---- Fast bulk save: patch the outgoing mission save (toggle-gated) ------
+    // Splice staged altitude changes into the POST /available_app/ body. Per-type
+    // rules learned from the probe: snapshot (type 6) → set value1; navigate
+    // (type 1) → set value1 + extra_options.shouldUseFreezoneMinAlt=false (the
+    // exact recompute the form does). Strict UNIQUE match by location + original
+    // value (the payload has no instruction ids). Returns a modified body string,
+    // or null to send the ORIGINAL unchanged (fail-closed). Only touches value1
+    // (+ the one navigate flag) on staged steps — nothing else.
+    function patchMissionSaveBody(bodyStr) {
+        const body = JSON.parse(bodyStr);
+        if (!body || !Array.isArray(body.instructions)) return null;
+        let missionId = null, changes = null;
+        for (const mid in pendingAltitudes) {
+            if (!Object.keys(pendingAltitudes[mid] || {}).length) continue;
+            const m = findCachedMissionById(mid);
+            if (!m) continue;
+            if ((m.app_id != null && body.app_id != null && m.app_id === body.app_id) ||
+                (m.name != null && body.name != null && m.name === body.name)) { missionId = mid; changes = pendingAltitudes[mid]; break; }
+        }
+        if (!changes) return null;
+        let applied = 0, skipped = 0; const used = new Set();
+        for (const instrId in changes) {
+            const ch = changes[instrId];
+            if (ch.newM == null || ch.lat == null) { skipped++; console.warn(`${TAG} [fast-save] skip ${instrId} — missing match data`); continue; }
+            let idx = -1, matchCount = 0;
+            for (let i = 0; i < body.instructions.length; i++) {
+                if (used.has(i)) continue;
+                const bi = body.instructions[i];
+                if (!bi || !bi.location || bi.location.lat == null) continue;
+                const locOk = Math.abs(Number(bi.location.lat) - ch.lat) < 1e-7 && Math.abs(Number(bi.location.lng) - ch.lng) < 1e-7;
+                const valOk = (ch.origM == null) || (typeof bi.value1 === 'number' && Math.abs(bi.value1 - ch.origM) < 0.5);
+                if (locOk && valOk) { matchCount++; if (idx < 0) idx = i; }
+            }
+            // STRICT: only patch on a single unambiguous match.
+            if (idx < 0 || matchCount !== 1) { skipped++; console.warn(`${TAG} [fast-save] skip step (lat=${ch.lat}, origM=${ch.origM}) — ${matchCount} matches, not 1`); continue; }
+            const bi = body.instructions[idx];
+            bi.value1 = Math.round(ch.newM * 100) / 100;
+            if (bi.type === 1) { // navigate: setting a custom altitude drops freezone-min
+                if (!bi.extra_options || typeof bi.extra_options !== 'object') bi.extra_options = {};
+                bi.extra_options.shouldUseFreezoneMinAlt = false;
+            }
+            used.add(idx); applied++;
+            console.log(`${TAG} [fast-save]   #${idx} (type ${bi.type}) value1→${bi.value1}${bi.type === 1 ? ' + freezone-min off' : ''}`);
+        }
+        if (applied === 0) return null;
+        // Reflect into cache + clear the staged queue for this mission.
+        try {
+            const m = findCachedMissionById(missionId);
+            if (m) for (const instrId in changes) {
+                const instr = (m.instructions || []).find(i => i && i.id === Number(instrId));
+                if (instr && changes[instrId].newM != null) instr.value1 = Math.round(changes[instrId].newM * 100) / 100;
+            }
+        } catch (e) {}
+        discardAllPendingFor(missionId);
+        const msg = `⚡ Fast save — patched ${applied}${skipped ? ` (skipped ${skipped} — see console)` : ''} altitude${applied === 1 ? '' : 's'}`;
+        showToast(msg, skipped ? '#ff9800' : '#5fff5f', 5000);
+        console.log(`${TAG} [fast-save] patched ${applied}, skipped ${skipped} for "${body.name}"`);
+        return JSON.stringify(body);
+    }
+
+    // Hook router: returns a modified body to send, or null = send original.
+    // Fail-closed: any throw → null (original save goes through untouched).
+    function handleMissionSave(bodyStr) {
+        if (fastBulkSave) {
+            try { return patchMissionSaveBody(bodyStr); }
+            catch (e) { console.warn(`${TAG} [fast-save] patch error — sending ORIGINAL save unchanged:`, e); return null; }
+        }
+        try { if (DEBUG()) probeSavePayload(bodyStr); } catch (e) {} // read-only diff log only when debugging
+        return null;
+    }
+
     let saveProbeInstalled = false;
     function installSaveDiffProbe() {
         if (saveProbeInstalled) return;
@@ -3129,9 +3219,12 @@ ${placemarks}
                     try {
                         const url = (typeof input === 'string') ? input : (input && input.url);
                         const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-                        if (method === 'POST' && url && SAVE_RE.test(url) && init && typeof init.body === 'string') probeSavePayload(init.body);
+                        if (method === 'POST' && url && SAVE_RE.test(url) && init && typeof init.body === 'string') {
+                            const patched = handleMissionSave(init.body);
+                            if (patched) init = Object.assign({}, init, { body: patched });
+                        }
                     } catch (e) {}
-                    return origFetch.apply(this, arguments); // read-only: original args, unchanged
+                    return origFetch.apply(this, arguments);
                 };
             }
         } catch (e) {}
@@ -3140,21 +3233,46 @@ ${placemarks}
             const origOpen = XHR.prototype.open, origSend = XHR.prototype.send;
             XHR.prototype.open = function(method, url) { this.__aim_mb_m = (method || '').toUpperCase(); this.__aim_mb_u = url; return origOpen.apply(this, arguments); };
             XHR.prototype.send = function(b) {
-                try { if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u) && typeof b === 'string') probeSavePayload(b); } catch (e) {}
-                return origSend.apply(this, arguments); // read-only: original body, unchanged
+                try {
+                    if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u) && typeof b === 'string') {
+                        const patched = handleMissionSave(b);
+                        if (patched) return origSend.call(this, patched);
+                    }
+                } catch (e) {}
+                return origSend.apply(this, arguments);
             };
         } catch (e) {}
         win.__aim_mb_diffprobe = true;
         saveProbeInstalled = true;
-        console.log(`${TAG} save-diff probe armed (READ-ONLY — saves are logged + diffed, never modified)`);
+        console.log(`${TAG} save hook armed — Fast bulk save is OFF by default (read-only) until you toggle it on`);
     }
 
     // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
+    function findCachedMissionById(missionId) {
+        for (const sid in missionsBySite) {
+            const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = arr.find(mm => mm && mm.id === missionId);
+            if (m) return m;
+        }
+        return null;
+    }
     function queueAltitudeChange(missionId, instructionId, value, unit) {
         if (!pendingAltitudes[missionId]) pendingAltitudes[missionId] = {};
-        pendingAltitudes[missionId][instructionId] = { value, unit };
+        // Stash what the fast-save interceptor needs to match this step in the
+        // save payload (which has no instruction ids): the new value in METERS,
+        // plus the step's original altitude + location. Harmless for the
+        // per-step path, which only reads {value, unit}.
+        const newM = unit === 'imperial' ? (Number(value) / 3.28084) : Number(value);
+        let origM = null, lat = null, lng = null;
+        const m = findCachedMissionById(missionId);
+        const instr = m && (m.instructions || []).find(i => i && i.id === Number(instructionId));
+        if (instr) {
+            if (typeof instr.value1 === 'number') origM = instr.value1;
+            if (instr.location && instr.location.lat != null) { lat = Number(instr.location.lat); lng = Number(instr.location.lng); }
+        }
+        pendingAltitudes[missionId][instructionId] = { value, unit, newM, origM, lat, lng };
     }
     function discardPendingChange(missionId, instructionId) {
         if (pendingAltitudes[missionId]) {
