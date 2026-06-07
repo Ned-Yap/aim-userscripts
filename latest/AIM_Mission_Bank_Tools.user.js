@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.57
+// @version      0.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.57';
+    const SCRIPT_VERSION = '0.58';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2866,19 +2866,18 @@ ${placemarks}
     // working Apply does exactly this; ported here.
     function setReactInputValue(input, value) {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        // v0.57: FOCUS first. Ant v5 InputNumber only commits its buffer to the
-        // form on blur-after-focus; a blur with no prior focus is a no-op, which
-        // is why the box showed the value but Save read the original. Mimic a
-        // real edit: focus → set → input → blur.
-        try { input.focus(); } catch (e) {}
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        // v0.58: do NOT focus()-then-blur. v0.57 did, and Percepto's edit dialog
+        // closes on the input blur — that's why the step "opened then instantly
+        // closed" like a cancel. The form commit is handled by
+        // commitInputNumberViaFiber (the InputNumber component onChange), which
+        // doesn't need a blur. We still dispatch a bubbling blur event (no prior
+        // focus, so harmless) only to satisfy any listener that expects one.
         input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
-        // NOTE (v0.55): do NOT dispatch a synthetic Enter here. v0.54 did, to
-        // force the commit — but the Quick Mission Editor (now that its own TDZ
-        // is fixed) listens for Enter on this page and popped its move dialog.
-        // The real commit is handled by commitInputNumberViaFiber in setAltValue.
+        // NOTE (v0.55): no synthetic Enter — the Quick Mission Editor listens
+        // for Enter on this page and would pop its move dialog.
     }
 
     // The inner `.ant-input-number-input` events update Ant's display but do
@@ -3032,6 +3031,22 @@ ${placemarks}
         if (lbl) lbl.click(); else el.click();
     }
 
+    // Click a button through its React onClick handler. Native .click() on
+    // Percepto's Ant v5 buttons doesn't always invoke React's onClick (so the
+    // dialog can close without actually saving — "acts like cancel"). Call the
+    // handler directly, with a native click as fallback. Returns true if fired.
+    function clickReactButton(btn) {
+        if (!btn) return false;
+        const k = Object.keys(btn).find(key => key.startsWith('__reactProps$'));
+        if (k && btn[k] && typeof btn[k].onClick === 'function') {
+            try {
+                btn[k].onClick({ preventDefault(){}, stopPropagation(){}, nativeEvent: {}, currentTarget: btn, target: btn });
+                return true;
+            } catch (e) { console.warn(`${TAG} [edit] react onClick threw, falling back to native click`, e); }
+        }
+        try { btn.click(); return true; } catch (e) { return false; }
+    }
+
     // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
@@ -3160,22 +3175,29 @@ ${placemarks}
                         // altitude — much more robust than label text.
                         setAltitudeInEditDialog(change.value, (ok) => {
                             if (!ok) { done(false, 'altitude input not found'); return; }
+                            // v0.58: SLOW DOWN. Give React ~1.1s to commit the new
+                            // value into the form model AND let you watch the value
+                            // land before we save. Saving too fast read the original
+                            // and the dialog blinked shut like a cancel.
+                            showToast(`Step ${idx + 1}/${entries.length}: set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'} — saving…`, '#14d2dc', 1500);
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
                                 if (!saveBtn) { console.log(`${TAG} [edit][diag] save button NOT found`); done(false, 'save button not found'); return; }
-                                console.log(`${TAG} [edit][diag] save btn found disabled=${saveBtn.disabled} aria-disabled=${saveBtn.getAttribute('aria-disabled')} class="${saveBtn.className}"`);
-                                saveBtn.click();
+                                console.log(`${TAG} [edit][diag] clicking Save (react onClick) disabled=${saveBtn.disabled}`);
+                                // Click through React's onClick — native click can
+                                // close the dialog without firing the save handler.
+                                clickReactButton(saveBtn);
                                 let saveAttempts = 0;
                                 const saveInterval = setInterval(() => {
                                     saveAttempts++;
-                                    if (saveAttempts > 25) { clearInterval(saveInterval); console.log(`${TAG} [edit][diag] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
+                                    if (saveAttempts > 30) { clearInterval(saveInterval); console.log(`${TAG} [edit][diag] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
                                     if (!document.querySelector('.edit-instruction')) {
                                         clearInterval(saveInterval);
-                                        console.log(`${TAG} [edit][diag] dialog closed after ~${saveAttempts * 200}ms — save click registered`);
+                                        console.log(`${TAG} [edit][diag] dialog closed after ~${saveAttempts * 200}ms — saved`);
                                         done(true);
                                     }
                                 }, 200);
-                            }, 250);
+                            }, 1100);
                         }, origDisplay);
                     }, 200);
                 }, 400);
