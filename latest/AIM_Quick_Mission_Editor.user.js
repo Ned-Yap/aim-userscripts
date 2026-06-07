@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Quick Mission Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @description  Bulk-reorder mission instructions via React fiber walk. Ctrl+Click handles to select, Enter to open the move dialog.
@@ -44,7 +44,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-quick-mission-editor';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const LARGE_MOVE_THRESHOLD = 20; // moves of this many or more get a confirm() prompt
     const TAG = '[AIM MB EDITOR]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1078,7 +1078,11 @@
             // Ant-aware input guard — blocks Enter while typing in Ant inputs,
             // selects, content-editables, role="textbox" divs, etc. Without
             // this, Enter in a Percepto search/dropdown opens the move modal.
-            if (isTypingTarget(document.activeElement)) return;
+            // v0.4: check e.target too, not just activeElement — another script's
+            // input may blur itself synchronously on Enter (e.g. Mission Bank
+            // Tools' inline altitude editor), moving activeElement off the input
+            // before this bubble-phase handler runs. e.target stays the input.
+            if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
             const total = getAllDraggables().length;
             const pendingGroups = selectedGroups.map(g => ({ ids: [...g.ids], label: g.label }));
             selectedGroups = []; clearHighlights(); refreshBubbleBar();
@@ -1100,7 +1104,7 @@
             if (e.key !== 'Escape') return;
             if (!masterEnabled) return;
             if (isBusy || document.getElementById('aqme-input-overlay')) return;
-            if (isTypingTarget(document.activeElement)) return;
+            if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
             selectedGroups = []; clearHighlights(); removeDropMarker(); refreshBubbleBar();
             hud.style.display = 'none';
             showToast('Cancelled', '#888', 1500);

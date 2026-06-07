@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.62
+// @version      0.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.62';
+    const SCRIPT_VERSION = '0.63';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2263,10 +2263,17 @@
         input.onkeydown = (e) => {
             if (e.key === 'Enter' || e.key === 'Tab') {
                 e.preventDefault();
+                // stopPropagation: this Enter belongs to our inline editor, NOT
+                // the Quick Mission Editor's document-level Enter handler (which
+                // would otherwise pop its move dialog). We blur() synchronously
+                // below, so by the time the event bubbled to QME, activeElement
+                // would no longer be this input and QME's guard would miss it.
+                e.stopPropagation();
                 advanceAfter = true;
                 input.blur();
             } else if (e.key === 'Escape') {
                 e.preventDefault();
+                e.stopPropagation();
                 input.onblur = null;
                 renderDetailView(missionId);
             }
