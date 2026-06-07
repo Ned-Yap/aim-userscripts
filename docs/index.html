@@ -100,7 +100,11 @@
   }
   .shot .shot-icon { font-size: 2rem; opacity: 0.7; }
   .shot .shot-cap { font-size: 0.92rem; }
-  .shot img { max-width: 100%; border-radius: 12px; display: block; }
+  /* When a real image is in place, drop the placeholder chrome — the images already
+     carry their own border + shadow. */
+  .shot:has(img) { border: none; background: none; padding: 0; min-height: 0; }
+  .shot img { max-width: 100%; display: block; margin: 0 auto; }
+  .wiz-body .shot:has(img) { min-height: 0; }
 
   /* Browser row */
   .browsers { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
