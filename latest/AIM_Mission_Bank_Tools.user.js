@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.56
+// @version      0.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.56';
+    const SCRIPT_VERSION = '0.57';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2150,13 +2150,9 @@
         // Commit pending changes
         const commitBtn = panelEl.querySelector('[data-commit-pending]');
         if (commitBtn) commitBtn.onclick = () => {
-            // v0.56: the old per-step dialog automation never reliably committed
-            // (Percepto's React form won't take a scripted value). Staged changes
-            // now apply via the save-interceptor when YOU save the mission, so
-            // this button just confirms what's staged + reminds you to save.
             const n = countPending(missionId);
-            if (n === 0) { showToast('No staged altitude changes', '#888'); return; }
-            showToast(`${n} altitude change${n === 1 ? '' : 's'} staged → click Save on the mission in Percepto and they'll be applied automatically.`, '#14d2dc', 5000);
+            if (n > 5 && !confirm(`Commit ${n} altitude changes? This opens each step in the editor, sets the value, and clicks Save on the step — ~2s per step. You still save the overall mission yourself afterward.`)) return;
+            commitPendingChanges(missionId);
         };
         // Discard pending changes
         const discardBtn = panelEl.querySelector('[data-discard-pending]');
@@ -2870,6 +2866,11 @@ ${placemarks}
     // working Apply does exactly this; ported here.
     function setReactInputValue(input, value) {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        // v0.57: FOCUS first. Ant v5 InputNumber only commits its buffer to the
+        // form on blur-after-focus; a blur with no prior focus is a no-op, which
+        // is why the box showed the value but Save read the original. Mimic a
+        // real edit: focus → set → input → blur.
+        try { input.focus(); } catch (e) {}
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -3034,141 +3035,10 @@ ${placemarks}
     // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
-    // Find a cached mission by its id across all loaded sites.
-    function findCachedMissionById(missionId) {
-        for (const sid in missionsBySite) {
-            const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
-            const m = arr.find(mm => mm && mm.id === missionId);
-            if (m) return m;
-        }
-        return null;
-    }
-
     function queueAltitudeChange(missionId, instructionId, value, unit) {
         if (!pendingAltitudes[missionId]) pendingAltitudes[missionId] = {};
-        // The save payload (POST /available_app/) stores altitude as
-        // instructions[].value1 in METERS and carries NO instruction ids — it's
-        // positional. So the save-interceptor matches each staged change by the
-        // instruction's LOCATION + original altitude. Stash both here, plus the
-        // new value already converted to meters.
-        const newM = unit === 'imperial' ? (Number(value) / 3.28084) : Number(value);
-        let origM = null, lat = null, lng = null;
-        const m = findCachedMissionById(missionId);
-        const instr = m && (m.instructions || []).find(i => i && i.id === Number(instructionId));
-        if (instr) {
-            if (typeof instr.value1 === 'number') origM = instr.value1;
-            if (instr.location && instr.location.lat != null) { lat = Number(instr.location.lat); lng = Number(instr.location.lng); }
-        }
-        pendingAltitudes[missionId][instructionId] = { value, unit, newM, origM, lat, lng };
+        pendingAltitudes[missionId][instructionId] = { value, unit };
     }
-    // ---- Save interceptor (the reliable path) -------------------------------
-    // Percepto's "Save mission" sends POST /available_app/ with the WHOLE
-    // mission as JSON. The per-instruction "Save" is a client-side draft we
-    // could never script reliably. So instead of touching the draft, we rewrite
-    // the outgoing mission-save body in flight: when the user saves the mission,
-    // we splice the staged altitudes into instructions[].value1 (meters),
-    // matching each by location + original value (the payload has no ids).
-    const SAVE_URL_RE = /\/available_app\/(?:$|\?|#)/;
-    function patchMissionSaveBody(bodyStr) {
-        let body;
-        try { body = JSON.parse(bodyStr); } catch (e) { return null; }
-        if (!body || !Array.isArray(body.instructions)) return null;
-        // Which staged mission is this save for? Prefer app_id, fall back to name.
-        let missionId = null, changes = null;
-        for (const mid in pendingAltitudes) {
-            if (!Object.keys(pendingAltitudes[mid] || {}).length) continue;
-            const m = findCachedMissionById(mid);
-            if (!m) continue;
-            const appMatch = (m.app_id != null && body.app_id != null) && (m.app_id === body.app_id);
-            const nameMatch = (m.name != null && body.name != null) && (m.name === body.name);
-            if (appMatch || nameMatch) { missionId = mid; changes = pendingAltitudes[mid]; break; }
-        }
-        if (!changes) return null;
-        let applied = 0;
-        const used = new Set();
-        for (const instrId in changes) {
-            const ch = changes[instrId];
-            if (ch.newM == null || ch.lat == null) continue;
-            let idx = -1;
-            for (let i = 0; i < body.instructions.length; i++) {
-                if (used.has(i)) continue;
-                const bi = body.instructions[i];
-                if (!bi || !bi.location || bi.location.lat == null) continue;
-                const latOk = Math.abs(Number(bi.location.lat) - ch.lat) < 1e-7;
-                const lngOk = Math.abs(Number(bi.location.lng) - ch.lng) < 1e-7;
-                if (!latOk || !lngOk) continue;
-                const valOk = (ch.origM == null) || (typeof bi.value1 === 'number' && Math.abs(bi.value1 - ch.origM) < 0.5);
-                if (valOk) { idx = i; break; }
-            }
-            if (idx >= 0) {
-                body.instructions[idx].value1 = Math.round(ch.newM * 100) / 100;
-                used.add(idx); applied++;
-            } else {
-                console.warn(`${TAG} [save-patch] no body match for staged step (lat=${ch.lat}, origM=${ch.origM})`);
-            }
-        }
-        if (applied === 0) return null;
-        // Reflect the saved values into our cache so the SUM table updates, then
-        // clear the staged changes for this mission.
-        try {
-            const m = findCachedMissionById(missionId);
-            if (m) for (const instrId in changes) {
-                const instr = (m.instructions || []).find(i => i && i.id === Number(instrId));
-                if (instr && changes[instrId].newM != null) instr.value1 = Math.round(changes[instrId].newM * 100) / 100;
-            }
-        } catch (e) {}
-        discardAllPendingFor(missionId);
-        try { showToast(`✓ Patched mission save — ${applied} altitude${applied === 1 ? '' : 's'} updated`, '#5fff5f', 4000); } catch (e) {}
-        console.log(`${TAG} [save-patch] spliced ${applied} altitude(s) into mission save for ${body.name}`);
-        return JSON.stringify(body);
-    }
-
-    let saveInterceptorInstalled = false;
-    function installSaveInterceptor() {
-        if (saveInterceptorInstalled) return;
-        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-        if (win.__aim_mb_save_patched) { saveInterceptorInstalled = true; return; }
-        // fetch
-        try {
-            const origFetch = win.fetch;
-            if (typeof origFetch === 'function') {
-                win.fetch = function(input, init) {
-                    try {
-                        const url = (typeof input === 'string') ? input : (input && input.url);
-                        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-                        if (method === 'POST' && url && SAVE_URL_RE.test(url) && init && typeof init.body === 'string') {
-                            const patched = patchMissionSaveBody(init.body);
-                            if (patched) init = Object.assign({}, init, { body: patched });
-                        }
-                    } catch (e) { console.warn(`${TAG} [save-patch] fetch hook error:`, e); }
-                    return origFetch.apply(this, arguments);
-                };
-            }
-        } catch (e) { console.warn(`${TAG} [save-patch] fetch patch failed:`, e); }
-        // XHR (axios uses this)
-        try {
-            const XHR = win.XMLHttpRequest;
-            const origOpen = XHR.prototype.open, origSend = XHR.prototype.send;
-            XHR.prototype.open = function(method, url) {
-                this.__aim_mb_method = (method || '').toUpperCase();
-                this.__aim_mb_url = url;
-                return origOpen.apply(this, arguments);
-            };
-            XHR.prototype.send = function(bodyArg) {
-                try {
-                    if (this.__aim_mb_method === 'POST' && this.__aim_mb_url && SAVE_URL_RE.test(this.__aim_mb_url) && typeof bodyArg === 'string') {
-                        const patched = patchMissionSaveBody(bodyArg);
-                        if (patched) return origSend.call(this, patched);
-                    }
-                } catch (e) { console.warn(`${TAG} [save-patch] xhr hook error:`, e); }
-                return origSend.apply(this, arguments);
-            };
-        } catch (e) { console.warn(`${TAG} [save-patch] xhr patch failed:`, e); }
-        win.__aim_mb_save_patched = true;
-        saveInterceptorInstalled = true;
-        console.log(`${TAG} save interceptor armed — staged altitudes apply on the next mission save`);
-    }
-
     function discardPendingChange(missionId, instructionId) {
         if (pendingAltitudes[missionId]) {
             delete pendingAltitudes[missionId][instructionId];
@@ -3531,11 +3401,6 @@ ${placemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             installRightClickHandler();
-            // Arm the mission-save interceptor — staged altitude changes get
-            // spliced into the outgoing POST /available_app/ when the user
-            // saves the mission. The save fires from this iframe's React app,
-            // so we patch fetch/XHR here.
-            installSaveInterceptor();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
