@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.63
+// @version      0.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.63';
+    const SCRIPT_VERSION = '0.64';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3377,6 +3377,11 @@ ${placemarks}
                 valCell = `<td><span class="aim-mb-alt-editable" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Click to edit altitude. Right-click to copy raw value.">${escapeHtml(val)}</span></td>`;
             }
         } else {
+            // v0.64 diag: why isn't this step's altitude editable? Dump the raw
+            // altitude fields for navigate steps so we can wire up nav editing.
+            if (s && s.type_name === 'navigate') {
+                dlog(`${TAG} [navalt] navigate not editable — value1=${JSON.stringify(s.value1)} value1_name=${JSON.stringify(s.value1_name)} value2=${JSON.stringify(s.value2)} value2_name=${JSON.stringify(s.value2_name)} keys=[${Object.keys(s).join(',')}]`);
+            }
             valCell = `<td>${escapeHtml(val)}</td>`;
         }
         // Location cell — clickable link to Google Maps
