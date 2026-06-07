@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.58
+// @version      0.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.58';
+    const SCRIPT_VERSION = '0.59';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2892,16 +2892,20 @@ ${placemarks}
             const fk = Object.keys(input).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
             if (!fk) return false;
             let fiber = input[fk], depth = 0;
-            while (fiber && depth < 24) {
-                const props = fiber.memoizedProps || (fiber.stateNode && fiber.stateNode.props);
-                // InputNumber's onChange takes the value directly (number|string),
-                // not a DOM event. Distinguish it from the inner input's
-                // event-style onChange by the numeric-field props it carries.
-                if (props && typeof props.onChange === 'function' &&
-                    ('step' in props || 'precision' in props || 'controls' in props ||
-                     'stringMode' in props || 'max' in props || 'min' in props)) {
-                    props.onChange(numericValue);
-                    return true;
+            // Walk up. The inner <input> and wrapper <div>s are HOST fibers
+            // (fiber.type is a string like 'input'/'div'). The Ant/rc InputNumber
+            // is a COMPONENT fiber (fiber.type is a function/object). Its onChange
+            // takes the committed value directly — that's the one that updates
+            // Percepto's form. v0.59: target "first component fiber with onChange"
+            // (the old numeric-prop heuristic didn't match Ant v5 → componentOnChange=false).
+            while (fiber && depth < 30) {
+                const props = fiber.memoizedProps;
+                const isHost = typeof fiber.type === 'string';
+                if (!isHost && props && typeof props.onChange === 'function') {
+                    try { props.onChange(numericValue); return true; } catch (e) {
+                        // Some wrappers expect an event-shaped arg; try that, then keep walking.
+                        try { props.onChange({ target: { value: numericValue } }); return true; } catch (e2) {}
+                    }
                 }
                 fiber = fiber.return; depth++;
             }
@@ -3179,7 +3183,7 @@ ${placemarks}
                             // value into the form model AND let you watch the value
                             // land before we save. Saving too fast read the original
                             // and the dialog blinked shut like a cancel.
-                            showToast(`Step ${idx + 1}/${entries.length}: set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'} — saving…`, '#14d2dc', 1500);
+                            showToast(`Set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'} — saving…`, '#14d2dc', 1500);
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
                                 if (!saveBtn) { console.log(`${TAG} [edit][diag] save button NOT found`); done(false, 'save button not found'); return; }
