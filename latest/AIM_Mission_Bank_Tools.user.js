@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.65
+// @version      0.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.65';
+    const SCRIPT_VERSION = '0.66';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1954,12 +1954,13 @@
                         if (n === 0) return '';
                         return `<div class="aim-mb-pending-banner">
                             <span><strong>${n}</strong> altitude change${n === 1 ? '' : 's'} pending</span>
-                            <button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n} (per-step)</button>
+                            ${fastBulkSave
+                                ? `<span style="color:#14d2dc;font-weight:700;white-space:nowrap;">⚡ ON → just <u>Save the mission</u> to apply all ${n} (no Commit needed)</span>`
+                                : `<button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n} (per-step)</button>`}
                             <button class="aim-mb-tbtn" data-discard-pending>Discard</button>
-                            <label style="display:inline-flex;align-items:center;gap:5px;margin-left:auto;cursor:pointer;white-space:nowrap;${fastBulkSave ? 'color:#14d2dc;font-weight:700;' : ''}" title="ON: these staged changes are spliced into your next mission Save in one shot (fast bulk). Snapshot → altitude; Navigate → altitude + drop freezone-min. Strict match, fail-closed. OFF by default; resets each reload.">
+                            <label style="display:inline-flex;align-items:center;gap:5px;margin-left:auto;cursor:pointer;white-space:nowrap;${fastBulkSave ? 'color:#14d2dc;font-weight:700;' : ''}" title="ON: skip per-step — staged changes are spliced into your next mission Save in one shot. Snapshot → altitude; Navigate → altitude + drop freezone-min. Strict match, fail-closed. OFF by default; resets each reload.">
                                 <input type="checkbox" data-fast-save ${fastBulkSave ? 'checked' : ''}> ⚡ Fast bulk save
                             </label>
-                            ${fastBulkSave ? '<span style="color:#14d2dc;font-size:10px;white-space:nowrap;">→ apply on your next mission Save</span>' : ''}
                         </div>`;
                     })()}
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
