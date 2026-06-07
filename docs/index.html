@@ -73,6 +73,37 @@
   }
   .btn-browser:hover { border-color: var(--cyan); }
 
+  /* Guided-setup primary button: bigger + a gentle pulse to draw the eye */
+  .btn-guided { font-size: 1.12rem; padding: 15px 30px; animation: guidedPulse 2.4s ease-in-out infinite; }
+  .btn-guided:hover { animation: none; }
+  @keyframes guidedPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(95, 221, 229, 0.0); }
+    50% { box-shadow: 0 0 0 7px rgba(95, 221, 229, 0.14); }
+  }
+  @media (prefers-reduced-motion: reduce) { .btn-guided { animation: none; } }
+
+  .hero-guided-note {
+    font-size: 0.98rem; color: var(--text); margin: 16px auto 0; max-width: 460px;
+  }
+  .hero-guided-note strong { color: var(--cyan); }
+
+  /* Guided banner above the manual steps */
+  .guided-banner {
+    display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    background: rgba(95, 221, 229, 0.06); border: 1px solid var(--cyan-dim);
+    border-radius: 14px; padding: 22px 24px; margin: 48px 0 0;
+  }
+  .guided-banner-text { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 4px; }
+  .guided-banner-text strong { font-size: 1.1rem; }
+  .guided-banner-text span { color: var(--text-muted); font-size: 0.95rem; }
+  .guided-banner .btn-guided { flex-shrink: 0; }
+
+  .manual-head {
+    text-align: center; color: var(--text-faint);
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.1em;
+    margin: 36px 0 -8px;
+  }
+
   /* Big step blocks (always visible) */
   .bigsteps { padding: 56px 0 8px; display: flex; flex-direction: column; gap: 28px; }
   .bigstep {
@@ -262,6 +293,7 @@
     .bigstep { padding: 24px 20px; }
     .install-row { flex-wrap: wrap; }
     .install-row .btn { width: 100%; margin-left: 0; justify-content: center; }
+    .guided-banner .btn-guided { width: 100%; justify-content: center; }
     .wiz-dot-l { display: none; }
   }
 </style>
@@ -274,14 +306,25 @@
     <h1>AIM Userscripts</h1>
     <p>Handy tools that make <code>percepto.app</code> faster. Set up once — they keep themselves updated.</p>
     <div class="hero-actions">
-      <button class="btn" id="launchWizard">Set it up →</button>
+      <button class="btn btn-guided js-launch-wizard">▶&nbsp; Start guided setup</button>
       <a href="guide.html" class="btn btn-secondary">What can these do?</a>
     </div>
-    <p class="muted" style="font-size:0.9rem; margin-top:14px;">Prefer to read it all yourself? <a href="#steps">Scroll to the full guide ↓</a></p>
+    <p class="hero-guided-note">👉 We'll walk you through it one step at a time — just tap <strong>Yes</strong> or <strong>No</strong> as you go. No tech know-how needed.</p>
+    <p class="muted" style="font-size:0.9rem; margin-top:10px;">Rather read it yourself? <a href="#steps">Jump to the manual guide ↓</a></p>
   </div>
 </header>
 
 <div class="wrap">
+
+  <div class="guided-banner">
+    <div class="guided-banner-text">
+      <strong>👋 New here? Let us do the driving.</strong>
+      <span>The guided walkthrough shows one step at a time and checks each one worked — the easiest way to get set up.</span>
+    </div>
+    <button class="btn btn-guided js-launch-wizard">▶&nbsp; Start guided setup</button>
+  </div>
+
+  <p class="manual-head">Or follow the steps manually</p>
 
   <div class="bigsteps" id="steps">
 
@@ -832,7 +875,7 @@
   var contentEl = document.getElementById("wizContent");
   var backEl = document.getElementById("wizBack");
   var closeEl = document.getElementById("wizClose");
-  var launchEl = document.getElementById("launchWizard");
+  var launchEls = document.querySelectorAll(".js-launch-wizard");
 
   var hist = [];
   var curId = null;
@@ -915,7 +958,7 @@
     document.body.style.overflow = "";
   }
 
-  if (launchEl) launchEl.addEventListener("click", openWizard);
+  for (var li = 0; li < launchEls.length; li++) launchEls[li].addEventListener("click", openWizard);
   if (closeEl) closeEl.addEventListener("click", closeWizard);
   if (backEl) backEl.addEventListener("click", back);
   overlay.addEventListener("click", function (e) { if (e.target === overlay) closeWizard(); });
