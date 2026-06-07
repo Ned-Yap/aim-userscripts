@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.54
+// @version      0.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.54';
+    const SCRIPT_VERSION = '0.55';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2869,26 +2869,40 @@ ${placemarks}
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
-        // v0.54: the box visibly shows the new value and HOLDS it, but Save was
-        // still persisting the original — diagnostics proved the right input was
-        // set and didn't revert. That means the synthetic 'input' event isn't
-        // reaching Ant InputNumber's React onChange, so the FORM MODEL never
-        // updated (display ≠ committed value). Call the input's React onChange
-        // prop directly (same fiber/props trick clickReactControl uses for
-        // radios) to force the controlled update into the form.
-        try {
-            const k = Object.keys(input).find(key => key.startsWith('__reactProps$'));
-            if (k && input[k] && typeof input[k].onChange === 'function') {
-                input[k].onChange({ target: input, currentTarget: input, preventDefault() {}, stopPropagation() {} });
-            }
-        } catch (e) { /* non-fatal — DOM events above are the fallback */ }
-        // Enter commits Ant InputNumber's typed buffer to the form model AND
-        // marks the field dirty (so a "disabled-until-changed" Save enables).
-        const ent = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
-        input.dispatchEvent(new KeyboardEvent('keydown', ent));
-        input.dispatchEvent(new KeyboardEvent('keyup', ent));
-        // Blur is still the canonical Ant commit trigger — keep it last.
         input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        // NOTE (v0.55): do NOT dispatch a synthetic Enter here. v0.54 did, to
+        // force the commit — but the Quick Mission Editor (now that its own TDZ
+        // is fixed) listens for Enter on this page and popped its move dialog.
+        // The real commit is handled by commitInputNumberViaFiber in setAltValue.
+    }
+
+    // The inner `.ant-input-number-input` events update Ant's display but do
+    // NOT reliably reach the Ant InputNumber *component's* onChange — the one
+    // that emits the committed numeric value into Percepto's form. Diagnostics
+    // proved the box holds the new value yet Save persists the old one, i.e. the
+    // form model never updated. Walk up the fiber from the inner input to the
+    // InputNumber component and call its onChange(value) directly. Returns true
+    // if a component-level onChange was found and invoked.
+    function commitInputNumberViaFiber(input, numericValue) {
+        try {
+            const fk = Object.keys(input).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+            if (!fk) return false;
+            let fiber = input[fk], depth = 0;
+            while (fiber && depth < 24) {
+                const props = fiber.memoizedProps || (fiber.stateNode && fiber.stateNode.props);
+                // InputNumber's onChange takes the value directly (number|string),
+                // not a DOM event. Distinguish it from the inner input's
+                // event-style onChange by the numeric-field props it carries.
+                if (props && typeof props.onChange === 'function' &&
+                    ('step' in props || 'precision' in props || 'controls' in props ||
+                     'stringMode' in props || 'max' in props || 'min' in props)) {
+                    props.onChange(numericValue);
+                    return true;
+                }
+                fiber = fiber.return; depth++;
+            }
+        } catch (e) { /* fall through — DOM events are the fallback */ }
+        return false;
     }
 
     function findEditDialogInputByLabel(...labelTexts) {
@@ -2983,7 +2997,10 @@ ${placemarks}
         const before = numInput.value, beforeAria = numInput.getAttribute('aria-valuenow');
         console.log(`${TAG} [edit][diag] target input disabled=${numInput.disabled} before value="${before}" aria="${beforeAria}" id="${numInput.id || ''}"`);
         setReactInputValue(numInput, value);
-        console.log(`${TAG} [edit][diag] after set → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}" (wanted ${value})`);
+        // The decisive commit: push the numeric value into the InputNumber
+        // component's own onChange so Percepto's form model actually updates.
+        const committed = commitInputNumberViaFiber(numInput, Number(value));
+        console.log(`${TAG} [edit][diag] after set → value="${numInput.value}" aria="${numInput.getAttribute('aria-valuenow')}" (wanted ${value}) · componentOnChange=${committed}`);
         // Revert check: a controlled InputNumber whose React onChange never
         // fired will roll the DOM value back to its model on the next render.
         // If we see it snap back here, that's the smoking gun.
