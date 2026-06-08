@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.69
+// @version      0.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.69';
+    const SCRIPT_VERSION = '0.70';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2011,7 +2011,7 @@
         kickOffElevationFetch(missionId, allSteps);
         // Optionally auto-focus the next editable altitude after a queue commit
         if (opts && opts.focusNextAfter != null) {
-            focusNextAltEditable(missionId, opts.focusNextAfter);
+            focusNextAltEditable(missionId, opts.focusNextAfter, opts.focusColumn);
         }
     }
 
@@ -2066,14 +2066,18 @@
         }
     }
 
-    function focusNextAltEditable(missionId, currentInstrId) {
-        const cells = panelEl.querySelectorAll('[data-alt-edit]');
+    // Tab advances to the NEXT editable cell in the SAME column (not across
+    // columns). column = 'alt' (Value) or 'agl' (AGL Δ).
+    function focusNextAltEditable(missionId, currentInstrId, column) {
+        const col = column === 'agl' ? 'agl' : 'alt';
+        const opener = col === 'agl' ? startInlineAglEdit : startInlineAltEdit;
+        const cells = panelEl.querySelectorAll(`[data-${col}-edit]`);
         let foundCurrent = false;
         for (const cell of cells) {
             const id = Number(cell.dataset.instrId);
             if (foundCurrent) {
                 cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                setTimeout(() => startInlineAltEdit(cell, missionId), 100);
+                setTimeout(() => opener(cell, missionId), 100);
                 return;
             }
             if (id === currentInstrId) foundCurrent = true;
@@ -2114,7 +2118,8 @@
                 renderDetailView(missionId);
             };
         });
-        // Step-type filter chips — multi-select toggle. "__all" clears filters.
+        // Step-type filter chips — left-click multi-select toggle ("__all"
+        // clears). Right-click (M2) solos that type only — like Site Setup SUM.
         panelEl.querySelectorAll('[data-step-filter]').forEach(b => {
             b.onclick = () => {
                 const key = b.dataset.stepFilter;
@@ -2126,6 +2131,14 @@
                     else f.add(key);
                     // If all types are now selected, same as "all" — clear the set
                 }
+                renderDetailView(missionId);
+            };
+            b.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const key = b.dataset.stepFilter;
+                // M2 on "All" clears; M2 on a type selects ONLY that type.
+                panelState.detailFilter = (key === '__all') ? new Set() : new Set([key]);
                 renderDetailView(missionId);
             };
         });
@@ -2320,26 +2333,29 @@
                 return;
             }
             const rounded = Math.round(v);
+            const adv = advanceAfter ? { focusNextAfter: instrId, focusColumn: 'alt' } : null;
             if (rounded === origAlt) {
                 discardPendingChange(missionId, instrId);
-                renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+                renderDetailView(missionId, adv);
                 return;
             }
             queueAltitudeChange(missionId, instrId, rounded, unit);
             showToast(`Queued: step ${instrId} → ${rounded} ${unitLabel}`, '#ff9800');
-            renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+            renderDetailView(missionId, adv);
         };
         input.onblur = commit;
         input.onkeydown = (e) => {
+            // Enter = done (commit, no advance). Tab = commit + advance to the
+            // next editable cell in the SAME column.
             if (e.key === 'Enter' || e.key === 'Tab') {
                 e.preventDefault();
-                // stopPropagation: this Enter belongs to our inline editor, NOT
-                // the Quick Mission Editor's document-level Enter handler (which
-                // would otherwise pop its move dialog). We blur() synchronously
-                // below, so by the time the event bubbled to QME, activeElement
-                // would no longer be this input and QME's guard would miss it.
+                // stopPropagation: this key belongs to our inline editor, NOT the
+                // Quick Mission Editor's document-level Enter handler (which would
+                // otherwise pop its move dialog). We blur() synchronously below, so
+                // by the time the event bubbled to QME, activeElement would no
+                // longer be this input and QME's guard would miss it.
                 e.stopPropagation();
-                advanceAfter = true;
+                advanceAfter = (e.key === 'Tab');
                 input.blur();
             } else if (e.key === 'Escape') {
                 e.preventDefault();
@@ -2401,21 +2417,23 @@
             const targetAglM = unit === 'imperial' ? (agl / 3.28084) : agl;
             const newAltM = elevM + targetAglM;
             const newAltDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            const adv = advanceAfter ? { focusNextAfter: instrId, focusColumn: 'agl' } : null;
             if (newAltDisp === origAlt) {
                 discardPendingChange(missionId, instrId);
-                renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+                renderDetailView(missionId, adv);
                 return;
             }
             queueAltitudeChange(missionId, instrId, newAltDisp, unit);
             showToast(`Queued: step ${instrId} → ${Math.round(agl)} ${unitLabel} AGL (alt ${newAltDisp.toLocaleString()} ${unitLabel})`, '#ff9800', 4000);
-            renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+            renderDetailView(missionId, adv);
         };
         input.onblur = commit;
         input.onkeydown = (e) => {
+            // Enter = done; Tab = commit + advance to the next AGL cell.
             if (e.key === 'Enter' || e.key === 'Tab') {
                 e.preventDefault();
                 e.stopPropagation();   // belongs to our editor, not QME's document-level Enter
-                advanceAfter = true;
+                advanceAfter = (e.key === 'Tab');
                 input.blur();
             } else if (e.key === 'Escape') {
                 e.preventDefault();

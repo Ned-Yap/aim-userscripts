@@ -6,13 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-07 — Mission Bank Tools v0.69 (DEV) — Editable AGL + Bulk → AGL/ALT + row selection (Site Setup SUM parity)
+## 2026-06-07 — Mission Bank Tools v0.70 (DEV) — Editable AGL + Bulk → AGL/ALT + row selection (Site Setup SUM parity)
 
 The Mission Summary step table now matches the **Site Setup SUM** for altitude editing:
 
 - **Editable AGL Δ cell** — click the AGL number and type a target clearance; the altitude back-solves to *ground elevation + AGL* (just like editing AGL on Site Setup sets Min Alt = Elevation + AGL). Editing the Value cell and the AGL cell now stay in sync — change one, the other follows. Right-click still copies the raw AGL; formulas (`100+10`) work.
 - **Row-selection checkboxes** + select-all (respects the active type filter).
 - **Bulk → AGL** and **Bulk → ALT** buttons (gold, like the Site Setup bulk toolbar). Scope mirrors Site Setup: **nothing selected → all visible editable steps; any selected → just those.** Bulk → AGL recomputes each step's altitude from its *own* ground elevation; Bulk → ALT sets one absolute altitude.
+- **Keyboard:** **Tab** commits and moves to the next editable cell in the *same* column (Value→Value, AGL→AGL — no longer hops columns); **Enter** commits and finishes (no advance); **Esc** cancels.
+- **Filter chips:** **right-click (M2)** a step-type chip to solo *only* that type (like the Site Setup type chips), instead of toggling each on/off.
 
 Everything queues through the existing pipeline — so per-step **Commit** and **⚡ Fast bulk save** apply unchanged, with the same strict/fail-closed safety. Dev-only in `latest/`.
 
