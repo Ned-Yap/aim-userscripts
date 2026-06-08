@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.66
+// @version      34.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.66';
+    const SCRIPT_VERSION = '34.67';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3646,6 +3646,35 @@
         return out;
     }
 
+    // Leaflet creates the overlay-pane <svg> LAZILY — only when the first
+    // vector layer (Path/Polyline/Polygon) is added to the map. On a site
+    // with zero native Percepto entities (a brand-new site that's just
+    // ortho + power lines, e.g. 1591) Percepto adds no vector layer, so
+    // Leaflet never builds the SVG and our KML shielding has nowhere to
+    // draw — every renderShielding() bails at the `if (!svg) return`.
+    // (Diagnosed 2026-06-08: KML loaded 827 features but rendered nothing
+    // until the user dropped an FFZ, which created the SVG.) Fix: force
+    // Leaflet to make its SVG renderer ourselves. L.svg().addTo(map) builds
+    // the <svg><g></g> structure synchronously and keeps its transform /
+    // viewBox synced on zoom/pan, so the existing getScreenCTM +
+    // latLngToContainerPoint projection keeps working unchanged.
+    function ensureOverlaySvg() {
+        if (document.querySelector('.leaflet-overlay-pane svg')) return true;
+        const map = getLeafletMap();
+        if (!map) return false;
+        let L;
+        try { L = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).L; } catch (e) { L = null; }
+        if (!L || typeof L.svg !== 'function') return false;
+        try {
+            L.svg().addTo(map);
+            console.log(`${TAG} created overlay-pane SVG renderer (site has no native vector layers yet)`);
+        } catch (e) {
+            console.error(`${TAG} failed to force overlay-pane SVG:`, e);
+            return false;
+        }
+        return !!document.querySelector('.leaflet-overlay-pane svg');
+    }
+
     function renderShielding() {
         const siteID = getCurrentSiteID();
         if (!siteID) return;
@@ -3655,6 +3684,10 @@
             return !kmlFeatures[k] && !kmlFetching.has(k) && !kmlMissing.has(k);
         });
         if (needsFetch) fetchKMLForSite(siteID);
+        // If we have features to draw but Leaflet hasn't made the overlay
+        // SVG (entity-less site), make it ourselves before querying for it.
+        const haveFeatures = KML_TYPES.some(t => (kmlFeatures[kmlKey(siteID, t)] || []).length > 0);
+        if (haveFeatures) ensureOverlaySvg();
         const svg = document.querySelector('.leaflet-overlay-pane svg');
         if (!svg) return;
         const g = svg.querySelector('g');

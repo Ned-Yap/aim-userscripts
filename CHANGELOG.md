@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — Map Styler v34.67 — KML shielding now renders on entity-less sites
+
+Fixes power-line / shielding KMLs not appearing on **brand-new sites that have no native entities yet** (no FFZs, flight paths, or assets — e.g. a site that's just ortho + power lines). Leaflet only creates its overlay `<svg>` the moment the first vector layer is added, so on an entity-less site the styler had nowhere to draw — the KML loaded fine (hundreds of lines) but rendered nothing until you dropped any entity. The styler now forces Leaflet to create the overlay SVG itself (`L.svg().addTo(map)`) whenever it has KML features to draw, so lines appear immediately on a fresh site. Shipped in both root (prod) and `latest/` (DEV).
+
 ## 2026-06-08 — Asset Inspector v3.65 (DEV) — Saved view presets (columns + filters + sort)
 
 New **Presets ▾** button in the Site Setup SUM toolbar (next to Columns ▾). A preset saves your whole view — **visible columns + order, the type filter, the validation filters, the sort, and ft/m** — so you can flip between layouts without re-toggling everything by hand:
