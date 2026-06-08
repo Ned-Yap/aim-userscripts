@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — Map Styler v34.68 (DEV) — +D / +T offers to create a blank KML when none exists
+
+When you press **+D** (distribution) or **+T** (transmission) in the Power Line Editor strip on a site that has **no power-line KML yet**, the styler now warns you instead of silently dropping you into draw mode (where a commit would later fail). You get a prompt: *"No distribution power-line KML exists for this site yet — if you already have power lines, upload the KML to the data repo first; otherwise click OK to create a new empty one now and start drawing."* OK creates a blank `<siteID>-distro.kml` (or `-trans.kml`) in the data repo and drops you straight into draw mode — draw, then ✓ to commit as usual. Use this for new areas with no existing lines, or new transmission lines that aren't in the repo yet. (DEV-only — Power Line Editor is dev-only.)
+
 ## 2026-06-08 — Map Styler v34.67 — KML shielding now renders on entity-less sites
 
 Fixes power-line / shielding KMLs not appearing on **brand-new sites that have no native entities yet** (no FFZs, flight paths, or assets — e.g. a site that's just ortho + power lines). Leaflet only creates its overlay `<svg>` the moment the first vector layer is added, so on an entity-less site the styler had nowhere to draw — the KML loaded fine (hundreds of lines) but rendered nothing until you dropped any entity. The styler now forces Leaflet to create the overlay SVG itself (`L.svg().addTo(map)`) whenever it has KML features to draw, so lines appear immediately on a fresh site. Shipped in both root (prod) and `latest/` (DEV).

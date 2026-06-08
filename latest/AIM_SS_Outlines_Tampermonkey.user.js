@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.67
+// @version      34.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.67';
+    const SCRIPT_VERSION = '34.68';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5072,6 +5072,170 @@
             drawModeType: drawingState ? drawingState.type : null,
         });
     }
+    // Reports whether the canonical KML for this site+type exists in the
+    // repo, based on state we already loaded at site nav (no network call):
+    //   'exists'  — features are loaded (file present, even if it has 0 lines)
+    //   'missing' — every filename candidate 404'd (kmlMissing set)
+    //   'unknown' — not fetched / settled yet (in flight or never tried)
+    function kmlExistenceState(siteID, type) {
+        const key = kmlKey(siteID, type);
+        if (Array.isArray(kmlFeatures[key])) return 'exists';
+        if (kmlMissing.has(key)) return 'missing';
+        return 'unknown';
+    }
+
+    // Guards in-flight create so a double-press of +D/+T doesn't PUT twice.
+    const kmlCreating = new Set();
+
+    // Builds a minimal, valid skeleton KML for a brand-new power-line layer.
+    // Empty <Document> — applyCommitOpsToKML appends drawn <Placemark>s
+    // straight into it, so no commit-path change is needed. The <Style> is
+    // cosmetic (only seen if the file is opened in Google Earth; our render
+    // uses the per-category toggle colors and ignores styleUrl).
+    function buildEmptyKML(siteID, type) {
+        const label = type === 'trans' ? 'Transmission' : 'Distribution';
+        const styleId = type === 'trans' ? 'rline' : 'yline';
+        const color = type === 'trans' ? 'ff3030ff' : 'ff00ffff'; // KML is aabbggrr
+        return `<?xml version='1.0' encoding='utf-8'?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Site ${siteID} - ${label} Power Lines</name>
+    <Style id="${styleId}">
+      <LineStyle>
+        <color>${color}</color>
+        <width>6.0</width>
+      </LineStyle>
+    </Style>
+  </Document>
+</kml>
+`;
+    }
+
+    // Creates an empty KML in the data repo (Contents API PUT with NO sha —
+    // that's how GitHub creates a new file). On success, seeds local state
+    // as if the file had loaded empty and runs onReady (used to enter draw
+    // mode). Lives here in Map Styler because it owns the token + commit
+    // infra; PLE only sends the ENTER_DRAW_MODE that triggers it.
+    function createEmptyKML(siteID, type, onReady) {
+        const key = kmlKey(siteID, type);
+        if (kmlCreating.has(key)) { showKMLToast(`Already creating the ${type} KML…`, 3000); return; }
+        const token = cachedToken || gmGet(TOKEN_KEY, '');
+        if (!token) { showKMLToast('No GitHub token — set one in AIM Controls first.', 4500); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        const path = `${siteID}-${type}.kml`;
+        const url = `${GITHUB_API_BASE}/repos/${KMLS_REPO}/contents/${encodeURIComponent(path)}`;
+        const xmlText = buildEmptyKML(siteID, type);
+        let contentB64;
+        try {
+            const utf8 = new TextEncoder().encode(xmlText);
+            let bin = '';
+            for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+            contentB64 = btoa(bin);
+        } catch (e) {
+            showKMLToast('Create failed: cannot encode XML.', 5000);
+            console.error(`${TAG} createEmptyKML btoa failed:`, e);
+            return;
+        }
+        kmlCreating.add(key);
+        showKMLToast(`Creating empty ${type} KML (${path})…`, 8000);
+        try {
+            GM_xmlhttpRequest({
+                method: 'PUT',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                    'Content-Type': 'application/json',
+                },
+                // No `sha` → create. branch pins it to main.
+                data: JSON.stringify({ message: `[AIM site ${siteID}] ${type}: create empty power-line KML`, content: contentB64, branch: KMLS_BRANCH }),
+                timeout: 20000,
+                onload: (resp) => {
+                    kmlCreating.delete(key);
+                    if (resp.status === 200 || resp.status === 201) {
+                        // Seed local state so the rest of the pipeline treats
+                        // the file as loaded-and-empty.
+                        kmlFeatures[key] = [];
+                        kmlResolvedPath[key] = path;
+                        kmlMissing.delete(key);
+                        gmSet(KML_CACHE_PREFIX + key, { features: [], at: Date.now(), path });
+                        // Cache the new SHA so the first real commit can skip
+                        // the GET (same fast-path the commit code uses).
+                        try {
+                            const respJson = JSON.parse(resp.responseText);
+                            const newSha = respJson && respJson.content && respJson.content.sha;
+                            if (newSha) committedKmlCache[key] = { sha: newSha, xmlText };
+                        } catch (e) { /* non-fatal — commit will GET the sha */ }
+                        showKMLToast(`✓ Created empty ${type} KML for site ${siteID}. Draw your lines, then click ✓ to commit.`, 6000);
+                        console.log(`${TAG} created empty ${type} KML at ${path} (HTTP ${resp.status})`);
+                        if (isActive) runUpdate();
+                        try { broadcastPowerLineStatus(); } catch (e2) {}
+                        if (typeof onReady === 'function') { try { onReady(); } catch (e3) { console.warn(`${TAG} createEmptyKML onReady threw:`, e3); } }
+                    } else if (resp.status === 422) {
+                        // 422 = file already exists. Someone created it (or a
+                        // race). Treat as success-ish: clear missing + refetch.
+                        kmlMissing.delete(key);
+                        delete kmlFeatures[key];
+                        showKMLToast(`A ${type} KML already exists now — reloading it.`, 5000);
+                        fetchKMLForSite(siteID, true);
+                    } else if (resp.status === 401 || resp.status === 403) {
+                        showKMLToast(`Create denied (${resp.status}) — your PAT may lack write access to the data repo.`, 7000);
+                        console.warn(`${TAG} createEmptyKML denied ${resp.status}`);
+                    } else {
+                        showKMLToast(`Create failed (HTTP ${resp.status}).`, 6000);
+                        console.warn(`${TAG} createEmptyKML HTTP ${resp.status}: ${resp.responseText && resp.responseText.slice(0, 200)}`);
+                    }
+                },
+                onerror: () => {
+                    kmlCreating.delete(key);
+                    showKMLToast(`Create failed: network error.`, 5000);
+                    console.warn(`${TAG} createEmptyKML network error`);
+                },
+                ontimeout: () => {
+                    kmlCreating.delete(key);
+                    showKMLToast(`Create timed out — check your connection and try again.`, 5000);
+                    console.warn(`${TAG} createEmptyKML timed out`);
+                },
+            });
+        } catch (e) {
+            kmlCreating.delete(key);
+            showKMLToast('Create failed to start.', 4000);
+            console.error(`${TAG} createEmptyKML threw:`, e);
+        }
+    }
+
+    // Called when +D/+T asks to draw. If the canonical KML doesn't exist
+    // yet, warn the user (so they can upload a real one first) and offer to
+    // create a blank file to draw into. Returns true if draw mode was
+    // entered (or scheduled to enter after create); false if we blocked it.
+    function enterDrawModeChecked(type, seedCoord) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return false; }
+        const state = kmlExistenceState(siteID, type);
+        if (state === 'exists') { enterDrawMode(type, seedCoord); return true; }
+        if (state === 'unknown') {
+            // Not settled yet — kick a fetch and ask the user to retry in a
+            // moment rather than guessing wrong about existence.
+            fetchKMLForSite(siteID, true);
+            showKMLToast(`Still checking the repo for a ${type} KML — press +${type === 'trans' ? 'T' : 'D'} again in a second.`, 4000);
+            return false;
+        }
+        // state === 'missing' → prompt.
+        const label = type === 'trans' ? 'transmission' : 'distribution';
+        const ok = confirm(
+            `No ${label} power-line KML exists for this site yet (${siteID}-${type}.kml).\n\n` +
+            `If you already have power lines for this area, upload the KML to the data repo first, then reopen the site.\n\n` +
+            `Click OK to create a new EMPTY ${label} KML now and start drawing.\n` +
+            `Click Cancel to stop.`
+        );
+        if (!ok) { showKMLToast(`No ${label} KML created. Upload one, then reopen the site.`, 5000); return false; }
+        createEmptyKML(siteID, type, () => enterDrawMode(type, seedCoord));
+        return true;
+    }
+
     function setupPowerLineEditorBridge() {
         try { powerLineEditorChannel = new BroadcastChannel('AIM_POWER_LINE_EDIT'); }
         catch (e) { console.warn(`${TAG} PLE channel unavailable:`, e); return; }
@@ -5108,7 +5272,10 @@
                     // (Phase 3a). When present, draw mode pre-seeds
                     // vertex 0 at that coord so the new line starts
                     // attached to the source vertex.
-                    enterDrawMode(m.kmlType, m.seedCoord || null);
+                    // v34.68: gate on KML existence. If no canonical KML for
+                    // this site+type, warn + offer to create a blank one to
+                    // draw into (so committing drawn lines doesn't later 404).
+                    enterDrawModeChecked(m.kmlType, m.seedCoord || null);
                 } else if (m.type === 'COMMIT_KML' && m.kmlType) {
                     // v34.46: was commitKMLChanges (legacy hide-only path);
                     // commitPendingOps is the ops-aware fn that handles
