@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-07 — Mission Bank Tools v0.69 (DEV) — Editable AGL + Bulk → AGL/ALT + row selection (Site Setup SUM parity)
+
+The Mission Summary step table now matches the **Site Setup SUM** for altitude editing:
+
+- **Editable AGL Δ cell** — click the AGL number and type a target clearance; the altitude back-solves to *ground elevation + AGL* (just like editing AGL on Site Setup sets Min Alt = Elevation + AGL). Editing the Value cell and the AGL cell now stay in sync — change one, the other follows. Right-click still copies the raw AGL; formulas (`100+10`) work.
+- **Row-selection checkboxes** + select-all (respects the active type filter).
+- **Bulk → AGL** and **Bulk → ALT** buttons (gold, like the Site Setup bulk toolbar). Scope mirrors Site Setup: **nothing selected → all visible editable steps; any selected → just those.** Bulk → AGL recomputes each step's altitude from its *own* ground elevation; Bulk → ALT sets one absolute altitude.
+
+Everything queues through the existing pipeline — so per-step **Commit** and **⚡ Fast bulk save** apply unchanged, with the same strict/fail-closed safety. Dev-only in `latest/`.
+
 ## 2026-06-07 — Mission Bank Tools v0.68 (DEV) — Fast bulk altitude save (interceptor, opt-in) + per-step persistence fix
 
 Bulk-editing 30-50 step altitudes via the per-step dialog is ~1-2s/step. New **⚡ Fast bulk save** option: stage your altitude changes in the SUM table, flip the toggle in the pending banner, then **Save the mission** — all staged changes are spliced into that one save request at once (instant). Built on measured per-type rules: snapshot → set altitude; navigate → set altitude + drop "use freezone min". Safety: **OFF by default and resets every reload** (a save is never modified unless you opt in that session), strict unique matching (location + original value — skips anything ambiguous), **fail-closed** (any hiccup → your original save goes through untouched), and a "patched N (skipped M)" toast + per-step console audit. Only ever changes the altitude (+ the one navigate flag) on steps you staged; Site Setup still governs the flight envelope. Per-step **Commit** stays as the in-form alternative. Dev-only in `latest/`.

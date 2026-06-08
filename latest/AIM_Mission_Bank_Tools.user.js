@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.68
+// @version      0.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.68';
+    const SCRIPT_VERSION = '0.69';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1229,6 +1229,8 @@
                 #${PANEL_ID} .aim-mb-agl-low { color: #ff5252; }
                 #${PANEL_ID} .aim-mb-agl-ok { color: #5fff5f; }
                 #${PANEL_ID} .aim-mb-agl-high { color: #3399ff; }
+                #${PANEL_ID} .aim-mb-agl-editable { border-bottom: 1px dotted #555; }
+                #${PANEL_ID} .aim-mb-agl-editable:hover { border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-editable { cursor: pointer; border-bottom: 1px dotted #555; }
                 #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
@@ -1236,6 +1238,13 @@
                 #${PANEL_ID} .aim-mb-alt-committed { color: #ffeb3b; font-weight: 700; margin-left: 4px; }
                 #${PANEL_ID} .aim-mb-alt-input { width: 80px; background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 2px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 #${PANEL_ID} .aim-mb-pending-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,152,0,0.15); border: 1px solid #ff9800; border-radius: 4px; margin-bottom: 8px; color: #ffb84d; font-size: 11px; font-weight: 600; }
+                /* Gold "Bulk →" buttons — mirror the Site Setup SUM bulk toolbar. */
+                #${PANEL_ID} .aim-mb-bulk-btn { background: #2a2a2a; border: 1px solid rgba(255,213,79,0.55); color: #ffd54f; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-bulk-btn:hover { background: rgba(255,213,79,0.12); border-color: #ffd54f; }
+                #${PANEL_ID} .aim-mb-sel-count { font-size: 11px; color: #ffd54f; white-space: nowrap; font-weight: 600; }
+                #${PANEL_ID} td.aim-mb-sel-cell input, #${PANEL_ID} th.aim-mb-sel-cell input { cursor: pointer; margin: 0; }
+                .aim-mb-bp-pop { position: fixed; z-index: 100002; min-width: 240px; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
+                .aim-mb-bp-pop input[type="text"] { background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 3px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
                 .aim-mb-cols-menu, .aim-mb-settings-popover { position: fixed; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; z-index: 100001; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
                 .aim-mb-cols-menu { padding: 0; max-height: 360px; overflow: hidden; display: flex; flex-direction: column; }
@@ -1823,6 +1832,11 @@
         if (!row) { renderTableView(); return; }
         panelState.drillId = missionId;
         if (!panelState.detailFilter) panelState.detailFilter = new Set();
+        // Row selection is per-mission — reset it when we land on a new mission.
+        if (!panelState.detailSelection || panelState.detailSelDrill !== missionId) {
+            panelState.detailSelection = new Set();
+            panelState.detailSelDrill = missionId;
+        }
 
         // Preserve scroll positions across re-renders so inline edits
         // don't snap the user back to the top of the drill-down.
@@ -1946,6 +1960,9 @@
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
                         <div class="aim-mb-card-title" style="margin-bottom:0;">Instructions</div>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;flex:1;">${filterChips}</div>
+                        ${panelState.detailSelection.size ? `<span class="aim-mb-sel-count">${panelState.detailSelection.size} selected</span>` : ''}
+                        <button class="aim-mb-bulk-btn" data-bulk="agl" title="Set a target AGL for the selected steps (or all visible editable steps if none selected) — recomputes each step's altitude from its own ground elevation.">Bulk → AGL</button>
+                        <button class="aim-mb-bulk-btn" data-bulk="alt" title="Set an absolute altitude for the selected steps (or all visible editable steps if none selected).">Bulk → ALT</button>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
                         <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
                     </div>
@@ -1966,7 +1983,7 @@
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
+                                <tr><th class="aim-mb-sel-cell" style="width:24px;text-align:center;"><input type="checkbox" data-sel-all title="Select all editable visible steps"></th><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
@@ -2199,15 +2216,49 @@
             el.onclick = copy;
             el.oncontextmenu = copy;
         });
-        // AGL Δ click-to-copy: raw whole number (left + right both copy)
-        panelEl.querySelectorAll('[data-agl-raw]').forEach(el => {
-            const copy = (e) => {
-                if (e) { e.preventDefault(); e.stopPropagation(); }
+        // AGL Δ cell — left-click edits AGL (back-solves altitude = ground + AGL),
+        // right-click copies the raw value. Mirrors the Value cell + Site Setup SUM.
+        panelEl.querySelectorAll('[data-agl-edit]').forEach(el => {
+            el.onclick = (e) => {
+                e.stopPropagation();
+                startInlineAglEdit(el, missionId);
+            };
+            el.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 copyToClipboard(el.dataset.aglRaw);
                 showToast(`Copied: ${el.dataset.aglRaw}`, '#5fff5f');
             };
-            el.onclick = copy;
-            el.oncontextmenu = copy;
+        });
+        // Row-selection checkboxes (per editable step) — drive Bulk scope.
+        if (!panelState.detailSelection) panelState.detailSelection = new Set();
+        panelEl.querySelectorAll('[data-sel-row]').forEach(cb => {
+            cb.onclick = (e) => e.stopPropagation();
+            cb.onchange = () => {
+                const id = Number(cb.dataset.instrId);
+                if (cb.checked) panelState.detailSelection.add(id);
+                else panelState.detailSelection.delete(id);
+                renderDetailView(missionId);
+            };
+        });
+        // Select-all — toggles every editable step currently visible (respects filter).
+        const selAll = panelEl.querySelector('[data-sel-all]');
+        if (selAll) {
+            const editableVisible = filteredSteps.filter(stepAltEditable);
+            selAll.checked = editableVisible.length > 0 && editableVisible.every(s => panelState.detailSelection.has(s.id));
+            selAll.onclick = (e) => e.stopPropagation();
+            selAll.onchange = () => {
+                if (selAll.checked) editableVisible.forEach(s => panelState.detailSelection.add(s.id));
+                else editableVisible.forEach(s => panelState.detailSelection.delete(s.id));
+                renderDetailView(missionId);
+            };
+        }
+        // Bulk → AGL / Bulk → ALT buttons.
+        panelEl.querySelectorAll('[data-bulk]').forEach(b => {
+            b.onclick = (e) => {
+                e.stopPropagation();
+                openBulkPopover(b, missionId, filteredSteps, b.dataset.bulk);
+            };
         });
         // Location cells — left-click opens Google Maps, right-click copies coords
         panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
@@ -2315,6 +2366,160 @@
             } catch (e) { return NaN; }
         }
         return Number(trimmed);
+    }
+
+    // Inline edit of the AGL Δ cell. The user types a target AGL (clearance
+    // above ground); we back-solve altitude = ground elevation + AGL and queue
+    // it as an ordinary altitude change, so it rides the same queue / Commit /
+    // ⚡ fast-save pipeline as a direct Value edit. Mirrors the Site Setup SUM,
+    // where editing AGL writes Min Alt = Elevation + AGL.
+    function startInlineAglEdit(cellSpan, missionId) {
+        const instrId = Number(cellSpan.dataset.instrId);
+        const elevM = Number(cellSpan.dataset.elevM);
+        const origAlt = Number(cellSpan.dataset.origAlt);      // original altitude, display units
+        const startAgl = Number(cellSpan.dataset.aglCur);      // current (effective) AGL, display units
+        if (!isFinite(elevM)) { showToast('Ground elevation not loaded yet — try again in a moment', '#ff9800'); return; }
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'aim-mb-alt-input';
+        input.value = isFinite(startAgl) ? startAgl : '';
+        input.title = `Target AGL in ${unitLabel}. Altitude becomes ground + this. Formulas like 100+10 work.`;
+        cellSpan.replaceWith(input);
+        input.focus();
+        input.select();
+        let advanceAfter = false;
+        const commit = () => {
+            const agl = parseFormulaValue(input.value);
+            if (isNaN(agl)) {
+                showToast('Invalid value or formula', '#ff5252');
+                renderDetailView(missionId);
+                return;
+            }
+            // target AGL (display) → meters → altitude meters → display altitude
+            const targetAglM = unit === 'imperial' ? (agl / 3.28084) : agl;
+            const newAltM = elevM + targetAglM;
+            const newAltDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            if (newAltDisp === origAlt) {
+                discardPendingChange(missionId, instrId);
+                renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+                return;
+            }
+            queueAltitudeChange(missionId, instrId, newAltDisp, unit);
+            showToast(`Queued: step ${instrId} → ${Math.round(agl)} ${unitLabel} AGL (alt ${newAltDisp.toLocaleString()} ${unitLabel})`, '#ff9800', 4000);
+            renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                e.stopPropagation();   // belongs to our editor, not QME's document-level Enter
+                advanceAfter = true;
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                input.onblur = null;
+                renderDetailView(missionId);
+            }
+        };
+    }
+
+    // ── Bulk → AGL / Bulk → ALT ─────────────────────────────────────────────
+    // Scope rule (matches Site Setup SUM): if any rows are checked, act on the
+    // selection; otherwise act on ALL editable steps currently visible (the
+    // active type filter is respected). Everything queues through the existing
+    // pipeline, so the same Commit / ⚡ fast-save / safety model applies.
+    let bulkPopoverEl = null;
+    function closeBulkPopover() {
+        if (bulkPopoverEl) { bulkPopoverEl.remove(); bulkPopoverEl = null; }
+        document.removeEventListener('mousedown', bulkOutsideClose, true);
+    }
+    function bulkOutsideClose(e) {
+        if (bulkPopoverEl && !bulkPopoverEl.contains(e.target)) closeBulkPopover();
+    }
+    function bulkScopedSteps(filteredSteps) {
+        const sel = panelState.detailSelection || new Set();
+        const editable = filteredSteps.filter(stepAltEditable);
+        return sel.size ? editable.filter(s => sel.has(s.id)) : editable;
+    }
+    function openBulkPopover(anchorBtn, missionId, filteredSteps, mode) {
+        closeBulkPopover();
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        const sel = panelState.detailSelection || new Set();
+        const scoped = bulkScopedSteps(filteredSteps);
+        const eligible = (mode === 'agl') ? scoped.filter(s => stepElevM(s) != null) : scoped;
+        const skipNoElev = scoped.length - eligible.length;
+        const scopeWord = sel.size ? 'selected' : 'visible editable';
+        const title = mode === 'agl' ? 'Bulk → AGL' : 'Bulk → ALT';
+        const hint = mode === 'agl'
+            ? `Sets each step's altitude to its own ground elevation + this AGL (${unitLabel}).`
+            : `Sets each step's altitude to this absolute value (${unitLabel}).`;
+        const pop = document.createElement('div');
+        pop.className = 'aim-mb-bp-pop';
+        pop.innerHTML = `
+            <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">${title}</span><button class="aim-mb-menu-close" data-bp-close>✕</button></div>
+            <div style="padding:10px 12px;">
+                <div style="font-size:11px;color:#aaa;margin-bottom:8px;">${hint}</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <label style="flex:1;font-size:11px;">Target ${mode === 'agl' ? 'AGL' : 'altitude'} (${unitLabel})</label>
+                    <input type="text" data-bp-input placeholder="${mode === 'agl' ? 'e.g. 100' : 'e.g. 2700'}" style="width:90px;">
+                </div>
+                <div style="font-size:11px;color:#888;margin:4px 0 10px;">Applies to <strong style="color:#ffd54f;">${eligible.length} ${scopeWord}</strong> step${eligible.length === 1 ? '' : 's'}${skipNoElev ? ` · ${skipNoElev} skipped (no elevation yet)` : ''}</div>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-bp-cancel>Cancel</button>
+                    <button class="aim-mb-bulk-btn" data-bp-apply>Queue ${eligible.length} edit${eligible.length === 1 ? '' : 's'}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        bulkPopoverEl = pop;
+        // Position below the button, clamped into the viewport.
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = r.left + 'px';
+        const pr = pop.getBoundingClientRect();
+        if (pr.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - pr.width) + 'px';
+        if (pr.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, r.top - pr.height - 4) + 'px';
+        const input = pop.querySelector('[data-bp-input]');
+        input.focus();
+        const doApply = () => applyBulk(mode, input.value, missionId, filteredSteps);
+        pop.querySelector('[data-bp-apply]').onclick = doApply;
+        pop.querySelector('[data-bp-cancel]').onclick = closeBulkPopover;
+        pop.querySelector('[data-bp-close]').onclick = closeBulkPopover;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); doApply(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeBulkPopover(); }
+        };
+        // Defer so the click that opened the popover doesn't immediately close it.
+        setTimeout(() => document.addEventListener('mousedown', bulkOutsideClose, true), 0);
+    }
+    function applyBulk(mode, rawInput, missionId, filteredSteps) {
+        const v = parseFormulaValue(rawInput);
+        if (isNaN(v)) { showToast('Invalid value or formula', '#ff5252'); return; }
+        const unit = panelState.distanceUnit;
+        const toM = (d) => unit === 'imperial' ? (d / 3.28084) : d;
+        const scoped = bulkScopedSteps(filteredSteps);
+        let queued = 0, skipped = 0;
+        scoped.forEach(s => {
+            let newAltM;
+            if (mode === 'agl') {
+                const elevM = stepElevM(s);
+                if (elevM == null) { skipped++; return; }
+                newAltM = elevM + toM(v);
+            } else {
+                newAltM = toM(v);
+            }
+            const newDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            const origDisp = unit === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+            if (newDisp === origDisp) { discardPendingChange(missionId, s.id); skipped++; return; }
+            queueAltitudeChange(missionId, s.id, newDisp, unit);
+            queued++;
+        });
+        closeBulkPopover();
+        showToast(`Bulk → ${mode.toUpperCase()}: queued ${queued}${skipped ? ` · skipped ${skipped}` : ''}`, queued ? '#ff9800' : '#888', 4500);
+        renderDetailView(missionId);
     }
 
     function exportDetailToSheets(filteredSteps, allSteps, unit, missionName) {
@@ -3463,13 +3668,38 @@ ${placemarks}
         return `<div class="${cls}" ${copyAttr}${title}><div class="aim-mb-stat-label">${escapeHtml(label)}</div><div class="aim-mb-stat-value">${escapeHtml(String(value))}</div></div>`;
     }
 
+    // Is this step's altitude inline/bulk editable? Gate shared by the row
+    // renderer, the selection checkboxes, and the Bulk → AGL/ALT actions.
+    function stepAltEditable(s) {
+        return !!(s && s.value1_name === 'm' && typeof s.value1 === 'number');
+    }
+    // Ground elevation (m) for a step's GPS, or null if no GPS / not cached yet.
+    function stepElevM(s) {
+        if (!s || !s.location || s.location.lat == null) return null;
+        const e = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
+        return (e == null) ? null : e;
+    }
+
     function renderStepRow(s, idx, unit) {
         const type = displayStepType(s);
         const val = displayStepValue(s, unit);
         const rawType = s && s.type_name;
-        let rowClass = '';
-        if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
-        else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
+        const missionId = panelState && panelState.drillId;
+        // Pending altitude change (if any) — used by BOTH the Value cell and the
+        // AGL cell so editing either keeps the other in sync (effective altitude).
+        const pendingChange = (missionId != null && s) ? getPendingChange(missionId, s.id) : null;
+        const editable = stepAltEditable(s);
+        const selSet = panelState && panelState.detailSelection;
+        const isSelected = editable && selSet && selSet.has(s.id);
+        const classes = [];
+        if (rawType === 'navigate') classes.push('aim-mb-step-nav');
+        else if (rawType === 'snapshot') classes.push('aim-mb-step-snap');
+        if (isSelected) classes.push('selected');
+        const rowClass = classes.length ? ` class="${classes.join(' ')}"` : '';
+        // Selection checkbox — only for editable steps (bulk can't touch the rest).
+        const selCell = editable
+            ? `<td class="aim-mb-sel-cell" style="text-align:center;"><input type="checkbox" data-sel-row data-instr-id="${s.id}" ${isSelected ? 'checked' : ''}></td>`
+            : '<td></td>';
         const hasGps = s && s.location && typeof s.location === 'object' && s.location.lat != null;
         // Binoculars — center map on this step's GPS
         let focusCell;
@@ -3486,11 +3716,10 @@ ${placemarks}
         // Altitude value: inline-editable when value1_name === 'm'.
         // Click → input → Enter/blur to queue change.
         let valCell;
-        if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
+        if (editable) {
             const u = unit || getDistanceUnit();
             const rawNum = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
-            const missionId = panelState && panelState.drillId;
-            const pending = missionId ? getPendingChange(missionId, s.id) : null;
+            const pending = pendingChange;
             const committed = missionId ? getCommitted(missionId, s.id) : null;
             if (pending) {
                 const pendingDisplay = u === 'imperial' ? `${Math.round(pending.value).toLocaleString()} ft ALT` : `${Math.round(pending.value).toLocaleString()} m ALT`;
@@ -3530,20 +3759,25 @@ ${placemarks}
                 const elevDisplay = u === 'imperial' ? Math.round(elevM * 3.28084) : Math.round(elevM);
                 const elevUnit = u === 'imperial' ? 'ft' : 'm';
                 elevCell = `<td><span class="aim-mb-elev" data-elev-raw="${elevDisplay}" title="Click to copy raw elevation">${elevDisplay.toLocaleString()} ${elevUnit} ELV</span></td>`;
-                // AGL only meaningful if step has altitude (value1_name === 'm')
-                if (s.value1_name === 'm' && typeof s.value1 === 'number') {
-                    const aglM = s.value1 - elevM;
+                // AGL only meaningful if step has altitude (value1_name === 'm').
+                // It's inline-editable: editing AGL back-solves altitude = ground + AGL.
+                // Uses the EFFECTIVE altitude (pending change wins) so editing the
+                // Value cell and the AGL cell stay in sync, just like the Site Setup SUM.
+                if (editable) {
+                    const effAltM = (pendingChange && typeof pendingChange.newM === 'number') ? pendingChange.newM : s.value1;
+                    const origAltDisp = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+                    const aglM = effAltM - elevM;
                     const aglDisplay = u === 'imperial' ? Math.round(aglM * 3.28084) : Math.round(aglM);
                     const aglFt = u === 'imperial' ? aglDisplay : Math.round(aglM * 3.28084);
                     const { cls, titleSuffix } = aglThresholdsForType(rawType, aglFt);
-                    aglCell = `<td><span class="aim-mb-agl ${cls}" data-agl-raw="${aglDisplay}" title="AGL = altitude − ground elevation. ${titleSuffix} Click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
+                    aglCell = `<td><span class="aim-mb-agl aim-mb-agl-editable ${cls}" data-agl-edit data-instr-id="${s.id}" data-elev-m="${elevM}" data-orig-alt="${origAltDisp}" data-agl-raw="${aglDisplay}" data-agl-cur="${aglDisplay}" title="AGL = altitude − ground elevation. ${titleSuffix} Click to edit AGL (sets altitude = ground + AGL). Right-click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
                 }
             } else {
                 elevCell = `<td><span class="aim-mb-elev-loading" data-elev-loading="${lat},${lng}">…</span></td>`;
                 aglCell = `<td><span class="aim-mb-agl-loading">…</span></td>`;
             }
         }
-        return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+        return `<tr${rowClass}>${selCell}${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
     }
 
     // AGL thresholds differ by step type:
