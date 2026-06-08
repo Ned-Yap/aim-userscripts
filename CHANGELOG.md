@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — Asset Inspector v3.65 (DEV) — Saved view presets (columns + filters + sort)
+
+New **Presets ▾** button in the Site Setup SUM toolbar (next to Columns ▾). A preset saves your whole view — **visible columns + order, the type filter, the validation filters, the sort, and ft/m** — so you can flip between layouts without re-toggling everything by hand:
+
+- **Apply** any saved preset with one click; **⟳** overwrites it with the current view, **×** deletes it.
+- **＋ Save** the current view under a name (inline — no popups). Saving an existing name updates it.
+- **↺ Default view** — back to all columns, no filters, default sort, feet.
+- Ships with one example preset, **"GMs · Name/Lat/Long"** (General Markers only, just those three columns) — exactly the "switch to GMs, Copy → Sheets, switch back" workflow. Presets are per-user and global across sites; search text is intentionally not captured (it's per-task).
+
+(Mission Bank Tools' detail table doesn't use the same column system yet — presets there are a possible follow-up.)
+
 ## 2026-06-08 — Lat / Long / GPS columns — Asset Inspector v3.64 + Mission Bank Tools v0.72 (DEV)
 
 Both SUM tables get three coordinate columns:

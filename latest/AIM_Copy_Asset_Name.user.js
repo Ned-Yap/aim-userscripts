@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.64
+// @version      3.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.64';
+    const SCRIPT_VERSION = '3.65';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -154,6 +154,7 @@
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
+    const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
     const ELEV_CONCURRENCY = 4;
     let elevationCache = null;
@@ -1752,6 +1753,82 @@
     }
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
+    }
+
+    // ── View presets (per-user) ─────────────────────────────────────────────
+    // A preset is a saved snapshot of the SUM view: visible columns + order,
+    // the type filter, the validation filters, the sort, and ft/m units.
+    // Search text is intentionally NOT captured (it's transient, per-task).
+    // Stored in GM storage so it survives reloads and is global across sites.
+    function loadViewPresets() {
+        const stored = elevGmGet(CACHE_KEY_VIEW_PRESETS, null);
+        if (stored == null) {
+            // First run: seed the example the user asked for so the feature
+            // is immediately useful. Deleting it sticks (we only seed when the
+            // key has never been written).
+            const seed = [{
+                name: 'GMs · Name/Lat/Long',
+                columnOrder: ['name', 'lat', 'long'],
+                typeFilter: ['19'],
+                validatedOnly: false, unvalidatedOnly: false, unshieldedOnly: false, notesOnly: false,
+                sortKey: 'name', sortDir: 1, unitsFt: true,
+            }];
+            elevGmSet(CACHE_KEY_VIEW_PRESETS, seed);
+            return seed;
+        }
+        return Array.isArray(stored) ? stored : [];
+    }
+    function saveViewPresets(arr) {
+        elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
+    }
+    // Snapshot the live SUM state into a plain preset object (sans name).
+    function captureCurrentView() {
+        return {
+            columnOrder: sumPanelState.columnOrder.slice(),
+            typeFilter: Array.from(sumPanelState.typeFilter),
+            validatedOnly: sumPanelState.validatedOnly,
+            unvalidatedOnly: sumPanelState.unvalidatedOnly,
+            unshieldedOnly: sumPanelState.unshieldedOnly,
+            notesOnly: sumPanelState.notesOnly,
+            sortKey: sumPanelState.sortKey,
+            sortDir: sumPanelState.sortDir,
+            unitsFt: sumPanelState.unitsFt,
+        };
+    }
+    // Apply a preset to the live state and re-render the whole panel (which
+    // rebuilds every toolbar control from sumPanelState, so chips/checkboxes/
+    // sort indicators all reflect the preset). Drag position is preserved.
+    function applyViewPreset(p, siteID) {
+        if (!p) return;
+        if (Array.isArray(p.columnOrder) && p.columnOrder.length) {
+            sumPanelState.columnOrder = p.columnOrder.filter(k => ALL_COL_KEYS.includes(k));
+            saveColumnOrder(sumPanelState.columnOrder);
+        }
+        if (Array.isArray(p.typeFilter)) sumPanelState.typeFilter = new Set(p.typeFilter.map(String));
+        sumPanelState.validatedOnly = !!p.validatedOnly;
+        sumPanelState.unvalidatedOnly = !!p.unvalidatedOnly;
+        sumPanelState.unshieldedOnly = !!p.unshieldedOnly;
+        sumPanelState.notesOnly = !!p.notesOnly;
+        if (p.sortKey) sumPanelState.sortKey = p.sortKey;
+        if (p.sortDir === 1 || p.sortDir === -1) sumPanelState.sortDir = p.sortDir;
+        if (typeof p.unitsFt === 'boolean') sumPanelState.unitsFt = p.unitsFt;
+        renderSummaryPanel(siteID);
+    }
+    // Reset to the out-of-box view: all columns, all types, no filters,
+    // default type-grouped sort, feet, no search.
+    function resetToDefaultView(siteID) {
+        sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+        saveColumnOrder(sumPanelState.columnOrder);
+        sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
+        sumPanelState.validatedOnly = false;
+        sumPanelState.unvalidatedOnly = false;
+        sumPanelState.unshieldedOnly = false;
+        sumPanelState.notesOnly = false;
+        sumPanelState.sortKey = 'typePrio';
+        sumPanelState.sortDir = 1;
+        sumPanelState.unitsFt = true;
+        sumPanelState.search = '';
+        renderSummaryPanel(siteID);
     }
 
     // ============================================================
@@ -4890,6 +4967,138 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(colsBtn);
+
+        // --- Presets menu — saved views (columns + filters + sort + units) ---
+        // Per-user, global across sites. Lets the user flip to e.g. "GMs ·
+        // Name/Lat/Long" to Copy → Sheets, then jump back to their usual view
+        // without re-toggling every column/filter by hand.
+        const presetsBtn = document.createElement('button');
+        presetsBtn.type = 'button';
+        presetsBtn.textContent = 'Presets ▾';
+        presetsBtn.title = 'Saved views — columns, filters, and sort. Apply a preset, save the current view, or reset to default.';
+        presetsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        let presetsMenuEl = null;
+        let presetsDocClick = null;
+        const closePresetsMenu = () => {
+            if (presetsMenuEl) { presetsMenuEl.remove(); presetsMenuEl = null; }
+            if (presetsDocClick) { document.removeEventListener('mousedown', presetsDocClick, true); presetsDocClick = null; }
+        };
+        presetsBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (presetsMenuEl) { closePresetsMenu(); return; }
+            presetsMenuEl = document.createElement('div');
+            presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
+            const rebuildPresetsMenu = () => {
+                presetsMenuEl.innerHTML = '';
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:4px 12px 4px;font-weight:700';
+                head.textContent = 'Apply a saved view';
+                presetsMenuEl.appendChild(head);
+                const presets = loadViewPresets();
+                if (presets.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.cssText = 'padding:3px 12px;color:#888';
+                    empty.textContent = 'No presets yet — save the current view below.';
+                    presetsMenuEl.appendChild(empty);
+                }
+                presets.forEach((p, i) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px';
+                    row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                    row.onmouseleave = () => { row.style.background = 'transparent'; };
+                    const lbl = document.createElement('span');
+                    lbl.textContent = p.name;
+                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer';
+                    lbl.title = 'Apply this view';
+                    lbl.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    row.appendChild(lbl);
+                    const upd = document.createElement('button');
+                    upd.textContent = '⟳';
+                    upd.title = 'Overwrite this preset with the current view';
+                    upd.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1';
+                    upd.onclick = (e2) => {
+                        e2.stopPropagation();
+                        const arr = loadViewPresets();
+                        arr[i] = Object.assign({ name: p.name }, captureCurrentView());
+                        saveViewPresets(arr);
+                        showToast(`Updated: ${p.name}`, 'rgba(95,255,95,0.5)');
+                        rebuildPresetsMenu();
+                    };
+                    row.appendChild(upd);
+                    const del = document.createElement('button');
+                    del.textContent = '×';
+                    del.title = 'Delete this preset';
+                    del.style.cssText = 'background:transparent;border:1px solid rgba(255,120,120,0.4);color:#ff8a80;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:12px;padding:0;line-height:1';
+                    del.onclick = (e2) => {
+                        e2.stopPropagation();
+                        const arr = loadViewPresets();
+                        arr.splice(i, 1);
+                        saveViewPresets(arr);
+                        rebuildPresetsMenu();
+                    };
+                    row.appendChild(del);
+                    presetsMenuEl.appendChild(row);
+                });
+                const hr = document.createElement('div');
+                hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                presetsMenuEl.appendChild(hr);
+                // Reset to default view
+                const defBtn = document.createElement('button');
+                defBtn.type = 'button';
+                defBtn.textContent = '↺ Default view (all columns · no filters)';
+                defBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 6px;width:calc(100% - 24px);text-align:left';
+                defBtn.onclick = () => { closePresetsMenu(); resetToDefaultView(siteID); showToast('Default view', 'rgba(20,210,220,0.55)'); };
+                presetsMenuEl.appendChild(defBtn);
+                // Save current view (inline name input — sandbox-safe, no prompt())
+                const saveRow = document.createElement('div');
+                saveRow.style.cssText = 'display:flex;gap:6px;padding:0 12px 4px';
+                const nameInput = document.createElement('input');
+                nameInput.type = 'text';
+                nameInput.placeholder = 'Name this view…';
+                nameInput.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#e6e6e6;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;outline:none';
+                nameInput.onfocus = () => { nameInput.style.borderColor = '#14d2dc'; };
+                nameInput.onblur = () => { nameInput.style.borderColor = 'rgba(255,255,255,0.20)'; };
+                const saveBtn2 = document.createElement('button');
+                saveBtn2.type = 'button';
+                saveBtn2.textContent = '＋ Save';
+                saveBtn2.title = 'Save the current columns + filters + sort as a new preset';
+                saveBtn2.style.cssText = 'background:rgba(20,210,220,0.15);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap';
+                const doSave = () => {
+                    const name = (nameInput.value || '').trim();
+                    if (!name) { nameInput.focus(); return; }
+                    const arr = loadViewPresets();
+                    const existing = arr.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
+                    const entry = Object.assign({ name }, captureCurrentView());
+                    let verb = 'Saved';
+                    if (existing >= 0) { arr[existing] = entry; verb = 'Updated'; }
+                    else arr.push(entry);
+                    saveViewPresets(arr);
+                    showToast(`${verb}: ${name}`, 'rgba(95,255,95,0.5)');
+                    rebuildPresetsMenu();
+                };
+                saveBtn2.onclick = (e2) => { e2.stopPropagation(); doSave(); };
+                nameInput.onkeydown = (e2) => {
+                    if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); doSave(); }
+                    else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); closePresetsMenu(); }
+                };
+                saveRow.appendChild(nameInput);
+                saveRow.appendChild(saveBtn2);
+                presetsMenuEl.appendChild(saveRow);
+            };
+            rebuildPresetsMenu();
+            const r = presetsBtn.getBoundingClientRect();
+            presetsMenuEl.style.left = r.left + 'px';
+            presetsMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(presetsMenuEl);
+            const mr = presetsMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) presetsMenuEl.style.left = (window.innerWidth - mr.width - 8) + 'px';
+            if (mr.bottom > window.innerHeight - 8) presetsMenuEl.style.top = (r.top - mr.height - 4) + 'px';
+            presetsDocClick = (e) => {
+                if (presetsMenuEl && !presetsMenuEl.contains(e.target) && e.target !== presetsBtn) closePresetsMenu();
+            };
+            setTimeout(() => document.addEventListener('mousedown', presetsDocClick, true), 0);
+        };
+        optsRow.appendChild(presetsBtn);
 
         // --- Bulk → AGL button ---
         // Opens a popover that lets the user queue Min Alt edits across
