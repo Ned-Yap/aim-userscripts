@@ -6,7 +6,7 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-07 — Mission Bank Tools v0.65 (DEV) — Fast bulk altitude save (interceptor, opt-in)
+## 2026-06-07 — Mission Bank Tools v0.68 (DEV) — Fast bulk altitude save (interceptor, opt-in) + per-step persistence fix
 
 Bulk-editing 30-50 step altitudes via the per-step dialog is ~1-2s/step. New **⚡ Fast bulk save** option: stage your altitude changes in the SUM table, flip the toggle in the pending banner, then **Save the mission** — all staged changes are spliced into that one save request at once (instant). Built on measured per-type rules: snapshot → set altitude; navigate → set altitude + drop "use freezone min". Safety: **OFF by default and resets every reload** (a save is never modified unless you opt in that session), strict unique matching (location + original value — skips anything ambiguous), **fail-closed** (any hiccup → your original save goes through untouched), and a "patched N (skipped M)" toast + per-step console audit. Only ever changes the altitude (+ the one navigate flag) on steps you staged; Site Setup still governs the flight envelope. Per-step **Commit** stays as the in-form alternative. Dev-only in `latest/`.
 
