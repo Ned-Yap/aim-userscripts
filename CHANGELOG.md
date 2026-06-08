@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — Map Styler v34.69 (DEV) — Saving a drawn line creates the KML if it's missing
+
+Follow-up to v34.68. Pressing ✓ to save a drawn power line on a site with no KML used to fail with a 404 (the commit fetches the file's SHA first, and there's no file). Now the save **self-heals**: if the file doesn't exist and you're only adding lines, it creates `<siteID>-<type>.kml` from a blank skeleton with your drawn lines baked in (single create instead of failing). This covers a line drawn before the file existed, a leftover pending line from earlier, or a declined create-on-draw prompt. (DEV-only.)
+
 ## 2026-06-08 — Map Styler v34.68 (DEV) — +D / +T offers to create a blank KML when none exists
 
 When you press **+D** (distribution) or **+T** (transmission) in the Power Line Editor strip on a site that has **no power-line KML yet**, the styler now warns you instead of silently dropping you into draw mode (where a commit would later fail). You get a prompt: *"No distribution power-line KML exists for this site yet — if you already have power lines, upload the KML to the data repo first; otherwise click OK to create a new empty one now and start drawing."* OK creates a blank `<siteID>-distro.kml` (or `-trans.kml`) in the data repo and drops you straight into draw mode — draw, then ✓ to commit as usual. Use this for new areas with no existing lines, or new transmission lines that aren't in the repo yet. (DEV-only — Power Line Editor is dev-only.)

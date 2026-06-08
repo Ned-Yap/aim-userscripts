@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.68
+// @version      34.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.68';
+    const SCRIPT_VERSION = '34.69';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2672,6 +2672,29 @@
                         if (resp.status === 401 || resp.status === 403) {
                             showKMLToast('GitHub denied read access — check your PAT scope.', 6000);
                         } else if (resp.status === 404) {
+                            // File doesn't exist yet. If we're only ADDING
+                            // lines (no delete/modify against existing
+                            // placemarks), this is the "drew on a site with
+                            // no KML" case — create the file from a blank
+                            // skeleton WITH the drawn lines, PUT with NO sha.
+                            // v34.69: makes Save self-heal instead of dead-
+                            // ending at 404 (covers a pending line drawn
+                            // before the file existed, or a declined/failed
+                            // create-on-draw prompt).
+                            if (co.added && co.added.length) {
+                                try {
+                                    const skeleton = buildEmptyKML(siteID, type);
+                                    const mutated = applyCommitOpsToKML(skeleton, co);
+                                    kmlMissing.delete(k);
+                                    console.log(`${TAG} commit-ops: ${path} missing → creating it with ${co.added.length} drawn line(s)`);
+                                    // sha undefined → JSON.stringify omits it → GitHub creates the file.
+                                    putCommitOpsToGitHub(siteID, type, mutated, undefined, token, summary.text);
+                                } catch (e) {
+                                    showKMLToast(`Create-on-save failed: ${e.message || 'XML error'}.`, 6000);
+                                    console.error(`${TAG} commit-ops create-on-404 failed:`, e);
+                                }
+                                return;
+                            }
                             showKMLToast(`File ${path} not found on GitHub.`, 5000);
                         } else {
                             showKMLToast(`Commit GET failed: HTTP ${resp.status}.`, 5000);
