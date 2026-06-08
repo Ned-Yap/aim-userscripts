@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.62
+// @version      3.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.62';
+    const SCRIPT_VERSION = '3.63';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1707,7 +1707,7 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -3487,6 +3487,14 @@
                 if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
+            // Point coordinate — only single-point entities (GMs type 19,
+            // Assets type 3) have a meaningful lat/lng. Polygons/lines leave
+            // these null so the Lat/Long/GPS cells render blank.
+            if ((e.type === 19 || e.type === 3) && Array.isArray(e.coords) && e.coords[0]
+                && typeof e.coords[0].lat === 'number') {
+                row._lat = e.coords[0].lat;
+                row._lng = e.coords[0].lng;
+            }
             // For non-asset rows, elevation = MAX DEM across sample
             // points (asset row already populated above from its
             // claimed elevation_asl — that takes priority).
@@ -5741,6 +5749,10 @@
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                // Point-entity coordinates — populated only for GMs + Assets.
+                { key: 'lat',       label: 'Lat',            w: 90,  num: true,  dataKey: '_lat' },
+                { key: 'long',      label: 'Long',           w: 90,  num: true,  dataKey: '_lng' },
+                { key: 'gps',       label: 'GPS',            w: 60,  num: false, dataKey: '_gps' },
             ];
             const COL_BY_KEY = Object.fromEntries(allColDefs.map(c => [c.key, c]));
             // Honor the user's persisted order — visibleCols was replaced
@@ -6147,6 +6159,48 @@
                         else if (r.validated === false) { txt = '✗'; color = '#ff5555'; }
                         td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
                         td.textContent = txt;
+                    } else if (col.key === 'lat' || col.key === 'long') {
+                        // Point coordinate (GMs + Assets only). Click or
+                        // right-click copies the raw number. M1-edit to move
+                        // the marker is a planned fast-follow.
+                        const v = col.key === 'lat' ? r._lat : r._lng;
+                        td.style.cssText = 'padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        if (v == null) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Only point entities (General Markers, Assets) have a single coordinate';
+                        } else {
+                            td.style.color = '#cdd6e0';
+                            td.textContent = v.toFixed(6);
+                            td.title = 'Click or right-click to copy. (Editing — moving the marker — coming soon.)';
+                            const copy = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(v), `Copied ${v.toFixed(6)}`); };
+                            td.onclick = copy;
+                            td.oncontextmenu = copy;
+                        }
+                    } else if (col.key === 'gps') {
+                        // Google Maps link. M1 opens a new tab, M2 copies the URL.
+                        td.style.cssText = 'padding:5px 8px;text-align:center;font-size:11px;cursor:pointer';
+                        if (r._lat == null) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Only point entities (General Markers, Assets) have a coordinate';
+                        } else {
+                            const url = `https://www.google.com/maps?q=${r._lat},${r._lng}`;
+                            const a = document.createElement('span');
+                            a.textContent = '🗺 Map';
+                            a.style.cssText = 'color:#8ab4f8;text-decoration:underline;white-space:nowrap';
+                            td.appendChild(a);
+                            td.title = 'Click: open in Google Maps (new tab). Right-click: copy the Maps link.';
+                            td.onclick = (ev) => {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                let opened = null;
+                                try { opened = (window.top || window).open(url, '_blank'); }
+                                catch (e2) { opened = null; }
+                                if (!opened) copyToClipboard(url, 'Popup blocked — copied link');
+                            };
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
+                        }
                     }
                     tr.appendChild(td);
                 });
@@ -6206,6 +6260,9 @@
                         if (r.validated === false) return 'no';
                         return ''; // N/A
                     }
+                    if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
+                    if (col.key === 'long') return r._lng != null ? r._lng.toFixed(6) : '';
+                    if (col.key === 'gps') return r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '';
                     return '';
                 }));
                 return [header, ...data];

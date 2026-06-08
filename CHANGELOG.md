@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — Lat / Long / GPS columns — Asset Inspector v3.63 + Mission Bank Tools v0.71 (DEV)
+
+Both SUM tables get three coordinate columns:
+
+- **Lat** and **Long** — click *or* right-click copies the raw number (6-decimal). In Site Setup these show for **point entities only (General Markers + Assets)**; lines/polygons (FP/FFZ/NFZ) stay blank. In MBT they show for every GPS step.
+- **GPS** — a 🗺 Map link: **left-click opens Google Maps in a new tab**, right-click copies the link. (Replaces MBT's old combined Location column.)
+- Lat/Long/GPS are included in the CSV/TSV exports too.
+
+**Coming next:** making Lat/Long **editable** (M1) to move a marker / waypoint — held as a fast-follow while I confirm Percepto's editors expose a numeric lat/lng field (vs map-drag). For now these columns are read/copy/link only. Dev-only in `latest/`.
+
 ## 2026-06-07 — Mission Bank Tools v0.70 (DEV) — Editable AGL + Bulk → AGL/ALT + row selection (Site Setup SUM parity)
 
 The Mission Summary step table now matches the **Site Setup SUM** for altitude editing:

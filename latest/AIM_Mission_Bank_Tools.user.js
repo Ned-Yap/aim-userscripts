@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.70
+// @version      0.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.70';
+    const SCRIPT_VERSION = '0.71';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1218,6 +1218,10 @@
                 #${PANEL_ID} .aim-mb-step-snap { color: #ff9800; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-loc { cursor: pointer; color: #fff; text-decoration: underline; }
                 #${PANEL_ID} .aim-mb-loc:hover { color: #14d2dc; }
+                #${PANEL_ID} .aim-mb-latlng { cursor: pointer; color: #cdd6e0; }
+                #${PANEL_ID} .aim-mb-latlng:hover { color: #14d2dc; }
+                #${PANEL_ID} .aim-mb-gps { cursor: pointer; color: #8ab4f8; text-decoration: underline; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-gps:hover { color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-step-focus { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
@@ -1983,7 +1987,7 @@
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th class="aim-mb-sel-cell" style="width:24px;text-align:center;"><input type="checkbox" data-sel-all title="Select all editable visible steps"></th><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
+                                <tr><th class="aim-mb-sel-cell" style="width:24px;text-align:center;"><input type="checkbox" data-sel-all title="Select all editable visible steps"></th><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Lat</th><th>Long</th><th>GPS</th></tr>
                             </thead>
                             <tbody>
                                 ${filteredSteps.map(s => {
@@ -2273,30 +2277,39 @@
                 openBulkPopover(b, missionId, filteredSteps, b.dataset.bulk);
             };
         });
-        // Location cells — left-click opens Google Maps, right-click copies coords
-        panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
+        // Lat / Long cells — click or right-click copies the raw number.
+        // (M1-edit to move the waypoint is a planned fast-follow.)
+        panelEl.querySelectorAll('.aim-mb-latlng').forEach(el => {
+            const copy = (e) => {
+                if (e) { e.preventDefault(); e.stopPropagation(); }
+                copyToClipboard(el.dataset.coordVal);
+                showToast(`Copied: ${el.dataset.coordVal}`, '#5fff5f');
+            };
+            el.onclick = copy;
+            el.oncontextmenu = copy;
+        });
+        // GPS cell — left-click opens the Google Maps link in a new tab,
+        // right-click copies the link.
+        panelEl.querySelectorAll('.aim-mb-gps').forEach(el => {
             el.onclick = (e) => {
                 e.preventDefault();
-                const lat = el.dataset.lat;
-                const lng = el.dataset.lng;
-                if (!lat || !lng) return;
-                const url = `https://www.google.com/maps?q=${lat},${lng}`;
+                const url = el.dataset.mapsUrl;
+                if (!url) return;
                 let opened = null;
                 try { opened = (window.top || window).open(url, '_blank'); }
                 catch (er) { opened = null; }
                 if (!opened) {
                     copyToClipboard(url);
-                    showToast(`Popup blocked. Copied URL: ${url}`, '#ff9800');
+                    showToast(`Popup blocked. Copied link: ${url}`, '#ff9800');
                 }
             };
             el.oncontextmenu = (e) => {
                 e.preventDefault();
-                const lat = el.dataset.lat;
-                const lng = el.dataset.lng;
-                if (lat && lng) {
-                    const coords = `${lat}, ${lng}`;
-                    copyToClipboard(coords);
-                    showToast(`Copied: ${coords}`, '#5fff5f');
+                e.stopPropagation();
+                const url = el.dataset.mapsUrl;
+                if (url) {
+                    copyToClipboard(url);
+                    showToast('Copied Maps link', '#5fff5f');
                 }
             };
         });
@@ -3758,12 +3771,18 @@ ${placemarks}
             }
             valCell = `<td>${escapeHtml(val)}</td>`;
         }
-        // Location cell — clickable link to Google Maps
-        let locCell = '';
+        // Lat / Long / GPS cells. Lat & Long: click or right-click copies the
+        // raw number (M1-edit to move the waypoint is a planned fast-follow).
+        // GPS: a Google Maps link — left-click opens a new tab, right-click
+        // copies the URL.
+        let latCell = '<td></td>', lngCell = '<td></td>', gpsCell = '<td></td>';
         if (hasGps) {
             const lat = Number(s.location.lat);
             const lng = Number(s.location.lng);
-            locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
+            const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+            latCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lat}" title="Click or right-click to copy latitude. (Editing — moving the waypoint — coming soon.)">${lat.toFixed(6)}</span></td>`;
+            lngCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lng}" title="Click or right-click to copy longitude. (Editing — moving the waypoint — coming soon.)">${lng.toFixed(6)}</span></td>`;
+            gpsCell = `<td style="font-size:10px;"><span class="aim-mb-gps" data-maps-url="${mapsUrl}" title="Click: open in Google Maps (new tab). Right-click: copy the Maps link.">🗺 Map</span></td>`;
         }
         // Elevation + AGL cells — populated by elevation cache (or "…" while fetching)
         const u = unit || getDistanceUnit();
@@ -3795,7 +3814,7 @@ ${placemarks}
                 aglCell = `<td><span class="aim-mb-agl-loading">…</span></td>`;
             }
         }
-        return `<tr${rowClass}>${selCell}${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+        return `<tr${rowClass}>${selCell}${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}${latCell}${lngCell}${gpsCell}</tr>`;
     }
 
     // AGL thresholds differ by step type:
