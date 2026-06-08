@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.71
+// @version      0.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.71';
+    const SCRIPT_VERSION = '0.72';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3782,7 +3782,7 @@ ${placemarks}
             const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
             latCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lat}" title="Click or right-click to copy latitude. (Editing — moving the waypoint — coming soon.)">${lat.toFixed(6)}</span></td>`;
             lngCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lng}" title="Click or right-click to copy longitude. (Editing — moving the waypoint — coming soon.)">${lng.toFixed(6)}</span></td>`;
-            gpsCell = `<td style="font-size:10px;"><span class="aim-mb-gps" data-maps-url="${mapsUrl}" title="Click: open in Google Maps (new tab). Right-click: copy the Maps link.">🗺 Map</span></td>`;
+            gpsCell = `<td style="font-size:10px;"><span class="aim-mb-gps" data-maps-url="${mapsUrl}" title="Click: open in Google Maps (new tab). Right-click: copy the Maps link.">${lat.toFixed(6)}, ${lng.toFixed(6)}</span></td>`;
         }
         // Elevation + AGL cells — populated by elevation cache (or "…" while fetching)
         const u = unit || getDistanceUnit();
