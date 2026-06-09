@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.72
+// @version      3.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.72';
+    const SCRIPT_VERSION = '3.73';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2994,7 +2994,7 @@
     // per-segment ceiling change (1-indexed) for reporting.
     function bridgeArcContinuity(arcs) {
         if (!Array.isArray(arcs) || arcs.length < 2) return [];
-        const OVERLAP_M = 1;
+        const OVERLAP_M = 2; // raise ceilings 2 m past the neighbour's floor for a clear, non-touching overlap
         const vkey = (p) => (p && typeof p.lat === 'number' && typeof p.lng === 'number') ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : null;
         const origMax = arcs.map(a => (a && typeof a.max_alt === 'number') ? a.max_alt : null);
         // Group arc indices by shared vertex (point_a + point_b).
@@ -3024,8 +3024,11 @@
                 if (!A || !B) continue;
                 if (typeof A.min_alt !== 'number' || typeof A.max_alt !== 'number' ||
                     typeof B.min_alt !== 'number' || typeof B.max_alt !== 'number') continue;
-                if (A.max_alt >= B.min_alt && B.max_alt >= A.min_alt) continue; // overlap
-                if (A.max_alt < B.min_alt) { A.max_alt = B.min_alt + OVERLAP_M; changed = true; }
+                // STRICT overlap: the server rejects bands that only TOUCH
+                // at a single altitude (max == min) — it needs a positive
+                // intersection. So use > not >=, and bridge the touchers.
+                if (A.max_alt > B.min_alt && B.max_alt > A.min_alt) continue; // already strictly overlap
+                if (A.max_alt <= B.min_alt) { A.max_alt = B.min_alt + OVERLAP_M; changed = true; }
                 else { B.max_alt = A.min_alt + OVERLAP_M; changed = true; }
             }
             if (!changed) break;
