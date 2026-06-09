@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.71
+// @version      3.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.71';
+    const SCRIPT_VERSION = '3.72';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3135,6 +3135,35 @@
         }
         if (resp.status !== 200) {
             const snippet = (resp.raw || '').slice(0, 200);
+            // Targeted diagnostic for the arc-overlap 400 — dump the named
+            // segments FROM THE BODY WE SENT so we can see why they're
+            // considered connected-but-disjoint (floors too far / a link
+            // we can't detect / numbering mismatch). Server numbering is
+            // unknown, so dump both 0- and 1-indexed candidates + check
+            // whether they share a vertex per our matcher.
+            const mArc = /Arcs?\s+(\d+)\s+and\s+(\d+)/i.exec(resp.raw || '');
+            if (mArc && Array.isArray(body.arcs)) {
+                const ft = (m) => (typeof m === 'number') ? Math.round(m * 3.28084) : '?';
+                const vk = (p) => (p && typeof p.lat === 'number') ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : 'none';
+                const desc = (n) => {
+                    const a = body.arcs[n];
+                    if (!a) return `[idx ${n}: none]`;
+                    return `idx ${n}: ${ft(a.min_alt)}-${ft(a.max_alt)}ft  A=${vk(a.point_a)}  B=${vk(a.point_b)}`;
+                };
+                const n1 = Number(mArc[1]), n2 = Number(mArc[2]);
+                console.warn(`${TAG} ⚡ 400 ARC DIAGNOSTIC — server says arcs ${n1} & ${n2} don't overlap. Body arcs (try 0- and 1-indexed):`);
+                [n1, n1 - 1].forEach(n => console.warn(`${TAG}   ${desc(n)}`));
+                console.warn(`${TAG}   ----`);
+                [n2, n2 - 1].forEach(n => console.warn(`${TAG}   ${desc(n)}`));
+                // Do any of the candidate pairs share a vertex (our model)?
+                const share = (i, j) => {
+                    const A = body.arcs[i], B = body.arcs[j];
+                    if (!A || !B) return false;
+                    const ka = [vk(A.point_a), vk(A.point_b)], kb = [vk(B.point_a), vk(B.point_b)];
+                    return ka.some(k => k !== 'none' && kb.includes(k));
+                };
+                console.warn(`${TAG}   share-vertex? [${n1},${n2}]=${share(n1, n2)} [${n1 - 1},${n2 - 1}]=${share(n1 - 1, n2 - 1)} [${n1},${n2 - 1}]=${share(n1, n2 - 1)} [${n1 - 1},${n2}]=${share(n1 - 1, n2)}`);
+            }
             applyState.errors.push({ entityName: label, reason: `server ${resp.status}: ${snippet}` });
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
