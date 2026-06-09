@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.67
+// @version      3.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.67';
+    const SCRIPT_VERSION = '3.68';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2887,9 +2887,16 @@
         return b;
     }
 
+    // FP arc altitudes are stored as INTEGER meters server-side (the
+    // server floors a sub-meter float — e.g. 880.6 → 880). Round our
+    // target to the nearest integer meter so the write matches intent
+    // (closer than the server's floor) AND verify is exact. FFZ
+    // restrictions accept decimals, so they're left untouched.
+    function fpArcAltMeters(m) { return Math.round(m); }
+
     // Mutate a write body in place with the group's queued edits.
     // newValueM is meters (the queue's storage unit) — FFZ restrictions
-    // and FP arc min_alt/max_alt are both meters, so no conversion.
+    // keep decimals; FP arc min_alt/max_alt round to integer meters.
     function applyEditsToBody(body, edits) {
         edits.forEach(e => {
             if (e.field === 'name') { body.name = e.newValue; return; }
@@ -2902,8 +2909,8 @@
                 let arc = body.arcs.find(a => a && a.id === e.arcId);
                 if (!arc && e.arcIndex != null && e.arcIndex < body.arcs.length) arc = body.arcs[e.arcIndex];
                 if (arc) {
-                    if (e.field === 'min_alt') arc.min_alt = e.newValueM;
-                    else if (e.field === 'max_alt') arc.max_alt = e.newValueM;
+                    if (e.field === 'min_alt') arc.min_alt = fpArcAltMeters(e.newValueM);
+                    else if (e.field === 'max_alt') arc.max_alt = fpArcAltMeters(e.newValueM);
                 }
             }
         });
@@ -2925,6 +2932,9 @@
                 continue;
             }
             let cur = null;
+            // FP arcs store integer meters; compare against the same
+            // rounded target we sent. FFZ restrictions keep decimals.
+            const target = e.isFfz ? e.newValueM : fpArcAltMeters(e.newValueM);
             if (e.isFfz) {
                 cur = saved.restrictions ? (e.field === 'min_alt' ? saved.restrictions.minAlt : saved.restrictions.maxAlt) : null;
             } else {
@@ -2932,8 +2942,8 @@
                 if (!arc && e.arcIndex != null && e.arcIndex < (saved.arcs || []).length) arc = saved.arcs[e.arcIndex];
                 cur = arc ? (e.field === 'min_alt' ? arc.min_alt : arc.max_alt) : null;
             }
-            if (cur == null || Math.abs(cur - e.newValueM) > tolM) {
-                return { ok: false, reason: `${e.segmentName || ''} ${e.field}: expected ${e.newValueM.toFixed(1)}m, got ${cur == null ? 'null' : cur.toFixed(1)}m`, structural: false };
+            if (cur == null || Math.abs(cur - target) > tolM) {
+                return { ok: false, reason: `${e.segmentName || ''} ${e.field}: expected ${target.toFixed(1)}m, got ${cur == null ? 'null' : cur.toFixed(1)}m`, structural: false };
             }
         }
         return { ok: true };
@@ -3152,8 +3162,8 @@
                 let arc = ent.arcs.find(a => a && a.id === e.arcId);
                 if (!arc && e.arcIndex != null && e.arcIndex < ent.arcs.length) arc = ent.arcs[e.arcIndex];
                 if (arc) {
-                    if (e.field === 'min_alt') arc.min_alt = e.newValueM;
-                    else if (e.field === 'max_alt') arc.max_alt = e.newValueM;
+                    if (e.field === 'min_alt') arc.min_alt = fpArcAltMeters(e.newValueM);
+                    else if (e.field === 'max_alt') arc.max_alt = fpArcAltMeters(e.newValueM);
                 }
             }
         });
