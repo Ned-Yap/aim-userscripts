@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.59
+// @version      3.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.59';
+    const SCRIPT_VERSION = '3.74';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -154,6 +154,7 @@
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
+    const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
     const ELEV_CONCURRENCY = 4;
     let elevationCache = null;
@@ -1579,7 +1580,7 @@
             // inspector popup over an entity that happens to be beneath the
             // issue icon.
             if (target && target.closest && target.closest('.aim-issues-icon-marker')) return;
-            // v3.59: Don't steal right-clicks meant for UI controls. The
+            // v3.61: Don't steal right-clicks meant for UI controls. The
             // Control Panel gear, Issues 🚩, and Power ⚡ buttons all inject
             // into .map-tools and each have their own M2 (right-click)
             // action. Our capture-phase handler otherwise hit-tests the
@@ -1587,7 +1588,7 @@
             // instead of letting the button toggle. Bail on any toolbar
             // button / Leaflet control / generic button.
             if (target && target.closest && target.closest('.map-tools, .map-tools__button, .leaflet-control, button, .ant-btn')) return;
-            // v3.59: Power-line paths are owned by Map Styler's contextmenu
+            // v3.61: Power-line paths are owned by Map Styler's contextmenu
             // handler (vertex delete / hide menu in edit mode). We hit-test
             // by lat/lng, so whenever an asset/FFZ/FP polygon overlapped a
             // power line we'd steal the right-click. If the click landed on
@@ -1707,7 +1708,7 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -1752,6 +1753,82 @@
     }
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
+    }
+
+    // ── View presets (per-user) ─────────────────────────────────────────────
+    // A preset is a saved snapshot of the SUM view: visible columns + order,
+    // the type filter, the validation filters, the sort, and ft/m units.
+    // Search text is intentionally NOT captured (it's transient, per-task).
+    // Stored in GM storage so it survives reloads and is global across sites.
+    function loadViewPresets() {
+        const stored = elevGmGet(CACHE_KEY_VIEW_PRESETS, null);
+        if (stored == null) {
+            // First run: seed the example the user asked for so the feature
+            // is immediately useful. Deleting it sticks (we only seed when the
+            // key has never been written).
+            const seed = [{
+                name: 'GMs · Name/Lat/Long',
+                columnOrder: ['name', 'lat', 'long'],
+                typeFilter: ['19'],
+                validatedOnly: false, unvalidatedOnly: false, unshieldedOnly: false, notesOnly: false,
+                sortKey: 'name', sortDir: 1, unitsFt: true,
+            }];
+            elevGmSet(CACHE_KEY_VIEW_PRESETS, seed);
+            return seed;
+        }
+        return Array.isArray(stored) ? stored : [];
+    }
+    function saveViewPresets(arr) {
+        elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
+    }
+    // Snapshot the live SUM state into a plain preset object (sans name).
+    function captureCurrentView() {
+        return {
+            columnOrder: sumPanelState.columnOrder.slice(),
+            typeFilter: Array.from(sumPanelState.typeFilter),
+            validatedOnly: sumPanelState.validatedOnly,
+            unvalidatedOnly: sumPanelState.unvalidatedOnly,
+            unshieldedOnly: sumPanelState.unshieldedOnly,
+            notesOnly: sumPanelState.notesOnly,
+            sortKey: sumPanelState.sortKey,
+            sortDir: sumPanelState.sortDir,
+            unitsFt: sumPanelState.unitsFt,
+        };
+    }
+    // Apply a preset to the live state and re-render the whole panel (which
+    // rebuilds every toolbar control from sumPanelState, so chips/checkboxes/
+    // sort indicators all reflect the preset). Drag position is preserved.
+    function applyViewPreset(p, siteID) {
+        if (!p) return;
+        if (Array.isArray(p.columnOrder) && p.columnOrder.length) {
+            sumPanelState.columnOrder = p.columnOrder.filter(k => ALL_COL_KEYS.includes(k));
+            saveColumnOrder(sumPanelState.columnOrder);
+        }
+        if (Array.isArray(p.typeFilter)) sumPanelState.typeFilter = new Set(p.typeFilter.map(String));
+        sumPanelState.validatedOnly = !!p.validatedOnly;
+        sumPanelState.unvalidatedOnly = !!p.unvalidatedOnly;
+        sumPanelState.unshieldedOnly = !!p.unshieldedOnly;
+        sumPanelState.notesOnly = !!p.notesOnly;
+        if (p.sortKey) sumPanelState.sortKey = p.sortKey;
+        if (p.sortDir === 1 || p.sortDir === -1) sumPanelState.sortDir = p.sortDir;
+        if (typeof p.unitsFt === 'boolean') sumPanelState.unitsFt = p.unitsFt;
+        renderSummaryPanel(siteID);
+    }
+    // Reset to the out-of-box view: all columns, all types, no filters,
+    // default type-grouped sort, feet, no search.
+    function resetToDefaultView(siteID) {
+        sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+        saveColumnOrder(sumPanelState.columnOrder);
+        sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
+        sumPanelState.validatedOnly = false;
+        sumPanelState.unvalidatedOnly = false;
+        sumPanelState.unshieldedOnly = false;
+        sumPanelState.notesOnly = false;
+        sumPanelState.sortKey = 'typePrio';
+        sumPanelState.sortDir = 1;
+        sumPanelState.unitsFt = true;
+        sumPanelState.search = '';
+        renderSummaryPanel(siteID);
     }
 
     // ============================================================
@@ -2295,16 +2372,32 @@
         }
 
         // Wait for the filter to apply, then find the matching item.
-        // Try includes-match first (handles "FOO" matching "FOO BAR" if
-        // names share prefixes); fall back to "the only visible row"
-        // when the filter narrowed down to exactly one entity.
+        // v3.62: EXACT name match wins. The old code took the first row whose
+        // full text merely *included* the query — so searching "freezone_2"
+        // could grab "freezone_21" (or any longer name sharing the prefix),
+        // open the wrong entity, and trip the name-mismatch guard → red toast.
+        // We now compare against each row's inner NAME span (not the whole
+        // row text, which also carries subtype/altitude badges), pick the
+        // exact match, and only fall back to "the single remaining row" when
+        // the filter narrowed to exactly one. No substring guessing.
+        const itemNameLower = (item) => {
+            const nm = item.querySelector('.map-entities__entity-name')
+                || item.querySelector('.entity-name')
+                || item.querySelector('[class*="entity-name"]');
+            return (((nm && nm.textContent) || item.textContent || '').trim().toLowerCase());
+        };
         const matched = await waitForCondition(() => {
             const items = inputDoc.querySelectorAll('.map-entities__entity-item');
+            if (items.length === 0) return null;
+            // 1. Exact name match — the only safe choice when names share a prefix.
             for (const item of items) {
-                const txt = (item.textContent || '').trim().toLowerCase();
-                if (txt.includes(matchLower)) return { el: item, doc: inputDoc };
+                if (itemNameLower(item) === matchLower) return { el: item, doc: inputDoc };
             }
+            // 2. Filter narrowed to a single row — unambiguous, take it (covers
+            //    minor name-extraction differences like a trailing badge).
             if (items.length === 1) return { el: items[0], doc: inputDoc };
+            // 3. Multiple rows, none exact yet — keep waiting; the filter may
+            //    still be settling. Never fall back to a substring pick.
             return null;
         }, 2000, 100);
 
@@ -2459,8 +2552,14 @@
             </div>
             ${warnHtml}
             <div style="margin-top:14px;padding:10px 12px;background:rgba(196,181,253,0.08);border:1px solid rgba(196,181,253,0.30);border-radius:4px;color:#c4b5fd;font-size:11px;line-height:1.5">
-                <strong>Dry Run</strong> walks the entire pipeline (opens editors, sets values) but <strong>cancels instead of saving</strong>. Use it to verify the script targets the right inputs without touching live data.
+                <strong>Dry Run</strong> walks the pipeline but <strong>does not save</strong>. In ⚡ Direct API mode it builds each body + runs the projected overlap check with zero POSTs. Use it to preview without touching live data.
             </div>
+            <label style="margin-top:12px;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:rgba(255,193,71,0.08);border:1px solid rgba(255,193,71,0.35);border-radius:4px;cursor:pointer">
+                <input type="checkbox" id="aim-ai-launch-directapi" style="margin-top:2px">
+                <span style="color:#ffd479;font-size:11px;line-height:1.5">
+                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. FFZs + FPs only (assets still use the editor).
+                </span>
+            </label>
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 <button id="aim-ai-launch-cancel" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px">Cancel</button>
                 <button id="aim-ai-launch-dry" style="background:rgba(196,181,253,0.18);color:#c4b5fd;border:1px solid rgba(196,181,253,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🧪 Dry Run (no save)</button>
@@ -2470,13 +2569,19 @@
         m.appendChild(box);
         document.body.appendChild(m);
         box.querySelector('#aim-ai-launch-cancel').onclick = closeApplyLauncher;
+        const directApiChecked = () => {
+            const cb = box.querySelector('#aim-ai-launch-directapi');
+            return !!(cb && cb.checked);
+        };
         box.querySelector('#aim-ai-launch-dry').onclick = () => {
+            const directApi = directApiChecked();
             closeApplyLauncher();
-            onLaunch({ dryRun: true });
+            onLaunch({ dryRun: true, directApi });
         };
         box.querySelector('#aim-ai-launch-live').onclick = () => {
+            const directApi = directApiChecked();
             closeApplyLauncher();
-            onLaunch({ dryRun: false });
+            onLaunch({ dryRun: false, directApi });
         };
     }
     function closeApplyLauncher() {
@@ -2497,14 +2602,15 @@
         const box = document.createElement('div');
         box.style.cssText = 'background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:20px 28px;min-width:460px;max-width:90vw;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
         box.innerHTML = `
-            <div style="color:#5fff5f;font-weight:700;font-size:15px;margin-bottom:6px">▶ Applying queued edits</div>
-            <div style="color:#888;font-size:11px;margin-bottom:14px">FFZs first, then FP segments. Do not click around.</div>
-            <div id="aim-ai-apply-label" style="color:#cfd6dc;font-size:12px;margin-bottom:8px;min-height:18px">Preparing…</div>
-            <div style="height:8px;background:rgba(95,255,95,0.15);border-radius:4px;overflow:hidden;margin-bottom:10px">
-                <div id="aim-ai-apply-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#5fff5f,#3fcf3f);transition:width 200ms ease-out"></div>
+            <div style="color:#5fff5f;font-weight:700;font-size:15px;margin-bottom:8px">▶ Applying changes</div>
+            <div id="aim-ai-apply-phase" style="display:flex;gap:6px;align-items:center;margin-bottom:12px;font-size:11px;flex-wrap:wrap"></div>
+            <div id="aim-ai-apply-label" style="color:#e6e6e6;font-size:13px;font-weight:600;margin-bottom:8px;min-height:18px">Getting ready…</div>
+            <div style="height:10px;background:rgba(95,255,95,0.15);border-radius:5px;overflow:hidden;margin-bottom:8px">
+                <div id="aim-ai-apply-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#5fff5f,#3fcf3f);transition:width 250ms ease-out"></div>
             </div>
-            <div id="aim-ai-apply-stats" style="color:#9ad;font-size:11px;font-variant-numeric:tabular-nums;min-height:16px"></div>
-            <div id="aim-ai-apply-errors" style="color:#ff8a80;font-size:11px;margin-top:6px;max-height:120px;overflow-y:auto"></div>
+            <div id="aim-ai-apply-stats" style="color:#9ad;font-size:12px;font-variant-numeric:tabular-nums;min-height:16px"></div>
+            <div id="aim-ai-apply-sub" style="color:#888;font-size:10px;margin-top:3px;min-height:13px"></div>
+            <div id="aim-ai-apply-errors" style="color:#ff8a80;font-size:11px;margin-top:8px;max-height:120px;overflow-y:auto"></div>
             <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
                 <button id="aim-ai-apply-abort" style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">Abort after current entity</button>
             </div>
@@ -2522,15 +2628,67 @@
     function updateApplyProgressModal(st) {
         const m = document.getElementById(APPLY_MODAL_ID);
         if (!m) return;
+        const phaseEl = m.querySelector('#aim-ai-apply-phase');
         const labelEl = m.querySelector('#aim-ai-apply-label');
         const fillEl = m.querySelector('#aim-ai-apply-fill');
         const statsEl = m.querySelector('#aim-ai-apply-stats');
+        const subEl = m.querySelector('#aim-ai-apply-sub');
         const errEl = m.querySelector('#aim-ai-apply-errors');
-        if (labelEl) labelEl.textContent = st.currentLabel || (st.running ? 'Working…' : 'Complete.');
-        const pct = st.total > 0 ? Math.round((st.done / st.total) * 100) : 0;
+
+        const phase = st.phase || (st.running ? 'writing' : 'done');
+        const total = st.entityTotal || 0;
+        const idx = Math.min(st.entityIndex || 0, total);
+        const failed = st.errors.length;
+
+        // Phase strip — only for ⚡ direct-API runs (it has the
+        // backup + safety-check stages). Editor runs hide it.
+        if (phaseEl) {
+            if (st.directApi) {
+                const order = ['snapshot', 'writing', 'checking'];
+                const steps = [['snapshot', '📸 Back up'], ['writing', '✏️ Update'], ['checking', '🔍 Safety check']];
+                const curRank = phase === 'done' ? 3 : order.indexOf(phase);
+                phaseEl.innerHTML = steps.map(([k, lbl], i) => {
+                    const isCur = k === phase;
+                    const isDone = i < curRank;
+                    const color = isCur ? '#5fff5f' : isDone ? '#7fbf7f' : '#5a5a5a';
+                    const weight = isCur ? '700' : '400';
+                    const mark = isDone ? '✓ ' : '';
+                    const arrow = i < steps.length - 1 ? `<span style="color:#444;margin:0 2px">→</span>` : '';
+                    return `<span style="color:${color};font-weight:${weight}">${mark}${lbl}</span>${arrow}`;
+                }).join('');
+                phaseEl.style.display = 'flex';
+            } else {
+                phaseEl.style.display = 'none';
+            }
+        }
+
+        // Big plain-language line for what's happening right now.
+        let label;
+        if (phase === 'snapshot') label = '📸 Saving a backup of everything first…';
+        else if (phase === 'checking') label = '🔍 Double-checking the whole map for any road poking above its zone…';
+        else if (phase === 'done' || !st.running) label = '✓ All done!';
+        else if (st.currentEntity) label = `✏️ Updating ${st.currentEntity}`;
+        else label = 'Working…';
+        if (labelEl) labelEl.textContent = label;
+
+        // Bar: full during the safety check / when done; entity-based
+        // while updating; a sliver during backup so it's clearly alive.
+        let pct;
+        if (phase === 'checking' || phase === 'done' || !st.running) pct = 100;
+        else if (phase === 'snapshot') pct = 4;
+        else pct = total > 0 ? Math.round((Math.max(0, idx - 1) / total) * 100) : 0;
         if (fillEl) fillEl.style.width = pct + '%';
-        if (statsEl) statsEl.textContent = `${st.done} / ${st.total} edits applied (${pct}%)`
-            + (st.errors.length ? ` · ${st.errors.length} error${st.errors.length === 1 ? '' : 's'}` : '');
+
+        // Stats in ENTITIES (what you see on the map), not raw edits.
+        if (statsEl) {
+            if (phase === 'snapshot') statsEl.textContent = `Backing up ${total} item${total === 1 ? '' : 's'}…`;
+            else if (phase === 'checking') statsEl.textContent = `Updated ${total - failed} of ${total} — now checking the map…`;
+            else if (phase === 'done' || !st.running) statsEl.textContent = `${total - failed} of ${total} updated${failed ? ` · ${failed} need a look` : ' ✓'}`;
+            else statsEl.textContent = `Item ${idx} of ${total}${failed ? ` · ${failed} need a look` : ''}`;
+        }
+        // Quiet secondary line with the raw edit count for the curious.
+        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} altitude values written)` : '';
+
         if (errEl) {
             errEl.innerHTML = '';
             st.errors.forEach(e => {
@@ -2543,6 +2701,78 @@
     function closeApplyProgressModal() {
         const m = document.getElementById(APPLY_MODAL_ID);
         if (m) m.remove();
+    }
+
+    // ⚡ Direct-API completion report — shows applied/failed counts, the
+    // overlap self-check result (the safety net), and a one-click
+    // rollback for live runs. broken = applyState.overlapBroken.
+    const DIRECT_REPORT_ID = 'aim-ai-direct-report';
+    function openDirectApiReport(st, opts) {
+        const old = document.getElementById(DIRECT_REPORT_ID);
+        if (old) old.remove();
+        const dryRun = !!(opts && opts.dryRun);
+        const failed = st.errors.length;
+        const ok = st.done;
+        const broken = Array.isArray(st.overlapBroken) ? st.overlapBroken : [];
+        const useFt = !!sumPanelState.unitsFt;
+        const band = (b) => {
+            const c = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+            return `${c(b[0])}–${c(b[1])}${useFt ? 'ft' : 'm'}`;
+        };
+        const m = document.createElement('div');
+        m.id = DIRECT_REPORT_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        const accent = broken.length ? '#ff8a80' : '#5fff5f';
+        box.style.cssText = `background:#1f2228;border:1px solid ${accent}88;border-radius:8px;padding:20px 26px;min-width:480px;max-width:90vw;max-height:88vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)`;
+        const errHtml = failed ? `<div style="margin-top:10px;color:#ff8a80;font-size:11px;max-height:140px;overflow-y:auto">${st.errors.map(e => `• ${String(e.entityName).replace(/</g, '&lt;')}: ${String(e.reason).replace(/</g, '&lt;')}`).join('<br>')}</div>` : '';
+        const overlapHtml = broken.length
+            ? `<div style="margin-top:14px;padding:10px 12px;background:rgba(255,138,128,0.10);border:1px solid rgba(255,138,128,0.45);border-radius:4px">
+                 <div style="color:#ff8a80;font-weight:700;font-size:12px;margin-bottom:6px">⚠ ${broken.length} FP↔FFZ pair${broken.length === 1 ? '' : 's'} now have DISJOINT altitude bands</div>
+                 <div style="color:#cfd6dc;font-size:11px;max-height:200px;overflow-y:auto;line-height:1.6">${broken.map(b => `• FFZ <strong>${String(b.ffz).replace(/</g, '&lt;')}</strong> (${band(b.ffzBand)}) ✕ FP <strong>${String(b.fp).replace(/</g, '&lt;')}</strong> (${band(b.fpBand)})`).join('<br>')}</div>
+                 <div style="color:#888;font-size:10px;margin-top:6px">${dryRun ? 'This is the PROJECTED end state — fix the queue before applying.' : 'These would have been blocked by Percepto\'s guard. Review them, or roll back below.'}</div>
+               </div>`
+            : `<div style="margin-top:14px;padding:8px 12px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#5fff5f;font-size:11px">✓ Overlap self-check passed — every crossing FP shares an altitude band with its FFZ${dryRun ? ' (projected end state)' : ''}.</div>`;
+        // Bridges — terrain seams auto-widened to keep paths continuous.
+        const bridgeGroups = Array.isArray(st.bridges) ? st.bridges : [];
+        const bridgeCount = bridgeGroups.reduce((s, g) => s + g.bridges.length, 0);
+        const ftc = (m) => useFt ? Math.round(m * 3.28084) : Math.round(m);
+        const bridgeHtml = bridgeCount
+            ? `<div style="margin-top:14px;padding:10px 12px;background:rgba(122,223,230,0.08);border:1px solid rgba(122,223,230,0.40);border-radius:4px">
+                 <div style="color:#7adfe6;font-weight:700;font-size:12px;margin-bottom:6px">🌉 Bridged ${bridgeCount} terrain seam${bridgeCount === 1 ? '' : 's'} ${dryRun ? 'would be raised' : 'raised'} to keep flight-path segments continuous</div>
+                 <div style="color:#cfd6dc;font-size:11px;max-height:160px;overflow-y:auto;line-height:1.6">${bridgeGroups.map(g => g.bridges.map(br => `• ${String(g.entityName).replace(/</g, '&lt;')} seg ${br.seg}: ceiling ${ftc(br.fromM)}→${ftc(br.toM)}${useFt ? 'ft' : 'm'}`).join('<br>')).join('<br>')}</div>
+                 <div style="color:#888;font-size:10px;margin-top:6px">Floors (AGL) unchanged — only the ceiling was raised at the steep steps so neighbouring segments overlap.</div>
+               </div>`
+            : '';
+        const rollbackBtn = (!dryRun && window.__aim_ai_directApiRollback)
+            ? `<button id="aim-ai-report-rollback" style="background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">↩ Roll back this run</button>`
+            : '';
+        box.innerHTML = `
+            <div style="color:${accent};font-weight:700;font-size:16px;margin-bottom:4px">⚡ ${dryRun ? 'Dry run preview' : 'Direct-API apply'} — ${dryRun ? 'no data written' : 'complete'}</div>
+            <div style="color:#cfd6dc;font-size:13px;margin-top:8px">
+                <strong style="color:#5fff5f">${ok}</strong> edit${ok === 1 ? '' : 's'} ${dryRun ? 'simulated' : 'applied + verified'}${failed ? ` · <strong style="color:#ff8a80">${failed}</strong> failed` : ''}
+            </div>
+            ${errHtml}
+            ${bridgeHtml}
+            ${overlapHtml}
+            <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                ${rollbackBtn}
+                <button id="aim-ai-report-close" style="background:rgba(95,255,95,0.16);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">Close</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        box.querySelector('#aim-ai-report-close').onclick = () => m.remove();
+        const rb = box.querySelector('#aim-ai-report-rollback');
+        if (rb) {
+            rb.onclick = async () => {
+                if (!confirm(`Roll back ${window.__aim_ai_directApiRollback.count} entit${window.__aim_ai_directApiRollback.count === 1 ? 'y' : 'ies'} to their pre-run altitudes?`)) return;
+                rb.disabled = true; rb.textContent = 'Rolling back…';
+                const res = await rollbackDirectApiRun();
+                rb.textContent = res.ok ? `↩ Restored ${res.restored}` : `↩ ${res.restored} ok · ${res.failed} failed`;
+                showToast(res.ok ? `Rolled back ${res.restored} entities` : `Rollback: ${res.restored} ok, ${res.failed} failed (see console)`, res.ok ? 'rgba(255,193,71,0.6)' : 'rgba(255,138,128,0.6)');
+            };
+        }
     }
 
     // Pre-flight checks before any save runs. Returns
@@ -2652,11 +2882,469 @@
         return edit.field === 'min_alt' ? arc.min_alt : arc.max_alt;
     }
 
+    // ============================================================
+    // ⚡ DIRECT API APPLY (v3.67)
+    //
+    // Instead of driving Percepto's editor per entity (slow, and its
+    // React layer blocks the "Mismatched Altitude Ranges" overlap
+    // case so bulk AGL/DELTA shifts can't be saved), we POST the
+    // entity straight to `/map_objects/`. Recon (2026-06-09) proved
+    // the overlap check is CLIENT-ONLY — the server accepts a
+    // non-overlapping save with 200 + warnings:[]. See memory
+    // reference_map_objects_save_endpoint.
+    //
+    // The catch: bypassing the guard means the END STATE's validity
+    // is on us. Four rails make that safe:
+    //   1. Snapshot + rollback file (download + in-memory) before any
+    //      write — failure to snapshot ABORTS before writing.
+    //   2. Per-POST verify-after: the response echoes the saved
+    //      entity; confirm altitudes landed AND structure (coord/arc
+    //      counts) is intact — a structural anomaly is treated as a
+    //      hard failure.
+    //   3. Final FP↔FFZ overlap self-check on fresh data (live) or the
+    //      projected end state (dry-run) — replaces the guard we
+    //      removed and flags any genuinely-disjoint band.
+    //   4. Dry-run builds bodies + runs the projected overlap check
+    //      WITHOUT any POST.
+    // ============================================================
+
+    // Per-site config cache. `/sites/<id>/` exposes `mountain_terrain`
+    // (the editor sends it as `mountain_terrain_site` in the write
+    // body — a terrain-relative-vs-MSL flag we must NOT guess).
+    const siteCfgCache = {};
+    async function fetchSiteConfig(siteID, force) {
+        if (!siteID) throw new Error('no siteID');
+        if (!force && siteCfgCache[siteID]) return siteCfgCache[siteID];
+        const r = await fetch(`https://percepto.app/sites/${encodeURIComponent(siteID)}/`, { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`/sites/${siteID}/ HTTP ${r.status}`);
+        const j = await r.json();
+        siteCfgCache[siteID] = j;
+        return j;
+    }
+
+    function getCsrfToken() {
+        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
+        return m ? decodeURIComponent(m[1]) : null;
+    }
+
+    // Convert a fetched (read-shape) entity into the exact write body
+    // Percepto's editor POSTs. Confirmed field mapping (FFZ + FP):
+    //   site_id ← site · points ← coords · strip site/coords/polygon/
+    //   asset_waypoints · mountain_terrain_site ← site cfg · each arc
+    //   gets points:[point_a,point_b]. We clone so the bucket entity
+    //   is never mutated.
+    function buildWriteBody(entity, siteCfg) {
+        const b = JSON.parse(JSON.stringify(entity));
+        b.site_id = entity.site;
+        b.points = Array.isArray(entity.coords) ? entity.coords : [];
+        delete b.site;
+        delete b.coords;
+        delete b.polygon;
+        delete b.asset_waypoints;
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        if (Array.isArray(b.arcs)) {
+            b.arcs.forEach(a => {
+                if (a && a.point_a && a.point_b && !Array.isArray(a.points)) {
+                    a.points = [a.point_a, a.point_b];
+                }
+            });
+        }
+        return b;
+    }
+
+    // FP arc altitudes are stored as INTEGER meters server-side (the
+    // server floors a sub-meter float — e.g. 880.6 → 880). Round our
+    // target to the nearest integer meter so the write matches intent
+    // (closer than the server's floor) AND verify is exact. FFZ
+    // restrictions accept decimals, so they're left untouched.
+    function fpArcAltMeters(m) { return Math.round(m); }
+
+    // Mutate a write body in place with the group's queued edits.
+    // newValueM is meters (the queue's storage unit) — FFZ restrictions
+    // keep decimals; FP arc min_alt/max_alt round to integer meters.
+    function applyEditsToBody(body, edits) {
+        edits.forEach(e => {
+            if (e.field === 'name') { body.name = e.newValue; return; }
+            if (e.isFfz) {
+                if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+                if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
+                else if (e.field === 'max_alt') body.restrictions.maxAlt = e.newValueM;
+            } else if (Array.isArray(body.arcs)) {
+                // arcId first, fall back to arcIndex (IDs regenerate on save).
+                let arc = body.arcs.find(a => a && a.id === e.arcId);
+                if (!arc && e.arcIndex != null && e.arcIndex < body.arcs.length) arc = body.arcs[e.arcIndex];
+                if (arc) {
+                    if (e.field === 'min_alt') arc.min_alt = fpArcAltMeters(e.newValueM);
+                    else if (e.field === 'max_alt') arc.max_alt = fpArcAltMeters(e.newValueM);
+                }
+            }
+        });
+    }
+
+    // Server rule: any two CONNECTED FP segments must share an altitude
+    // band, or POST 400s ("Arcs N and M have no overlapping altitude
+    // range"). A flight path is a BRANCHING GRAPH — segments connect at
+    // shared waypoints, NOT just by list order — so connected pairs can
+    // be far apart in the array (e.g. arcs 47 & 52 meeting at a branch).
+    // We build adjacency from each arc's point_a/point_b, then for every
+    // connected pair whose bands are disjoint we RAISE only the lower
+    // arc's CEILING to reconnect — each segment keeps its AGL floor, the
+    // band just fattens at the seam. Ceilings only ever rise (floors
+    // fixed) so repeated passes converge; we cap at 8. Returns the net
+    // per-segment ceiling change (1-indexed) for reporting.
+    function bridgeArcContinuity(arcs) {
+        if (!Array.isArray(arcs) || arcs.length < 2) return [];
+        const OVERLAP_M = 2; // raise ceilings 2 m past the neighbour's floor for a clear, non-touching overlap
+        const vkey = (p) => (p && typeof p.lat === 'number' && typeof p.lng === 'number') ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : null;
+        const origMax = arcs.map(a => (a && typeof a.max_alt === 'number') ? a.max_alt : null);
+        // Group arc indices by shared vertex (point_a + point_b).
+        const byVertex = new Map();
+        arcs.forEach((a, i) => {
+            if (!a) return;
+            [vkey(a.point_a), vkey(a.point_b)].forEach(k => {
+                if (!k) return;
+                if (!byVertex.has(k)) byVertex.set(k, []);
+                byVertex.get(k).push(i);
+            });
+        });
+        // Every unordered pair of arcs meeting at any vertex = an edge.
+        const edges = new Set();
+        for (const idxs of byVertex.values()) {
+            for (let x = 0; x < idxs.length; x++) {
+                for (let y = x + 1; y < idxs.length; y++) {
+                    edges.add(Math.min(idxs[x], idxs[y]) + ':' + Math.max(idxs[x], idxs[y]));
+                }
+            }
+        }
+        const edgeList = [...edges].map(s => s.split(':').map(Number));
+        for (let pass = 0; pass < 8; pass++) {
+            let changed = false;
+            for (const [i, j] of edgeList) {
+                const A = arcs[i], B = arcs[j];
+                if (!A || !B) continue;
+                if (typeof A.min_alt !== 'number' || typeof A.max_alt !== 'number' ||
+                    typeof B.min_alt !== 'number' || typeof B.max_alt !== 'number') continue;
+                // STRICT overlap: the server rejects bands that only TOUCH
+                // at a single altitude (max == min) — it needs a positive
+                // intersection. So use > not >=, and bridge the touchers.
+                if (A.max_alt > B.min_alt && B.max_alt > A.min_alt) continue; // already strictly overlap
+                if (A.max_alt <= B.min_alt) { A.max_alt = B.min_alt + OVERLAP_M; changed = true; }
+                else { B.max_alt = A.min_alt + OVERLAP_M; changed = true; }
+            }
+            if (!changed) break;
+        }
+        const bridges = [];
+        arcs.forEach((a, i) => {
+            if (origMax[i] != null && a && typeof a.max_alt === 'number' && a.max_alt > origMax[i] + 0.01) {
+                bridges.push({ seg: i + 1, fromM: origMax[i], toM: a.max_alt });
+            }
+        });
+        return bridges;
+    }
+
+    // Rail 2 — verify the server's echoed object matches WHAT WE SENT
+    // (sentBody), not the raw queue — so auto-bridged ceilings verify
+    // correctly. Checks every arc/restriction round-tripped + structure
+    // (coord/arc counts) intact; a count change is a STRUCTURAL anomaly.
+    function verifyDirectSave(saved, sentBody, original) {
+        if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
+        const oc = (original.coords || []).length, sc = (saved.coords || []).length;
+        if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
+        const oa = (original.arcs || []).length, sa = (saved.arcs || []).length;
+        if (oa !== sa) return { ok: false, reason: `arc count changed ${oa}→${sa}`, structural: true };
+        const tolM = 0.5;
+        // FFZ restrictions (object, decimals).
+        if (sentBody.restrictions && typeof sentBody.restrictions === 'object' && !Array.isArray(sentBody.restrictions)) {
+            const sr = saved.restrictions || {};
+            for (const k of ['minAlt', 'maxAlt']) {
+                if (typeof sentBody.restrictions[k] === 'number' &&
+                    (typeof sr[k] !== 'number' || Math.abs(sr[k] - sentBody.restrictions[k]) > tolM)) {
+                    return { ok: false, reason: `FFZ ${k}: sent ${sentBody.restrictions[k].toFixed(1)}m, got ${typeof sr[k] === 'number' ? sr[k].toFixed(1) : 'null'}m`, structural: false };
+                }
+            }
+        }
+        // FP arcs, by INDEX (ids regenerate on save).
+        if (Array.isArray(sentBody.arcs)) {
+            for (let i = 0; i < sentBody.arcs.length; i++) {
+                const sentA = sentBody.arcs[i], savA = (saved.arcs || [])[i];
+                if (!savA) return { ok: false, reason: `segment ${i + 1} missing in response`, structural: true };
+                for (const k of ['min_alt', 'max_alt']) {
+                    if (typeof sentA[k] === 'number' &&
+                        (typeof savA[k] !== 'number' || Math.abs(savA[k] - sentA[k]) > tolM)) {
+                        return { ok: false, reason: `seg ${i + 1} ${k}: sent ${sentA[k]}m, got ${typeof savA[k] === 'number' ? savA[k] : 'null'}m`, structural: false };
+                    }
+                }
+            }
+        }
+        return { ok: true };
+    }
+
+    // POST one entity group directly. Returns the same outcome shape as
+    // applyOneEntity: { ok, reason, appliedCount, verified, structural }.
+    async function applyOneEntityDirect(group, opts) {
+        const { dryRun } = opts || {};
+        const label = group.entityName || '(unnamed)';
+        const siteID = getCurrentSiteID();
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        const entity = bucket ? (bucket.entities || []).find(en => en.id === group.entityId) : null;
+        if (!entity) {
+            applyState.errors.push({ entityName: label, reason: 'entity not in fetched data (refresh first)' });
+            return { ok: false, reason: 'entity not in fetched data', appliedCount: 0 };
+        }
+        let siteCfg;
+        try { siteCfg = await fetchSiteConfig(siteID); }
+        catch (e) {
+            applyState.errors.push({ entityName: label, reason: `site config read failed (${e && e.message || e})` });
+            return { ok: false, reason: 'site config read failed', appliedCount: 0 };
+        }
+        const body = buildWriteBody(entity, siteCfg);
+        applyEditsToBody(body, group.edits);
+        // Auto-bridge terrain seams on flight paths so adjacent segments
+        // overlap (server rule) — raises ceilings only, AGL floor kept.
+        let bridges = [];
+        if (!group.isFfz && Array.isArray(body.arcs)) {
+            bridges = bridgeArcContinuity(body.arcs);
+            if (bridges.length) {
+                const useFt = !!sumPanelState.unitsFt;
+                const maxRaise = Math.max(...bridges.map(br => br.toM - br.fromM));
+                console.log(`${TAG} ⚡ ${label} — bridged ${bridges.length} terrain seam(s) (raised ceiling up to ${useFt ? Math.round(maxRaise * 3.28084) + 'ft' : maxRaise.toFixed(0) + 'm'}) to keep segments continuous`);
+            }
+        }
+
+        if (dryRun) {
+            console.log(`${TAG} ⚡[DRY] ${label} — built body (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? ', ' + bridges.length + ' seam(s) to bridge' : ''}), NOT posting`);
+            return { ok: true, reason: 'dry-run (no POST)', appliedCount: group.edits.length, verified: false, simulated: true, bridges };
+        }
+
+        const csrf = getCsrfToken();
+        if (!csrf) {
+            applyState.errors.push({ entityName: label, reason: 'no csrftoken cookie — cannot authenticate POST' });
+            return { ok: false, reason: 'no csrftoken', appliedCount: 0 };
+        }
+        let resp;
+        try {
+            const r = await fetch('https://percepto.app/map_objects/', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                body: JSON.stringify(body),
+            });
+            const txt = await r.text();
+            let json = null; try { json = JSON.parse(txt); } catch (e) {}
+            resp = { status: r.status, json, raw: txt };
+        } catch (e) {
+            applyState.errors.push({ entityName: label, reason: `POST threw: ${e && e.message || e}` });
+            return { ok: false, reason: 'POST threw', appliedCount: 0 };
+        }
+        if (resp.status !== 200) {
+            const snippet = (resp.raw || '').slice(0, 200);
+            // Targeted diagnostic for the arc-overlap 400 — dump the named
+            // segments FROM THE BODY WE SENT so we can see why they're
+            // considered connected-but-disjoint (floors too far / a link
+            // we can't detect / numbering mismatch). Server numbering is
+            // unknown, so dump both 0- and 1-indexed candidates + check
+            // whether they share a vertex per our matcher.
+            const mArc = /Arcs?\s+(\d+)\s+and\s+(\d+)/i.exec(resp.raw || '');
+            if (mArc && Array.isArray(body.arcs)) {
+                const ft = (m) => (typeof m === 'number') ? Math.round(m * 3.28084) : '?';
+                const vk = (p) => (p && typeof p.lat === 'number') ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : 'none';
+                const desc = (n) => {
+                    const a = body.arcs[n];
+                    if (!a) return `[idx ${n}: none]`;
+                    return `idx ${n}: ${ft(a.min_alt)}-${ft(a.max_alt)}ft  A=${vk(a.point_a)}  B=${vk(a.point_b)}`;
+                };
+                const n1 = Number(mArc[1]), n2 = Number(mArc[2]);
+                console.warn(`${TAG} ⚡ 400 ARC DIAGNOSTIC — server says arcs ${n1} & ${n2} don't overlap. Body arcs (try 0- and 1-indexed):`);
+                [n1, n1 - 1].forEach(n => console.warn(`${TAG}   ${desc(n)}`));
+                console.warn(`${TAG}   ----`);
+                [n2, n2 - 1].forEach(n => console.warn(`${TAG}   ${desc(n)}`));
+                // Do any of the candidate pairs share a vertex (our model)?
+                const share = (i, j) => {
+                    const A = body.arcs[i], B = body.arcs[j];
+                    if (!A || !B) return false;
+                    const ka = [vk(A.point_a), vk(A.point_b)], kb = [vk(B.point_a), vk(B.point_b)];
+                    return ka.some(k => k !== 'none' && kb.includes(k));
+                };
+                console.warn(`${TAG}   share-vertex? [${n1},${n2}]=${share(n1, n2)} [${n1 - 1},${n2 - 1}]=${share(n1 - 1, n2 - 1)} [${n1},${n2 - 1}]=${share(n1, n2 - 1)} [${n1 - 1},${n2}]=${share(n1 - 1, n2)}`);
+            }
+            applyState.errors.push({ entityName: label, reason: `server ${resp.status}: ${snippet}` });
+            return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
+        }
+        const saved = resp.json && resp.json.map_objects;
+        const verify = verifyDirectSave(saved, body, entity);
+        // Refresh the in-memory bucket with the server's echoed object so
+        // downstream reads (and the overlap check) see truth, not stale.
+        if (saved && bucket) {
+            const idx = bucket.entities.findIndex(en => en.id === group.entityId);
+            if (idx >= 0) bucket.entities[idx] = saved;
+        }
+        if (!verify.ok) {
+            applyState.errors.push({ entityName: label, reason: `verify ${verify.structural ? 'STRUCTURAL ' : ''}failed: ${verify.reason}` });
+            return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural, bridges };
+        }
+        console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? `, ${bridges.length} seam(s) bridged` : ''})`);
+        return { ok: true, appliedCount: group.edits.length, verified: true, bridges };
+    }
+
+    // Rail 1 — snapshot the CURRENT write body of every target entity so
+    // a bad run can be re-POSTed verbatim. Returns a portable object we
+    // both stash in memory/GM and download as a file.
+    async function collectRollbackSnapshot(groups, siteID, siteCfg) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        const entities = [];
+        for (const g of groups) {
+            if (g.isAsset) continue; // asset edits still go the editor path
+            const ent = bucket ? (bucket.entities || []).find(en => en.id === g.entityId) : null;
+            if (!ent) throw new Error(`snapshot: entity ${g.entityId} (${g.entityName}) not in fetched data`);
+            entities.push({ id: ent.id, name: ent.name, type: ent.type, body: buildWriteBody(ent, siteCfg) });
+        }
+        return { siteID, when: new Date().toISOString(), count: entities.length, entities };
+    }
+
+    function downloadRollback(snap) {
+        try {
+            const json = JSON.stringify(snap, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            // window.top bypasses the map-iframe sandbox for downloads.
+            const topDoc = (window.top && window.top.document) ? window.top.document : document;
+            const a = topDoc.createElement('a');
+            a.href = url;
+            a.download = `aim-rollback-site${snap.siteID}-${snap.when.replace(/[:.]/g, '-')}.json`;
+            (topDoc.body || document.body).appendChild(a);
+            a.click();
+            setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 1500);
+        } catch (e) {
+            console.warn(`${TAG} ⚡ rollback download failed (snapshot still in window.__aim_ai_directApiRollback):`, e);
+        }
+    }
+
+    // One-click restore: re-POST every snapshotted body verbatim. Exposed
+    // as window.__aim_ai_rollback() and wired to the report modal button.
+    async function rollbackDirectApiRun(snap) {
+        snap = snap || window.__aim_ai_directApiRollback;
+        if (!snap || !Array.isArray(snap.entities) || !snap.entities.length) {
+            console.warn(`${TAG} ⚡ no rollback snapshot available`);
+            return { ok: false, restored: 0, failed: 0, reason: 'no snapshot' };
+        }
+        const csrf = getCsrfToken();
+        if (!csrf) { console.warn(`${TAG} ⚡ rollback: no csrftoken`); return { ok: false, restored: 0, failed: 0, reason: 'no csrftoken' }; }
+        let restored = 0, failed = 0;
+        for (const ent of snap.entities) {
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                    body: JSON.stringify(ent.body),
+                });
+                if (r.status === 200) restored++;
+                else { failed++; console.warn(`${TAG} ⚡ rollback ${ent.name}: server ${r.status}`); }
+            } catch (e) { failed++; console.warn(`${TAG} ⚡ rollback ${ent.name} threw:`, e); }
+            await sleep(150);
+        }
+        console.log(`${TAG} ⚡ rollback complete — restored ${restored}, failed ${failed}`);
+        try {
+            const sid = getCurrentSiteID();
+            if (sid) { await fetchMapObjects(sid, true); if (document.getElementById(SUM_PANEL_ID)) renderSummaryPanel(sid); }
+        } catch (e) {}
+        return { ok: failed === 0, restored, failed };
+    }
+    window.__aim_ai_rollback = () => rollbackDirectApiRun();
+
+    // ---- Overlap self-check geometry (rail 3) ----
+    // lat/lng treated as planar x/y — fine at site scale. Ray-cast PIP.
+    function pointInPolygon(pt, poly) {
+        if (!pt || !Array.isArray(poly) || poly.length < 3) return false;
+        const x = pt.lng, y = pt.lat;
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].lng, yi = poly[i].lat, xj = poly[j].lng, yj = poly[j].lat;
+            const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    function segIntersect(a, b, c, d) {
+        if (!a || !b || !c || !d) return false;
+        const o = (p, q, r) => Math.sign((q.lng - p.lng) * (r.lat - p.lat) - (q.lat - p.lat) * (r.lng - p.lng));
+        const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
+        return o1 !== o2 && o3 !== o4;
+    }
+    // True if FP geometrically crosses the FFZ polygon. Uses ARCS (the
+    // real flight segments — FPs can branch, so consecutive coords are
+    // NOT reliable segments) and tests both endpoint-inside and
+    // segment-crosses-edge (the point-to-SEGMENT lesson, not just
+    // point-to-vertex).
+    function fpCrossesPolygon(fp, poly) {
+        const arcs = Array.isArray(fp.arcs) ? fp.arcs : [];
+        for (const a of arcs) {
+            if (a.point_a && pointInPolygon(a.point_a, poly)) return true;
+            if (a.point_b && pointInPolygon(a.point_b, poly)) return true;
+            if (a.point_a && a.point_b) {
+                for (let j = 0; j < poly.length; j++) {
+                    if (segIntersect(a.point_a, a.point_b, poly[j], poly[(j + 1) % poly.length])) return true;
+                }
+            }
+        }
+        return false;
+    }
+    // Returns [{ffz, fp, ffzBand:[min,max], fpBand:[min,max]}] for every
+    // crossing FP whose overall altitude band is DISJOINT from the FFZ's.
+    function runOverlapSelfCheck(entities) {
+        const list = Array.isArray(entities) ? entities : [];
+        const ffzs = list.filter(e => e.type === 16 && e.restrictions && Array.isArray(e.coords) && e.coords.length >= 3);
+        const fps = list.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const broken = [];
+        for (const ffz of ffzs) {
+            const fMin = ffz.restrictions.minAlt, fMax = ffz.restrictions.maxAlt;
+            if (typeof fMin !== 'number' || typeof fMax !== 'number') continue;
+            for (const fp of fps) {
+                if (!fpCrossesPolygon(fp, ffz.coords)) continue;
+                let pMin = Infinity, pMax = -Infinity;
+                fp.arcs.forEach(a => {
+                    if (typeof a.min_alt === 'number') pMin = Math.min(pMin, a.min_alt);
+                    if (typeof a.max_alt === 'number') pMax = Math.max(pMax, a.max_alt);
+                });
+                if (!isFinite(pMin) || !isFinite(pMax)) continue;
+                if (pMax < fMin || pMin > fMax) {
+                    broken.push({ ffz: ffz.name, fp: fp.name, ffzBand: [fMin, fMax], fpBand: [pMin, pMax] });
+                }
+            }
+        }
+        return broken;
+    }
+    // Dry-run projection: clone fetched entities, apply ALL queued edits
+    // in memory, return the projected end state for the overlap check.
+    function projectQueueOntoEntities(siteID) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        if (!bucket) return [];
+        const clones = JSON.parse(JSON.stringify(bucket.entities || []));
+        const byId = new Map(clones.map(e => [e.id, e]));
+        Object.values(pendingSegmentEdits).forEach(e => {
+            const ent = byId.get(e.entityId);
+            if (!ent) return;
+            if (e.field === 'name') { ent.name = e.newValue; return; }
+            if (e.isFfz) {
+                if (!ent.restrictions) ent.restrictions = {};
+                if (e.field === 'min_alt') ent.restrictions.minAlt = e.newValueM;
+                else if (e.field === 'max_alt') ent.restrictions.maxAlt = e.newValueM;
+            } else if (Array.isArray(ent.arcs)) {
+                let arc = ent.arcs.find(a => a && a.id === e.arcId);
+                if (!arc && e.arcIndex != null && e.arcIndex < ent.arcs.length) arc = ent.arcs[e.arcIndex];
+                if (arc) {
+                    if (e.field === 'min_alt') arc.min_alt = fpArcAltMeters(e.newValueM);
+                    else if (e.field === 'max_alt') arc.max_alt = fpArcAltMeters(e.newValueM);
+                }
+            }
+        });
+        return clones;
+    }
+
     // The actual apply pipeline — async, processes one group at a
     // time. Calls onProgress(state) on every step so the UI can
     // update. Honors applyState.aborted between groups.
     async function runApplyPipeline(onProgress, opts) {
-        const { dryRun } = opts || {};
+        const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
         applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
         applyState.done = 0;
@@ -2664,6 +3352,13 @@
         applyState.running = true;
         applyState.aborted = false;
         applyState.dryRun = !!dryRun;
+        applyState.directApi = !!directApi;
+        applyState.overlapBroken = undefined;
+        applyState.bridges = [];
+        applyState.entityTotal = groups.length;
+        applyState.entityIndex = 0;
+        applyState.currentEntity = '';
+        applyState.phase = 'writing';
         applyState.startTime = Date.now();
         const auditEntries = [];
         // Outer try/catch — bulletproof guarantee that applyState.running
@@ -2672,15 +3367,39 @@
         // is in flight forever (blocking future runs until page refresh).
         try {
             await closeEditor();
-            for (let gi = 0; gi < groups.length; gi++) {
+            // Rail 1 — snapshot + rollback file BEFORE any direct-API
+            // write. If the snapshot can't be built we ABORT before
+            // touching live data (no safety net = no run).
+            let snapshotFailed = false;
+            if (directApi && !dryRun) {
+                applyState.phase = 'snapshot';
+                onProgress(applyState);
+                try {
+                    const sid = getCurrentSiteID();
+                    const cfg = await fetchSiteConfig(sid);
+                    const snap = await collectRollbackSnapshot(groups, sid, cfg);
+                    window.__aim_ai_directApiRollback = snap;
+                    try { elevGmSet('aim-ai-directapi-rollback', snap); } catch (e) {}
+                    downloadRollback(snap);
+                    console.log(`${TAG} ⚡ rollback snapshot saved (${snap.count} entities) + downloaded`);
+                } catch (e) {
+                    snapshotFailed = true;
+                    applyState.errors.push({ entityName: '(rollback snapshot)', reason: `FAILED: ${e && e.message || e} — run aborted before any write` });
+                    console.error(`${TAG} ⚡ rollback snapshot failed — aborting before writes:`, e);
+                }
+            }
+            for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
                 if (applyState.aborted) break;
                 const g = groups[gi];
+                applyState.phase = 'writing';
+                applyState.entityIndex = gi + 1;
+                applyState.currentEntity = g.entityName;
                 applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
                 onProgress(applyState);
                 const entityStart = Date.now();
                 let outcome;
                 try {
-                    outcome = await applyOneEntity(g, { dryRun });
+                    outcome = await applyOneEntity(g, { dryRun, directApi });
                 } catch (err) {
                     outcome = { ok: false, reason: `unhandled exception: ${err && err.message ? err.message : err}`, appliedCount: 0 };
                     applyState.errors.push({ entityName: g.entityName, reason: outcome.reason });
@@ -2710,6 +3429,9 @@
                         newValueM: e.newValueM,
                     })),
                 });
+                if (outcome.bridges && outcome.bridges.length) {
+                    applyState.bridges.push({ entityName: g.entityName, bridges: outcome.bridges });
+                }
                 if (outcome.ok) {
                     applyState.done += g.edits.length;
                     if (!dryRun) {
@@ -2718,8 +3440,16 @@
                         });
                     }
                 }
+                // A STRUCTURAL verify failure means we sent a malformed
+                // body (coord/arc count changed) — stop immediately so a
+                // body-shape bug can't damage entity after entity.
+                if (outcome.structural) {
+                    applyState.aborted = true;
+                    applyState.errors.push({ entityName: '(safety abort)', reason: `structural anomaly on ${g.entityName} — run halted; rollback available` });
+                    console.error(`${TAG} ⚡ STRUCTURAL anomaly on ${g.entityName} — halting run. Use window.__aim_ai_rollback() or the report button.`);
+                }
                 onProgress(applyState);
-                await sleep(600);
+                await sleep(directApi && !dryRun ? 250 : 600);
             }
         } catch (err) {
             console.error(`${TAG} apply pipeline unhandled exception:`, err);
@@ -2767,6 +3497,11 @@
                     sidebarInput.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             } catch (e) {}
+            // ⚡ Direct-API: the refresh + overlap check below take a
+            // couple seconds with the bar full — label that "checking"
+            // so it doesn't look frozen. (running is already false, so
+            // the modal's checking branch must win over the done case.)
+            if (directApi && !applyState.aborted) applyState.phase = 'checking';
             onProgress(applyState);
             // AUTO-REFRESH after a live run that wrote anything. Force
             // a final fetch + re-render the SUM panel so the user sees
@@ -2791,6 +3526,23 @@
                     console.warn(`${TAG} apply: auto-refresh failed:`, e);
                 }
             }
+            // Rail 3 — final FP↔FFZ overlap self-check. Live: on the
+            // freshly-fetched data above. Dry-run: on the PROJECTED end
+            // state (clone + apply queued edits). This is the safety net
+            // that replaces the client guard we bypassed.
+            if (directApi) {
+                try {
+                    const sid = getCurrentSiteID();
+                    const ents = dryRun ? projectQueueOntoEntities(sid) : ((mapObjectsBySite[sid] || {}).entities || []);
+                    applyState.overlapBroken = runOverlapSelfCheck(ents);
+                    console.log(`${TAG} ⚡ overlap self-check (${dryRun ? 'projected end state' : 'live'}): ${applyState.overlapBroken.length} disjoint FP↔FFZ pair(s)`, applyState.overlapBroken);
+                } catch (e) {
+                    applyState.overlapBroken = null;
+                    console.warn(`${TAG} ⚡ overlap self-check failed:`, e);
+                }
+            }
+            applyState.phase = 'done';
+            onProgress(applyState);
         }
     }
 
@@ -3082,6 +3834,12 @@
     async function applyOneEntity(group, opts) {
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
+        // v3.67: ⚡ direct-API path — POST /map_objects/ instead of
+        // driving the editor. FFZ + FP only; assets keep the editor
+        // path (subtype edit is an Ant Select, not an altitude POST).
+        if (opts && opts.directApi && !group.isAsset) {
+            return applyOneEntityDirect(group, opts);
+        }
         // v3.41: branch to the asset path for subtype-only edits. The
         // FP/FFZ path operates on number inputs; assets need the Ant
         // Select dropdown ("Type" field with creatable footer).
@@ -3471,6 +4229,14 @@
                 if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
+            // Point coordinate — only single-point entities (GMs type 19,
+            // Assets type 3) have a meaningful lat/lng. Polygons/lines leave
+            // these null so the Lat/Long/GPS cells render blank.
+            if ((e.type === 19 || e.type === 3) && Array.isArray(e.coords) && e.coords[0]
+                && typeof e.coords[0].lat === 'number') {
+                row._lat = e.coords[0].lat;
+                row._lng = e.coords[0].lng;
+            }
             // For non-asset rows, elevation = MAX DEM across sample
             // points (asset row already populated above from its
             // claimed elevation_asl — that takes priority).
@@ -3649,6 +4415,14 @@
             '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
+            // GM radius circles — purple outline (ties to the purple GM
+            // icon), faint purple fill so the ring reads without hiding
+            // what's underneath. KML aabbggrr: ff f020a0 = full-alpha
+            // purple outline; 30 f020a0 = ~19% fill.
+            '<Style id="gmradius_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><color>30f020a0</color></PolyStyle></Style>',
+            // Same purple outline, no fill — used when multiple rings are
+            // drawn so overlapping fills don't muddy the map.
+            '<Style id="gmradius_outline_style"><LineStyle><color>fff020a0</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
             // V-Buffer: BLUE (moved from yellow — yellow is now reserved
             // for distro power lines per Exxon Powerlines KML standard).
             // KML color aabbggrr: ffff0000 = full alpha + pure blue.
@@ -3680,6 +4454,32 @@
         const first = points[0], last = points[points.length - 1];
         if (first.lat === last.lat && first.lng === last.lng) return points;
         return points.concat([first]);
+    }
+    // Closed polygon ring approximating a circle of `radiusM` meters
+    // around (lat,lng). Equirectangular projection — accurate to well
+    // under a meter at site scale (sub-km radii). Returns segments+1
+    // points (last == first, already closed). 48 segments reads as a
+    // smooth circle in Google Earth.
+    function kmlCircleRing(lat, lng, radiusM, segments) {
+        const n = segments || 48;
+        const mPerDegLat = 111320;
+        const mPerDegLng = 111320 * Math.cos(lat * Math.PI / 180) || 1e-9;
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+            const theta = (i / n) * 2 * Math.PI;
+            const dx = radiusM * Math.sin(theta); // east
+            const dy = radiusM * Math.cos(theta); // north
+            pts.push({ lat: lat + dy / mPerDegLat, lng: lng + dx / mPerDegLng });
+        }
+        return pts;
+    }
+    // GM radius circle as a ground-clamped Polygon. Flat circle on the
+    // ground regardless of 2D/3D mode — it's a horizontal buffer.
+    function kmlGmCircleGeometry(item, radiusM) {
+        const c = (Array.isArray(item.coords) && item.coords[0]) || null;
+        if (!c) return '';
+        const ring = kmlCircleRing(c.lat, c.lng, radiusM, 48);
+        return `<Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>${kmlCoords(ring, 0)}</coordinates></LinearRing></outerBoundaryIs></Polygon>`;
     }
     // Format a dual-line "Label (AGL): ftAGL / mAGL | (MSL): ftMSL / mMSL"
     // entry — matches Python's _format_alt_line output exactly. Bold ft
@@ -4025,6 +4825,34 @@
                 xml.push('</Folder>');
             });
         }
+        // General Marker radius circles — OFF by default. One or more
+        // horizontal buffer rings (clamped to ground) around every GM
+        // regardless of subtype. Radii are user-configurable (default a
+        // single 0.5-mi ring). Each radius gets its own subfolder so the
+        // Google Earth tree is filterable per ring. A single ring gets a
+        // faint fill; multiple rings render as outlines only.
+        if (include.gmCircles) {
+            const rings = (Array.isArray(options.gmRings) && options.gmRings.length > 0)
+                ? options.gmRings
+                : [{ meters: 804.672, label: '0.5 mi' }];
+            const allGms = byType[19].general.concat(byType[19].tower, byType[19].hazard);
+            if (allGms.length > 0) {
+                const styleId = rings.length > 1 ? 'gmradius_outline_style' : 'gmradius_style';
+                xml.push('<Folder><name>General Marker Radius Circles</name>');
+                rings.forEach((ring, ri) => {
+                    const radiusM = (typeof ring.meters === 'number' && ring.meters > 0) ? ring.meters : 804.672;
+                    const radLabel = ring.label || `${(radiusM / 1609.344).toFixed(2)} mi`;
+                    xml.push(`<Folder><name>${xmlEscape(radLabel)}</name>`);
+                    allGms.forEach(e => {
+                        const geom = kmlGmCircleGeometry(e, radiusM);
+                        if (!geom) return;
+                        xml.push(`<Placemark id="gmcircle_${e.id}_r${ri}"><name>${xmlEscape(e.name)} - ${xmlEscape(radLabel)} radius</name><styleUrl>#${styleId}</styleUrl>${geom}</Placemark>`);
+                    });
+                    xml.push('</Folder>');
+                });
+                xml.push('</Folder>');
+            }
+        }
         // Power Lines — pulled from Map Styler's loaded KML data via
         // BroadcastChannel. Two separate folders (Distribution, Trans-
         // mission) matching Map Styler's category split. Only emitted
@@ -4167,6 +4995,7 @@
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="ffzs" checked style="accent-color:#7adfe6"> Free-Fly Zones (${counts.ffzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="nfzs" checked style="accent-color:#7adfe6"> No-Fly Zones (${counts.nfzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="markers" checked style="accent-color:#7adfe6"> General Markers (${counts.markers})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-gmcircles-label"><input type="checkbox" data-inc="gmCircles" style="accent-color:#7adfe6"> GM Radius Circles</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-vbuffers-label"><input type="checkbox" data-inc="vbuffers" checked style="accent-color:#7adfe6"> Vertical Buffers (3D only)</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-powerlines-label"><input type="checkbox" data-inc="powerlines" checked style="accent-color:#7adfe6"> Power Lines <span id="aim-ai-pl-status" style="color:#888;font-size:10px">(requesting…)</span></label>
                 </div>
@@ -4178,6 +5007,12 @@
                     <label style="display:flex;align-items:center;gap:6px"><span style="color:#cfd6dc">Transmission:</span><input type="number" id="aim-ai-trans-ht" value="80" min="0" max="300" step="5" style="width:60px;background:#1a1d23;border:1px solid rgba(255,213,79,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888">ft AGL</span></label>
                 </div>
                 <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Permian Basin: distro typically 30-45 ft (35 default), trans 40-150 ft depending on voltage (80 default for safety). Adjust per-site.</div>
+            </div>
+            <div id="aim-ai-gm-radius" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(240,32,160,0.06);border:1px dashed rgba(240,32,160,0.30);border-radius:3px">
+                <div style="font-size:11px;color:#f070c0;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">GM radius circles</div>
+                <div id="aim-ai-gm-rings"></div>
+                <button id="aim-ai-gm-add-ring" type="button" style="margin-top:2px;background:rgba(240,32,160,0.12);color:#f070c0;border:1px solid rgba(240,32,160,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">+ Add ring</button>
+                <div style="color:#888;font-size:10px;margin-top:6px;line-height:1.4">Each ring draws a flat ground circle of that radius around every General Marker. With one ring it gets a faint fill; with multiple, rings render as outlines only. Off by default.</div>
             </div>
             <div id="aim-ai-kml-stats" style="color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px"></div>
             <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
@@ -4200,10 +5035,22 @@
             const transIn = box.querySelector('#aim-ai-trans-ht');
             const distroHeightFt = distroIn ? parseFloat(distroIn.value) : 35;
             const transHeightFt = transIn ? parseFloat(transIn.value) : 80;
+            // GM radius circles — collect every ring row, convert value+unit
+            // to meters. Skip blank/invalid rows. Fall back to one 0.5-mi ring.
+            const gmRings = [];
+            box.querySelectorAll('#aim-ai-gm-rings .aim-ai-gm-ring').forEach(row => {
+                const raw = parseFloat(row.querySelector('.aim-ai-gm-ring-val').value);
+                if (!isFinite(raw) || raw <= 0) return;
+                const unit = row.querySelector('.aim-ai-gm-ring-unit').value;
+                const meters = unit === 'ft' ? raw / KML_FT : raw * 1609.344;
+                gmRings.push({ meters, label: unit === 'ft' ? `${raw} ft` : `${raw} mi` });
+            });
+            if (gmRings.length === 0) gmRings.push({ meters: 0.5 * 1609.344, label: '0.5 mi' });
             return {
                 mode, include,
                 distroHeightFt: isFinite(distroHeightFt) ? distroHeightFt : 35,
                 transHeightFt: isFinite(transHeightFt) ? transHeightFt : 80,
+                gmRings,
                 siteName: `Site ${siteID} Map - ${siteName}`,
             };
         };
@@ -4224,13 +5071,61 @@
             if (phts) phts.style.display = mode === '3D' ? '' : 'none';
             updateStats();
         };
+        // GM radius control block only shown when GM Radius Circles is on.
+        const updateGmRadiusVis = () => {
+            const cb = box.querySelector('input[data-inc="gmCircles"]');
+            const blk = box.querySelector('#aim-ai-gm-radius');
+            if (blk) blk.style.display = (cb && cb.checked) ? '' : 'none';
+        };
+        // GM radius rings — dynamic list. Each + adds a row defaulting to
+        // the next preset (0.5 / 1 / 5 / 10 mi), then 10 mi thereafter.
+        // The × removes a row; the last remaining row can't be removed.
+        const GM_RING_PRESETS = [0.5, 1, 5, 10];
+        const ringsHost = box.querySelector('#aim-ai-gm-rings');
+        const syncRingDelButtons = () => {
+            const rows = ringsHost.querySelectorAll('.aim-ai-gm-ring');
+            rows.forEach(r => {
+                const del = r.querySelector('.aim-ai-gm-ring-del');
+                if (del) del.style.visibility = rows.length > 1 ? 'visible' : 'hidden';
+            });
+        };
+        const addRingRow = (value, unit) => {
+            const idx = ringsHost.querySelectorAll('.aim-ai-gm-ring').length;
+            const v = (value != null) ? value : (GM_RING_PRESETS[idx] != null ? GM_RING_PRESETS[idx] : 10);
+            const u = unit || 'mi';
+            const row = document.createElement('div');
+            row.className = 'aim-ai-gm-ring';
+            row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:11px';
+            row.innerHTML = `
+                <span style="color:#cfd6dc">Radius:</span>
+                <input type="number" class="aim-ai-gm-ring-val" value="${v}" min="0" step="0.1" style="width:70px;background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right">
+                <select class="aim-ai-gm-ring-unit" style="background:#1a1d23;border:1px solid rgba(240,32,160,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px">
+                    <option value="mi"${u === 'mi' ? ' selected' : ''}>miles</option>
+                    <option value="ft"${u === 'ft' ? ' selected' : ''}>feet</option>
+                </select>
+                <button type="button" class="aim-ai-gm-ring-del" title="Remove ring" style="background:transparent;color:#f070c0;border:1px solid rgba(240,32,160,0.45);border-radius:3px;width:22px;height:22px;line-height:1;cursor:pointer;font:inherit;font-size:13px;padding:0">×</button>
+            `;
+            row.querySelector('.aim-ai-gm-ring-val').oninput = updateStats;
+            row.querySelector('.aim-ai-gm-ring-unit').onchange = updateStats;
+            row.querySelector('.aim-ai-gm-ring-del').onclick = () => {
+                if (ringsHost.querySelectorAll('.aim-ai-gm-ring').length <= 1) return;
+                row.remove();
+                syncRingDelButtons();
+                updateStats();
+            };
+            ringsHost.appendChild(row);
+            syncRingDelButtons();
+        };
+        addRingRow(0.5, 'mi'); // seed first ring
+        box.querySelector('#aim-ai-gm-add-ring').onclick = () => { addRingRow(); updateStats(); };
         // Live preview on height input changes.
         const dh = box.querySelector('#aim-ai-distro-ht');
         const th = box.querySelector('#aim-ai-trans-ht');
         if (dh) dh.oninput = updateStats;
         if (th) th.oninput = updateStats;
         box.querySelectorAll('input[name="aim-ai-kml-mode"]').forEach(r => r.onchange = updateVbufferVis);
-        box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = updateStats);
+        box.querySelectorAll('input[data-inc]').forEach(cb => cb.onchange = () => { updateGmRadiusVis(); updateStats(); });
+        updateGmRadiusVis();
         updateVbufferVis();
 
         // Power Lines: request from Map Styler + poll for response.
@@ -4738,6 +5633,138 @@
         };
         optsRow.appendChild(colsBtn);
 
+        // --- Presets menu — saved views (columns + filters + sort + units) ---
+        // Per-user, global across sites. Lets the user flip to e.g. "GMs ·
+        // Name/Lat/Long" to Copy → Sheets, then jump back to their usual view
+        // without re-toggling every column/filter by hand.
+        const presetsBtn = document.createElement('button');
+        presetsBtn.type = 'button';
+        presetsBtn.textContent = 'Presets ▾';
+        presetsBtn.title = 'Saved views — columns, filters, and sort. Apply a preset, save the current view, or reset to default.';
+        presetsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        let presetsMenuEl = null;
+        let presetsDocClick = null;
+        const closePresetsMenu = () => {
+            if (presetsMenuEl) { presetsMenuEl.remove(); presetsMenuEl = null; }
+            if (presetsDocClick) { document.removeEventListener('mousedown', presetsDocClick, true); presetsDocClick = null; }
+        };
+        presetsBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (presetsMenuEl) { closePresetsMenu(); return; }
+            presetsMenuEl = document.createElement('div');
+            presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
+            const rebuildPresetsMenu = () => {
+                presetsMenuEl.innerHTML = '';
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:4px 12px 4px;font-weight:700';
+                head.textContent = 'Apply a saved view';
+                presetsMenuEl.appendChild(head);
+                const presets = loadViewPresets();
+                if (presets.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.cssText = 'padding:3px 12px;color:#888';
+                    empty.textContent = 'No presets yet — save the current view below.';
+                    presetsMenuEl.appendChild(empty);
+                }
+                presets.forEach((p, i) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px';
+                    row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                    row.onmouseleave = () => { row.style.background = 'transparent'; };
+                    const lbl = document.createElement('span');
+                    lbl.textContent = p.name;
+                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer';
+                    lbl.title = 'Apply this view';
+                    lbl.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    row.appendChild(lbl);
+                    const upd = document.createElement('button');
+                    upd.textContent = '⟳';
+                    upd.title = 'Overwrite this preset with the current view';
+                    upd.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1';
+                    upd.onclick = (e2) => {
+                        e2.stopPropagation();
+                        const arr = loadViewPresets();
+                        arr[i] = Object.assign({ name: p.name }, captureCurrentView());
+                        saveViewPresets(arr);
+                        showToast(`Updated: ${p.name}`, 'rgba(95,255,95,0.5)');
+                        rebuildPresetsMenu();
+                    };
+                    row.appendChild(upd);
+                    const del = document.createElement('button');
+                    del.textContent = '×';
+                    del.title = 'Delete this preset';
+                    del.style.cssText = 'background:transparent;border:1px solid rgba(255,120,120,0.4);color:#ff8a80;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:12px;padding:0;line-height:1';
+                    del.onclick = (e2) => {
+                        e2.stopPropagation();
+                        const arr = loadViewPresets();
+                        arr.splice(i, 1);
+                        saveViewPresets(arr);
+                        rebuildPresetsMenu();
+                    };
+                    row.appendChild(del);
+                    presetsMenuEl.appendChild(row);
+                });
+                const hr = document.createElement('div');
+                hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                presetsMenuEl.appendChild(hr);
+                // Reset to default view
+                const defBtn = document.createElement('button');
+                defBtn.type = 'button';
+                defBtn.textContent = '↺ Default view (all columns · no filters)';
+                defBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 6px;width:calc(100% - 24px);text-align:left';
+                defBtn.onclick = () => { closePresetsMenu(); resetToDefaultView(siteID); showToast('Default view', 'rgba(20,210,220,0.55)'); };
+                presetsMenuEl.appendChild(defBtn);
+                // Save current view (inline name input — sandbox-safe, no prompt())
+                const saveRow = document.createElement('div');
+                saveRow.style.cssText = 'display:flex;gap:6px;padding:0 12px 4px';
+                const nameInput = document.createElement('input');
+                nameInput.type = 'text';
+                nameInput.placeholder = 'Name this view…';
+                nameInput.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#e6e6e6;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;outline:none';
+                nameInput.onfocus = () => { nameInput.style.borderColor = '#14d2dc'; };
+                nameInput.onblur = () => { nameInput.style.borderColor = 'rgba(255,255,255,0.20)'; };
+                const saveBtn2 = document.createElement('button');
+                saveBtn2.type = 'button';
+                saveBtn2.textContent = '＋ Save';
+                saveBtn2.title = 'Save the current columns + filters + sort as a new preset';
+                saveBtn2.style.cssText = 'background:rgba(20,210,220,0.15);color:#7adfe6;border:1px solid rgba(20,210,220,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap';
+                const doSave = () => {
+                    const name = (nameInput.value || '').trim();
+                    if (!name) { nameInput.focus(); return; }
+                    const arr = loadViewPresets();
+                    const existing = arr.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
+                    const entry = Object.assign({ name }, captureCurrentView());
+                    let verb = 'Saved';
+                    if (existing >= 0) { arr[existing] = entry; verb = 'Updated'; }
+                    else arr.push(entry);
+                    saveViewPresets(arr);
+                    showToast(`${verb}: ${name}`, 'rgba(95,255,95,0.5)');
+                    rebuildPresetsMenu();
+                };
+                saveBtn2.onclick = (e2) => { e2.stopPropagation(); doSave(); };
+                nameInput.onkeydown = (e2) => {
+                    if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); doSave(); }
+                    else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); closePresetsMenu(); }
+                };
+                saveRow.appendChild(nameInput);
+                saveRow.appendChild(saveBtn2);
+                presetsMenuEl.appendChild(saveRow);
+            };
+            rebuildPresetsMenu();
+            const r = presetsBtn.getBoundingClientRect();
+            presetsMenuEl.style.left = r.left + 'px';
+            presetsMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(presetsMenuEl);
+            const mr = presetsMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) presetsMenuEl.style.left = (window.innerWidth - mr.width - 8) + 'px';
+            if (mr.bottom > window.innerHeight - 8) presetsMenuEl.style.top = (r.top - mr.height - 4) + 'px';
+            presetsDocClick = (e) => {
+                if (presetsMenuEl && !presetsMenuEl.contains(e.target) && e.target !== presetsBtn) closePresetsMenu();
+            };
+            setTimeout(() => document.addEventListener('mousedown', presetsDocClick, true), 0);
+        };
+        optsRow.appendChild(presetsBtn);
+
         // --- Bulk → AGL button ---
         // Opens a popover that lets the user queue Min Alt edits across
         // all FP segments (or just the selected ones) targeting a single
@@ -4809,6 +5836,48 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(deltaBtn);
+
+        // --- Bulk → Min / Bulk → Max buttons ---
+        // Set an ABSOLUTE Min (or Max) Alt across every eligible FP segment +
+        // FFZ (or just the selected rows). Complements Bulk → AGL (Min from
+        // elevation) and Bulk → Delta (Max from Min). Shared toggle/position/
+        // outside-click wiring via attachBulkPopover.
+        const attachBulkPopover = (btn, builder) => {
+            let popEl = null;
+            btn.onclick = (ev) => {
+                ev.stopPropagation();
+                if (popEl) { popEl.remove(); popEl = null; return; }
+                popEl = builder(btn, () => { if (popEl) { popEl.remove(); popEl = null; } });
+                document.body.appendChild(popEl);
+                const r = btn.getBoundingClientRect();
+                popEl.style.left = r.left + 'px';
+                popEl.style.top = (r.bottom + 4) + 'px';
+                const rect = popEl.getBoundingClientRect();
+                if (rect.right > window.innerWidth - 8) popEl.style.left = (window.innerWidth - rect.width - 8) + 'px';
+                const onDocClick = (e) => {
+                    if (popEl && !popEl.contains(e.target) && e.target !== btn) {
+                        popEl.remove(); popEl = null;
+                        document.removeEventListener('mousedown', onDocClick, true);
+                    }
+                };
+                setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+            };
+        };
+        const bulkBtnStyle = 'background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const minBtn = document.createElement('button');
+        minBtn.type = 'button';
+        minBtn.textContent = 'Bulk → Min';
+        minBtn.title = 'Set an absolute Min Alt across FP segments + FFZs (selected, or all)';
+        minBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(minBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'min_alt'));
+        optsRow.appendChild(minBtn);
+        const maxBtn = document.createElement('button');
+        maxBtn.type = 'button';
+        maxBtn.textContent = 'Bulk → Max';
+        maxBtn.title = 'Set an absolute Max Alt across FP segments + FFZs (selected, or all)';
+        maxBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(maxBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'max_alt'));
+        optsRow.appendChild(maxBtn);
 
         // --- v3.53: Bulk → Subtype button ---
         // Queues a subtype edit for every selected asset row (or all asset
@@ -5002,7 +6071,11 @@
                 row.appendChild(i);
                 return { row, input: i };
             };
-            const fpDeltaDefault = useFt ? 20 : 6;     // 20 ft ≈ 6 m
+            // SOP 2026-06-09: 30 ft delta for everything (FFZ + FP), with
+            // the 2 m bridge overlap as slack. A 30 ft band tolerates ~23 ft
+            // of terrain step between segments before overlap drops under
+            // 2 m (vs 20 ft = zero headroom), so far fewer bridges/splits.
+            const fpDeltaDefault = useFt ? 30 : 9;     // 30 ft ≈ 9 m
             const ffzDeltaDefault = useFt ? 30 : 9;    // 30 ft ≈ 9 m
             const fp = mkRow(`FP segments — target delta (${unitTxt}):`, fpDeltaDefault);
             const ffz = mkRow(`FFZ entities — target delta (${unitTxt}):`, ffzDeltaDefault);
@@ -5256,6 +6329,128 @@
             return pop;
         }
 
+        // Builds the Bulk → Min / Bulk → Max popover. Sets an ABSOLUTE target
+        // altitude (not derived from elevation/delta) on each eligible row.
+        // field = 'min_alt' | 'max_alt'.
+        function buildBulkMinMaxPopover(anchor, onClose, field) {
+            const isMin = field === 'min_alt';
+            const lblWord = isMin ? 'Min' : 'Max';
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:300px';
+            const useFt = !!sumPanelState.unitsFt;
+            const unitTxt = useFt ? 'ft' : 'm';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = `🎯 Bulk Set ${lblWord} Alt`;
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = `Sets ${lblWord} Alt to this absolute value for each FP segment + FFZ in scope. Skips rows already at target.`;
+            pop.appendChild(help);
+
+            // Target input — accepts a number or a formula (2650+50).
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px';
+            const lbl1 = document.createElement('label');
+            lbl1.textContent = `Target ${lblWord} (${unitTxt}):`;
+            lbl1.style.cssText = 'flex:1;color:#cfd6dc';
+            row1.appendChild(lbl1);
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.placeholder = useFt ? 'e.g. 2700' : 'e.g. 820';
+            inp.title = 'A number or formula (e.g. 2700 or 2650+50).';
+            inp.style.cssText = 'width:90px;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:12px;text-align:right';
+            row1.appendChild(inp);
+            pop.appendChild(row1);
+
+            // Scope radio (same convention as Bulk → AGL/Delta).
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:10px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = 'aim-ai-bulk-mm-scope';
+                r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r);
+                l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All FPs/FFZs on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true;
+            else allScope.r.checked = true;
+            row2.appendChild(allScope.l);
+            row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            const curM = (r) => isMin ? r.altMinM : r.altMaxM;
+            const computeEligible = () => {
+                const parsed = parseFormulaValue(inp.value);
+                if (!isFinite(parsed)) return { eligible: [], newValueM: NaN, total: 0 };
+                const newDisp = useFt ? Math.round(parsed) : Number(parsed.toFixed(1));
+                const newValueM = useFt ? newDisp / 3.28084 : newDisp;
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const candidates = allRows.filter(r => {
+                    if (!isEditableRow(r)) return false;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return false;
+                    return true;
+                });
+                const eligible = candidates.filter(r => {
+                    const cm = curM(r);
+                    if (cm == null) return true; // no current value → setting one counts
+                    const curDisp = useFt ? Math.round(cm * 3.28084) : Number(cm.toFixed(1));
+                    return newDisp !== curDisp;
+                });
+                return { eligible, newValueM, total: candidates.length };
+            };
+            const refreshPreview = () => {
+                const { eligible, newValueM, total } = computeEligible();
+                if (!isFinite(newValueM)) { preview.textContent = 'Enter a target altitude.'; return; }
+                if (total === 0) { preview.textContent = '⚠️ No eligible FP/FFZ rows in scope.'; return; }
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> ${lblWord} edit${eligible.length === 1 ? '' : 's'} · skipping ${total - eligible.length} already at target.`;
+            };
+            refreshPreview();
+            inp.oninput = refreshPreview;
+            allScope.r.onchange = refreshPreview;
+            selScope.r.onchange = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, newValueM } = computeEligible();
+                if (!isFinite(newValueM)) { showToast('Invalid target value', 'rgba(255,82,82,0.6)'); return; }
+                if (eligible.length === 0) { showToast('Nothing to queue — all eligible rows already at target'); return; }
+                let queued = 0;
+                eligible.forEach(r => { if (queueAltEdit(r, field, newValueM)) queued++; });
+                const tDisp = useFt ? Math.round(newValueM * 3.28084) : Number(newValueM.toFixed(1));
+                showToast(`Queued ${queued} ${lblWord} Alt edit${queued === 1 ? '' : 's'} → ${tDisp}${unitTxt}`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
         // --- DEM progress strip ---
         // Hidden by default. Shows during the bulk elevation fetch with
         // a moving fill + count. Hides itself when the fetch is done.
@@ -5495,7 +6690,14 @@
                         const failed = applyState.errors.length;
                         const ok = applyState.done;
                         const tag = opts.dryRun ? '[DRY RUN] ' : '';
-                        if (failed === 0) {
+                        // ⚡ Direct-API runs get the richer report modal
+                        // (overlap self-check + rollback). Editor runs keep
+                        // the lightweight toast.
+                        if (opts.directApi) {
+                            openDirectApiReport(applyState, opts);
+                            if (failed) console.warn(`${TAG} ⚡ apply failures:`, applyState.errors);
+                            console.log(`${TAG} ⚡ audit log at window.__aim_ai_lastApplyLog`);
+                        } else if (failed === 0) {
                             showToast(`${tag}✓ ${opts.dryRun ? 'Walked' : 'Applied'} ${ok} edit${ok === 1 ? '' : 's'} successfully`, 'rgba(95,255,95,0.6)');
                         } else {
                             showToast(`${tag}${opts.dryRun ? 'Walked' : 'Applied'} ${ok} · ${failed} failed (see console)`, 'rgba(255,138,128,0.6)');
@@ -5596,6 +6798,10 @@
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                // Point-entity coordinates — populated only for GMs + Assets.
+                { key: 'lat',       label: 'Lat',            w: 90,  num: true,  dataKey: '_lat' },
+                { key: 'long',      label: 'Long',           w: 90,  num: true,  dataKey: '_lng' },
+                { key: 'gps',       label: 'GPS',            w: 150, num: false, dataKey: '_gps' },
             ];
             const COL_BY_KEY = Object.fromEntries(allColDefs.map(c => [c.key, c]));
             // Honor the user's persisted order — visibleCols was replaced
@@ -6002,6 +7208,49 @@
                         else if (r.validated === false) { txt = '✗'; color = '#ff5555'; }
                         td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
                         td.textContent = txt;
+                    } else if (col.key === 'lat' || col.key === 'long') {
+                        // Point coordinate (GMs + Assets only). Click or
+                        // right-click copies the raw number. M1-edit to move
+                        // the marker is a planned fast-follow.
+                        const v = col.key === 'lat' ? r._lat : r._lng;
+                        td.style.cssText = 'padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        if (v == null) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Only point entities (General Markers, Assets) have a single coordinate';
+                        } else {
+                            td.style.color = '#cdd6e0';
+                            td.textContent = v.toFixed(6);
+                            td.title = 'Click or right-click to copy. (Editing — moving the marker — coming soon.)';
+                            const copy = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(v), `Copied ${v.toFixed(6)}`); };
+                            td.onclick = copy;
+                            td.oncontextmenu = copy;
+                        }
+                    } else if (col.key === 'gps') {
+                        // Google Maps link — shows the "lat, lng" pair (6 dp) as
+                        // the link text. M1 opens a new tab, M2 copies the URL.
+                        td.style.cssText = 'padding:5px 8px;text-align:left;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
+                        if (r._lat == null) {
+                            td.textContent = '—';
+                            td.style.color = '#555';
+                            td.title = 'Only point entities (General Markers, Assets) have a coordinate';
+                        } else {
+                            const url = `https://www.google.com/maps?q=${r._lat},${r._lng}`;
+                            const a = document.createElement('span');
+                            a.textContent = `${r._lat.toFixed(6)}, ${r._lng.toFixed(6)}`;
+                            a.style.cssText = 'color:#8ab4f8;text-decoration:underline;white-space:nowrap';
+                            td.appendChild(a);
+                            td.title = 'Click: open in Google Maps (new tab). Right-click: copy the Maps link.';
+                            td.onclick = (ev) => {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                let opened = null;
+                                try { opened = (window.top || window).open(url, '_blank'); }
+                                catch (e2) { opened = null; }
+                                if (!opened) copyToClipboard(url, 'Popup blocked — copied link');
+                            };
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
+                        }
                     }
                     tr.appendChild(td);
                 });
@@ -6061,6 +7310,9 @@
                         if (r.validated === false) return 'no';
                         return ''; // N/A
                     }
+                    if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
+                    if (col.key === 'long') return r._lng != null ? r._lng.toFixed(6) : '';
+                    if (col.key === 'gps') return r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '';
                     return '';
                 }));
                 return [header, ...data];
@@ -6219,8 +7471,29 @@
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
         };
         input.onblur = commit;
+        // Tab advances to the SAME column on the next editable row (Shift+Tab
+        // = previous); Enter commits and finishes. Mirrors the Subtype/Name
+        // editors so Min/Max/AGL get the same keyboard-driven row walk.
+        const fieldColKey = isMin ? 'altMin' : (isMax ? 'altMax' : 'agl');
         input.onkeydown = (e) => {
-            if (e.key === 'Enter' || e.key === 'Tab') {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                // AGL needs a loaded elevation to be editable — skip rows
+                // without one so the Tab chain doesn't dead-end on a toast.
+                const next = findNextRowForCol(row._rowKey, dir, r =>
+                    isEditableRow(r) && (!isAgl || r.elevationM != null));
+                input.blur(); // commit + redraw
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, fieldColKey);
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineSegmentEdit(nextTd, next, field);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             } else if (e.key === 'Escape') {

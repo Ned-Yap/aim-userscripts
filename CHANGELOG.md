@@ -6,6 +6,19 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Asset Inspector v3.74 (was 3.59) — ⚡ bulk altitude editing that actually saves, + 30 ft SOP default
+
+Big jump for the Inspector — everything from the dev line lands for everyone. Headline: **bulk Min/Max altitude edits now apply in one shot**, even across the FFZ↔Flight-Path overlap rules that used to make a bulk save impossible.
+
+- **⚡ Direct API apply (opt-in).** Tick "⚡ Direct API" in the Apply launcher and queued altitude edits are written straight to the server instead of opening each entity's editor one by one. This sidesteps the "Mismatched Altitude Ranges" wall that blocked bulk AGL/DELTA shifts (raise the zones and the path together — it just goes). Four safety rails: a **rollback file is downloaded before any write**, every write is **verified**, a final **FP↔FFZ overlap self-check** runs, and a **Dry Run** previews everything with zero writes. One-click **↩ Roll back this run** in the report.
+- **Auto-bridges terrain seams on flight paths.** When AGL-following over a hill would leave two connected segments without an overlapping band (the server rejects that), it nudges *only the ceiling* up at the seam so the path stays continuous — your AGL floor is untouched. Branch points included.
+- **Bulk → Delta now defaults to 30 ft** for both Flight Paths and Free Zones (new SOP), with the 2 m overlap as slack. Both boxes are still editable per run.
+- Clearer apply progress (Back up → Update → Safety check phases, counts in entities not raw edits) and a richer completion report.
+
+Carries forward everything from 3.59 (right-click inspector, SUM panel, 📊 Site Summary, Find in Map Entities, etc.).
+
+---
+
 ## 2026-06-09 — AIM Issues v1.01 — 🚩 flag mode no longer needs Map Styler enabled
 
 - **Fix:** placing an issue on the map (left-click the 🚩, "flag mode") would report **"Map not ready"** and refuse to activate for anyone whose Map Styler master toggle was OFF. Right-clicking the 🚩 (the issues menu) was unaffected. Cause: AIM Issues found the Leaflet map only via a container tag that *Map Styler* sets, and Map Styler only sets it while it's enabled — so with Map Styler off, the map was never tagged and flag mode couldn't find it. AIM Issues now installs its own map-detection hook at startup, so flag mode works whether or not Map Styler is enabled or installed.
