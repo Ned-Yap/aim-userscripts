@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-08 — AIM Site Watch v0.1 (NEW SCRIPT, DEV/personal) — adaptive site-setup change auditor
+
+Brand-new background auditor (dev/personal, `latest/` only — not enabled for coworkers). Polls every site's setup JSON from your own logged-in session and records what changed over time.
+
+- **Adaptive schedule** per site: COLD (checked daily) until a change, then HOT (every 3h) on a rolling 24h window that resets on each new change, then back to COLD. Most sites stay COLD, so hundreds of sites cost only a handful of fetches per hour. All intervals configurable in the Control Panel ("Site Watch").
+- **Cheap detection** — JSON normalized (keys sorted) + SHA-256 hashed; only the tiny hash is kept locally to decide changed/not.
+- **On change** — diffs against the previous snapshot and appends field-level rows (`what was / what is / when`) to `site-watch/changes.csv`, plus stores the new JSON as `latest.json.gz` + a 10-deep rotating snapshot ring, committed to the private `aim-userscripts-data` repo.
+- **Robust by design** — auth-loss freeze (weekend logout never corrupts baselines, resumes Monday), timestamp scheduler with wake catch-up (nightly sleep just delays), single-tab leader lease (only one tab polls). Optional Slack webhook on change (set in the panel when available).
+
 ## 2026-06-08 — Map Styler v34.69 (DEV) — Saving a drawn line creates the KML if it's missing
 
 Follow-up to v34.68. Pressing ✓ to save a drawn power line on a site with no KML used to fail with a 404 (the commit fetches the file's SHA first, and there's no file). Now the save **self-heals**: if the file doesn't exist and you're only adding lines, it creates `<siteID>-<type>.kml` from a blank skeleton with your drawn lines baked in (single create instead of failing). This covers a line drawn before the file existed, a leftover pending line from earlier, or a declined create-on-draw prompt. (DEV-only.)
