@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.2';
+    const SCRIPT_VERSION = '0.3';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -86,7 +86,8 @@
         siteListRefreshHours: 24,
     };
     const WAKE_MS = 15 * 60 * 1000;     // scheduler wake interval
-    const LEASE_TTL_MS = WAKE_MS * 3;   // leader lease validity (> wake interval)
+    const LEASE_TTL_MS = 90 * 1000;     // leader lease validity — short, so a vanished tab frees it fast
+    const HEARTBEAT_MS = 30 * 1000;     // leader renews / others try to claim this often
     const STARTUP_CATCHUP_MS = 8000;    // first catch-up shortly after load
     const MAX_CSV_FIELD = 500;          // truncate long was/is values
 
@@ -97,6 +98,7 @@
     let cachedToken = gmGet(TOKEN_KEY, '') || '';
     let slackWebhook = gmGet(SLACK_KEY, '') || '';
     const tabId = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now();
+    let amLeader = false;
     let pausedForAuth = false;
     let cycleRunning = false;
     let siteList = [];          // [{id, name}]
@@ -447,17 +449,28 @@
         pausedForAuth = true;
     }
 
-    // Leader lease — only the holding tab does work. TTL > wake interval so a
-    // renewed lease stays valid between wakes.
+    // Leader lease — only one tab polls. Short TTL + heartbeat + pagehide
+    // release so a refreshed/closed tab frees it immediately (a stale lease
+    // from a dead page must never deadlock the live tabs).
+    function leaseForeignAndFresh(now) {
+        const lease = gmGet(LEADER_KEY, null);
+        return !!(lease && lease.tabId && lease.ts && lease.tabId !== tabId && (now - lease.ts) < LEASE_TTL_MS);
+    }
     function claimLeader() {
         const now = Date.now();
-        const lease = gmGet(LEADER_KEY, null);
-        if (lease && lease.tabId && lease.ts && lease.tabId !== tabId && (now - lease.ts) < LEASE_TTL_MS) return false;
+        if (leaseForeignAndFresh(now)) { amLeader = false; return false; }
         gmSet(LEADER_KEY, { tabId, ts: now });
         const after = gmGet(LEADER_KEY, null);
-        return !!(after && after.tabId === tabId);
+        amLeader = !!(after && after.tabId === tabId);
+        return amLeader;
     }
-    function renewLeader() { gmSet(LEADER_KEY, { tabId, ts: Date.now() }); }
+    function renewLeader() { if (amLeader) gmSet(LEADER_KEY, { tabId, ts: Date.now() }); }
+    function stealLeader() { gmSet(LEADER_KEY, { tabId, ts: Date.now() }); amLeader = true; }   // manual action forces this tab
+    function releaseLeader() {
+        const lease = gmGet(LEADER_KEY, null);
+        if (lease && lease.tabId === tabId) gmSet(LEADER_KEY, null);
+        amLeader = false;
+    }
 
     function notifySlack(id, name) {
         if (!slackWebhook) return;
@@ -554,7 +567,7 @@
         if (!masterEnabled) return;
         if (cycleRunning) return;
         if (!cachedToken) { console.warn(`${TAG} no GitHub token yet — open the Control Panel and save your PAT`); return; }
-        if (!claimLeader()) return;     // another tab owns polling
+        if (!claimLeader()) { console.log(`${TAG} another tab is the active watcher — standing by (use "Check all due now" to take over)`); return; }
         cycleRunning = true;
         try {
             const now = Date.now();
@@ -657,7 +670,7 @@
         }
     }
     function handleAction(actionId) {
-        if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); runCycle('manual'); }
+        if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
         else if (actionId === 'set-slack') {
             const v = prompt('Slack incoming-webhook URL (leave blank to clear):', slackWebhook || '');
             if (v === null) return;
@@ -705,4 +718,14 @@
 
     setInterval(() => runCycle('wake'), WAKE_MS);
     setTimeout(() => runCycle('startup-catchup'), STARTUP_CATCHUP_MS);
+
+    // Leader heartbeat: hold the lease if we're leader, else try to claim a
+    // stale one (so a vanished leader is replaced within ~LEASE_TTL).
+    setInterval(() => {
+        if (!masterEnabled || !cachedToken) return;
+        if (amLeader) renewLeader();
+        else claimLeader();
+    }, HEARTBEAT_MS);
+    // Free the lease on refresh/close so the next load takes over immediately.
+    window.addEventListener('pagehide', releaseLeader);
 })();

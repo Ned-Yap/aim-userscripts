@@ -15,6 +15,7 @@ Brand-new background auditor (dev/personal, `latest/` only — not enabled for c
 - **On change** — diffs against the previous snapshot and appends field-level rows (`what was / what is / when`) to `site-watch/changes.csv`, plus stores the new JSON as `latest.json.gz` + a 10-deep rotating snapshot ring, committed to the private `aim-userscripts-data` repo.
 - **Robust by design** — auth-loss freeze (weekend logout never corrupts baselines, resumes Monday), timestamp scheduler with wake catch-up (nightly sleep just delays), single-tab leader lease (only one tab polls). Optional Slack webhook on change (set in the panel when available).
 - **v0.2 (same day)** — per-site progress logging during a cycle (baselining no longer looks frozen) + a 20s abort timeout on every Percepto fetch so one hung site can't stall the whole cycle. First live run enumerated 443 sites correctly.
+- **v0.3 (same day)** — fix a leader-lease deadlock: refreshing the page left a stale lease from the old (now-gone) tab that blocked the new one for up to 45 min, so cycles silently never ran. Now: lease frees on `pagehide` (refresh/close), short 90s TTL + 30s heartbeat re-elects a vanished leader, "Check all due now" steals leadership to the clicking tab, and standing-by now logs instead of going silent.
 
 ## 2026-06-08 — Map Styler v34.69 (DEV) — Saving a drawn line creates the KML if it's missing
 
