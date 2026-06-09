@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.73
+// @version      3.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.73';
+    const SCRIPT_VERSION = '3.74';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6071,7 +6071,11 @@
                 row.appendChild(i);
                 return { row, input: i };
             };
-            const fpDeltaDefault = useFt ? 20 : 6;     // 20 ft ≈ 6 m
+            // SOP 2026-06-09: 30 ft delta for everything (FFZ + FP), with
+            // the 2 m bridge overlap as slack. A 30 ft band tolerates ~23 ft
+            // of terrain step between segments before overlap drops under
+            // 2 m (vs 20 ft = zero headroom), so far fewer bridges/splits.
+            const fpDeltaDefault = useFt ? 30 : 9;     // 30 ft ≈ 9 m
             const ffzDeltaDefault = useFt ? 30 : 9;    // 30 ft ≈ 9 m
             const fp = mkRow(`FP segments — target delta (${unitTxt}):`, fpDeltaDefault);
             const ffz = mkRow(`FFZ entities — target delta (${unitTxt}):`, ffzDeltaDefault);
