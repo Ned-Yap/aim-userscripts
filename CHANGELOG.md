@@ -36,6 +36,11 @@ When you press **+D** (distribution) or **+T** (transmission) in the Power Line 
 
 Fixes power-line / shielding KMLs not appearing on **brand-new sites that have no native entities yet** (no FFZs, flight paths, or assets — e.g. a site that's just ortho + power lines). Leaflet only creates its overlay `<svg>` the moment the first vector layer is added, so on an entity-less site the styler had nowhere to draw — the KML loaded fine (hundreds of lines) but rendered nothing until you dropped any entity. The styler now forces Leaflet to create the overlay SVG itself (`L.svg().addTo(map)`) whenever it has KML features to draw, so lines appear immediately on a fresh site. Shipped in both root (prod) and `latest/` (DEV).
 
+## 2026-06-08 — Asset Inspector v3.66 (DEV) — Tab walks the column for Min/Max/AGL + Bulk → Min / Bulk → Max
+
+- **Tab now goes down.** When editing a **Min Alt / Max Alt / AGL** cell, **Tab** commits and drops to the same column on the next editable row (**Shift+Tab** = up, **Enter** = commit + done). Previously Tab just closed the editor — only the Subtype/Name columns had the row-walk.
+- **Bulk → Min** and **Bulk → Max** buttons (next to Bulk → AGL/Delta) — set an *absolute* Min or Max altitude across all FP segments + FFZs (or just the selected rows), with a live "will queue N · skipping M already at target" preview. Accepts formulas (e.g. `2650+50`). Queues through the same pending/Apply pipeline as the inline edits.
+
 ## 2026-06-08 — Asset Inspector v3.65 (DEV) — Saved view presets (columns + filters + sort)
 
 New **Presets ▾** button in the Site Setup SUM toolbar (next to Columns ▾). A preset saves your whole view — **visible columns + order, the type filter, the validation filters, the sort, and ft/m** — so you can flip between layouts without re-toggling everything by hand:

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.65
+// @version      3.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.65';
+    const SCRIPT_VERSION = '3.66';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5172,6 +5172,48 @@
         };
         optsRow.appendChild(deltaBtn);
 
+        // --- Bulk → Min / Bulk → Max buttons ---
+        // Set an ABSOLUTE Min (or Max) Alt across every eligible FP segment +
+        // FFZ (or just the selected rows). Complements Bulk → AGL (Min from
+        // elevation) and Bulk → Delta (Max from Min). Shared toggle/position/
+        // outside-click wiring via attachBulkPopover.
+        const attachBulkPopover = (btn, builder) => {
+            let popEl = null;
+            btn.onclick = (ev) => {
+                ev.stopPropagation();
+                if (popEl) { popEl.remove(); popEl = null; return; }
+                popEl = builder(btn, () => { if (popEl) { popEl.remove(); popEl = null; } });
+                document.body.appendChild(popEl);
+                const r = btn.getBoundingClientRect();
+                popEl.style.left = r.left + 'px';
+                popEl.style.top = (r.bottom + 4) + 'px';
+                const rect = popEl.getBoundingClientRect();
+                if (rect.right > window.innerWidth - 8) popEl.style.left = (window.innerWidth - rect.width - 8) + 'px';
+                const onDocClick = (e) => {
+                    if (popEl && !popEl.contains(e.target) && e.target !== btn) {
+                        popEl.remove(); popEl = null;
+                        document.removeEventListener('mousedown', onDocClick, true);
+                    }
+                };
+                setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+            };
+        };
+        const bulkBtnStyle = 'background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const minBtn = document.createElement('button');
+        minBtn.type = 'button';
+        minBtn.textContent = 'Bulk → Min';
+        minBtn.title = 'Set an absolute Min Alt across FP segments + FFZs (selected, or all)';
+        minBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(minBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'min_alt'));
+        optsRow.appendChild(minBtn);
+        const maxBtn = document.createElement('button');
+        maxBtn.type = 'button';
+        maxBtn.textContent = 'Bulk → Max';
+        maxBtn.title = 'Set an absolute Max Alt across FP segments + FFZs (selected, or all)';
+        maxBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(maxBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'max_alt'));
+        optsRow.appendChild(maxBtn);
+
         // --- v3.53: Bulk → Subtype button ---
         // Queues a subtype edit for every selected asset row (or all asset
         // rows if none selected). Uses the same datalist of observed
@@ -5609,6 +5651,128 @@
                 eligible.forEach(r => { if (queueMinForAgl(r, targetM)) queued++; });
                 const tDisp = useFt ? Math.round(targetM * 3.28084) : Number(targetM.toFixed(1));
                 showToast(`Queued ${queued} Min Alt edit${queued === 1 ? '' : 's'} → ${tDisp}${unitTxt} AGL`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
+        // Builds the Bulk → Min / Bulk → Max popover. Sets an ABSOLUTE target
+        // altitude (not derived from elevation/delta) on each eligible row.
+        // field = 'min_alt' | 'max_alt'.
+        function buildBulkMinMaxPopover(anchor, onClose, field) {
+            const isMin = field === 'min_alt';
+            const lblWord = isMin ? 'Min' : 'Max';
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:300px';
+            const useFt = !!sumPanelState.unitsFt;
+            const unitTxt = useFt ? 'ft' : 'm';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = `🎯 Bulk Set ${lblWord} Alt`;
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = `Sets ${lblWord} Alt to this absolute value for each FP segment + FFZ in scope. Skips rows already at target.`;
+            pop.appendChild(help);
+
+            // Target input — accepts a number or a formula (2650+50).
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:10px';
+            const lbl1 = document.createElement('label');
+            lbl1.textContent = `Target ${lblWord} (${unitTxt}):`;
+            lbl1.style.cssText = 'flex:1;color:#cfd6dc';
+            row1.appendChild(lbl1);
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.placeholder = useFt ? 'e.g. 2700' : 'e.g. 820';
+            inp.title = 'A number or formula (e.g. 2700 or 2650+50).';
+            inp.style.cssText = 'width:90px;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:4px 6px;border-radius:3px;font:inherit;font-size:12px;text-align:right';
+            row1.appendChild(inp);
+            pop.appendChild(row1);
+
+            // Scope radio (same convention as Bulk → AGL/Delta).
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:10px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio';
+                r.name = 'aim-ai-bulk-mm-scope';
+                r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r);
+                l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All FPs/FFZs on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true;
+            else allScope.r.checked = true;
+            row2.appendChild(allScope.l);
+            row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            const curM = (r) => isMin ? r.altMinM : r.altMaxM;
+            const computeEligible = () => {
+                const parsed = parseFormulaValue(inp.value);
+                if (!isFinite(parsed)) return { eligible: [], newValueM: NaN, total: 0 };
+                const newDisp = useFt ? Math.round(parsed) : Number(parsed.toFixed(1));
+                const newValueM = useFt ? newDisp / 3.28084 : newDisp;
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const candidates = allRows.filter(r => {
+                    if (!isEditableRow(r)) return false;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return false;
+                    return true;
+                });
+                const eligible = candidates.filter(r => {
+                    const cm = curM(r);
+                    if (cm == null) return true; // no current value → setting one counts
+                    const curDisp = useFt ? Math.round(cm * 3.28084) : Number(cm.toFixed(1));
+                    return newDisp !== curDisp;
+                });
+                return { eligible, newValueM, total: candidates.length };
+            };
+            const refreshPreview = () => {
+                const { eligible, newValueM, total } = computeEligible();
+                if (!isFinite(newValueM)) { preview.textContent = 'Enter a target altitude.'; return; }
+                if (total === 0) { preview.textContent = '⚠️ No eligible FP/FFZ rows in scope.'; return; }
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> ${lblWord} edit${eligible.length === 1 ? '' : 's'} · skipping ${total - eligible.length} already at target.`;
+            };
+            refreshPreview();
+            inp.oninput = refreshPreview;
+            allScope.r.onchange = refreshPreview;
+            selScope.r.onchange = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, newValueM } = computeEligible();
+                if (!isFinite(newValueM)) { showToast('Invalid target value', 'rgba(255,82,82,0.6)'); return; }
+                if (eligible.length === 0) { showToast('Nothing to queue — all eligible rows already at target'); return; }
+                let queued = 0;
+                eligible.forEach(r => { if (queueAltEdit(r, field, newValueM)) queued++; });
+                const tDisp = useFt ? Math.round(newValueM * 3.28084) : Number(newValueM.toFixed(1));
+                showToast(`Queued ${queued} ${lblWord} Alt edit${queued === 1 ? '' : 's'} → ${tDisp}${unitTxt}`, 'rgba(255,213,79,0.7)');
                 onClose();
                 redrawTable();
             };
@@ -6631,8 +6795,29 @@
             if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
         };
         input.onblur = commit;
+        // Tab advances to the SAME column on the next editable row (Shift+Tab
+        // = previous); Enter commits and finishes. Mirrors the Subtype/Name
+        // editors so Min/Max/AGL get the same keyboard-driven row walk.
+        const fieldColKey = isMin ? 'altMin' : (isMax ? 'altMax' : 'agl');
         input.onkeydown = (e) => {
-            if (e.key === 'Enter' || e.key === 'Tab') {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const dir = e.shiftKey ? -1 : 1;
+                // AGL needs a loaded elevation to be editable — skip rows
+                // without one so the Tab chain doesn't dead-end on a toast.
+                const next = findNextRowForCol(row._rowKey, dir, r =>
+                    isEditableRow(r) && (!isAgl || r.elevationM != null));
+                input.blur(); // commit + redraw
+                if (next) {
+                    requestAnimationFrame(() => {
+                        const nextTd = findCellAfterRedraw(next._rowKey, fieldColKey);
+                        if (nextTd) {
+                            try { nextTd.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (err) {}
+                            startInlineSegmentEdit(nextTd, next, field);
+                        }
+                    });
+                }
+            } else if (e.key === 'Enter') {
                 e.preventDefault();
                 input.blur();
             } else if (e.key === 'Escape') {
