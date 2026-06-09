@@ -101,7 +101,7 @@ The Map Styler can overlay power lines (yellow distro / red trans) and run a Cov
 
 1. Go to [github.com/signup](https://github.com/signup)
 2. Use your work email or personal email — either works. The email isn't shown publicly.
-3. Pick a username (lowercase letters / digits / dashes; it's permanent so pick something you're OK with). **Suggested:** `aim-<firstname><lastInitial>` or `<initials>-aim` (e.g. `aim-johnd` or `jd-aim`) — project-scoped, doesn't expose your employer in your public profile. Avoid putting your company name in the username if you want a clean separation. Personal accounts work fine too.
+3. Pick a username using the format **first name + last initial + `-AIM`** — e.g. `PaydenW-AIM` or `ChristopherD-AIM`. (GitHub usernames allow letters, digits, and dashes; it's permanent, so type it exactly how you want it shown.) This keeps the team consistent and easy to recognize when granting repo access, and the `-AIM` tag keeps it project-scoped without putting your employer's name in your public profile. Personal accounts work fine too.
 4. Verify the email when GitHub sends the verification link.
 
 That's it — no payment, no further setup. **Skip this step if you already have an account.**
@@ -110,7 +110,7 @@ That's it — no payment, no further setup. **Skip this step if you already have
 
 GitHub doesn't have a "request access" link for personal-account private repos, so the access has to be granted by Payden directly. Two steps:
 
-1. **DM / email Payden your GitHub username** (just the username, e.g. `flast` — usernames are public, no risk).
+1. **DM / email Payden your GitHub username** (just the username, e.g. `ChristopherD-AIM` — usernames are public, no risk).
 2. Watch your email for a message from GitHub titled something like *"@Ned-Yap invited you to Ned-Yap/aim-userscripts-data"*. Click **View invitation** → **Accept invitation**.
 
 After accepting, you can view the repo at [github.com/Ned-Yap/aim-userscripts-data](https://github.com/Ned-Yap/aim-userscripts-data) (it'll 404 until then — that's expected, it's private).
