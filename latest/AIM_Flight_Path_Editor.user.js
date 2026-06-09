@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.1
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a "+" handle (or right-click a segment) and it splits that one segment into two, no delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
+// @version      0.2
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a "+" handle and it splits that one segment into two, no delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -13,12 +13,13 @@
 //
 // AIM Flight Path Editor — on-map mid-segment vertex insert for Percepto flight paths.
 //   - Toggle the ✚ button in .map-tools (iframe only — that's where the map is).
-//   - Pick a flight path. A dim "+" handle appears at the MIDDLE of every segment.
-//   - Click a "+" handle → a real vertex is inserted there (arcs-splice via
-//     POST /map_objects/), the path re-fetches, and the handles rebuild. The new
-//     vertex is a genuine branchable/draggable waypoint.
-//   - Right-click anywhere on the chosen path's geometry → insert at the exact
-//     clicked point (snapped onto the nearest segment).
+//   - A dim "+" handle appears at the MIDDLE of every flight-path segment that's
+//     currently in view (pan/zoom loads more). No flight-path picking needed.
+//   - Click a "+" → a real vertex is inserted there (arcs-splice via
+//     POST /map_objects/), the data re-fetches, and the handles rebuild. The new
+//     vertex is a genuine branchable/draggable waypoint (after one page reload —
+//     Percepto's editor needs to re-read the entity).
+//   - ↩ Undo button reverts the last insert.
 // Mechanism proven in ShortKeys/AIM_Insert_Vertex.js. arcs is the geometry source
 // of truth; the server rebuilds the path from arcs. Arc IDs regenerate every save,
 // so we never key on them. Log tag: [AIM FPE].
@@ -27,12 +28,10 @@
     'use strict';
     const TAG = '[AIM FPE]';
     const IS_IFRAME = window !== window.top;
-    // The map lives in the react-pages iframe; only run the map logic there.
     if (!IS_IFRAME) { try { console.log(`${TAG} top frame — idle (map is in iframe)`); } catch (e) {} return; }
 
     const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
     const SAVE_URL = 'https://percepto.app/map_objects/';
-    const SNAP_PX = 12;
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
     const warn = (...a) => { try { (unsafeWindow.console || console).warn(TAG, ...a); } catch (e) {} };
@@ -50,7 +49,8 @@
     let leafletMapRef = null;
     function looksLikeLeafletMap(o) {
         return o && typeof o.latLngToContainerPoint === 'function' && typeof o.containerPointToLatLng === 'function'
-            && typeof o.latLngToLayerPoint === 'function' && typeof o.getContainer === 'function' && typeof o.distance === 'function';
+            && typeof o.latLngToLayerPoint === 'function' && typeof o.getContainer === 'function' && typeof o.distance === 'function'
+            && typeof o.getBounds === 'function';
     }
     function patchLeafletMap() {
         try {
@@ -96,7 +96,6 @@
     }
     const flightPaths = () => entities.filter(e => e && e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
 
-    // Build the write body for an entity (read→write transform).
     function buildWriteBody(e, cfg) {
         const b = JSON.parse(JSON.stringify(e));
         b.site_id = e.site; b.points = (e.coords || []).slice();
@@ -106,12 +105,11 @@
         return b;
     }
 
-    // Insert a vertex at point M splitting arc index `idx` of entity `e`.
     async function insertVertex(e, idx, M) {
         const cfg = await fetchSiteCfg();
         const csrf = getCsrf();
         if (!csrf) { warn('no csrftoken'); return { ok: false }; }
-        const before = JSON.parse(JSON.stringify(e)); // for the audit + undo
+        const before = JSON.parse(JSON.stringify(e));
         const b = buildWriteBody(e, cfg);
         const arc = b.arcs[idx];
         if (!arc) return { ok: false, reason: 'no arc' };
@@ -121,7 +119,6 @@
             min_alt: arc.min_alt, max_alt: arc.max_alt, min_emergency_alt: arc.min_emergency_alt,
             wait_until_approved: arc.wait_until_approved || false, mapobject: e.id, points: [pa, pb],
         });
-        // frac of the new vertex along A→B (for the distance split).
         const dAB = Math.hypot(B.lat - A.lat, B.lng - A.lng) || 1;
         const frac = Math.min(0.999, Math.max(0.001, Math.hypot(M.lat - A.lat, M.lng - A.lng) / dAB));
         b.arcs.splice(idx, 1, mk(A, M, frac), mk(M, B, 1 - frac));
@@ -134,7 +131,6 @@
             resp = { status: r.status, json: j, raw: txt };
         } catch (err) { warn('POST threw', err); return { ok: false }; }
         if (resp.status !== 200) { warn('server', resp.status, (resp.raw || '').slice(0, 300)); return { ok: false, status: resp.status, raw: resp.raw }; }
-        // Audit: GPS-matched old→new segment-number remap.
         const vk = p => p ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : '∅';
         const newArcs = (resp.json.map_objects && resp.json.map_objects.arcs) || [];
         const newKeys = newArcs.map(a => vk(a.point_a) + '>' + vk(a.point_b));
@@ -148,109 +144,85 @@
         return { ok: true, saved: resp.json.map_objects, remap, backup: before };
     }
 
-    // ---- on-map handles ----
-    const state = { active: false, fpId: null, handles: [], rightClickHandler: null };
+    // ---- on-map handles (all FPs, viewport-culled) ----
+    const state = { active: false, handles: [], moveHandler: null };
     function clearHandles() {
-        const map = getLeafletMap();
         state.handles.forEach(h => { try { h.remove(); } catch (e) {} });
         state.handles = [];
     }
-    function currentFP() { return entities.find(e => e && e.id === state.fpId) || null; }
-
+    let busy = false;
     function rebuildHandles() {
         clearHandles();
         const map = getLeafletMap();
         const L = unsafeWindow.L;
-        const fp = currentFP();
-        if (!map || !L || !fp || !state.active) { renderPanel(); return; }
+        if (!map || !L || !state.active) { renderPanel(); return; }
         const ghost = L.divIcon({
-            html: '<div style="width:11px;height:11px;border-radius:50%;background:rgba(122,223,230,0.5);border:1.5px solid rgba(255,255,255,0.7);cursor:copy" title="Click to add a vertex here"></div>',
-            className: 'aim-fpe-mid', iconSize: [15, 15], iconAnchor: [7.5, 7.5],
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:rgba(122,223,230,0.55);border:1.5px solid rgba(255,255,255,0.75);cursor:copy;box-shadow:0 0 4px rgba(0,0,0,0.5)" title="Click to add a vertex here"></div>',
+            className: 'aim-fpe-mid', iconSize: [16, 16], iconAnchor: [8, 8],
         });
-        (fp.arcs || []).forEach((arc, idx) => {
-            const A = arc.point_a, B = arc.point_b;
-            if (!A || !B) return;
-            const mid = { lat: (A.lat + B.lat) / 2, lng: (A.lng + B.lng) / 2 };
-            const mk = L.marker([mid.lat, mid.lng], { icon: ghost, zIndexOffset: 900, keyboard: false });
-            mk.on('click', async (ev) => {
-                try { if (ev.originalEvent) { ev.originalEvent.preventDefault(); ev.originalEvent.stopPropagation(); } } catch (e) {}
-                await doInsert(idx, mid, mk);
+        let total = 0;
+        const bounds = map.getBounds();
+        flightPaths().forEach(fp => {
+            const eid = fp.id;
+            (fp.arcs || []).forEach((arc, idx) => {
+                const A = arc.point_a, B = arc.point_b;
+                if (!A || !B) return;
+                const mid = { lat: (A.lat + B.lat) / 2, lng: (A.lng + B.lng) / 2 };
+                total++;
+                if (!bounds.contains([mid.lat, mid.lng])) return; // only render what's in view
+                const mk = L.marker([mid.lat, mid.lng], { icon: ghost, zIndexOffset: 900, keyboard: false });
+                mk.on('click', async (ev) => {
+                    try { if (ev.originalEvent) { ev.originalEvent.preventDefault(); ev.originalEvent.stopPropagation(); } } catch (e) {}
+                    const ent = entities.find(x => x.id === eid);
+                    if (ent) await doInsert(ent, idx, mid, mk);
+                });
+                mk.addTo(map);
+                state.handles.push(mk);
             });
-            mk.addTo(map);
-            state.handles.push(mk);
         });
-        log(`showing ${state.handles.length} insert handles on "${fp.name}"`);
+        log(`showing ${state.handles.length} of ${total} insert points (in view)`);
         renderPanel();
     }
 
-    let busy = false;
-    async function doInsert(idx, M, marker) {
+    async function doInsert(fp, idx, M, marker) {
         if (busy) return;
         busy = true;
         try {
-            if (marker) try { marker.getElement().firstChild.style.background = 'rgba(255,213,79,0.9)'; } catch (e) {}
-            const fp = currentFP();
-            if (!fp) return;
+            if (marker) try { marker.getElement().firstChild.style.background = 'rgba(255,213,79,0.95)'; } catch (e) {}
             const res = await insertVertex(fp, idx, M);
             if (!res.ok) { toast(`Insert failed${res.status ? ' (' + res.status + ')' : ''} — see console`, '#ff8a80'); return; }
-            window.__aim_fpe_lastBackup = res.backup; // undo source
+            window.__aim_fpe_lastBackup = res.backup;
             await fetchEntities();
             rebuildHandles();
-            toast(`Vertex added on ${fp.name} · seg ${idx + 1} split. Refresh the editor to drag/branch it.`, '#7adfe6');
+            toast(`Vertex added on ${fp.name}, seg ${idx + 1}. ↩ Undo in the panel, or refresh to edit it.`, '#7adfe6');
         } catch (e) { warn('insert error', e); }
         finally { busy = false; }
     }
 
-    // Right-click anywhere on the map → insert at the snapped click point on the
-    // nearest segment of the chosen FP (within SNAP_PX).
-    function snapToFP(clickLatLng) {
-        const map = getLeafletMap();
-        const fp = currentFP();
-        if (!map || !fp) return null;
-        const cp = map.latLngToContainerPoint(clickLatLng);
-        let best = null, bestD = SNAP_PX + 0.01;
-        (fp.arcs || []).forEach((arc, idx) => {
-            const A = arc.point_a, B = arc.point_b; if (!A || !B) return;
-            const pa = map.latLngToContainerPoint(L_ll(A)), pb = map.latLngToContainerPoint(L_ll(B));
-            const dx = pb.x - pa.x, dy = pb.y - pa.y, len2 = dx * dx + dy * dy;
-            if (len2 < 1e-6) return;
-            let t = ((cp.x - pa.x) * dx + (cp.y - pa.y) * dy) / len2;
-            t = Math.max(0, Math.min(1, t));
-            const fx = pa.x + t * dx, fy = pa.y + t * dy;
-            const d = Math.hypot(fx - cp.x, fy - cp.y);
-            if (d < bestD) { bestD = d; const ll = map.containerPointToLatLng([fx, fy]); best = { idx, M: { lat: ll.lat, lng: ll.lng } }; }
-        });
-        return best;
+    async function doUndo() {
+        const o = window.__aim_fpe_lastBackup;
+        if (!o) { toast('Nothing to undo', '#ffd479'); return; }
+        try {
+            const cfg = await fetchSiteCfg();
+            const csrf = getCsrf();
+            const b = buildWriteBody(o, cfg);
+            const r = await fetch(SAVE_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
+            log('undo →', r.status);
+            if (r.status === 200) { window.__aim_fpe_lastBackup = null; await fetchEntities(); rebuildHandles(); toast('Reverted last insert — refresh to see it in the editor', '#ffd479'); }
+            else toast('Undo failed (' + r.status + ')', '#ff8a80');
+        } catch (e) { warn('undo error', e); toast('Undo errored — see console', '#ff8a80'); }
     }
-    function L_ll(p) { return unsafeWindow.L.latLng(p.lat, p.lng); }
+    unsafeWindow.__aim_fpe_undo = doUndo;
 
-    function installRightClick() {
-        const map = getLeafletMap();
-        if (!map || state.rightClickHandler) return;
-        state.rightClickHandler = (e) => {
-            if (!state.active || !currentFP()) return;
-            const hit = snapToFP(e.latlng);
-            if (!hit) return;
-            try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (x) {}
-            doInsert(hit.idx, hit.M, null);
-        };
-        map.on('contextmenu', state.rightClickHandler);
-    }
-    function uninstallRightClick() {
-        const map = getLeafletMap();
-        if (map && state.rightClickHandler) map.off('contextmenu', state.rightClickHandler);
-        state.rightClickHandler = null;
-    }
-
-    // ---- UI: button + small panel ----
+    // ---- UI ----
     const PANEL_ID = 'aim-fpe-panel';
     function toast(msg, color) {
         try {
             const t = document.createElement('div');
             t.textContent = msg;
-            t.style.cssText = `position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2228;color:${color || '#e6e6e6'};border:1px solid ${color || '#5fff5f'}88;border-radius:6px;padding:10px 16px;font:13px -apple-system,sans-serif;z-index:100002;box-shadow:0 6px 20px rgba(0,0,0,0.6)`;
+            t.style.cssText = `position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2228;color:${color || '#e6e6e6'};border:1px solid ${color || '#5fff5f'}88;border-radius:6px;padding:10px 16px;font:13px -apple-system,sans-serif;z-index:100002;box-shadow:0 6px 20px rgba(0,0,0,0.6);max-width:80vw;text-align:center`;
             document.body.appendChild(t);
-            setTimeout(() => t.remove(), 4500);
+            setTimeout(() => t.remove(), 5000);
         } catch (e) {}
     }
     function findToolsBar() { return document.querySelector('.map-tools'); }
@@ -267,23 +239,22 @@
         log('button injected into .map-tools');
     }
     function togglePanel() {
-        const ex = document.getElementById(PANEL_ID);
-        if (ex) { closePanel(); return; }
+        if (document.getElementById(PANEL_ID)) { closePanel(); return; }
         openPanel();
     }
     async function openPanel() {
         try { await fetchEntities(); } catch (e) { warn('fetch failed', e); }
         state.active = true;
-        installRightClick();
+        const map = getLeafletMap();
+        if (map && !state.moveHandler) { state.moveHandler = () => rebuildHandles(); map.on('moveend zoomend', state.moveHandler); }
         renderPanel();
-        // default to first FP if none chosen
-        if (!state.fpId) { const f = flightPaths()[0]; if (f) state.fpId = f.id; }
         rebuildHandles();
     }
     function closePanel() {
         state.active = false;
         clearHandles();
-        uninstallRightClick();
+        const map = getLeafletMap();
+        if (map && state.moveHandler) { try { map.off('moveend zoomend', state.moveHandler); } catch (e) {} state.moveHandler = null; }
         const p = document.getElementById(PANEL_ID); if (p) p.remove();
     }
     function renderPanel() {
@@ -292,52 +263,31 @@
         if (!p) {
             p = document.createElement('div');
             p.id = PANEL_ID;
-            p.style.cssText = 'position:fixed;top:80px;right:18px;width:300px;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
+            p.style.cssText = 'position:fixed;top:80px;right:18px;width:288px;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
             document.body.appendChild(p);
         }
         const fps = flightPaths();
-        const fp = currentFP();
         p.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <strong style="color:#7adfe6;font-size:14px">✚ Flight Path Editor</strong>
                 <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px">×</span>
             </div>
-            <div style="color:#aaa;margin-bottom:8px">Pick a flight path, then click a dim "+" on the map to add a vertex mid-segment. Or right-click anywhere on the path.</div>
-            <select id="aim-fpe-sel" style="width:100%;background:#13151a;color:#e6e6e6;border:1px solid #3a3f47;border-radius:4px;padding:6px;margin-bottom:8px">
-                ${fps.map(f => `<option value="${f.id}" ${f.id === state.fpId ? 'selected' : ''}>${String(f.name).replace(/</g, '&lt;')} (${f.arcs.length} seg)</option>`).join('')}
-            </select>
-            <div style="color:#7adfe6">${fp ? `${state.handles.length} insert points shown` : 'no flight path selected'}</div>
-            <div style="color:#888;margin-top:8px;font-size:11px">After inserting, refresh the page to drag/branch the new vertex in Percepto's editor. Undo last: <code>window.__aim_fpe_undo()</code></div>
+            <div style="color:#aaa;margin-bottom:8px;line-height:1.5">Click a dim cyan <b>+</b> on the map to drop a vertex in the middle of that segment. Pan/zoom to load more.</div>
+            <div style="color:#7adfe6;margin-bottom:10px"><b>${state.handles.length}</b> insert points in view · ${fps.length} flight path${fps.length === 1 ? '' : 's'}</div>
+            <button id="aim-fpe-undo" style="width:100%;background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↩ Undo last insert</button>
+            <div style="color:#888;margin-top:8px;font-size:11px;line-height:1.5">After inserting, <b>refresh the page</b> to drag/branch the new vertex in Percepto's editor. (Auto-reload coming.)</div>
         `;
         p.querySelector('#aim-fpe-x').onclick = closePanel;
-        const sel = p.querySelector('#aim-fpe-sel');
-        if (sel) sel.onchange = () => { state.fpId = parseInt(sel.value, 10); rebuildHandles(); };
+        const u = p.querySelector('#aim-fpe-undo'); if (u) u.onclick = doUndo;
     }
-
-    // Undo the last insert (re-POST the pre-insert body).
-    unsafeWindow.__aim_fpe_undo = async () => {
-        const o = window.__aim_fpe_lastBackup;
-        if (!o) { log('nothing to undo'); return; }
-        const cfg = await fetchSiteCfg();
-        const csrf = getCsrf();
-        const b = buildWriteBody(o, cfg);
-        const r = await fetch(SAVE_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
-        log('undo →', r.status);
-        if (r.status === 200) { await fetchEntities(); rebuildHandles(); toast('Reverted last insert', '#ffd479'); }
-    };
 
     // ---- boot ----
     patchLeafletMap();
     let tries = 0;
-    const boot = setInterval(() => {
-        tries++;
-        if (findToolsBar() && !buttonEl) injectButton();
-        if (tries > 60) clearInterval(boot);
-    }, 700);
-    // Re-inject if the toolbar re-renders.
+    const boot = setInterval(() => { tries++; if (findToolsBar() && !buttonEl) injectButton(); if (tries > 60) clearInterval(boot); }, 700);
     try {
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.1 ready (iframe) — ✚ in .map-tools');
+    log('v0.2 ready (iframe) — ✚ in .map-tools');
 })();
