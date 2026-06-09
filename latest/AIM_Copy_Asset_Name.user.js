@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.68
+// @version      3.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.68';
+    const SCRIPT_VERSION = '3.69';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2602,14 +2602,15 @@
         const box = document.createElement('div');
         box.style.cssText = 'background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:20px 28px;min-width:460px;max-width:90vw;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
         box.innerHTML = `
-            <div style="color:#5fff5f;font-weight:700;font-size:15px;margin-bottom:6px">▶ Applying queued edits</div>
-            <div style="color:#888;font-size:11px;margin-bottom:14px">FFZs first, then FP segments. Do not click around.</div>
-            <div id="aim-ai-apply-label" style="color:#cfd6dc;font-size:12px;margin-bottom:8px;min-height:18px">Preparing…</div>
-            <div style="height:8px;background:rgba(95,255,95,0.15);border-radius:4px;overflow:hidden;margin-bottom:10px">
-                <div id="aim-ai-apply-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#5fff5f,#3fcf3f);transition:width 200ms ease-out"></div>
+            <div style="color:#5fff5f;font-weight:700;font-size:15px;margin-bottom:8px">▶ Applying changes</div>
+            <div id="aim-ai-apply-phase" style="display:flex;gap:6px;align-items:center;margin-bottom:12px;font-size:11px;flex-wrap:wrap"></div>
+            <div id="aim-ai-apply-label" style="color:#e6e6e6;font-size:13px;font-weight:600;margin-bottom:8px;min-height:18px">Getting ready…</div>
+            <div style="height:10px;background:rgba(95,255,95,0.15);border-radius:5px;overflow:hidden;margin-bottom:8px">
+                <div id="aim-ai-apply-fill" style="height:100%;width:0%;background:linear-gradient(90deg,#5fff5f,#3fcf3f);transition:width 250ms ease-out"></div>
             </div>
-            <div id="aim-ai-apply-stats" style="color:#9ad;font-size:11px;font-variant-numeric:tabular-nums;min-height:16px"></div>
-            <div id="aim-ai-apply-errors" style="color:#ff8a80;font-size:11px;margin-top:6px;max-height:120px;overflow-y:auto"></div>
+            <div id="aim-ai-apply-stats" style="color:#9ad;font-size:12px;font-variant-numeric:tabular-nums;min-height:16px"></div>
+            <div id="aim-ai-apply-sub" style="color:#888;font-size:10px;margin-top:3px;min-height:13px"></div>
+            <div id="aim-ai-apply-errors" style="color:#ff8a80;font-size:11px;margin-top:8px;max-height:120px;overflow-y:auto"></div>
             <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:8px">
                 <button id="aim-ai-apply-abort" style="background:rgba(255,138,128,0.15);color:#ff8a80;border:1px solid rgba(255,138,128,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600">Abort after current entity</button>
             </div>
@@ -2627,15 +2628,67 @@
     function updateApplyProgressModal(st) {
         const m = document.getElementById(APPLY_MODAL_ID);
         if (!m) return;
+        const phaseEl = m.querySelector('#aim-ai-apply-phase');
         const labelEl = m.querySelector('#aim-ai-apply-label');
         const fillEl = m.querySelector('#aim-ai-apply-fill');
         const statsEl = m.querySelector('#aim-ai-apply-stats');
+        const subEl = m.querySelector('#aim-ai-apply-sub');
         const errEl = m.querySelector('#aim-ai-apply-errors');
-        if (labelEl) labelEl.textContent = st.currentLabel || (st.running ? 'Working…' : 'Complete.');
-        const pct = st.total > 0 ? Math.round((st.done / st.total) * 100) : 0;
+
+        const phase = st.phase || (st.running ? 'writing' : 'done');
+        const total = st.entityTotal || 0;
+        const idx = Math.min(st.entityIndex || 0, total);
+        const failed = st.errors.length;
+
+        // Phase strip — only for ⚡ direct-API runs (it has the
+        // backup + safety-check stages). Editor runs hide it.
+        if (phaseEl) {
+            if (st.directApi) {
+                const order = ['snapshot', 'writing', 'checking'];
+                const steps = [['snapshot', '📸 Back up'], ['writing', '✏️ Update'], ['checking', '🔍 Safety check']];
+                const curRank = phase === 'done' ? 3 : order.indexOf(phase);
+                phaseEl.innerHTML = steps.map(([k, lbl], i) => {
+                    const isCur = k === phase;
+                    const isDone = i < curRank;
+                    const color = isCur ? '#5fff5f' : isDone ? '#7fbf7f' : '#5a5a5a';
+                    const weight = isCur ? '700' : '400';
+                    const mark = isDone ? '✓ ' : '';
+                    const arrow = i < steps.length - 1 ? `<span style="color:#444;margin:0 2px">→</span>` : '';
+                    return `<span style="color:${color};font-weight:${weight}">${mark}${lbl}</span>${arrow}`;
+                }).join('');
+                phaseEl.style.display = 'flex';
+            } else {
+                phaseEl.style.display = 'none';
+            }
+        }
+
+        // Big plain-language line for what's happening right now.
+        let label;
+        if (phase === 'snapshot') label = '📸 Saving a backup of everything first…';
+        else if (phase === 'checking') label = '🔍 Double-checking the whole map for any road poking above its zone…';
+        else if (phase === 'done' || !st.running) label = '✓ All done!';
+        else if (st.currentEntity) label = `✏️ Updating ${st.currentEntity}`;
+        else label = 'Working…';
+        if (labelEl) labelEl.textContent = label;
+
+        // Bar: full during the safety check / when done; entity-based
+        // while updating; a sliver during backup so it's clearly alive.
+        let pct;
+        if (phase === 'checking' || phase === 'done' || !st.running) pct = 100;
+        else if (phase === 'snapshot') pct = 4;
+        else pct = total > 0 ? Math.round((Math.max(0, idx - 1) / total) * 100) : 0;
         if (fillEl) fillEl.style.width = pct + '%';
-        if (statsEl) statsEl.textContent = `${st.done} / ${st.total} edits applied (${pct}%)`
-            + (st.errors.length ? ` · ${st.errors.length} error${st.errors.length === 1 ? '' : 's'}` : '');
+
+        // Stats in ENTITIES (what you see on the map), not raw edits.
+        if (statsEl) {
+            if (phase === 'snapshot') statsEl.textContent = `Backing up ${total} item${total === 1 ? '' : 's'}…`;
+            else if (phase === 'checking') statsEl.textContent = `Updated ${total - failed} of ${total} — now checking the map…`;
+            else if (phase === 'done' || !st.running) statsEl.textContent = `${total - failed} of ${total} updated${failed ? ` · ${failed} need a look` : ' ✓'}`;
+            else statsEl.textContent = `Item ${idx} of ${total}${failed ? ` · ${failed} need a look` : ''}`;
+        }
+        // Quiet secondary line with the raw edit count for the curious.
+        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} altitude values written)` : '';
+
         if (errEl) {
             errEl.innerHTML = '';
             st.errors.forEach(e => {
@@ -3184,6 +3237,10 @@
         applyState.dryRun = !!dryRun;
         applyState.directApi = !!directApi;
         applyState.overlapBroken = undefined;
+        applyState.entityTotal = groups.length;
+        applyState.entityIndex = 0;
+        applyState.currentEntity = '';
+        applyState.phase = 'writing';
         applyState.startTime = Date.now();
         const auditEntries = [];
         // Outer try/catch — bulletproof guarantee that applyState.running
@@ -3197,6 +3254,8 @@
             // touching live data (no safety net = no run).
             let snapshotFailed = false;
             if (directApi && !dryRun) {
+                applyState.phase = 'snapshot';
+                onProgress(applyState);
                 try {
                     const sid = getCurrentSiteID();
                     const cfg = await fetchSiteConfig(sid);
@@ -3214,6 +3273,9 @@
             for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
                 if (applyState.aborted) break;
                 const g = groups[gi];
+                applyState.phase = 'writing';
+                applyState.entityIndex = gi + 1;
+                applyState.currentEntity = g.entityName;
                 applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
                 onProgress(applyState);
                 const entityStart = Date.now();
@@ -3314,6 +3376,11 @@
                     sidebarInput.dispatchEvent(new Event('change', { bubbles: true }));
                 }
             } catch (e) {}
+            // ⚡ Direct-API: the refresh + overlap check below take a
+            // couple seconds with the bar full — label that "checking"
+            // so it doesn't look frozen. (running is already false, so
+            // the modal's checking branch must win over the done case.)
+            if (directApi && !applyState.aborted) applyState.phase = 'checking';
             onProgress(applyState);
             // AUTO-REFRESH after a live run that wrote anything. Force
             // a final fetch + re-render the SUM panel so the user sees
@@ -3353,6 +3420,8 @@
                     console.warn(`${TAG} ⚡ overlap self-check failed:`, e);
                 }
             }
+            applyState.phase = 'done';
+            onProgress(applyState);
         }
     }
 
