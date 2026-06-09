@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.70
+// @version      3.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.70';
+    const SCRIPT_VERSION = '3.71';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2981,36 +2981,61 @@
         });
     }
 
-    // Server rule: adjacent FP segments must share an altitude band, or
-    // POST 400s ("Arcs N and M have no overlapping altitude range").
-    // AGL-following over a terrain STEP pushes neighbors apart by more
-    // than the delta → unsaveable. We keep every segment's FLOOR
-    // (min_alt = the AGL target) and only RAISE the lower neighbor's
-    // CEILING just enough to reconnect — constant AGL floor preserved,
-    // the band only fattens vertically right at the seam. One left-to-
-    // right pass suffices (ceilings only go up, floors are fixed, so a
-    // raise can't break an already-overlapping earlier pair). OVERLAP_M
-    // gives a real (non-touching) intersection. Returns the bridges made
-    // (1-indexed segment numbers, meters) for reporting.
+    // Server rule: any two CONNECTED FP segments must share an altitude
+    // band, or POST 400s ("Arcs N and M have no overlapping altitude
+    // range"). A flight path is a BRANCHING GRAPH — segments connect at
+    // shared waypoints, NOT just by list order — so connected pairs can
+    // be far apart in the array (e.g. arcs 47 & 52 meeting at a branch).
+    // We build adjacency from each arc's point_a/point_b, then for every
+    // connected pair whose bands are disjoint we RAISE only the lower
+    // arc's CEILING to reconnect — each segment keeps its AGL floor, the
+    // band just fattens at the seam. Ceilings only ever rise (floors
+    // fixed) so repeated passes converge; we cap at 8. Returns the net
+    // per-segment ceiling change (1-indexed) for reporting.
     function bridgeArcContinuity(arcs) {
-        const bridges = [];
-        if (!Array.isArray(arcs)) return bridges;
+        if (!Array.isArray(arcs) || arcs.length < 2) return [];
         const OVERLAP_M = 1;
-        for (let i = 0; i < arcs.length - 1; i++) {
-            const A = arcs[i], B = arcs[i + 1];
-            if (typeof A.min_alt !== 'number' || typeof A.max_alt !== 'number' ||
-                typeof B.min_alt !== 'number' || typeof B.max_alt !== 'number') continue;
-            if (A.max_alt >= B.min_alt && B.max_alt >= A.min_alt) continue; // already overlap
-            if (A.max_alt < B.min_alt) {
-                const newMax = B.min_alt + OVERLAP_M;
-                bridges.push({ seg: i + 1, fromM: A.max_alt, toM: newMax });
-                A.max_alt = newMax;
-            } else {
-                const newMax = A.min_alt + OVERLAP_M;
-                bridges.push({ seg: i + 2, fromM: B.max_alt, toM: newMax });
-                B.max_alt = newMax;
+        const vkey = (p) => (p && typeof p.lat === 'number' && typeof p.lng === 'number') ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : null;
+        const origMax = arcs.map(a => (a && typeof a.max_alt === 'number') ? a.max_alt : null);
+        // Group arc indices by shared vertex (point_a + point_b).
+        const byVertex = new Map();
+        arcs.forEach((a, i) => {
+            if (!a) return;
+            [vkey(a.point_a), vkey(a.point_b)].forEach(k => {
+                if (!k) return;
+                if (!byVertex.has(k)) byVertex.set(k, []);
+                byVertex.get(k).push(i);
+            });
+        });
+        // Every unordered pair of arcs meeting at any vertex = an edge.
+        const edges = new Set();
+        for (const idxs of byVertex.values()) {
+            for (let x = 0; x < idxs.length; x++) {
+                for (let y = x + 1; y < idxs.length; y++) {
+                    edges.add(Math.min(idxs[x], idxs[y]) + ':' + Math.max(idxs[x], idxs[y]));
+                }
             }
         }
+        const edgeList = [...edges].map(s => s.split(':').map(Number));
+        for (let pass = 0; pass < 8; pass++) {
+            let changed = false;
+            for (const [i, j] of edgeList) {
+                const A = arcs[i], B = arcs[j];
+                if (!A || !B) continue;
+                if (typeof A.min_alt !== 'number' || typeof A.max_alt !== 'number' ||
+                    typeof B.min_alt !== 'number' || typeof B.max_alt !== 'number') continue;
+                if (A.max_alt >= B.min_alt && B.max_alt >= A.min_alt) continue; // overlap
+                if (A.max_alt < B.min_alt) { A.max_alt = B.min_alt + OVERLAP_M; changed = true; }
+                else { B.max_alt = A.min_alt + OVERLAP_M; changed = true; }
+            }
+            if (!changed) break;
+        }
+        const bridges = [];
+        arcs.forEach((a, i) => {
+            if (origMax[i] != null && a && typeof a.max_alt === 'number' && a.max_alt > origMax[i] + 0.01) {
+                bridges.push({ seg: i + 1, fromM: origMax[i], toM: a.max_alt });
+            }
+        });
         return bridges;
     }
 
