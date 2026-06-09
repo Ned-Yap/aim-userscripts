@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a "+" handle and it splits that one segment into two, no delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -157,7 +157,7 @@
         const L = unsafeWindow.L;
         if (!map || !L || !state.active) { renderPanel(); return; }
         const ghost = L.divIcon({
-            html: '<div style="width:12px;height:12px;border-radius:50%;background:rgba(122,223,230,0.55);border:1.5px solid rgba(255,255,255,0.75);cursor:copy;box-shadow:0 0 4px rgba(0,0,0,0.5)" title="Click to add a vertex here"></div>',
+            html: '<div style="display:flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:3px;background:rgba(34,197,94,0.9);border:1.5px solid #fff;color:#fff;font:700 13px/1 monospace;cursor:copy;box-shadow:0 0 5px rgba(0,0,0,0.7)" title="Click to add a vertex here">+</div>',
             className: 'aim-fpe-mid', iconSize: [16, 16], iconAnchor: [8, 8],
         });
         let total = 0;
@@ -289,5 +289,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.2 ready (iframe) — ✚ in .map-tools');
+    log('v0.3 ready (iframe) — ✚ in .map-tools');
 })();
