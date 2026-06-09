@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.3';
+    const SCRIPT_VERSION = '0.4';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -485,6 +485,28 @@
         } catch (e) { console.warn(TAG, 'slack notify error', e); }
     }
 
+    // Dump a live status table to the console: what's been checked, each
+    // site's COLD/HOT state, last check, next due, and snapshot count.
+    function showStatus() {
+        const ids = Object.keys(state.sites);
+        const rows = ids.map(id => {
+            const st = state.sites[id];
+            return {
+                site: id,
+                name: nameFor(id) || '',
+                state: st.state,
+                lastChecked: st.lastCheckAt ? new Date(st.lastCheckAt).toLocaleString() : '(baseline)',
+                nextDue: st.nextCheckAt ? new Date(st.nextCheckAt).toLocaleString() : '',
+                snapshots: st.slot || 0,
+            };
+        }).sort((a, b) => (a.state === b.state ? a.site.localeCompare(b.site, undefined, { numeric: true }) : (a.state === 'hot' ? -1 : 1)));
+        const hot = rows.filter(r => r.state === 'hot').length;
+        const dueNow = ids.filter(id => (state.sites[id].nextCheckAt || 0) <= Date.now()).length;
+        console.log(`${TAG} STATUS — ${ids.length}/${siteList.length} sites checked · ${hot} HOT · ${ids.length - hot} cold · ${dueNow} due now · paused=${pausedForAuth} · leader=${amLeader}`);
+        try { console.table(rows); } catch (e) { console.log(rows); }
+        return rows;
+    }
+
     // Returns 'auth' | 'error' | 'baseline' | 'checked' | 'changed'
     async function checkSite(s, pendingCsv) {
         const id = s.id;
@@ -635,6 +657,7 @@
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
+        { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
         { id: 'set-slack', label: 'Set Slack webhook…', type: 'button', action: 'set-slack' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
     ];
@@ -671,6 +694,7 @@
     }
     function handleAction(actionId) {
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
+        else if (actionId === 'status') { showStatus(); }
         else if (actionId === 'set-slack') {
             const v = prompt('Slack incoming-webhook URL (leave blank to clear):', slackWebhook || '');
             if (v === null) return;
