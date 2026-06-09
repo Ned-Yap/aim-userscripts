@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.66
+// @version      3.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.66';
+    const SCRIPT_VERSION = '3.67';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2552,8 +2552,14 @@
             </div>
             ${warnHtml}
             <div style="margin-top:14px;padding:10px 12px;background:rgba(196,181,253,0.08);border:1px solid rgba(196,181,253,0.30);border-radius:4px;color:#c4b5fd;font-size:11px;line-height:1.5">
-                <strong>Dry Run</strong> walks the entire pipeline (opens editors, sets values) but <strong>cancels instead of saving</strong>. Use it to verify the script targets the right inputs without touching live data.
+                <strong>Dry Run</strong> walks the pipeline but <strong>does not save</strong>. In ⚡ Direct API mode it builds each body + runs the projected overlap check with zero POSTs. Use it to preview without touching live data.
             </div>
+            <label style="margin-top:12px;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:rgba(255,193,71,0.08);border:1px solid rgba(255,193,71,0.35);border-radius:4px;cursor:pointer">
+                <input type="checkbox" id="aim-ai-launch-directapi" style="margin-top:2px">
+                <span style="color:#ffd479;font-size:11px;line-height:1.5">
+                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. FFZs + FPs only (assets still use the editor).
+                </span>
+            </label>
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 <button id="aim-ai-launch-cancel" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px">Cancel</button>
                 <button id="aim-ai-launch-dry" style="background:rgba(196,181,253,0.18);color:#c4b5fd;border:1px solid rgba(196,181,253,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🧪 Dry Run (no save)</button>
@@ -2563,13 +2569,19 @@
         m.appendChild(box);
         document.body.appendChild(m);
         box.querySelector('#aim-ai-launch-cancel').onclick = closeApplyLauncher;
+        const directApiChecked = () => {
+            const cb = box.querySelector('#aim-ai-launch-directapi');
+            return !!(cb && cb.checked);
+        };
         box.querySelector('#aim-ai-launch-dry').onclick = () => {
+            const directApi = directApiChecked();
             closeApplyLauncher();
-            onLaunch({ dryRun: true });
+            onLaunch({ dryRun: true, directApi });
         };
         box.querySelector('#aim-ai-launch-live').onclick = () => {
+            const directApi = directApiChecked();
             closeApplyLauncher();
-            onLaunch({ dryRun: false });
+            onLaunch({ dryRun: false, directApi });
         };
     }
     function closeApplyLauncher() {
@@ -2636,6 +2648,66 @@
     function closeApplyProgressModal() {
         const m = document.getElementById(APPLY_MODAL_ID);
         if (m) m.remove();
+    }
+
+    // ⚡ Direct-API completion report — shows applied/failed counts, the
+    // overlap self-check result (the safety net), and a one-click
+    // rollback for live runs. broken = applyState.overlapBroken.
+    const DIRECT_REPORT_ID = 'aim-ai-direct-report';
+    function openDirectApiReport(st, opts) {
+        const old = document.getElementById(DIRECT_REPORT_ID);
+        if (old) old.remove();
+        const dryRun = !!(opts && opts.dryRun);
+        const failed = st.errors.length;
+        const ok = st.done;
+        const broken = Array.isArray(st.overlapBroken) ? st.overlapBroken : [];
+        const useFt = !!sumPanelState.unitsFt;
+        const band = (b) => {
+            const c = (m) => useFt ? Math.round(m * 3.28084) : Number(m.toFixed(1));
+            return `${c(b[0])}–${c(b[1])}${useFt ? 'ft' : 'm'}`;
+        };
+        const m = document.createElement('div');
+        m.id = DIRECT_REPORT_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100001;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        const accent = broken.length ? '#ff8a80' : '#5fff5f';
+        box.style.cssText = `background:#1f2228;border:1px solid ${accent}88;border-radius:8px;padding:20px 26px;min-width:480px;max-width:90vw;max-height:88vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)`;
+        const errHtml = failed ? `<div style="margin-top:10px;color:#ff8a80;font-size:11px;max-height:140px;overflow-y:auto">${st.errors.map(e => `• ${String(e.entityName).replace(/</g, '&lt;')}: ${String(e.reason).replace(/</g, '&lt;')}`).join('<br>')}</div>` : '';
+        const overlapHtml = broken.length
+            ? `<div style="margin-top:14px;padding:10px 12px;background:rgba(255,138,128,0.10);border:1px solid rgba(255,138,128,0.45);border-radius:4px">
+                 <div style="color:#ff8a80;font-weight:700;font-size:12px;margin-bottom:6px">⚠ ${broken.length} FP↔FFZ pair${broken.length === 1 ? '' : 's'} now have DISJOINT altitude bands</div>
+                 <div style="color:#cfd6dc;font-size:11px;max-height:200px;overflow-y:auto;line-height:1.6">${broken.map(b => `• FFZ <strong>${String(b.ffz).replace(/</g, '&lt;')}</strong> (${band(b.ffzBand)}) ✕ FP <strong>${String(b.fp).replace(/</g, '&lt;')}</strong> (${band(b.fpBand)})`).join('<br>')}</div>
+                 <div style="color:#888;font-size:10px;margin-top:6px">${dryRun ? 'This is the PROJECTED end state — fix the queue before applying.' : 'These would have been blocked by Percepto\'s guard. Review them, or roll back below.'}</div>
+               </div>`
+            : `<div style="margin-top:14px;padding:8px 12px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#5fff5f;font-size:11px">✓ Overlap self-check passed — every crossing FP shares an altitude band with its FFZ${dryRun ? ' (projected end state)' : ''}.</div>`;
+        const rollbackBtn = (!dryRun && window.__aim_ai_directApiRollback)
+            ? `<button id="aim-ai-report-rollback" style="background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">↩ Roll back this run</button>`
+            : '';
+        box.innerHTML = `
+            <div style="color:${accent};font-weight:700;font-size:16px;margin-bottom:4px">⚡ ${dryRun ? 'Dry run preview' : 'Direct-API apply'} — ${dryRun ? 'no data written' : 'complete'}</div>
+            <div style="color:#cfd6dc;font-size:13px;margin-top:8px">
+                <strong style="color:#5fff5f">${ok}</strong> edit${ok === 1 ? '' : 's'} ${dryRun ? 'simulated' : 'applied + verified'}${failed ? ` · <strong style="color:#ff8a80">${failed}</strong> failed` : ''}
+            </div>
+            ${errHtml}
+            ${overlapHtml}
+            <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                ${rollbackBtn}
+                <button id="aim-ai-report-close" style="background:rgba(95,255,95,0.16);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">Close</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        box.querySelector('#aim-ai-report-close').onclick = () => m.remove();
+        const rb = box.querySelector('#aim-ai-report-rollback');
+        if (rb) {
+            rb.onclick = async () => {
+                if (!confirm(`Roll back ${window.__aim_ai_directApiRollback.count} entit${window.__aim_ai_directApiRollback.count === 1 ? 'y' : 'ies'} to their pre-run altitudes?`)) return;
+                rb.disabled = true; rb.textContent = 'Rolling back…';
+                const res = await rollbackDirectApiRun();
+                rb.textContent = res.ok ? `↩ Restored ${res.restored}` : `↩ ${res.restored} ok · ${res.failed} failed`;
+                showToast(res.ok ? `Rolled back ${res.restored} entities` : `Rollback: ${res.restored} ok, ${res.failed} failed (see console)`, res.ok ? 'rgba(255,193,71,0.6)' : 'rgba(255,138,128,0.6)');
+            };
+        }
     }
 
     // Pre-flight checks before any save runs. Returns
@@ -2745,11 +2817,354 @@
         return edit.field === 'min_alt' ? arc.min_alt : arc.max_alt;
     }
 
+    // ============================================================
+    // ⚡ DIRECT API APPLY (v3.67)
+    //
+    // Instead of driving Percepto's editor per entity (slow, and its
+    // React layer blocks the "Mismatched Altitude Ranges" overlap
+    // case so bulk AGL/DELTA shifts can't be saved), we POST the
+    // entity straight to `/map_objects/`. Recon (2026-06-09) proved
+    // the overlap check is CLIENT-ONLY — the server accepts a
+    // non-overlapping save with 200 + warnings:[]. See memory
+    // reference_map_objects_save_endpoint.
+    //
+    // The catch: bypassing the guard means the END STATE's validity
+    // is on us. Four rails make that safe:
+    //   1. Snapshot + rollback file (download + in-memory) before any
+    //      write — failure to snapshot ABORTS before writing.
+    //   2. Per-POST verify-after: the response echoes the saved
+    //      entity; confirm altitudes landed AND structure (coord/arc
+    //      counts) is intact — a structural anomaly is treated as a
+    //      hard failure.
+    //   3. Final FP↔FFZ overlap self-check on fresh data (live) or the
+    //      projected end state (dry-run) — replaces the guard we
+    //      removed and flags any genuinely-disjoint band.
+    //   4. Dry-run builds bodies + runs the projected overlap check
+    //      WITHOUT any POST.
+    // ============================================================
+
+    // Per-site config cache. `/sites/<id>/` exposes `mountain_terrain`
+    // (the editor sends it as `mountain_terrain_site` in the write
+    // body — a terrain-relative-vs-MSL flag we must NOT guess).
+    const siteCfgCache = {};
+    async function fetchSiteConfig(siteID, force) {
+        if (!siteID) throw new Error('no siteID');
+        if (!force && siteCfgCache[siteID]) return siteCfgCache[siteID];
+        const r = await fetch(`https://percepto.app/sites/${encodeURIComponent(siteID)}/`, { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`/sites/${siteID}/ HTTP ${r.status}`);
+        const j = await r.json();
+        siteCfgCache[siteID] = j;
+        return j;
+    }
+
+    function getCsrfToken() {
+        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
+        return m ? decodeURIComponent(m[1]) : null;
+    }
+
+    // Convert a fetched (read-shape) entity into the exact write body
+    // Percepto's editor POSTs. Confirmed field mapping (FFZ + FP):
+    //   site_id ← site · points ← coords · strip site/coords/polygon/
+    //   asset_waypoints · mountain_terrain_site ← site cfg · each arc
+    //   gets points:[point_a,point_b]. We clone so the bucket entity
+    //   is never mutated.
+    function buildWriteBody(entity, siteCfg) {
+        const b = JSON.parse(JSON.stringify(entity));
+        b.site_id = entity.site;
+        b.points = Array.isArray(entity.coords) ? entity.coords : [];
+        delete b.site;
+        delete b.coords;
+        delete b.polygon;
+        delete b.asset_waypoints;
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        if (Array.isArray(b.arcs)) {
+            b.arcs.forEach(a => {
+                if (a && a.point_a && a.point_b && !Array.isArray(a.points)) {
+                    a.points = [a.point_a, a.point_b];
+                }
+            });
+        }
+        return b;
+    }
+
+    // Mutate a write body in place with the group's queued edits.
+    // newValueM is meters (the queue's storage unit) — FFZ restrictions
+    // and FP arc min_alt/max_alt are both meters, so no conversion.
+    function applyEditsToBody(body, edits) {
+        edits.forEach(e => {
+            if (e.field === 'name') { body.name = e.newValue; return; }
+            if (e.isFfz) {
+                if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+                if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
+                else if (e.field === 'max_alt') body.restrictions.maxAlt = e.newValueM;
+            } else if (Array.isArray(body.arcs)) {
+                // arcId first, fall back to arcIndex (IDs regenerate on save).
+                let arc = body.arcs.find(a => a && a.id === e.arcId);
+                if (!arc && e.arcIndex != null && e.arcIndex < body.arcs.length) arc = body.arcs[e.arcIndex];
+                if (arc) {
+                    if (e.field === 'min_alt') arc.min_alt = e.newValueM;
+                    else if (e.field === 'max_alt') arc.max_alt = e.newValueM;
+                }
+            }
+        });
+    }
+
+    // Rail 2 — verify the server's echoed object reflects the targets
+    // AND preserved structure. A coord/arc-count change is a STRUCTURAL
+    // anomaly (we sent a malformed body) → hard fail, caller aborts.
+    function verifyDirectSave(saved, original, edits) {
+        if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
+        const oc = (original.coords || []).length, sc = (saved.coords || []).length;
+        if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
+        const oa = (original.arcs || []).length, sa = (saved.arcs || []).length;
+        if (oa !== sa) return { ok: false, reason: `arc count changed ${oa}→${sa}`, structural: true };
+        const tolM = 0.5;
+        for (const e of edits) {
+            if (e.field === 'name') {
+                if ((saved.name || '') !== e.newValue) return { ok: false, reason: `name expected "${e.newValue}" got "${saved.name}"`, structural: false };
+                continue;
+            }
+            let cur = null;
+            if (e.isFfz) {
+                cur = saved.restrictions ? (e.field === 'min_alt' ? saved.restrictions.minAlt : saved.restrictions.maxAlt) : null;
+            } else {
+                let arc = (saved.arcs || []).find(a => a && a.id === e.arcId);
+                if (!arc && e.arcIndex != null && e.arcIndex < (saved.arcs || []).length) arc = saved.arcs[e.arcIndex];
+                cur = arc ? (e.field === 'min_alt' ? arc.min_alt : arc.max_alt) : null;
+            }
+            if (cur == null || Math.abs(cur - e.newValueM) > tolM) {
+                return { ok: false, reason: `${e.segmentName || ''} ${e.field}: expected ${e.newValueM.toFixed(1)}m, got ${cur == null ? 'null' : cur.toFixed(1)}m`, structural: false };
+            }
+        }
+        return { ok: true };
+    }
+
+    // POST one entity group directly. Returns the same outcome shape as
+    // applyOneEntity: { ok, reason, appliedCount, verified, structural }.
+    async function applyOneEntityDirect(group, opts) {
+        const { dryRun } = opts || {};
+        const label = group.entityName || '(unnamed)';
+        const siteID = getCurrentSiteID();
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        const entity = bucket ? (bucket.entities || []).find(en => en.id === group.entityId) : null;
+        if (!entity) {
+            applyState.errors.push({ entityName: label, reason: 'entity not in fetched data (refresh first)' });
+            return { ok: false, reason: 'entity not in fetched data', appliedCount: 0 };
+        }
+        let siteCfg;
+        try { siteCfg = await fetchSiteConfig(siteID); }
+        catch (e) {
+            applyState.errors.push({ entityName: label, reason: `site config read failed (${e && e.message || e})` });
+            return { ok: false, reason: 'site config read failed', appliedCount: 0 };
+        }
+        const body = buildWriteBody(entity, siteCfg);
+        applyEditsToBody(body, group.edits);
+
+        if (dryRun) {
+            console.log(`${TAG} ⚡[DRY] ${label} — built body (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}), NOT posting`);
+            return { ok: true, reason: 'dry-run (no POST)', appliedCount: group.edits.length, verified: false, simulated: true };
+        }
+
+        const csrf = getCsrfToken();
+        if (!csrf) {
+            applyState.errors.push({ entityName: label, reason: 'no csrftoken cookie — cannot authenticate POST' });
+            return { ok: false, reason: 'no csrftoken', appliedCount: 0 };
+        }
+        let resp;
+        try {
+            const r = await fetch('https://percepto.app/map_objects/', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                body: JSON.stringify(body),
+            });
+            const txt = await r.text();
+            let json = null; try { json = JSON.parse(txt); } catch (e) {}
+            resp = { status: r.status, json, raw: txt };
+        } catch (e) {
+            applyState.errors.push({ entityName: label, reason: `POST threw: ${e && e.message || e}` });
+            return { ok: false, reason: 'POST threw', appliedCount: 0 };
+        }
+        if (resp.status !== 200) {
+            const snippet = (resp.raw || '').slice(0, 200);
+            applyState.errors.push({ entityName: label, reason: `server ${resp.status}: ${snippet}` });
+            return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
+        }
+        const saved = resp.json && resp.json.map_objects;
+        const verify = verifyDirectSave(saved, entity, group.edits);
+        // Refresh the in-memory bucket with the server's echoed object so
+        // downstream reads (and the overlap check) see truth, not stale.
+        if (saved && bucket) {
+            const idx = bucket.entities.findIndex(en => en.id === group.entityId);
+            if (idx >= 0) bucket.entities[idx] = saved;
+        }
+        if (!verify.ok) {
+            applyState.errors.push({ entityName: label, reason: `verify ${verify.structural ? 'STRUCTURAL ' : ''}failed: ${verify.reason}` });
+            return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural };
+        }
+        console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'})`);
+        return { ok: true, appliedCount: group.edits.length, verified: true };
+    }
+
+    // Rail 1 — snapshot the CURRENT write body of every target entity so
+    // a bad run can be re-POSTed verbatim. Returns a portable object we
+    // both stash in memory/GM and download as a file.
+    async function collectRollbackSnapshot(groups, siteID, siteCfg) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        const entities = [];
+        for (const g of groups) {
+            if (g.isAsset) continue; // asset edits still go the editor path
+            const ent = bucket ? (bucket.entities || []).find(en => en.id === g.entityId) : null;
+            if (!ent) throw new Error(`snapshot: entity ${g.entityId} (${g.entityName}) not in fetched data`);
+            entities.push({ id: ent.id, name: ent.name, type: ent.type, body: buildWriteBody(ent, siteCfg) });
+        }
+        return { siteID, when: new Date().toISOString(), count: entities.length, entities };
+    }
+
+    function downloadRollback(snap) {
+        try {
+            const json = JSON.stringify(snap, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            // window.top bypasses the map-iframe sandbox for downloads.
+            const topDoc = (window.top && window.top.document) ? window.top.document : document;
+            const a = topDoc.createElement('a');
+            a.href = url;
+            a.download = `aim-rollback-site${snap.siteID}-${snap.when.replace(/[:.]/g, '-')}.json`;
+            (topDoc.body || document.body).appendChild(a);
+            a.click();
+            setTimeout(() => { try { a.remove(); URL.revokeObjectURL(url); } catch (e) {} }, 1500);
+        } catch (e) {
+            console.warn(`${TAG} ⚡ rollback download failed (snapshot still in window.__aim_ai_directApiRollback):`, e);
+        }
+    }
+
+    // One-click restore: re-POST every snapshotted body verbatim. Exposed
+    // as window.__aim_ai_rollback() and wired to the report modal button.
+    async function rollbackDirectApiRun(snap) {
+        snap = snap || window.__aim_ai_directApiRollback;
+        if (!snap || !Array.isArray(snap.entities) || !snap.entities.length) {
+            console.warn(`${TAG} ⚡ no rollback snapshot available`);
+            return { ok: false, restored: 0, failed: 0, reason: 'no snapshot' };
+        }
+        const csrf = getCsrfToken();
+        if (!csrf) { console.warn(`${TAG} ⚡ rollback: no csrftoken`); return { ok: false, restored: 0, failed: 0, reason: 'no csrftoken' }; }
+        let restored = 0, failed = 0;
+        for (const ent of snap.entities) {
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                    body: JSON.stringify(ent.body),
+                });
+                if (r.status === 200) restored++;
+                else { failed++; console.warn(`${TAG} ⚡ rollback ${ent.name}: server ${r.status}`); }
+            } catch (e) { failed++; console.warn(`${TAG} ⚡ rollback ${ent.name} threw:`, e); }
+            await sleep(150);
+        }
+        console.log(`${TAG} ⚡ rollback complete — restored ${restored}, failed ${failed}`);
+        try {
+            const sid = getCurrentSiteID();
+            if (sid) { await fetchMapObjects(sid, true); if (document.getElementById(SUM_PANEL_ID)) renderSummaryPanel(sid); }
+        } catch (e) {}
+        return { ok: failed === 0, restored, failed };
+    }
+    window.__aim_ai_rollback = () => rollbackDirectApiRun();
+
+    // ---- Overlap self-check geometry (rail 3) ----
+    // lat/lng treated as planar x/y — fine at site scale. Ray-cast PIP.
+    function pointInPolygon(pt, poly) {
+        if (!pt || !Array.isArray(poly) || poly.length < 3) return false;
+        const x = pt.lng, y = pt.lat;
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].lng, yi = poly[i].lat, xj = poly[j].lng, yj = poly[j].lat;
+            const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    function segIntersect(a, b, c, d) {
+        if (!a || !b || !c || !d) return false;
+        const o = (p, q, r) => Math.sign((q.lng - p.lng) * (r.lat - p.lat) - (q.lat - p.lat) * (r.lng - p.lng));
+        const o1 = o(a, b, c), o2 = o(a, b, d), o3 = o(c, d, a), o4 = o(c, d, b);
+        return o1 !== o2 && o3 !== o4;
+    }
+    // True if FP geometrically crosses the FFZ polygon. Uses ARCS (the
+    // real flight segments — FPs can branch, so consecutive coords are
+    // NOT reliable segments) and tests both endpoint-inside and
+    // segment-crosses-edge (the point-to-SEGMENT lesson, not just
+    // point-to-vertex).
+    function fpCrossesPolygon(fp, poly) {
+        const arcs = Array.isArray(fp.arcs) ? fp.arcs : [];
+        for (const a of arcs) {
+            if (a.point_a && pointInPolygon(a.point_a, poly)) return true;
+            if (a.point_b && pointInPolygon(a.point_b, poly)) return true;
+            if (a.point_a && a.point_b) {
+                for (let j = 0; j < poly.length; j++) {
+                    if (segIntersect(a.point_a, a.point_b, poly[j], poly[(j + 1) % poly.length])) return true;
+                }
+            }
+        }
+        return false;
+    }
+    // Returns [{ffz, fp, ffzBand:[min,max], fpBand:[min,max]}] for every
+    // crossing FP whose overall altitude band is DISJOINT from the FFZ's.
+    function runOverlapSelfCheck(entities) {
+        const list = Array.isArray(entities) ? entities : [];
+        const ffzs = list.filter(e => e.type === 16 && e.restrictions && Array.isArray(e.coords) && e.coords.length >= 3);
+        const fps = list.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const broken = [];
+        for (const ffz of ffzs) {
+            const fMin = ffz.restrictions.minAlt, fMax = ffz.restrictions.maxAlt;
+            if (typeof fMin !== 'number' || typeof fMax !== 'number') continue;
+            for (const fp of fps) {
+                if (!fpCrossesPolygon(fp, ffz.coords)) continue;
+                let pMin = Infinity, pMax = -Infinity;
+                fp.arcs.forEach(a => {
+                    if (typeof a.min_alt === 'number') pMin = Math.min(pMin, a.min_alt);
+                    if (typeof a.max_alt === 'number') pMax = Math.max(pMax, a.max_alt);
+                });
+                if (!isFinite(pMin) || !isFinite(pMax)) continue;
+                if (pMax < fMin || pMin > fMax) {
+                    broken.push({ ffz: ffz.name, fp: fp.name, ffzBand: [fMin, fMax], fpBand: [pMin, pMax] });
+                }
+            }
+        }
+        return broken;
+    }
+    // Dry-run projection: clone fetched entities, apply ALL queued edits
+    // in memory, return the projected end state for the overlap check.
+    function projectQueueOntoEntities(siteID) {
+        const bucket = siteID ? mapObjectsBySite[siteID] : null;
+        if (!bucket) return [];
+        const clones = JSON.parse(JSON.stringify(bucket.entities || []));
+        const byId = new Map(clones.map(e => [e.id, e]));
+        Object.values(pendingSegmentEdits).forEach(e => {
+            const ent = byId.get(e.entityId);
+            if (!ent) return;
+            if (e.field === 'name') { ent.name = e.newValue; return; }
+            if (e.isFfz) {
+                if (!ent.restrictions) ent.restrictions = {};
+                if (e.field === 'min_alt') ent.restrictions.minAlt = e.newValueM;
+                else if (e.field === 'max_alt') ent.restrictions.maxAlt = e.newValueM;
+            } else if (Array.isArray(ent.arcs)) {
+                let arc = ent.arcs.find(a => a && a.id === e.arcId);
+                if (!arc && e.arcIndex != null && e.arcIndex < ent.arcs.length) arc = ent.arcs[e.arcIndex];
+                if (arc) {
+                    if (e.field === 'min_alt') arc.min_alt = e.newValueM;
+                    else if (e.field === 'max_alt') arc.max_alt = e.newValueM;
+                }
+            }
+        });
+        return clones;
+    }
+
     // The actual apply pipeline — async, processes one group at a
     // time. Calls onProgress(state) on every step so the UI can
     // update. Honors applyState.aborted between groups.
     async function runApplyPipeline(onProgress, opts) {
-        const { dryRun } = opts || {};
+        const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
         applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
         applyState.done = 0;
@@ -2757,6 +3172,8 @@
         applyState.running = true;
         applyState.aborted = false;
         applyState.dryRun = !!dryRun;
+        applyState.directApi = !!directApi;
+        applyState.overlapBroken = undefined;
         applyState.startTime = Date.now();
         const auditEntries = [];
         // Outer try/catch — bulletproof guarantee that applyState.running
@@ -2765,7 +3182,26 @@
         // is in flight forever (blocking future runs until page refresh).
         try {
             await closeEditor();
-            for (let gi = 0; gi < groups.length; gi++) {
+            // Rail 1 — snapshot + rollback file BEFORE any direct-API
+            // write. If the snapshot can't be built we ABORT before
+            // touching live data (no safety net = no run).
+            let snapshotFailed = false;
+            if (directApi && !dryRun) {
+                try {
+                    const sid = getCurrentSiteID();
+                    const cfg = await fetchSiteConfig(sid);
+                    const snap = await collectRollbackSnapshot(groups, sid, cfg);
+                    window.__aim_ai_directApiRollback = snap;
+                    try { elevGmSet('aim-ai-directapi-rollback', snap); } catch (e) {}
+                    downloadRollback(snap);
+                    console.log(`${TAG} ⚡ rollback snapshot saved (${snap.count} entities) + downloaded`);
+                } catch (e) {
+                    snapshotFailed = true;
+                    applyState.errors.push({ entityName: '(rollback snapshot)', reason: `FAILED: ${e && e.message || e} — run aborted before any write` });
+                    console.error(`${TAG} ⚡ rollback snapshot failed — aborting before writes:`, e);
+                }
+            }
+            for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
                 if (applyState.aborted) break;
                 const g = groups[gi];
                 applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
@@ -2773,7 +3209,7 @@
                 const entityStart = Date.now();
                 let outcome;
                 try {
-                    outcome = await applyOneEntity(g, { dryRun });
+                    outcome = await applyOneEntity(g, { dryRun, directApi });
                 } catch (err) {
                     outcome = { ok: false, reason: `unhandled exception: ${err && err.message ? err.message : err}`, appliedCount: 0 };
                     applyState.errors.push({ entityName: g.entityName, reason: outcome.reason });
@@ -2811,8 +3247,16 @@
                         });
                     }
                 }
+                // A STRUCTURAL verify failure means we sent a malformed
+                // body (coord/arc count changed) — stop immediately so a
+                // body-shape bug can't damage entity after entity.
+                if (outcome.structural) {
+                    applyState.aborted = true;
+                    applyState.errors.push({ entityName: '(safety abort)', reason: `structural anomaly on ${g.entityName} — run halted; rollback available` });
+                    console.error(`${TAG} ⚡ STRUCTURAL anomaly on ${g.entityName} — halting run. Use window.__aim_ai_rollback() or the report button.`);
+                }
                 onProgress(applyState);
-                await sleep(600);
+                await sleep(directApi && !dryRun ? 250 : 600);
             }
         } catch (err) {
             console.error(`${TAG} apply pipeline unhandled exception:`, err);
@@ -2882,6 +3326,21 @@
                     }
                 } catch (e) {
                     console.warn(`${TAG} apply: auto-refresh failed:`, e);
+                }
+            }
+            // Rail 3 — final FP↔FFZ overlap self-check. Live: on the
+            // freshly-fetched data above. Dry-run: on the PROJECTED end
+            // state (clone + apply queued edits). This is the safety net
+            // that replaces the client guard we bypassed.
+            if (directApi) {
+                try {
+                    const sid = getCurrentSiteID();
+                    const ents = dryRun ? projectQueueOntoEntities(sid) : ((mapObjectsBySite[sid] || {}).entities || []);
+                    applyState.overlapBroken = runOverlapSelfCheck(ents);
+                    console.log(`${TAG} ⚡ overlap self-check (${dryRun ? 'projected end state' : 'live'}): ${applyState.overlapBroken.length} disjoint FP↔FFZ pair(s)`, applyState.overlapBroken);
+                } catch (e) {
+                    applyState.overlapBroken = null;
+                    console.warn(`${TAG} ⚡ overlap self-check failed:`, e);
                 }
             }
         }
@@ -3175,6 +3634,12 @@
     async function applyOneEntity(group, opts) {
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
+        // v3.67: ⚡ direct-API path — POST /map_objects/ instead of
+        // driving the editor. FFZ + FP only; assets keep the editor
+        // path (subtype edit is an Ant Select, not an altitude POST).
+        if (opts && opts.directApi && !group.isAsset) {
+            return applyOneEntityDirect(group, opts);
+        }
         // v3.41: branch to the asset path for subtype-only edits. The
         // FP/FFZ path operates on number inputs; assets need the Ant
         // Select dropdown ("Type" field with creatable footer).
@@ -6021,7 +6486,14 @@
                         const failed = applyState.errors.length;
                         const ok = applyState.done;
                         const tag = opts.dryRun ? '[DRY RUN] ' : '';
-                        if (failed === 0) {
+                        // ⚡ Direct-API runs get the richer report modal
+                        // (overlap self-check + rollback). Editor runs keep
+                        // the lightweight toast.
+                        if (opts.directApi) {
+                            openDirectApiReport(applyState, opts);
+                            if (failed) console.warn(`${TAG} ⚡ apply failures:`, applyState.errors);
+                            console.log(`${TAG} ⚡ audit log at window.__aim_ai_lastApplyLog`);
+                        } else if (failed === 0) {
                             showToast(`${tag}✓ ${opts.dryRun ? 'Walked' : 'Applied'} ${ok} edit${ok === 1 ? '' : 's'} successfully`, 'rgba(95,255,95,0.6)');
                         } else {
                             showToast(`${tag}${opts.dryRun ? 'Walked' : 'Applied'} ${ok} · ${failed} failed (see console)`, 'rgba(255,138,128,0.6)');
