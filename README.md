@@ -101,7 +101,7 @@ The Map Styler can overlay power lines (yellow distro / red trans) and run a Cov
 
 1. Go to [github.com/signup](https://github.com/signup)
 2. Use your work email or personal email — either works. The email isn't shown publicly.
-3. Pick a username using the format **first name + last initial + `-AIM`** — e.g. `PaydenW-AIM` or `ChristopherD-AIM`. (GitHub usernames allow letters, digits, and dashes; it's permanent, so type it exactly how you want it shown.) This keeps the team consistent and easy to recognize when granting repo access, and the `-AIM` tag keeps it project-scoped without putting your employer's name in your public profile. Personal accounts work fine too.
+3. **Your username must follow this format: first name + last initial + `-AIM`** — e.g. `PaydenW-AIM` or `ChristopherD-AIM`. This is required, not a suggestion: the team relies on it to recognize who's who when granting repo access and reviewing issues, so accounts that don't follow it may not be added. GitHub usernames allow letters, digits, and dashes and are permanent, so type it exactly as shown above. The `-AIM` tag keeps it project-scoped and off your public profile's tie to your employer.
 4. Verify the email when GitHub sends the verification link.
 
 That's it — no payment, no further setup. **Skip this step if you already have an account.**
