@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.69
+// @version      3.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.69';
+    const SCRIPT_VERSION = '3.70';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2733,6 +2733,17 @@
                  <div style="color:#888;font-size:10px;margin-top:6px">${dryRun ? 'This is the PROJECTED end state — fix the queue before applying.' : 'These would have been blocked by Percepto\'s guard. Review them, or roll back below.'}</div>
                </div>`
             : `<div style="margin-top:14px;padding:8px 12px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#5fff5f;font-size:11px">✓ Overlap self-check passed — every crossing FP shares an altitude band with its FFZ${dryRun ? ' (projected end state)' : ''}.</div>`;
+        // Bridges — terrain seams auto-widened to keep paths continuous.
+        const bridgeGroups = Array.isArray(st.bridges) ? st.bridges : [];
+        const bridgeCount = bridgeGroups.reduce((s, g) => s + g.bridges.length, 0);
+        const ftc = (m) => useFt ? Math.round(m * 3.28084) : Math.round(m);
+        const bridgeHtml = bridgeCount
+            ? `<div style="margin-top:14px;padding:10px 12px;background:rgba(122,223,230,0.08);border:1px solid rgba(122,223,230,0.40);border-radius:4px">
+                 <div style="color:#7adfe6;font-weight:700;font-size:12px;margin-bottom:6px">🌉 Bridged ${bridgeCount} terrain seam${bridgeCount === 1 ? '' : 's'} ${dryRun ? 'would be raised' : 'raised'} to keep flight-path segments continuous</div>
+                 <div style="color:#cfd6dc;font-size:11px;max-height:160px;overflow-y:auto;line-height:1.6">${bridgeGroups.map(g => g.bridges.map(br => `• ${String(g.entityName).replace(/</g, '&lt;')} seg ${br.seg}: ceiling ${ftc(br.fromM)}→${ftc(br.toM)}${useFt ? 'ft' : 'm'}`).join('<br>')).join('<br>')}</div>
+                 <div style="color:#888;font-size:10px;margin-top:6px">Floors (AGL) unchanged — only the ceiling was raised at the steep steps so neighbouring segments overlap.</div>
+               </div>`
+            : '';
         const rollbackBtn = (!dryRun && window.__aim_ai_directApiRollback)
             ? `<button id="aim-ai-report-rollback" style="background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">↩ Roll back this run</button>`
             : '';
@@ -2742,6 +2753,7 @@
                 <strong style="color:#5fff5f">${ok}</strong> edit${ok === 1 ? '' : 's'} ${dryRun ? 'simulated' : 'applied + verified'}${failed ? ` · <strong style="color:#ff8a80">${failed}</strong> failed` : ''}
             </div>
             ${errHtml}
+            ${bridgeHtml}
             ${overlapHtml}
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 ${rollbackBtn}
@@ -2969,34 +2981,71 @@
         });
     }
 
-    // Rail 2 — verify the server's echoed object reflects the targets
-    // AND preserved structure. A coord/arc-count change is a STRUCTURAL
-    // anomaly (we sent a malformed body) → hard fail, caller aborts.
-    function verifyDirectSave(saved, original, edits) {
+    // Server rule: adjacent FP segments must share an altitude band, or
+    // POST 400s ("Arcs N and M have no overlapping altitude range").
+    // AGL-following over a terrain STEP pushes neighbors apart by more
+    // than the delta → unsaveable. We keep every segment's FLOOR
+    // (min_alt = the AGL target) and only RAISE the lower neighbor's
+    // CEILING just enough to reconnect — constant AGL floor preserved,
+    // the band only fattens vertically right at the seam. One left-to-
+    // right pass suffices (ceilings only go up, floors are fixed, so a
+    // raise can't break an already-overlapping earlier pair). OVERLAP_M
+    // gives a real (non-touching) intersection. Returns the bridges made
+    // (1-indexed segment numbers, meters) for reporting.
+    function bridgeArcContinuity(arcs) {
+        const bridges = [];
+        if (!Array.isArray(arcs)) return bridges;
+        const OVERLAP_M = 1;
+        for (let i = 0; i < arcs.length - 1; i++) {
+            const A = arcs[i], B = arcs[i + 1];
+            if (typeof A.min_alt !== 'number' || typeof A.max_alt !== 'number' ||
+                typeof B.min_alt !== 'number' || typeof B.max_alt !== 'number') continue;
+            if (A.max_alt >= B.min_alt && B.max_alt >= A.min_alt) continue; // already overlap
+            if (A.max_alt < B.min_alt) {
+                const newMax = B.min_alt + OVERLAP_M;
+                bridges.push({ seg: i + 1, fromM: A.max_alt, toM: newMax });
+                A.max_alt = newMax;
+            } else {
+                const newMax = A.min_alt + OVERLAP_M;
+                bridges.push({ seg: i + 2, fromM: B.max_alt, toM: newMax });
+                B.max_alt = newMax;
+            }
+        }
+        return bridges;
+    }
+
+    // Rail 2 — verify the server's echoed object matches WHAT WE SENT
+    // (sentBody), not the raw queue — so auto-bridged ceilings verify
+    // correctly. Checks every arc/restriction round-tripped + structure
+    // (coord/arc counts) intact; a count change is a STRUCTURAL anomaly.
+    function verifyDirectSave(saved, sentBody, original) {
         if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
         const oc = (original.coords || []).length, sc = (saved.coords || []).length;
         if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
         const oa = (original.arcs || []).length, sa = (saved.arcs || []).length;
         if (oa !== sa) return { ok: false, reason: `arc count changed ${oa}→${sa}`, structural: true };
         const tolM = 0.5;
-        for (const e of edits) {
-            if (e.field === 'name') {
-                if ((saved.name || '') !== e.newValue) return { ok: false, reason: `name expected "${e.newValue}" got "${saved.name}"`, structural: false };
-                continue;
+        // FFZ restrictions (object, decimals).
+        if (sentBody.restrictions && typeof sentBody.restrictions === 'object' && !Array.isArray(sentBody.restrictions)) {
+            const sr = saved.restrictions || {};
+            for (const k of ['minAlt', 'maxAlt']) {
+                if (typeof sentBody.restrictions[k] === 'number' &&
+                    (typeof sr[k] !== 'number' || Math.abs(sr[k] - sentBody.restrictions[k]) > tolM)) {
+                    return { ok: false, reason: `FFZ ${k}: sent ${sentBody.restrictions[k].toFixed(1)}m, got ${typeof sr[k] === 'number' ? sr[k].toFixed(1) : 'null'}m`, structural: false };
+                }
             }
-            let cur = null;
-            // FP arcs store integer meters; compare against the same
-            // rounded target we sent. FFZ restrictions keep decimals.
-            const target = e.isFfz ? e.newValueM : fpArcAltMeters(e.newValueM);
-            if (e.isFfz) {
-                cur = saved.restrictions ? (e.field === 'min_alt' ? saved.restrictions.minAlt : saved.restrictions.maxAlt) : null;
-            } else {
-                let arc = (saved.arcs || []).find(a => a && a.id === e.arcId);
-                if (!arc && e.arcIndex != null && e.arcIndex < (saved.arcs || []).length) arc = saved.arcs[e.arcIndex];
-                cur = arc ? (e.field === 'min_alt' ? arc.min_alt : arc.max_alt) : null;
-            }
-            if (cur == null || Math.abs(cur - target) > tolM) {
-                return { ok: false, reason: `${e.segmentName || ''} ${e.field}: expected ${target.toFixed(1)}m, got ${cur == null ? 'null' : cur.toFixed(1)}m`, structural: false };
+        }
+        // FP arcs, by INDEX (ids regenerate on save).
+        if (Array.isArray(sentBody.arcs)) {
+            for (let i = 0; i < sentBody.arcs.length; i++) {
+                const sentA = sentBody.arcs[i], savA = (saved.arcs || [])[i];
+                if (!savA) return { ok: false, reason: `segment ${i + 1} missing in response`, structural: true };
+                for (const k of ['min_alt', 'max_alt']) {
+                    if (typeof sentA[k] === 'number' &&
+                        (typeof savA[k] !== 'number' || Math.abs(savA[k] - sentA[k]) > tolM)) {
+                        return { ok: false, reason: `seg ${i + 1} ${k}: sent ${sentA[k]}m, got ${typeof savA[k] === 'number' ? savA[k] : 'null'}m`, structural: false };
+                    }
+                }
             }
         }
         return { ok: true };
@@ -3022,10 +3071,21 @@
         }
         const body = buildWriteBody(entity, siteCfg);
         applyEditsToBody(body, group.edits);
+        // Auto-bridge terrain seams on flight paths so adjacent segments
+        // overlap (server rule) — raises ceilings only, AGL floor kept.
+        let bridges = [];
+        if (!group.isFfz && Array.isArray(body.arcs)) {
+            bridges = bridgeArcContinuity(body.arcs);
+            if (bridges.length) {
+                const useFt = !!sumPanelState.unitsFt;
+                const maxRaise = Math.max(...bridges.map(br => br.toM - br.fromM));
+                console.log(`${TAG} ⚡ ${label} — bridged ${bridges.length} terrain seam(s) (raised ceiling up to ${useFt ? Math.round(maxRaise * 3.28084) + 'ft' : maxRaise.toFixed(0) + 'm'}) to keep segments continuous`);
+            }
+        }
 
         if (dryRun) {
-            console.log(`${TAG} ⚡[DRY] ${label} — built body (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}), NOT posting`);
-            return { ok: true, reason: 'dry-run (no POST)', appliedCount: group.edits.length, verified: false, simulated: true };
+            console.log(`${TAG} ⚡[DRY] ${label} — built body (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? ', ' + bridges.length + ' seam(s) to bridge' : ''}), NOT posting`);
+            return { ok: true, reason: 'dry-run (no POST)', appliedCount: group.edits.length, verified: false, simulated: true, bridges };
         }
 
         const csrf = getCsrfToken();
@@ -3054,7 +3114,7 @@
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
         const saved = resp.json && resp.json.map_objects;
-        const verify = verifyDirectSave(saved, entity, group.edits);
+        const verify = verifyDirectSave(saved, body, entity);
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
@@ -3063,10 +3123,10 @@
         }
         if (!verify.ok) {
             applyState.errors.push({ entityName: label, reason: `verify ${verify.structural ? 'STRUCTURAL ' : ''}failed: ${verify.reason}` });
-            return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural };
+            return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural, bridges };
         }
-        console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'})`);
-        return { ok: true, appliedCount: group.edits.length, verified: true };
+        console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? `, ${bridges.length} seam(s) bridged` : ''})`);
+        return { ok: true, appliedCount: group.edits.length, verified: true, bridges };
     }
 
     // Rail 1 — snapshot the CURRENT write body of every target entity so
@@ -3237,6 +3297,7 @@
         applyState.dryRun = !!dryRun;
         applyState.directApi = !!directApi;
         applyState.overlapBroken = undefined;
+        applyState.bridges = [];
         applyState.entityTotal = groups.length;
         applyState.entityIndex = 0;
         applyState.currentEntity = '';
@@ -3311,6 +3372,9 @@
                         newValueM: e.newValueM,
                     })),
                 });
+                if (outcome.bridges && outcome.bridges.length) {
+                    applyState.bridges.push({ entityName: g.entityName, bridges: outcome.bridges });
+                }
                 if (outcome.ok) {
                     applyState.done += g.edits.length;
                     if (!dryRun) {
