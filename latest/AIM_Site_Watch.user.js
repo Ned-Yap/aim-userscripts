@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -507,6 +507,37 @@
         return rows;
     }
 
+    const RESULT_COLOR = {
+        baseline: '#5fd0ff',   // cyan — first-time baseline
+        checked:  '#8a8f98',   // gray — unchanged
+        changed:  '#ffd24a',   // yellow — something changed (attention)
+        error:    '#ff6b6b',   // red — fetch failed / missed
+        auth:     '#ff9f43',   // orange — auth-paused
+    };
+    function siteSetupUrl(id) { return `${location.origin}/#/site/${id}/control-panel/site-setup`; }
+    function siteJsonUrl(id) { return `${location.origin}/map_objects/?getPoiMapObjectsAsList=true&site_id=${id}`; }
+    // Rich per-site console line: progress (batch + running total), site name,
+    // id, colored result. Changed/error lines also append clickable URLs (passed
+    // as separate args so DevTools linkifies them).
+    function logSiteResult(i, batchLen, s, res) {
+        const id = s.id;
+        const name = nameFor(id) || s.name || '(unnamed)';
+        const done = Object.keys(state.sites).length;
+        const c = RESULT_COLOR[res] || '#cccccc';
+        const line = `%c(${i}/${batchLen} · ${done}/${siteList.length})%c ${name} %c(${id})%c → ${res}`;
+        const styles = [
+            'color:#9aa0a6',
+            'color:#e6e6e6;font-weight:600',
+            'color:#9aa0a6',
+            `color:${c};font-weight:700`,
+        ];
+        if (res === 'changed' || res === 'error') {
+            console.log(line, ...styles, '\n   setup →', siteSetupUrl(id), '\n   json →', siteJsonUrl(id));
+        } else {
+            console.log(line, ...styles);
+        }
+    }
+
     // Returns 'auth' | 'error' | 'baseline' | 'checked' | 'changed'
     async function checkSite(s, pendingCsv) {
         const id = s.id;
@@ -618,7 +649,7 @@
             due.sort((a, b) => ((state.sites[a.id] && state.sites[a.id].nextCheckAt) || 0) - ((state.sites[b.id] && state.sites[b.id].nextCheckAt) || 0));
             const batch = due.slice(0, cfg.maxPerCycle);
             if (!batch.length) return;
-            console.log(`${TAG} cycle (${trigger}): ${batch.length}/${due.length} due of ${siteList.length} total`);
+            console.log(`%c${TAG} cycle (${trigger}): ${batch.length}/${due.length} due of ${siteList.length} total · ${Object.keys(state.sites).length} baselined so far`, 'color:#5fd0ff;font-weight:600');
 
             const pendingCsv = [];
             let checked = 0;
@@ -632,7 +663,7 @@
                 if (res === 'auth') { pauseForAuth('cycle'); break; }
                 if (res === 'changed') changed++;
                 if (res === 'changed' || res === 'checked' || res === 'baseline') checked++;
-                console.log(`${TAG}   (${i}/${batch.length}) site ${s.id} → ${res}`);
+                logSiteResult(i, batch.length, s, res);
                 await sleep(cfg.throttleMs);
             }
             if (pendingCsv.length) {
@@ -640,7 +671,11 @@
                 catch (e) { console.error(TAG, 'CSV append failed', e); }
             }
             persistState();
-            console.log(`${TAG} cycle done: ${checked} checked, ${changed} changed`);
+            const stillDue = siteList.filter(s => { const st = state.sites[s.id]; return !st || (st.nextCheckAt || 0) <= Date.now(); }).length;
+            const tail = stillDue > 0
+                ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
+                : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
+            console.log(`%c${TAG} cycle done: ${checked} checked, ${changed} changed · ${tail}`, 'color:#5fd0ff;font-weight:600');
         } catch (e) {
             console.error(TAG, 'cycle error', e);
         } finally {
