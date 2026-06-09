@@ -14,6 +14,7 @@ Brand-new background auditor (dev/personal, `latest/` only — not enabled for c
 - **Cheap detection** — JSON normalized (keys sorted) + SHA-256 hashed; only the tiny hash is kept locally to decide changed/not.
 - **On change** — diffs against the previous snapshot and appends field-level rows (`what was / what is / when`) to `site-watch/changes.csv`, plus stores the new JSON as `latest.json.gz` + a 10-deep rotating snapshot ring, committed to the private `aim-userscripts-data` repo.
 - **Robust by design** — auth-loss freeze (weekend logout never corrupts baselines, resumes Monday), timestamp scheduler with wake catch-up (nightly sleep just delays), single-tab leader lease (only one tab polls). Optional Slack webhook on change (set in the panel when available).
+- **v0.2 (same day)** — per-site progress logging during a cycle (baselining no longer looks frozen) + a 20s abort timeout on every Percepto fetch so one hung site can't stall the whole cycle. First live run enumerated 443 sites correctly.
 
 ## 2026-06-08 — Map Styler v34.69 (DEV) — Saving a drawn line creates the KML if it's missing
 

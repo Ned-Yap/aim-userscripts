@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.1';
+    const SCRIPT_VERSION = '0.2';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -187,6 +187,14 @@
         return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
     }
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    // fetch() has no built-in timeout — without this a single hung request
+    // would freeze the whole cycle indefinitely. Aborts after `ms`.
+    async function fetchWithTimeout(url, opts, ms) {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), ms);
+        try { return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal })); }
+        finally { clearTimeout(t); }
+    }
 
     // =====================================================================
     // GitHub HTTP (Promise over GM_xmlhttpRequest)
@@ -277,7 +285,7 @@
     async function fetchSiteSetup(siteId) {
         const url = `/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteId)}`;
         let resp;
-        try { resp = await fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }); }
+        try { resp = await fetchWithTimeout(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 20000); }
         catch (e) { return { error: 'network', detail: String(e) }; }
         if (resp.status === 401 || resp.status === 403) return { authLost: true };
         if (resp.redirected && /\/(login|signin|auth|account)/i.test(resp.url)) return { authLost: true };
@@ -299,7 +307,7 @@
 
     async function fetchSiteList() {
         let resp;
-        try { resp = await fetch('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }); }
+        try { resp = await fetchWithTimeout('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 20000); }
         catch (e) { console.warn(TAG, 'site list fetch failed', e); return null; }
         if (resp.status === 401 || resp.status === 403) { pauseForAuth('site-list 401/403'); return null; }
         if (!resp.ok) { console.warn(TAG, 'site list HTTP', resp.status); return null; }
@@ -580,13 +588,16 @@
             const pendingCsv = [];
             let checked = 0;
             let changed = 0;
+            let i = 0;
             for (const s of batch) {
                 if (pausedForAuth) break;
                 renewLeader();
                 const res = await checkSite(s, pendingCsv);
+                i++;
                 if (res === 'auth') { pauseForAuth('cycle'); break; }
                 if (res === 'changed') changed++;
                 if (res === 'changed' || res === 'checked' || res === 'baseline') checked++;
+                console.log(`${TAG}   (${i}/${batch.length}) site ${s.id} → ${res}`);
                 await sleep(cfg.throttleMs);
             }
             if (pendingCsv.length) {
