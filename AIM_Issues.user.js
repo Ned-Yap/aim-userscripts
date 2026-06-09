@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.00
+// @version      1.01
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -55,7 +55,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.00';
+    const SCRIPT_VERSION = '1.01';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -965,6 +965,47 @@
             } catch (e) {}
         }
         return null;
+    }
+
+    // ------- Leaflet map tagging (self-sufficient — was a v1.00 bug) -------
+    // v1.01: AIM Issues previously only READ `container.__aim_map__`, which
+    // is set by Map Styler's prototype hook — but that hook only installs
+    // when Map Styler's master toggle is ON. Coworkers with Map Styler
+    // disabled got "Map not ready" on flag mode (M1) because the container
+    // was never tagged, and Percepto holds the map in a closure the DOM
+    // walk can't reach. We now install our OWN copy of the hook so flag
+    // mode works regardless of whether Map Styler is enabled or installed.
+    // Idempotent with Map Styler's hook (both guard on !container.__aim_map__),
+    // so running both is harmless.
+    let leafletPatched = false;
+    function patchLeafletMap() {
+        if (leafletPatched) return true;
+        try {
+            const L = getL();
+            if (!L || !L.Map || !L.Map.prototype) return false;
+            // Hook commonly-called map methods. The next time Percepto runs
+            // ANY of these, we capture `this` and stash it on the container
+            // as `__aim_map__` — covers already-created maps, not just new ones.
+            const methodsToHook = ['initialize', 'getPane', 'addLayer', 'invalidateSize', 'setView', 'panTo', '_animateZoom'];
+            methodsToHook.forEach(method => {
+                if (typeof L.Map.prototype[method] !== 'function') return;
+                const orig = L.Map.prototype[method];
+                L.Map.prototype[method] = function (...args) {
+                    try {
+                        if (this && this._container && !this._container.__aim_map__) {
+                            this._container.__aim_map__ = this;
+                        }
+                    } catch (e) {}
+                    return orig.apply(this, args);
+                };
+            });
+            leafletPatched = true;
+            console.log(`${TAG} patched L.Map prototype methods (${methodsToHook.length} hooks)`);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} L.Map patch failed:`, e);
+            return false;
+        }
     }
 
     function getL() {
@@ -4290,6 +4331,16 @@
         // Always ask the Control Panel for the current token so we get
         // the latest if the user updated it elsewhere.
         try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
+
+        // Install our own Leaflet map-tagging hook ASAP (both frames — the map
+        // lives in the iframe but TOP has its own L). Leaflet may not be loaded
+        // at init, so retry until it patches (or we give up after ~30s).
+        if (!patchLeafletMap()) {
+            let patchTries = 0;
+            const patchTimer = setInterval(() => {
+                if (patchLeafletMap() || ++patchTries >= 60) clearInterval(patchTimer);
+            }, 500);
+        }
 
         if (IS_TOP) {
             // TOP frame: register with Control Panel only — no UI here.

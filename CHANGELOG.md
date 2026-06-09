@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Issues v1.01 — 🚩 flag mode no longer needs Map Styler enabled
+
+- **Fix:** placing an issue on the map (left-click the 🚩, "flag mode") would report **"Map not ready"** and refuse to activate for anyone whose Map Styler master toggle was OFF. Right-clicking the 🚩 (the issues menu) was unaffected. Cause: AIM Issues found the Leaflet map only via a container tag that *Map Styler* sets, and Map Styler only sets it while it's enabled — so with Map Styler off, the map was never tagged and flag mode couldn't find it. AIM Issues now installs its own map-detection hook at startup, so flag mode works whether or not Map Styler is enabled or installed.
+
+---
+
 ## 2026-06-08 — AIM Site Watch v0.1 (NEW SCRIPT, DEV/personal) — adaptive site-setup change auditor
 
 Brand-new background auditor (dev/personal, `latest/` only — not enabled for coworkers). Polls every site's setup JSON from your own logged-in session and records what changed over time.
