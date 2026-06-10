@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.74
+// @version      3.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.74';
+    const SCRIPT_VERSION = '3.75';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -775,6 +775,22 @@
         }
         return inside;
     }
+    // v3.75: Percepto stores some asset polygons as [corner, well-head-point,
+    // corner, corner, corner] — i.e. 4 rectangle corners + 1 interior point.
+    // In the raw vertex order this forms a self-intersecting "bowtie" that
+    // breaks ray-casting. Sort by angle around the centroid to convert any
+    // star-shaped polygon (which well pads + reasonable FFZs all are) into
+    // a proper simple polygon before pip-testing.
+    function simplifyPolygon(poly) {
+        if (!poly || poly.length < 3) return poly || [];
+        let cLat = 0, cLng = 0;
+        for (const p of poly) { cLat += p.lat; cLng += p.lng; }
+        cLat /= poly.length; cLng /= poly.length;
+        return poly.slice().sort((a, b) =>
+            Math.atan2(a.lat - cLat, a.lng - cLng)
+          - Math.atan2(b.lat - cLat, b.lng - cLng)
+        );
+    }
     function approxMeters(lat1, lng1, lat2, lng2) {
         // Equirectangular approximation — good for <10km within a site.
         const R = 6371000;
@@ -801,11 +817,14 @@
         const entities = bucket.entities || [];
         // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16) — prefer
         //    smaller area on ties so user can pick a small asset inside a
-        //    larger zone.
+        //    larger zone. v3.75: pip-test against the angular-sorted polygon
+        //    so Percepto's bowtie-shaped well-pad coords (4 corners + well
+        //    point in non-monotonic order) hit-test correctly.
         let bestPoly = null, bestPolyArea = Infinity;
         for (const e of entities) {
             if ((e.type === 3 || e.type === 4 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
-                if (pointInPolygon(lat, lng, e.coords)) {
+                const poly = simplifyPolygon(e.coords);
+                if (pointInPolygon(lat, lng, poly)) {
                     // Rough area via bounding box (cheap, no real area calc).
                     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
                     for (const c of e.coords) {

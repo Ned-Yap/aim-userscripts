@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Asset Inspector v3.75 (PROD + latest) — Right-click finds well-pad assets again
+
+Bugfix. Right-clicking Assets and FFZs on some sites (notably Exxon-style well pads with horizontal-drilling sites) brought up Chrome's native context menu instead of the Inspector popup. Flight Paths kept working.
+
+**Cause:** Percepto stores well-pad asset polygons as `[NE_corner, well-head-point, SE_corner, SW_corner, NW_corner]` — i.e. the 4 corners of the pad PLUS the surface well-head as an interior 5th vertex. In that raw vertex order the polygon is self-intersecting (a "bowtie"), which makes standard ray-casting return nonsense. AI's hit-test ran ray-cast on the raw coords, missed the entity, fell through, native menu won.
+
+**Fix:** `simplifyPolygon()` — sorts vertices by angle around the centroid before pip-testing. Converts any star-shaped polygon (which well pads + reasonable FFZs all are) into a proper simple polygon. Now ray-cast works correctly on these.
+
+Applied to Asset (type 3), NFZ (type 4), and FFZ (type 16) hit-tests. Flight-path hit-test unchanged (already used per-segment distance, not pip).
+
+---
+
 ## 2026-06-09 — AIM Asset Inspector v3.74 (was 3.59) — ⚡ bulk altitude editing that actually saves, + 30 ft SOP default
 
 Big jump for the Inspector — everything from the dev line lands for everyone. Headline: **bulk Min/Max altitude edits now apply in one shot**, even across the FFZ↔Flight-Path overlap rules that used to make a bulk save impossible.
