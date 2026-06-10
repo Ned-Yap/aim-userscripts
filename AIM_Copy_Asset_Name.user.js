@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.76
+// @version      3.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.76';
+    const SCRIPT_VERSION = '3.77';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -775,6 +775,20 @@
         }
         return inside;
     }
+    // v3.77: After the Direct-API Apply pipeline POSTs to /map_objects/,
+    // the server echoes the entity back in the WRITE shape — `points`
+    // instead of `coords`. That `saved` then overwrites bucket.entities[idx]
+    // in the cache. Subsequent right-clicks miss because findEntityAtLatLng
+    // tests Array.isArray(e.coords), which is now false. This helper returns
+    // whichever vertex array is populated. Fixes silent hit-test rot after
+    // any Apply run. (Diagnosed via PIP HITS finding the entity on a live
+    // fetch but AI's cached pip returning null on the same coord.)
+    function entityCoords(e) {
+        if (!e) return null;
+        if (Array.isArray(e.coords) && e.coords.length > 0) return e.coords;
+        if (Array.isArray(e.points) && e.points.length > 0) return e.points;
+        return null;
+    }
     // v3.75: Percepto stores some asset polygons as [corner, well-head-point,
     // corner, corner, corner] — i.e. 4 rectangle corners + 1 interior point.
     // In the raw vertex order this forms a self-intersecting "bowtie" that
@@ -815,23 +829,21 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
         const entities = bucket.entities || [];
-        // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16) — prefer
-        //    smaller area on ties so user can pick a small asset inside a
-        //    larger zone. v3.76: pip on RAW coords first (works for normal
-        //    polygons), fall back to simplifyPolygon (angular-sort) ONLY if
-        //    raw misses (covers Percepto's bowtie-shaped well-pad coords —
-        //    4 corners + well-head point in non-monotonic order). v3.75
-        //    used sort-only which regressed normal FFZs whose sort produced
-        //    a different (invalid) shape; raw-first preserves their behavior.
+        // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16). v3.77:
+        //    use entityCoords(e) helper so Apply'd entities (whose `.coords`
+        //    was replaced with `.points` by the server's write-shape echo)
+        //    still hit-test. Raw first, sort fallback for bowtie wells.
         let bestPoly = null, bestPolyArea = Infinity;
         for (const e of entities) {
-            if ((e.type === 3 || e.type === 4 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
-                let inside = pointInPolygon(lat, lng, e.coords);
-                if (!inside) inside = pointInPolygon(lat, lng, simplifyPolygon(e.coords));
+            if (e.type === 3 || e.type === 4 || e.type === 16) {
+                const polyCoords = entityCoords(e);
+                if (!polyCoords || polyCoords.length < 3) continue;
+                let inside = pointInPolygon(lat, lng, polyCoords);
+                if (!inside) inside = pointInPolygon(lat, lng, simplifyPolygon(polyCoords));
                 if (inside) {
                     // Rough area via bounding box (cheap, no real area calc).
                     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-                    for (const c of e.coords) {
+                    for (const c of polyCoords) {
                         if (c.lat < minLat) minLat = c.lat;
                         if (c.lat > maxLat) maxLat = c.lat;
                         if (c.lng < minLng) minLng = c.lng;
@@ -843,11 +855,11 @@
             }
         }
         if (bestPoly) return bestPoly;
-        // 2. Flight paths (type 15) — distance to nearest segment < 8m
+        // 2. Flight paths (type 15) — distance to nearest segment < 8m.
+        //    Arcs preferred; if missing, fall back to entityCoords (v3.77).
         let bestFP = null, bestFPDist = 8;
         for (const e of entities) {
             if (e.type !== 15) continue;
-            // Try the arcs first (more accurate segment list)
             if (Array.isArray(e.arcs) && e.arcs.length) {
                 for (const arc of e.arcs) {
                     if (arc && arc.point_a && arc.point_b) {
@@ -855,21 +867,25 @@
                         if (d < bestFPDist) { bestFP = e; bestFPDist = d; }
                     }
                 }
-            } else if (Array.isArray(e.coords) && e.coords.length >= 2) {
-                for (let i = 0; i < e.coords.length - 1; i++) {
-                    const d = pointToSegMeters(lat, lng, e.coords[i], e.coords[i+1]);
-                    if (d < bestFPDist) { bestFP = e; bestFPDist = d; }
+            } else {
+                const fpCoords = entityCoords(e);
+                if (fpCoords && fpCoords.length >= 2) {
+                    for (let i = 0; i < fpCoords.length - 1; i++) {
+                        const d = pointToSegMeters(lat, lng, fpCoords[i], fpCoords[i+1]);
+                        if (d < bestFPDist) { bestFP = e; bestFPDist = d; }
+                    }
                 }
             }
         }
         if (bestFP) return bestFP;
-        // 3. Point markers (type 19) — nearest within 15m
+        // 3. Point markers (type 19) — nearest within 15m. v3.77 entityCoords fallback.
         let bestPt = null, bestPtDist = 15;
         for (const e of entities) {
-            if (e.type === 19 && Array.isArray(e.coords) && e.coords[0]) {
-                const d = approxMeters(lat, lng, e.coords[0].lat, e.coords[0].lng);
-                if (d < bestPtDist) { bestPt = e; bestPtDist = d; }
-            }
+            if (e.type !== 19) continue;
+            const mc = entityCoords(e);
+            if (!mc || !mc[0]) continue;
+            const d = approxMeters(lat, lng, mc[0].lat, mc[0].lng);
+            if (d < bestPtDist) { bestPt = e; bestPtDist = d; }
         }
         return bestPt;
     }
@@ -3220,6 +3236,15 @@
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
+            // v3.77: server echoes entity in WRITE shape (.points, not .coords).
+            // If we stored it as-is, subsequent right-click hit-tests would
+            // miss this entity (findEntityAtLatLng checked .coords). Alias
+            // .points → .coords so the cached entity stays read-shape and
+            // hit-test keeps working. Also log so we can see it happening.
+            if (saved && !Array.isArray(saved.coords) && Array.isArray(saved.points)) {
+                console.log(`${TAG} Direct-API echo missing .coords, aliasing .points (${saved.points.length}) → .coords for ${saved.name || saved.id}`);
+                saved.coords = saved.points;
+            }
             const idx = bucket.entities.findIndex(en => en.id === group.entityId);
             if (idx >= 0) bucket.entities[idx] = saved;
         }

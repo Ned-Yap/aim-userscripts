@@ -6,6 +6,22 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Asset Inspector v3.77 (PROD + latest) — points→coords fallback for Apply'd entities
+
+**Real root cause found.** Right-click on Assets/FFZs at Exxon site 1599 was failing for entities AI had hit-tested fine before. v3.76's debug logs caught it: AI's pip on the cached entity returned no match, but a parallel pip on a fresh live fetch of the same entity DID find it. Same code, same coords, different result → cache must hold different data than the live response.
+
+**Diagnosis:** The Direct-API Apply pipeline (shipped in v3.67-v3.74) POSTs entity changes to `/map_objects/` and overwrites `bucket.entities[idx]` with the server's echoed entity. The server's echo is in **WRITE shape** (`.points` instead of `.coords`). After any Apply run, those cached entities had `.points` set but `.coords` missing. `findEntityAtLatLng` checked `Array.isArray(e.coords)` → false → skipped the entity → "no entity at lat,lng" bail → browser context menu won. Silent hit-test rot, growing worse with every Apply.
+
+**Fix (two layers, defense in depth):**
+1. **`entityCoords(e)` helper** — returns `e.coords` if it's a non-empty array, falls back to `e.points`. Used everywhere we'd reach for `e.coords` in hit-test: type 3 (Asset) / type 4 (NFZ) / type 16 (FFZ) polygon test, type 15 (Flight Path) coords-fallback when arcs absent, type 19 (General Marker) distance test.
+2. **Alias at the cache-mutation point** — when `bucket.entities[idx] = saved` runs in the Apply pipeline, if `saved.coords` is missing but `saved.points` exists, set `saved.coords = saved.points` BEFORE storing. Logs `Direct-API echo missing .coords, aliasing .points → .coords for <name>` so we can see future cases of this.
+
+Coworkers right-clicking on an asset that previously had altitude-Applied: works again. Future Apply runs: no rot.
+
+(v3.76's debug logging stays in place — `RIGHT_CLICK_DEBUG = true` const — so if a similar mystery surfaces we triage in one round instead of three.)
+
+---
+
 ## 2026-06-09 — AIM Asset Inspector v3.76 (PROD + latest) — Right-click hit-test rollback + debug logs
 
 v3.75 used angular-sort polygon as the SOLE hit-test path. Turned out the sort regressed some normal FFZs (specifically `freezone_4` in site 1599) — their sort produced a polygon shape that excluded the click point the raw polygon included. Result: right-click missed valid FFZ entities.
