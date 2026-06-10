@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a green "+" to split that segment in two. No delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -218,7 +218,7 @@
             window.__aim_fpe_lastBackup = res.backup;
             await fetchEntities();
             rebuildHandles();
-            toast(`Vertex added on ${fp.name}, seg ${idx + 1}. Reopen the FP editor (or ↻ Reload) to edit it.`, '#7adfe6');
+            toast(`⚠ Vertex added on ${fp.name}, seg ${idx + 1}. REFRESH before editing this path natively — a native Save would overwrite it.`, '#ffb14e');
         } catch (e) { warn('insert error', e); }
         finally { busy = false; }
     }
@@ -316,7 +316,7 @@
                 <button id="aim-fpe-undo" style="flex:1;background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↩ Undo</button>
                 <button id="aim-fpe-reload" style="flex:1;background:rgba(122,223,230,0.16);color:#7adfe6;border:1px solid rgba(122,223,230,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↻ Reload now</button>
             </div>
-            <div style="color:#888;font-size:11px;line-height:1.5">After inserting, reopen the FP in Percepto's editor (or ↻ Reload) to drag/branch the new vertex.</div>
+            <div style="color:#888;font-size:11px;line-height:1.5">⚠ After inserting, REFRESH before any native edit/save on this path — a native Save overwrites the insert. Then drag/branch the vertex.</div>
         `;
         p.querySelector('#aim-fpe-x').onclick = closePanel;
         const u = p.querySelector('#aim-fpe-undo'); if (u) u.onclick = doUndo;
@@ -331,5 +331,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.5 ready (iframe) — ✚ in .map-tools');
+    log('v0.6 ready (iframe) — ✚ in .map-tools');
 })();
