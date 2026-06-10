@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — open the flight path's native editor, toggle the ✚ (insert mode), and click any segment number to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -26,15 +26,18 @@
 // (capture phase, suppresses the native handler) and matches it to the nearest arc
 // midpoint across all flight paths in live state → that's the (path, segment).
 //
-// HOW THE INSERT WORKS (Path B, confirmed 2026-06-09): Percepto's Site Setup editor
-// keeps the full map-object array in a React hook (component `g$e`, the entities-
-// array useState). We locate that hook by walking the React fiber tree from the
-// Leaflet container, splice the chosen arc A→B into A→M, M→B (M = segment midpoint),
-// and call the hook's dispatch (Percepto's own setState). The map re-renders the new
-// waypoint immediately, and because the native Save reads from this same hook, the
-// insert survives the save — no API POST, no reload. arcs is the geometry source of
-// truth; arc IDs regenerate on save so we key on geometry (endpoints), never id.
-// See ShortKeys/AIM_Editor_Probe[2-5].js + reference_percepto_editor_react_state. [AIM FPE].
+// HOW THE INSERT WORKS (Path B, confirmed 2026-06-09/10): when you open a flight path's
+// native editor, Percepto holds that path's LIVE working copy in a React useState whose
+// value is the FP object itself ({id,name,type:15,arcs,coords,…}, component `JBe`). This
+// — NOT the site-wide entities array `g$e`/hook0 — is what native drags mutate and what a
+// Save serializes (hook0 stays at the page-load snapshot during editing and never sees
+// drags; v0.8–0.10 wrote hook0 and so couldn't insert after a drag). We locate the working
+// copy by walking the React fiber tree (FiberRoot.current) from the Leaflet container,
+// splice the chosen arc A→B into A→M, M→B (M = segment midpoint), and value-dispatch the
+// updated FP object. The map re-renders the new waypoint immediately, it coexists with
+// dragged waypoints, and the native Save persists it — no API POST, no reload. We key arcs
+// on geometry (endpoints), never id (ids regenerate on save).
+// See ShortKeys/AIM_Editor_Probe[2-8].js + reference_percepto_editor_react_state. [AIM FPE].
 //
 (function() {
     'use strict';
@@ -100,17 +103,24 @@
         for (const k in el) { if (k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) return el[k]; }
         return null;
     }
-    function findEntitiesHook() {
+    // Find the open flight path's EDITOR WORKING COPY — the live state a native drag
+    // mutates AND a native Save serializes. This is NOT g$e/hook0 (the site-wide
+    // entities array), which stays at the page-load snapshot during editing and never
+    // sees native drags. The working copy is a function-component useState whose value
+    // is the FP object itself: { id, name, type:15, arcs:[…], coords:[…], … } + dispatch
+    // (Percepto's `JBe`). Reading it means our matching + splice always agree with what
+    // you see on the map (dragged waypoints included). Confirmed via AIM_Editor_Probe8.
+    // Returns [{ id, name, state, dispatch }] — usually one (the path being edited).
+    function findFpWorkingCopies() {
         const map = getLeafletMap();
         const container = (map && map.getContainer && map.getContainer()) || document.querySelector('.leaflet-container');
         let f = fiberOf(container);
-        if (!f) return null;
-        // The DOM node's fiber pointer is the one current AT MOUNT; after any state
-        // update the live tree is its alternate. Walk up to the HostRoot, then read
-        // the FiberRoot's .current (the committed tree) so we never read stale state.
+        if (!f) return [];
+        // Resolve FiberRoot.current so we DFS the committed tree (never a stale alternate).
         let top = f, g = 0; while (top.return && g++ < 5000) top = top.return;
         const fiberRoot = top.stateNode;
         const root = (fiberRoot && fiberRoot.current) ? fiberRoot.current : top;
+        const found = [];
         const visited = new Set(); const stack = [root]; let count = 0;
         while (stack.length && count < 60000) {
             const fb = stack.pop(); if (!fb || visited.has(fb)) continue; visited.add(fb); count++;
@@ -119,9 +129,10 @@
                 let h = fb.memoizedState, i = 0;
                 while (h && typeof h === 'object' && 'next' in h && i < 80) {
                     const s = h.memoizedState;
-                    if (Array.isArray(s) && s.length >= 2 && h.queue && h.queue.dispatch
-                        && s.some(x => x && typeof x === 'object' && (x.arcs || x.coords))) {
-                        return { arr: s, dispatch: h.queue.dispatch };
+                    if (s && typeof s === 'object' && !Array.isArray(s) && s.type === 15
+                        && Array.isArray(s.arcs) && s.arcs.length && Array.isArray(s.coords)
+                        && h.queue && h.queue.dispatch) {
+                        found.push({ id: s.id, name: s.name, state: s, dispatch: h.queue.dispatch });
                     }
                     h = h.next; i++;
                 }
@@ -129,10 +140,9 @@
             if (fb.child) stack.push(fb.child);
             if (fb.sibling) stack.push(fb.sibling);
         }
-        return null;
+        return found;
     }
-    function liveEntities() { const hk = findEntitiesHook(); return (hk && hk.arr) || []; }
-    const flightPaths = () => liveEntities().filter(e => e && e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+    const flightPaths = () => findFpWorkingCopies();
 
     // ---- state ----
     const state = {
@@ -151,12 +161,12 @@
         const r = badgeEl.getBoundingClientRect();
         const bx = r.left + r.width / 2 - cr.left, by = r.top + r.height / 2 - cr.top;
         let best = null, bestD = BADGE_MATCH_PX;
-        flightPaths().forEach(fp => (fp.arcs || []).forEach(arc => {
+        flightPaths().forEach(wc => (wc.state.arcs || []).forEach(arc => {
             const A = arc.point_a, B = arc.point_b; if (!A || !B) return;
             const mid = { lat: (A.lat + B.lat) / 2, lng: (A.lng + B.lng) / 2 };
             let p; try { p = map.latLngToContainerPoint(L_ll(mid)); } catch (e) { return; }
             const d = Math.hypot(p.x - bx, p.y - by);
-            if (d < bestD) { bestD = d; best = { fpId: fp.id, A: clone(A), B: clone(B), mid }; }
+            if (d < bestD) { bestD = d; best = { fpId: wc.id, A: clone(A), B: clone(B), mid }; }
         }));
         return best;
     }
@@ -200,16 +210,16 @@
         (document.head || document.documentElement).appendChild(s);
     }
 
-    // ---- the Path B insert: splice arc into live React state, no network ----
+    // ---- the Path B insert: splice arc into the open FP's working copy, no network ----
     function doInsert(fpId, A, B, M) {
-        const hook = findEntitiesHook();
-        if (!hook || !hook.dispatch) { toast('Live editor state not found — reload the page and try again.', '#ff8a80'); warn('no entities hook'); return; }
-        const ent = hook.arr.find(e => e && e.id === fpId);
-        if (!ent || !Array.isArray(ent.arcs)) { toast('Flight path not found in live state.', '#ff8a80'); return; }
+        const wcs = findFpWorkingCopies();
+        const wc = wcs.find(w => w.id === fpId) || wcs[0];
+        if (!wc || !wc.dispatch) { toast('Open the flight path\'s editor first (so its segment numbers show).', '#ff8a80'); warn('no FP working copy'); return; }
+        const st = wc.state;
         // find the arc by its endpoints (geometry, not index — arc ids/order can shift)
-        let idx = ent.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
+        const idx = st.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
         if (idx === -1) { toast('That segment just changed — click the segment number again.', '#ffb14e'); return; }
-        const a = ent.arcs[idx];
+        const a = st.arcs[idx];
         const Mpt = M || { lat: (a.point_a.lat + a.point_b.lat) / 2, lng: (a.point_a.lng + a.point_b.lng) / 2 };
         const dAB = hav(a.point_a, a.point_b) || (a.distance || 1);
         const fAM = Math.min(0.999, Math.max(0.001, hav(a.point_a, Mpt) / dAB));
@@ -217,27 +227,28 @@
         // id so React keys don't collide (the server regenerates all arc ids on save).
         const am = { ...a, point_b: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * fAM, id: a.id };
         const mb = { ...a, point_a: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * (1 - fAM), id: (a.id || 0) * 1000 + 1 };
-        const origArcs = clone(ent.arcs), origCoords = clone(ent.coords || []);
-        const newArcs = ent.arcs.slice(); newArcs.splice(idx, 1, am, mb);
-        // coords is cosmetic-for-render (the save rebuilds it from arcs); keep it consistent.
-        const newCoords = (ent.coords || []).slice();
+        const origArcs = clone(st.arcs), origCoords = clone(st.coords || []);
+        const newArcs = st.arcs.slice(); newArcs.splice(idx, 1, am, mb);
+        // coords mirrors the waypoint list (the save rebuilds it from arcs); keep it consistent.
+        const newCoords = (st.coords || []).slice();
         if (newCoords.length) newCoords.splice(Math.min(idx + 1, newCoords.length), 0, clone(Mpt));
         else newCoords.push(clone(a.point_a), clone(Mpt), clone(a.point_b));
 
-        undoStack.push({ id: fpId, name: ent.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
-        hook.dispatch(arr => arr.map(e => (e && e.id === fpId) ? { ...e, arcs: newArcs, coords: newCoords } : e));
+        undoStack.push({ id: fpId, name: st.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
+        // value-form dispatch on the working-copy useState (it holds the FP object itself).
+        wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
         state.inserts++;
-        log(`inserted vertex on "${ent.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (live, no refresh)`);
+        log(`inserted vertex on "${st.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (live working copy, no refresh)`);
         renderPanel();
-        toast(`✚ Vertex added on ${ent.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
+        toast(`✚ Vertex added on ${st.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
     }
 
     function doUndo() {
         const snap = undoStack.pop();
         if (!snap) { toast('Nothing to undo', '#ffd479'); return; }
-        const hook = findEntitiesHook();
-        if (!hook || !hook.dispatch) { toast('Live state not found — refresh.', '#ff8a80'); return; }
-        hook.dispatch(arr => arr.map(e => (e && e.id === snap.id) ? { ...e, arcs: snap.arcs, coords: snap.coords } : e));
+        const wc = findFpWorkingCopies().find(w => w.id === snap.id);
+        if (!wc || !wc.dispatch) { toast('Open the path\'s editor to undo.', '#ff8a80'); return; }
+        wc.dispatch({ ...wc.state, arcs: snap.arcs, coords: snap.coords });
         if (state.inserts > 0) state.inserts--;
         log(`undid insert on "${snap.name}" seg ${snap.seg}`);
         renderPanel();
@@ -278,7 +289,7 @@
         syncButton();
         if (state.insertMode) {
             const hasBadges = document.querySelector(ARC_BADGE_SEL);
-            if (!findEntitiesHook()) warn('live editor state not found — open Site Setup so the map editor is loaded');
+            if (!findFpWorkingCopies().length) warn('no flight path editor open yet — open a flight path so its segment numbers appear');
             toast(hasBadges
                 ? 'Insert mode ON — click any glowing segment number to split it.'
                 : 'Insert mode ON — open a flight path\'s editor so its segment numbers appear, then click one.', '#5fff5f');
@@ -326,5 +337,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.10 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · seamless Path B (no refresh)');
+    log('v0.11 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · writes the FP editor working copy (coexists with native drags) · no refresh');
 })();

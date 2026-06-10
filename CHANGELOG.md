@@ -12,6 +12,14 @@ v3.76 left right-click debug logging on by default while we hunted the hit-test 
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.11 (latest, dev-only) — splice the editor working copy, not hook0 (coexist with native drags)
+
+v0.10 still couldn't split a segment *after* you dragged a waypoint ("Couldn't match segment to a path"). Root cause, nailed by probes 6–8: a native waypoint drag does **not** touch `hook0` (the site-wide entities array we were writing) — `hook0` stays at the page-load snapshot during editing. The live geometry a drag mutates, and that a Save serializes, is a **per-flight-path editor working copy**: a React `useState` (component `JBe`) whose value is the FP object itself (`{id,name,type:15,arcs,coords,…}`). We were reading the wrong state, so after a drag our arc midpoints no longer lined up with the rendered segment badges.
+
+v0.11 finds that working copy (function-component hook whose state is a `type:15` object with `arcs`+`coords`+dispatch) and value-dispatches the spliced FP object into it. Now badge↔segment matching always agrees with what's on screen, and a split **coexists with dragged waypoints** — insert, drag, insert again, branch, Save, all without a refresh. Undo reverts the working copy.
+
+---
+
 ## 2026-06-10 — AIM Flight Path Editor v0.10 (latest, dev-only) — fix stale-state read after an insert
 
 v0.9 could only insert once per session: the second click failed with "Couldn't match segment to a path." Cause — React double-buffering. The Leaflet container's `__reactFiber$` pointer is the fiber that was current *at mount*; after our first dispatch the live tree became its `alternate`, but our reader kept walking the stale one, so the arc midpoints it computed were at the pre-insert geometry and no longer lined up with Percepto's (correctly re-rendered) segment badges. Fixed by resolving the **FiberRoot's `.current`** (the committed tree) and DFS-ing from there every read. Multiple inserts in a row now work.
