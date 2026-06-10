@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.81
+// @version      3.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.81';
+    const SCRIPT_VERSION = '3.82';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1862,7 +1862,14 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
+    // ALL_COL_KEYS = every KNOWN column, in canonical display order.
+    // DEFAULT_COL_KEYS = the subset shown by default on a fresh install.
+    // The optional columns added 2026-06-10 (equipment/state/gmGroup/
+    // emergAlt/segLen/unshielded/notes) are known but OFF by default —
+    // they'd be mostly-blank for most rows. They surface via the Columns ▾
+    // menu's "Hidden" list, or get switched on by a built-in preset.
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'validated', 'unshielded', 'notes', 'lat', 'long', 'gps'];
+    const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -1878,7 +1885,11 @@
             // user actually SEES the new column instead of having to
             // manually toggle it on from the hidden list.
             const storedSet = new Set(cleaned);
-            const newKeys = ALL_COL_KEYS.filter(k => !storedSet.has(k));
+            // Only auto-append columns that are DEFAULT-ON. Optional columns
+            // (off by default) must NOT suddenly appear in an existing user's
+            // view — they'd be 7 mostly-blank columns. They stay in the
+            // Columns ▾ "Hidden" list until toggled on or enabled by a preset.
+            const newKeys = DEFAULT_COL_KEYS.filter(k => !storedSet.has(k));
             if (cleaned.length > 0) {
                 if (newKeys.length > 0) {
                     // Insert each new key right after its left neighbor
@@ -1903,7 +1914,7 @@
                 return cleaned;
             }
         }
-        return ALL_COL_KEYS.slice();
+        return DEFAULT_COL_KEYS.slice();
     }
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
@@ -1971,7 +1982,7 @@
     // Reset to the out-of-box view: all columns, all types, no filters,
     // default type-grouped sort, feet, no search.
     function resetToDefaultView(siteID) {
-        sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+        sumPanelState.columnOrder = DEFAULT_COL_KEYS.slice();
         saveColumnOrder(sumPanelState.columnOrder);
         sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
         sumPanelState.validatedOnly = false;
@@ -4355,6 +4366,14 @@
                         validated: reg.hasValidStatus ? !!e.validated : null,
                         unshielded: !!e.is_unshielded,
                         hasNotes: !!(e.description && String(e.description).trim()),
+                        // v3.82 columns. Emergency ceiling + segment length are
+                        // per-arc. Notes come from the parent FP (shared across
+                        // its segments). Equipment/state/gmGroup don't apply to
+                        // FP segments — left undefined → blank cell.
+                        emergAltM: typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null,
+                        segLenM: typeof arc.distance === 'number' ? arc.distance
+                            : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
+                        notesText: e.description ? String(e.description).trim() : '',
                     });
                 });
                 return;
@@ -4385,6 +4404,15 @@
                 validated: reg.hasValidStatus ? !!e.validated : null,
                 unshielded: !!e.is_unshielded,
                 hasNotes: !!(e.description && String(e.description).trim()),
+                // v3.82 columns. notesText is the raw description; equipment/
+                // state (assets) + gmGroup (markers) are parsed below. emergAlt/
+                // segLen are FP-segment-only → null here.
+                notesText: e.description ? String(e.description).trim() : '',
+                equipment: '',
+                state: '',
+                gmGroup: '',
+                emergAltM: null,
+                segLenM: null,
             };
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
@@ -4399,6 +4427,19 @@
                 if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
+            // v3.82: parse Equipment + State from the asset subtype, and
+            // GM Group from the marker name — mirrors computeSiteStats so the
+            // columns read identically to the 📊 Stats popup. Equipment = head
+            // before " - "; State = first modifier after " - " (no modifier =
+            // "Normal", the baseline-good state). GM Group = name with trailing
+            // numeric tokens stripped ("Elevator 1"/"Elevator 2" → "Elevator").
+            if (e.type === 3 && row.subtype) {
+                const parts = row.subtype.split(' - ');
+                row.equipment = prettyKey((parts[0] || '').trim());
+                const mods = parts.slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
+                row.state = mods.length ? mods.join(' + ') : 'Normal';
+            }
+            if (e.type === 19) row.gmGroup = gmBaseName(e.name || '');
             // Point coordinate — only single-point entities (GMs type 19,
             // Assets type 3) have a meaningful lat/lng. Polygons/lines leave
             // these null so the Lat/Long/GPS cells render blank.
@@ -5653,12 +5694,19 @@
                 name:      'Name',
                 segId:     'Segment ID',
                 subtype:   'Subtype',
+                equipment: 'Equipment (asset)',
+                state:     'State / Health (asset)',
+                gmGroup:   'GM Group',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
+                emergAlt:  'Emergency Alt (FP seg)',
                 altDelta:  'Min/Max Delta',
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
+                segLen:    'Segment Length (FP seg)',
                 validated: 'Valid',
+                unshielded:'Unshielded',
+                notes:     'Notes',
             };
             // MBT-style menu: visible columns first with ↑/↓ reorder
             // arrows + remove checkbox, then a divider, then hidden
@@ -5770,7 +5818,7 @@
                 resetBtn.textContent = 'Reset to defaults';
                 resetBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 4px';
                 resetBtn.onclick = () => {
-                    sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+                    sumPanelState.columnOrder = DEFAULT_COL_KEYS.slice();
                     saveColumnOrder(sumPanelState.columnOrder);
                     redrawTable();
                     rebuildColsMenu();
@@ -6956,18 +7004,35 @@
                 if (m == null) return '';
                 return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
             };
+            // v3.82: State→color, mirroring the Stats popup's STATE_COLORS so
+            // the State column reads as health-at-a-glance. "Normal" is muted
+            // (it's the healthy baseline — no need to shout); any modifier
+            // state gets its semantic color so problems pop while scanning.
+            const SUM_STATE_COLORS = { 'HY': '#00e5ff', 'Empty': '#ffd54f', 'Inactive': '#ff9800', 'Unshielded': '#ff5722', 'Unreachable': '#a855f7' };
+            const stateCellColor = (s) => {
+                if (!s) return '#555';
+                if (s === 'Normal') return '#7a8a92';
+                return SUM_STATE_COLORS[s] || '#ffb347'; // unknown modifier → amber flag
+            };
             const allColDefs = [
                 { key: 'visibility', label: '👁',            w: 28,  num: false, dataKey: '_vis' },
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
+                { key: 'equipment', label: 'Equipment',      w: 110, num: false, dataKey: 'equipment' },
+                { key: 'state',     label: 'State',          w: 100, num: false, dataKey: 'state' },
+                { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'emergAlt',  label: `Emerg Alt (${unitLbl})`,     w: 90,  num: true, dataKey: 'emergAltM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altDelta',  label: `Min/Max Delta (${unitLbl})`, w: 100, num: true, dataKey: 'altDeltaM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
+                { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
+                { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
                 // Point-entity coordinates — populated only for GMs + Assets.
                 { key: 'lat',       label: 'Lat',            w: 90,  num: true,  dataKey: '_lat' },
                 { key: 'long',      label: 'Long',           w: 90,  num: true,  dataKey: '_lng' },
@@ -7421,6 +7486,65 @@
                             };
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
                         }
+                    } else if (col.key === 'equipment' || col.key === 'gmGroup') {
+                        // Plain text (asset equipment / GM group). Blank for
+                        // rows the field doesn't apply to. Right-click copies.
+                        const v = r[col.dataKey] || '';
+                        const color = col.key === 'gmGroup' ? '#c4a8f0' : '#cdd6e0';
+                        td.style.cssText = `padding:5px 8px;color:${v ? color : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = `${v} — Right-click: copy`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
+                        } else {
+                            td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only' : 'Equipment is parsed from asset subtype (before " - ")';
+                        }
+                    } else if (col.key === 'state') {
+                        // Asset state, colored by severity (Normal muted, any
+                        // modifier in its semantic color so problems pop).
+                        const v = r.state || '';
+                        td.style.cssText = `padding:5px 8px;color:${stateCellColor(v)};font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = `Asset state "${v}" (subtype after " - "; no modifier = Normal). Right-click: copy`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
+                        } else {
+                            td.title = 'State applies to assets only';
+                        }
+                    } else if (col.key === 'emergAlt' || col.key === 'segLen') {
+                        // FP-segment-only numerics. fmt/raw convert m→ft per
+                        // the unit toggle, same as the other altitude columns.
+                        const m = r[col.dataKey];
+                        td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        td.textContent = col.fmt(m);
+                        if (m == null) {
+                            td.title = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only' : 'Segment length — FP segments only';
+                        } else {
+                            td.title = (col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). ' : 'Segment length (arc.distance). ') + 'Right-click: copy raw';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
+                        }
+                    } else if (col.key === 'unshielded') {
+                        // ✓ = unshielded (a drone-safety concern), ✗ = shielded,
+                        // — = N/A. The flag is meaningful for FFZ + Assets.
+                        let txt = '—', color = '#666';
+                        if (r.unshielded) { txt = '✓'; color = '#ff5722'; }
+                        else if (r.type === 16 || r.type === 3) { txt = '✗'; color = '#5fff5f'; }
+                        td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
+                        td.textContent = txt;
+                        td.title = (r.type === 16 || r.type === 3)
+                            ? (r.unshielded ? 'Unshielded (drone-safety concern)' : 'Shielded')
+                            : 'Unshielded flag applies to FFZ + Assets';
+                    } else if (col.key === 'notes') {
+                        // Description text, single-line with full text on hover.
+                        const v = r.notesText || '';
+                        td.style.cssText = `padding:5px 8px;color:${v ? '#b8c2cc' : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = v + '\n\nRight-click: copy';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, 'Copied note'); };
+                        } else {
+                            td.title = 'No notes';
+                        }
                     }
                     tr.appendChild(td);
                 });
@@ -7471,8 +7595,12 @@
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
                     if (col.key === 'subtype') return r.subtype || '';
+                    if (col.key === 'equipment') return r.equipment || '';
+                    if (col.key === 'state') return r.state || '';
+                    if (col.key === 'gmGroup') return r.gmGroup || '';
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
-                        || col.key === 'elevation' || col.key === 'agl') {
+                        || col.key === 'elevation' || col.key === 'agl'
+                        || col.key === 'emergAlt' || col.key === 'segLen') {
                         return num(r[col.dataKey]);
                     }
                     if (col.key === 'validated') {
@@ -7480,6 +7608,12 @@
                         if (r.validated === false) return 'no';
                         return ''; // N/A
                     }
+                    if (col.key === 'unshielded') {
+                        if (r.unshielded) return 'yes';
+                        if (r.type === 16 || r.type === 3) return 'no';
+                        return ''; // N/A
+                    }
+                    if (col.key === 'notes') return r.notesText || '';
                     if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
                     if (col.key === 'long') return r._lng != null ? r._lng.toFixed(6) : '';
                     if (col.key === 'gps') return r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '';
