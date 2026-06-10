@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.84
+// @version      3.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.84';
+    const SCRIPT_VERSION = '3.85';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1936,23 +1936,59 @@
     // Search text is intentionally NOT captured (it's transient, per-task).
     // Stored in GM storage so it survives reloads and is global across sites.
     function loadViewPresets() {
+        // User-saved views only. The canonical starter views now live in
+        // BUILTIN_PRESETS (read-only, always current), so there's nothing to
+        // seed — a brand-new user still sees the built-ins in the menu.
         const stored = elevGmGet(CACHE_KEY_VIEW_PRESETS, null);
-        if (stored == null) {
-            // First run: seed the example the user asked for so the feature
-            // is immediately useful. Deleting it sticks (we only seed when the
-            // key has never been written).
-            const seed = [{
-                name: 'GMs · Name/Lat/Long',
-                columnOrder: ['name', 'lat', 'long'],
-                typeFilter: ['19'],
-                validatedOnly: false, unvalidatedOnly: false, unshieldedOnly: false, notesOnly: false,
-                sortKey: 'name', sortDir: 1, unitsFt: true,
-            }];
-            elevGmSet(CACHE_KEY_VIEW_PRESETS, seed);
-            return seed;
-        }
         return Array.isArray(stored) ? stored : [];
     }
+    // v3.85: curated built-in views. Read-only / apply-only, shown above the
+    // user's saved views in the Presets ▾ menu, and always current because
+    // they live in code. Only the fields that DIFFER from default need to be
+    // set — applyViewPreset coerces missing booleans to false and missing
+    // numericFilters to {}, so applying a built-in fully (re)defines the view.
+    // numericFilters are stored in METERS (90 ft ≈ 27.43 m).
+    const FT_TO_M = 1 / 3.28084;
+    const BUILTIN_PRESETS = [
+        {
+            name: 'FP Altitude Audit',
+            desc: 'Every flight-path segment with the full altitude picture — lowest AGL first.',
+            columnOrder: ['name', 'segId', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'validated'],
+            typeFilter: ['15'], sortKey: 'aglM', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'AGL Safety (< 90 ft)',
+            desc: 'Flight-path segments flying below 90 ft AGL — the red danger band.',
+            columnOrder: ['name', 'segId', 'altMin', 'elevation', 'agl', 'segLen', 'validated'],
+            typeFilter: ['15'], numericFilters: { agl: { min: null, max: 90 * FT_TO_M } },
+            sortKey: 'aglM', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Unvalidated Triage',
+            desc: 'Everything not yet validated (FFZ / FP / NFZ), grouped by type.',
+            columnOrder: ['typeShort', 'name', 'subtype', 'validated', 'notes'],
+            typeFilter: ['3', '4', '15', '16', '19'], unvalidatedOnly: true,
+            sortKey: 'typePrio', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Asset Roster',
+            desc: 'All assets with equipment, state/health, elevation + coordinates.',
+            columnOrder: ['name', 'subtype', 'equipment', 'state', 'elevation', 'lat', 'long', 'gps'],
+            typeFilter: ['3'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Shielding Review',
+            desc: 'FFZs + assets with shielded/unshielded status + altitudes.',
+            columnOrder: ['typeShort', 'name', 'subtype', 'unshielded', 'altMin', 'altMax', 'notes'],
+            typeFilter: ['16', '3'], sortKey: 'typePrio', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'GMs · Name/Lat/Long',
+            desc: 'General markers with coordinates — for Copy → Sheets.',
+            columnOrder: ['name', 'lat', 'long'],
+            typeFilter: ['19'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+    ];
     function saveViewPresets(arr) {
         elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
     }
@@ -6037,6 +6073,28 @@
             presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
             const rebuildPresetsMenu = () => {
                 presetsMenuEl.innerHTML = '';
+                // --- Built-in views (read-only, apply-only) ---
+                const biHead = document.createElement('div');
+                biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
+                biHead.textContent = '★ Built-in views';
+                presetsMenuEl.appendChild(biHead);
+                BUILTIN_PRESETS.forEach(p => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                    row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                    row.onmouseleave = () => { row.style.background = 'transparent'; };
+                    row.title = p.desc || 'Apply this view';
+                    const lbl = document.createElement('span');
+                    lbl.textContent = p.name;
+                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    row.appendChild(lbl);
+                    row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    presetsMenuEl.appendChild(row);
+                });
+                const biHr = document.createElement('div');
+                biHr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                presetsMenuEl.appendChild(biHr);
+                // --- User-saved views ---
                 const head = document.createElement('div');
                 head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:4px 12px 4px;font-weight:700';
                 head.textContent = 'Apply a saved view';
