@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.78
+// @version      3.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.78';
+    const SCRIPT_VERSION = '3.79';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1599,7 +1599,7 @@
         // v3.76: opt-in debug. Set window.__aim_ai_debug = true in console
         // (or toggle below) to log every step of the right-click handler.
         // Helps triage "right-click brings up native menu" reports.
-        const RIGHT_CLICK_DEBUG = true; // v3.76 default ON; flip to false once stable.
+        const RIGHT_CLICK_DEBUG = false; // v3.79: now stable, default OFF. Opt-in via window.__aim_ai_debug = true.
         function dbg(...args) {
             if (RIGHT_CLICK_DEBUG || (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__aim_ai_debug) {
                 try { console.log(TAG, 'RC', ...args); } catch (e) {}
