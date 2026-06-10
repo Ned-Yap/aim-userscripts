@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a green "+" to split that segment in two. No delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -149,6 +149,7 @@
     const state = {
         active: false, selectedFpId: null, handles: [],
         moveHandler: null, clickHandler: null,
+        pending: 0,   // inserts written but not yet synced into Percepto (cleared by a page reload)
     };
     function selectedFP() { return entities.find(e => e && e.id === state.selectedFpId) || null; }
 
@@ -216,6 +217,7 @@
             const res = await insertVertex(fp, idx, M);
             if (!res.ok) { toast(`Insert failed${res.status ? ' (' + res.status + ')' : ''} — see console`, '#ff8a80'); return; }
             window.__aim_fpe_lastBackup = res.backup;
+            state.pending++;
             await fetchEntities();
             rebuildHandles();
             toast(`⚠ Vertex added on ${fp.name}, seg ${idx + 1}. REFRESH before editing this path natively — a native Save would overwrite it.`, '#ffb14e');
@@ -312,11 +314,12 @@
             ${fp
                 ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> handles in view.<br><span style="color:#888">Click a handle to insert. Click another path to switch.</span></div>`
                 : `<div style="color:#aaa;margin-bottom:8px;line-height:1.5"><b>Click a flight path on the map</b> to focus it — its insert handles appear.</div>`}
+            ${state.pending > 0 ? `<div style="margin-bottom:8px;padding:7px 10px;background:rgba(255,177,78,0.12);border:1px solid rgba(255,177,78,0.5);border-radius:4px;color:#ffb14e;font-weight:600">⚠ ${state.pending} insert${state.pending === 1 ? '' : 's'} pending — Refresh to apply before editing natively.</div>` : ''}
             <div style="display:flex;gap:6px;margin-bottom:8px">
                 <button id="aim-fpe-undo" style="flex:1;background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↩ Undo</button>
-                <button id="aim-fpe-reload" style="flex:1;background:rgba(122,223,230,0.16);color:#7adfe6;border:1px solid rgba(122,223,230,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↻ Reload now</button>
+                <button id="aim-fpe-reload" style="flex:1;background:${state.pending > 0 ? 'rgba(255,177,78,0.2)' : 'rgba(122,223,230,0.16)'};color:${state.pending > 0 ? '#ffb14e' : '#7adfe6'};border:1px solid ${state.pending > 0 ? 'rgba(255,177,78,0.6)' : 'rgba(122,223,230,0.55)'};border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↻ ${state.pending > 0 ? `Refresh to apply (${state.pending})` : 'Reload now'}</button>
             </div>
-            <div style="color:#888;font-size:11px;line-height:1.5">⚠ After inserting, REFRESH before any native edit/save on this path — a native Save overwrites the insert. Then drag/branch the vertex.</div>
+            <div style="color:#888;font-size:11px;line-height:1.5">Insert as many as you like, then hit <b>Refresh to apply</b> once. ⚠ Don't native-edit/save this path before refreshing — a native Save overwrites the inserts.</div>
         `;
         p.querySelector('#aim-fpe-x').onclick = closePanel;
         const u = p.querySelector('#aim-fpe-undo'); if (u) u.onclick = doUndo;
@@ -331,5 +334,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.6 ready (iframe) — ✚ in .map-tools');
+    log('v0.7 ready (iframe) — ✚ in .map-tools');
 })();
