@@ -12,6 +12,12 @@ v3.76 left right-click debug logging on by default while we hunted the hit-test 
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.10 (latest, dev-only) — fix stale-state read after an insert
+
+v0.9 could only insert once per session: the second click failed with "Couldn't match segment to a path." Cause — React double-buffering. The Leaflet container's `__reactFiber$` pointer is the fiber that was current *at mount*; after our first dispatch the live tree became its `alternate`, but our reader kept walking the stale one, so the arc midpoints it computed were at the pre-insert geometry and no longer lined up with Percepto's (correctly re-rendered) segment badges. Fixed by resolving the **FiberRoot's `.current`** (the committed tree) and DFS-ing from there every read. Multiple inserts in a row now work.
+
+---
+
 ## 2026-06-10 — AIM Flight Path Editor v0.9 (latest, dev-only) — click Percepto's own segment numbers
 
 v0.8 drew its own cyan "+" handles, which (a) sat on top of Percepto's segment-number badges (hard to see) and (b) didn't follow a waypoint when you dragged it (they only rebuilt on pan/zoom). v0.9 drops our handles entirely and **piggybacks on Percepto's segment-number badges** (`.map-marker__arc-index`) — they're already at each segment midpoint, zoom-animated, and re-rendered by Percepto on every geometry change, so they never drift or overlap.

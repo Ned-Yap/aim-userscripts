@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — open the flight path's native editor, toggle the ✚ (insert mode), and click any segment number to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -105,7 +105,12 @@
         const container = (map && map.getContainer && map.getContainer()) || document.querySelector('.leaflet-container');
         let f = fiberOf(container);
         if (!f) return null;
-        let root = f, g = 0; while (root.return && g++ < 5000) root = root.return;
+        // The DOM node's fiber pointer is the one current AT MOUNT; after any state
+        // update the live tree is its alternate. Walk up to the HostRoot, then read
+        // the FiberRoot's .current (the committed tree) so we never read stale state.
+        let top = f, g = 0; while (top.return && g++ < 5000) top = top.return;
+        const fiberRoot = top.stateNode;
+        const root = (fiberRoot && fiberRoot.current) ? fiberRoot.current : top;
         const visited = new Set(); const stack = [root]; let count = 0;
         while (stack.length && count < 60000) {
             const fb = stack.pop(); if (!fb || visited.has(fb)) continue; visited.add(fb); count++;
@@ -321,5 +326,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.9 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · seamless Path B (no refresh)');
+    log('v0.10 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · seamless Path B (no refresh)');
 })();
