@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a green "+" to split that segment in two. No delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -149,7 +149,6 @@
     const state = {
         active: false, selectedFpId: null, handles: [],
         moveHandler: null, clickHandler: null,
-        autoReload: true, reloadTimer: null,
     };
     function selectedFP() { return entities.find(e => e && e.id === state.selectedFpId) || null; }
 
@@ -186,7 +185,7 @@
         const fp = selectedFP();
         if (!map || !L || !state.active || !fp) { renderPanel(); return; }
         const ghost = L.divIcon({
-            html: '<div style="display:flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:3px;background:rgba(34,197,94,0.9);border:1.5px solid #fff;color:#fff;font:700 13px/1 monospace;cursor:copy;box-shadow:0 0 5px rgba(0,0,0,0.7)" title="Click to add a vertex here">+</div>',
+            html: '<div style="width:12px;height:12px;border-radius:50%;background:rgba(122,223,230,0.55);border:1.5px solid rgba(255,255,255,0.75);cursor:copy;box-shadow:0 0 4px rgba(0,0,0,0.5)" title="Click to add a vertex here"></div>',
             className: 'aim-fpe-mid', iconSize: [16, 16], iconAnchor: [8, 8],
         });
         let total = 0;
@@ -219,36 +218,21 @@
             window.__aim_fpe_lastBackup = res.backup;
             await fetchEntities();
             rebuildHandles();
-            if (state.autoReload) {
-                toast(`Vertex added on ${fp.name}, seg ${idx + 1} · reloading to edit it…`, '#7adfe6');
-                scheduleReload();
-            } else {
-                toast(`Vertex added on ${fp.name}, seg ${idx + 1} · ↻ Reload to edit it`, '#7adfe6');
-            }
+            toast(`Vertex added on ${fp.name}, seg ${idx + 1}. Reopen the FP editor (or ↻ Reload) to edit it.`, '#7adfe6');
         } catch (e) { warn('insert error', e); }
         finally { busy = false; }
-    }
-
-    function scheduleReload() {
-        if (state.reloadTimer) clearTimeout(state.reloadTimer);
-        state.reloadTimer = setTimeout(() => { log('auto-reload (debounced) — re-reading Percepto'); location.reload(); }, RELOAD_DELAY);
-        renderPanel();
-    }
-    function cancelReload() {
-        if (state.reloadTimer) { clearTimeout(state.reloadTimer); state.reloadTimer = null; renderPanel(); }
     }
 
     async function doUndo() {
         const o = window.__aim_fpe_lastBackup;
         if (!o) { toast('Nothing to undo', '#ffd479'); return; }
         try {
-            cancelReload();
             const cfg = await fetchSiteCfg();
             const csrf = getCsrf();
             const b = buildWriteBody(o, cfg);
             const r = await fetch(SAVE_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
             log('undo →', r.status);
-            if (r.status === 200) { window.__aim_fpe_lastBackup = null; await fetchEntities(); rebuildHandles(); toast('Reverted last insert' + (state.autoReload ? ' · reloading…' : ' · ↻ Reload to see it'), '#ffd479'); if (state.autoReload) scheduleReload(); }
+            if (r.status === 200) { window.__aim_fpe_lastBackup = null; await fetchEntities(); rebuildHandles(); toast('Reverted last insert · reopen the editor to see it', '#ffd479'); }
             else toast('Undo failed (' + r.status + ')', '#ff8a80');
         } catch (e) { warn('undo error', e); toast('Undo errored — see console', '#ff8a80'); }
     }
@@ -303,7 +287,6 @@
     function closePanel() {
         state.active = false;
         clearHandles();
-        cancelReload();
         const map = getLeafletMap();
         if (map) {
             if (state.moveHandler) { try { map.off('moveend zoomend', state.moveHandler); } catch (e) {} state.moveHandler = null; }
@@ -321,29 +304,23 @@
             document.body.appendChild(p);
         }
         const fp = selectedFP();
-        const reloading = !!state.reloadTimer;
         p.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <strong style="color:#7adfe6;font-size:14px">✚ Flight Path Editor</strong>
                 <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px">×</span>
             </div>
             ${fp
-                ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> "+" in view.<br><span style="color:#888">Click a green + to insert. Click another path to switch.</span></div>`
-                : `<div style="color:#aaa;margin-bottom:8px;line-height:1.5"><b>Click a flight path on the map</b> to focus it — its green "+" insert handles appear.</div>`}
-            ${reloading ? `<div style="color:#ffd479;margin-bottom:8px">Reloading map shortly… <span id="aim-fpe-cancel" style="cursor:pointer;text-decoration:underline">cancel</span></div>` : ''}
+                ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> handles in view.<br><span style="color:#888">Click a handle to insert. Click another path to switch.</span></div>`
+                : `<div style="color:#aaa;margin-bottom:8px;line-height:1.5"><b>Click a flight path on the map</b> to focus it — its insert handles appear.</div>`}
             <div style="display:flex;gap:6px;margin-bottom:8px">
                 <button id="aim-fpe-undo" style="flex:1;background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↩ Undo</button>
                 <button id="aim-fpe-reload" style="flex:1;background:rgba(122,223,230,0.16);color:#7adfe6;border:1px solid rgba(122,223,230,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↻ Reload now</button>
             </div>
-            <label style="display:flex;align-items:center;gap:6px;color:#aaa;font-size:11px;cursor:pointer">
-                <input type="checkbox" id="aim-fpe-auto" ${state.autoReload ? 'checked' : ''}> Auto-reload after insert (resets map view)
-            </label>
+            <div style="color:#888;font-size:11px;line-height:1.5">After inserting, reopen the FP in Percepto's editor (or ↻ Reload) to drag/branch the new vertex.</div>
         `;
         p.querySelector('#aim-fpe-x').onclick = closePanel;
         const u = p.querySelector('#aim-fpe-undo'); if (u) u.onclick = doUndo;
         const rl = p.querySelector('#aim-fpe-reload'); if (rl) rl.onclick = () => location.reload();
-        const auto = p.querySelector('#aim-fpe-auto'); if (auto) auto.onchange = () => { state.autoReload = auto.checked; if (!auto.checked) cancelReload(); };
-        const cancel = p.querySelector('#aim-fpe-cancel'); if (cancel) cancel.onclick = cancelReload;
     }
 
     // ---- boot ----
@@ -354,5 +331,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.4 ready (iframe) — ✚ in .map-tools');
+    log('v0.5 ready (iframe) — ✚ in .map-tools');
 })();
