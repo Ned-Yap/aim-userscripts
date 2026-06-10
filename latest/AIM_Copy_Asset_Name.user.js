@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.86
+// @version      3.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.86';
+    const SCRIPT_VERSION = '3.87';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1992,6 +1992,107 @@
     function saveViewPresets(arr) {
         elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
     }
+
+    // ---- v3.87 (Phase 2): cross-preset export ----
+    // Copy ANY preset's table (its columns + filters) to the clipboard,
+    // Sheets-ready, WITHOUT switching the live view — so the user can pull
+    // several field-sets in a row. Built standalone (the live table's column
+    // defs live inside redrawTable's closure).
+    function presetToFilterState(p) {
+        return {
+            search: '',
+            typeFilter: new Set((Array.isArray(p.typeFilter) ? p.typeFilter : ['3', '4', '15', '16', '19']).map(String)),
+            validatedOnly: !!p.validatedOnly,
+            unvalidatedOnly: !!p.unvalidatedOnly,
+            unshieldedOnly: !!p.unshieldedOnly,
+            notesOnly: !!p.notesOnly,
+            numericFilters: (p.numericFilters && typeof p.numericFilters === 'object') ? p.numericFilters : {},
+            sortKey: p.sortKey || 'typePrio',
+            sortDir: (p.sortDir === 1 || p.sortDir === -1) ? p.sortDir : 1,
+        };
+    }
+    // Column label + value-extractor registry for export. unitsFt controls the
+    // altitude/distance m→ft conversion + the (ft|m) label suffix.
+    function exportColumnDefs(columnKeys, unitsFt) {
+        const u = unitsFt ? 'ft' : 'm';
+        const num = (m) => m == null ? '' : (unitsFt ? Math.round(m * 3.28084).toString() : m.toFixed(1));
+        const reg = {
+            visibility: { label: 'Visibility', val: () => '' },
+            typeShort: { label: 'Type', val: r => r.typeShort || '' },
+            name: { label: 'Name', val: r => r.name || '' },
+            segId: { label: 'Seg ID', val: r => r._segId != null ? String(r._segId) : '' },
+            subtype: { label: 'Subtype', val: r => r.subtype || '' },
+            equipment: { label: 'Equipment', val: r => r.equipment || '' },
+            state: { label: 'State', val: r => r.state || '' },
+            gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
+            altMin: { label: `Min Alt (${u})`, val: r => num(r.altMinM) },
+            altMax: { label: `Max Alt (${u})`, val: r => num(r.altMaxM) },
+            emergAlt: { label: `Emerg Alt (${u})`, val: r => num(r.emergAltM) },
+            altDelta: { label: `Delta (${u})`, val: r => num(r.altDeltaM) },
+            elevation: { label: `Elevation (${u})`, val: r => num(r.elevationM) },
+            agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
+            segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
+            validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
+            unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
+            notes: { label: 'Notes', val: r => r.notesText || '' },
+            lat: { label: 'Lat', val: r => r._lat != null ? r._lat.toFixed(6) : '' },
+            long: { label: 'Long', val: r => r._lng != null ? r._lng.toFixed(6) : '' },
+            gps: { label: 'GPS', val: r => r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '' },
+        };
+        return (columnKeys || []).map(k => reg[k]).filter(Boolean);
+    }
+    const exportHtmlEscape = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Build {html, text, count} for one preset against the given row set.
+    function buildPresetExport(p, allRows) {
+        const rows = filterAndSortRows(allRows, presetToFilterState(p));
+        const cols = exportColumnDefs(p.columnOrder, typeof p.unitsFt === 'boolean' ? p.unitsFt : true);
+        const headHtml = '<tr>' + cols.map(c => `<th style="background:#1f2933;color:#ffffff;border:1px solid #888888;padding:3px 7px;text-align:left;font-weight:bold">${exportHtmlEscape(c.label)}</th>`).join('') + '</tr>';
+        const bodyHtml = rows.map(r => '<tr>' + cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${exportHtmlEscape(c.val(r))}</td>`).join('') + '</tr>').join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')]
+            .concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t')))
+            .join('\n');
+        return { html, text, count: rows.length };
+    }
+    // Generic rich-clipboard writer (text/html + text/plain) — mirrors
+    // copyStatsAsSheet's path.
+    async function writeSheetsClipboard(html, text, toastMsg) {
+        try {
+            if (navigator.clipboard && window.ClipboardItem) {
+                const item = new ClipboardItem({
+                    'text/html': new Blob([html], { type: 'text/html' }),
+                    'text/plain': new Blob([text], { type: 'text/plain' }),
+                });
+                await navigator.clipboard.write([item]);
+                showToast(toastMsg);
+                return;
+            }
+        } catch (e) {
+            console.warn(`${TAG} export ClipboardItem write failed, falling back:`, e);
+        }
+        try {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            tmp.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+            document.body.appendChild(tmp);
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(tmp);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('copy');
+            sel.removeAllRanges();
+            document.body.removeChild(tmp);
+            showToast(toastMsg);
+        } catch (e) {
+            console.error(`${TAG} export Sheets fallback failed:`, e);
+            copyToClipboard(text, 'Copied as plain text (HTML copy unavailable)');
+        }
+    }
+    function allExportPresets() {
+        return BUILTIN_PRESETS.concat(loadViewPresets());
+    }
+
     // Snapshot the live SUM state into a plain preset object (sans name).
     function captureCurrentView() {
         return {
@@ -6968,8 +7069,103 @@
                 if (mapObjectsBySite[sid]) renderSummaryPanel(sid);
             }, 1500);
         };
+        // v3.87 (Phase 2): Export ▾ — copy ANY preset's table (its columns +
+        // filters) to the clipboard, Sheets-ready, without changing the live
+        // view. The CSV/Sheets/JSON buttons export the CURRENT view; this
+        // exports a chosen preset's view so you can pull several field-sets
+        // back-to-back.
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = '📤 Export ▾';
+        exportBtn.title = 'Copy a preset\'s table (its own columns + filters) for paste into Sheets — without switching your current view';
+        exportBtn.style.cssText = BTN_CSS;
+        let exportMenuEl = null;
+        const closeExportMenu = () => { if (exportMenuEl) { exportMenuEl.remove(); exportMenuEl = null; } };
+        exportBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (exportMenuEl) { closeExportMenu(); return; }
+            exportMenuEl = document.createElement('div');
+            exportMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:240px;max-height:65vh;overflow:auto';
+            const head = document.createElement('div');
+            head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+            head.textContent = 'Copy a preset → Sheets';
+            exportMenuEl.appendChild(head);
+            const sub = document.createElement('div');
+            sub.style.cssText = 'font-size:9px;color:#888;padding:0 12px 4px;max-width:236px;line-height:1.3';
+            sub.textContent = "Uses that preset's columns + filters, not your current view.";
+            exportMenuEl.appendChild(sub);
+            const mkRow = (label, desc, onPick, accent) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;padding:3px 12px;cursor:pointer';
+                row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                row.onmouseleave = () => { row.style.background = 'transparent'; };
+                if (desc) row.title = desc;
+                const lbl = document.createElement('span');
+                lbl.textContent = label;
+                lbl.style.cssText = `flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${accent ? 'color:' + accent : ''}`;
+                row.appendChild(lbl);
+                row.onclick = onPick;
+                return row;
+            };
+            const doExport = (p) => {
+                closeExportMenu();
+                try {
+                    const { html, text, count } = buildPresetExport(p, allRows);
+                    writeSheetsClipboard(html, text, `Copied "${p.name}" (${count} row${count === 1 ? '' : 's'}) → paste into Sheets`);
+                } catch (e) {
+                    console.error(`${TAG} export "${p.name}" failed:`, e);
+                    showToast(`Export failed: ${p.name}`, 'rgba(255,96,96,0.55)');
+                }
+            };
+            const biHead = document.createElement('div');
+            biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:4px 12px 2px;font-weight:700';
+            biHead.textContent = '★ Built-in';
+            exportMenuEl.appendChild(biHead);
+            BUILTIN_PRESETS.forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
+            const userPresets = loadViewPresets();
+            if (userPresets.length) {
+                const uHead = document.createElement('div');
+                uHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+                uHead.textContent = 'Saved';
+                exportMenuEl.appendChild(uHead);
+                userPresets.forEach(p => exportMenuEl.appendChild(mkRow(p.name, 'Your saved view', () => doExport(p))));
+            }
+            const hr = document.createElement('div');
+            hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+            exportMenuEl.appendChild(hr);
+            exportMenuEl.appendChild(mkRow('⧉ Copy ALL (stacked)', 'Every preset stacked into one plain-text paste, section by section (best for a single multi-section paste)', () => {
+                closeExportMenu();
+                try {
+                    const all = allExportPresets();
+                    const sections = all.map(p => {
+                        const { text, count } = buildPresetExport(p, allRows);
+                        return `=== ${p.name} (${count} row${count === 1 ? '' : 's'}) ===\n${text}`;
+                    });
+                    copyToClipboard(sections.join('\n\n'), `Copied ALL ${all.length} preset tables (stacked, plain text)`);
+                } catch (e) {
+                    console.error(`${TAG} export ALL failed:`, e);
+                    showToast('Export ALL failed', 'rgba(255,96,96,0.55)');
+                }
+            }, '#ffd54f'));
+            const r = exportBtn.getBoundingClientRect();
+            exportMenuEl.style.left = r.left + 'px';
+            exportMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(exportMenuEl);
+            const mr = exportMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) exportMenuEl.style.left = Math.max(8, window.innerWidth - mr.width - 8) + 'px';
+            // Footer sits near the bottom — flip the menu up if it would
+            // overflow below the viewport.
+            if (mr.bottom > window.innerHeight - 8) exportMenuEl.style.top = Math.max(8, r.top - mr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (exportMenuEl && !exportMenuEl.contains(e.target) && e.target !== exportBtn) {
+                    closeExportMenu();
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
         footer.appendChild(csvBtn);
         footer.appendChild(tsvBtn);
+        footer.appendChild(exportBtn);
         footer.appendChild(jsonBtn);
         footer.appendChild(refreshBtn);
 
