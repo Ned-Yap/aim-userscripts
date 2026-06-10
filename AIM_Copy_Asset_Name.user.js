@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.80
+// @version      3.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.80';
+    const SCRIPT_VERSION = '3.81';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -144,6 +144,89 @@
             .finally(() => {
                 fetchingSites.delete(siteID);
             });
+    }
+
+    // ============================================================
+    // v3.81: save-invalidator. The inspector caches /map_objects/ per
+    // site at page load and never refetches on native saves. Result:
+    // after Percepto's editor saves (including FPE splits), the new
+    // geometry exists on the server + in Percepto's live state but the
+    // inspector's cache is the page-load snapshot → right-click on the
+    // new segment bails with "no entity". Reload was the workaround.
+    //
+    // Fix: wrap fetch + XHR so any successful POST /map_objects/ from
+    // ANY source (native Save, FPE, AI's own Apply) invalidates the
+    // current site's cache and triggers a background refetch. Next
+    // right-click sees fresh data with no manual refresh.
+    //
+    // Wraps run in the IFRAME (where Percepto's editor lives) on
+    // unsafeWindow so we catch the page's real fetch/XHR, not the
+    // sandbox proxies. Idempotent via __aim_ai_save_invalidator_installed.
+    // ============================================================
+    const SAVE_URL_RE = /\/map_objects\/?(\?|$)/;
+    function installSaveInvalidator() {
+        if (CONTEXT === 'TOP') return; // saves happen in iframe
+        const realWin = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        try {
+            if (realWin.__aim_ai_save_invalidator_installed) return;
+            realWin.__aim_ai_save_invalidator_installed = true;
+
+            const onSaveSuccess = () => {
+                const sid = getCurrentSiteID();
+                if (!sid) return;
+                if (!mapObjectsBySite[sid]) return; // already empty, nothing to invalidate
+                delete mapObjectsBySite[sid];
+                console.log(`${TAG} cache invalidated for site ${sid} after POST /map_objects/`);
+                // Short delay: let the save finish + give the server a moment
+                // before we re-read. 300 ms is plenty for same-host writes.
+                setTimeout(() => fetchMapObjects(sid).catch(() => {}), 300);
+            };
+
+            // ---- fetch wrapper ----
+            const origFetch = realWin.fetch;
+            if (typeof origFetch === 'function') {
+                realWin.fetch = function (input, init) {
+                    let url, method;
+                    try {
+                        url = (input && typeof input === 'object' && 'url' in input) ? input.url : input;
+                        method = ((init && init.method) || (input && input.method) || 'GET').toString().toUpperCase();
+                    } catch (e) {}
+                    const p = origFetch.apply(this, arguments);
+                    try {
+                        if (method === 'POST' && typeof url === 'string' && SAVE_URL_RE.test(url)) {
+                            p.then(resp => { if (resp && resp.ok) onSaveSuccess(); }).catch(() => {});
+                        }
+                    } catch (e) {}
+                    return p;
+                };
+            }
+
+            // ---- XHR wrapper (Axios + Percepto's classic save path) ----
+            const XHR = realWin.XMLHttpRequest;
+            if (XHR && XHR.prototype && !XHR.prototype.__aim_ai_save_xhr_wrapped) {
+                XHR.prototype.__aim_ai_save_xhr_wrapped = true;
+                const origOpen = XHR.prototype.open;
+                const origSend = XHR.prototype.send;
+                XHR.prototype.open = function (method, url) {
+                    try { this.__aim_ai_method = method; this.__aim_ai_url = url; } catch (e) {}
+                    return origOpen.apply(this, arguments);
+                };
+                XHR.prototype.send = function () {
+                    try {
+                        const m = String(this.__aim_ai_method || 'GET').toUpperCase();
+                        if (m === 'POST' && typeof this.__aim_ai_url === 'string' && SAVE_URL_RE.test(this.__aim_ai_url)) {
+                            this.addEventListener('load', () => {
+                                try { if (this.status >= 200 && this.status < 300) onSaveSuccess(); } catch (e) {}
+                            });
+                        }
+                    } catch (e) {}
+                    return origSend.apply(this, arguments);
+                };
+            }
+            console.log(`${TAG} save-invalidator armed (cache refreshes after any /map_objects/ save)`);
+        } catch (e) {
+            console.warn(`${TAG} installSaveInvalidator failed:`, e);
+        }
     }
 
     // ============================================================
@@ -1761,6 +1844,7 @@
     // where we loaded after the panel's initial TOKEN_VALUE broadcast.
     if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });
     installRightClickHandler();
+    installSaveInvalidator();
 
     // ============================================================
     // SUMMARY VIEW — floating panel listing every entity on the site.

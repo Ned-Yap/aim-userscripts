@@ -12,6 +12,18 @@ Hardening so the splitter can **never** push a malformed flight path into Percep
 
 ---
 
+## 2026-06-10 — AIM Asset Inspector v3.81 (PROD + latest) — refresh cache after native saves
+
+Native Percepto saves (including FPE vertex splits) weren't visible to the right-click inspector until you reloaded the page. Cause: the inspector caches `/map_objects/` per site on first need and never refetches on its own; the save writes Percepto's live state and the server, but the inspector's snapshot stays frozen at page-load.
+
+**Fix:** install a one-time wrapper around `fetch` + `XHR.prototype.send` in the iframe context. Any successful `POST /map_objects/` from any source — native Save, FPE split, AI's own Apply pipeline — deletes the current site's cache and triggers a background refetch 300 ms later. Next right-click sees fresh data with no manual reload.
+
+Coexists with v3.77's in-place cache update inside AI's own Apply pipeline (which overwrites `bucket.entities[idx]`). The wrapper-driven refetch fires shortly after, replacing the entire bucket with the server's authoritative shape — a small redundancy that means freshness is guaranteed regardless of code path.
+
+Idempotent — guarded on `window.__aim_ai_save_invalidator_installed` so it doesn't double-wrap if AI loads twice. Logs `cache invalidated for site <id> after POST /map_objects/` when it fires, so you can see it working.
+
+---
+
 ## 2026-06-10 — AIM Asset Inspector v3.80 (PROD + latest) — don't steal FP vertex right-clicks
 
 v3.78 fixed the shadowing-pip bug that had quietly broken Asset/FFZ right-click since v3.67. Side effect: with the inspector hit-test now actually firing on Flight Paths, it also fired on **flight-path vertex markers** — stealing Percepto's native "delete vertex" right-click. Same for the segment-number badges (which Flight Path Editor's own right-click uses).
