@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.12
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. DEV/personal.
+// @version      0.13
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. Also auto-blocks Percepto's native "phantom vertex on drop" bug (a stray vertex spawned when you release a dragged waypoint). DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -18,6 +18,9 @@
 //     treat it as a split. The new vertex is a genuine branchable/draggable waypoint,
 //     and a native Save persists it with NO refresh. A small Undo chip appears after
 //     a split (or call window.__aim_fpe_undo()).
+//   - Also auto-fixes a NATIVE Percepto bug: dropping a dragged vertex fires a stray
+//     `click` that spawns a phantom zero-length vertex on top of the moved one. We
+//     swallow exactly that post-drag click (see the phantom-add guard below).
 //
 // WHY piggyback on the segment-number badges (.map-marker__arc-index): they are
 // Percepto's OWN markers — already at each segment midpoint, zoom-animated, and
@@ -189,9 +192,38 @@
         e.stopPropagation();
         if (e.stopImmediatePropagation) e.stopImmediatePropagation();
     }
+    // ---- native "phantom vertex on drop" guard ----
+    // Percepto bug (pre-dates these scripts, reproduces with TM off): after you DRAG a
+    // flight-path vertex, a synthetic `click` fires at the drop point and Percepto adds
+    // a stray zero-length branch vertex on top of the one you moved — invisible until
+    // you zoom all the way in. Confirmed via AIM_Editor_Probe9: mousedown on
+    // .map-marker__flight-path-vertex → move → mouseup → `click` with a large movedΔ →
+    // arc count ++. We swallow EXACTLY that click: press started on a vertex + moved past
+    // a threshold, while an FP editor is open. A real click-to-add (no preceding drag,
+    // movedΔ≈0), vertex-select (no move), panning, and our segment-split all pass.
+    const VERTEX_SEL = '.map-marker__flight-path-vertex';
+    const DRAG_PX = 5;          // movement past this between mousedown and the click = a drag, not a click
+    let lastDown = { x: 0, y: 0, onVertex: false };
+    function editingFP() { return !!document.querySelector(ARC_BADGE_SEL) || findFpWorkingCopies().length > 0; }
+    function onDownTrack(e) {
+        lastDown = { x: e.clientX, y: e.clientY, onVertex: !!(e.target && e.target.closest && e.target.closest(VERTEX_SEL)) };
+    }
+    function onClickGuard(e) {
+        if (!lastDown.onVertex) return;                                                 // press didn't start on a vertex
+        if (e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL)) return;     // never touch our split
+        if (Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) <= DRAG_PX) return; // a real click/select, not a drag
+        if (!editingFP()) return;                                                       // only while editing a flight path
+        e.preventDefault(); e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        log(`blocked Percepto's phantom "drop = new vertex" click (${Math.round(Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y))}px after a vertex drag)`);
+    }
     function installBadgeListeners() {
         document.addEventListener('click', onBadgeClick, true);
         ['mousedown', 'pointerdown', 'dblclick'].forEach(t => document.addEventListener(t, onBadgeSuppress, true));
+        // phantom-add guard (capture, so it runs before Percepto's handler)
+        document.addEventListener('mousedown', onDownTrack, true);
+        document.addEventListener('pointerdown', onDownTrack, true);
+        document.addEventListener('click', onClickGuard, true);
     }
 
     // Subtle cue that segment numbers are click-to-split while editing (CSS only).
@@ -288,5 +320,5 @@
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
-    log('v0.12 ready (iframe) — click a segment number to split it (no button; live whenever an FP editor is open) · writes the FP editor working copy (coexists with native drags) · no refresh');
+    log('v0.13 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
 })();

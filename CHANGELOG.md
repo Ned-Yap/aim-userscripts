@@ -12,6 +12,14 @@ v3.76 left right-click debug logging on by default while we hunted the hit-test 
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.13 (latest, dev-only) — auto-kill the native "phantom vertex on drop" bug
+
+Long-standing **native** Percepto annoyance (reproduces with Tampermonkey fully off): when you drag a flight-path vertex and release, a synthetic `click` fires at the drop point and Percepto spawns a stray zero-length branch vertex *on top of* the one you moved — invisible until you zoom all the way in, then you have to right-click it off. Probe traced it precisely: `mousedown` on a `.map-marker__flight-path-vertex` → drag → `mouseup` → a `click` with a large `movedΔ` → arc count ++.
+
+v0.13 swallows exactly that click — and only that one: the press must have **started on a vertex**, the pointer must have **moved past ~5px** (a drag, not a click), and an **FP editor must be open**. Intentional click-to-add (no preceding drag), vertex-select (no move), panning, and our segment-split are all untouched, so building paths still works normally. No toggle needed — the phantom is uniquely identifiable, so it's just gone. Console logs `blocked Percepto's phantom "drop = new vertex" click` each time it fires.
+
+---
+
 ## 2026-06-10 — AIM Flight Path Editor v0.12 (latest, dev-only) — drop the button, split on a plain segment-number click
 
 No more ✚ toggle. A native click on a segment number does nothing (the numbers are info-only), so while you're natively editing a flight path, **a plain click on a segment number just splits it** — no button, no mode. The numbers show a copy-cursor and glow green on hover so the capability is discoverable. A small "↩ Undo split (N)" chip appears bottom-right after a split (also `window.__aim_fpe_undo()`). Both halves of a split inherit the original segment's full altitude band (`min_alt`/`max_alt`/`min_emergency_alt`/`wait_until_approved`).
