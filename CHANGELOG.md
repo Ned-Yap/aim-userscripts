@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Flight Path Editor v0.15 (latest, dev-only) — pre-write validation gate + self-check
+
+Hardening so the splitter can **never** push a malformed flight path into Percepto's state. Before any split is written, a validation gate asserts: arc/coord counts grew by exactly 1; every resulting coordinate is a finite number (also refuses to edit an already-corrupt path); the split preserves the chain `A→M→B` exactly (`am.point_a==src.point_a`, `mb.point_b==src.point_b`, `am.point_b==mb.point_a==M`); the midpoint isn't degenerate (never manufactures a zero-length arc); both halves inherit the parent's `min_alt`/`max_alt`/`min_emergency_alt`/`wait_until_approved`; the source band is strictly positive (`max>min`); and `mapobject` ownership is unchanged. **If any check fails, it aborts — writes nothing, leaves the path untouched, and shows a visible error.** A post-write self-check then confirms the edit actually landed (and rolls back bookkeeping if it didn't). `doInsert` is wrapped so a throw can't leave partial state. Backs the data-integrity write-up (`ShortKeys/AIM_FPE_Data_Integrity_Writeup.md`).
+
+---
+
 ## 2026-06-10 — AIM Asset Inspector v3.80 (PROD + latest) — don't steal FP vertex right-clicks
 
 v3.78 fixed the shadowing-pip bug that had quietly broken Asset/FFZ right-click since v3.67. Side effect: with the inspector hit-test now actually firing on Flight Paths, it also fired on **flight-path vertex markers** — stealing Percepto's native "delete vertex" right-click. Same for the segment-number badges (which Flight Path Editor's own right-click uses).

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.14
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. Also auto-blocks Percepto's native "phantom vertex on drop" bug (a stray vertex spawned when you release a dragged waypoint). DEV/personal.
+// @version      0.15
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. Every split passes a pre-write validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -63,6 +63,9 @@
         return 2 * R * Math.asin(Math.sqrt(s));
     };
     const ptEq = (p, q) => p && q && Math.abs(p.lat - q.lat) < EPS && Math.abs(p.lng - q.lng) < EPS;
+    const num = (n) => typeof n === 'number' && Number.isFinite(n);
+    const finitePt = (p) => !!p && num(p.lat) && num(p.lng);
+    const ptSame = (p, q) => !!p && !!q && p.lat === q.lat && p.lng === q.lng;  // exact (same inserted vertex)
 
     // ---- Leaflet map access (mirrors Map Styler's getLeafletMap) ----
     let leafletMapRef = null;
@@ -246,37 +249,105 @@
         (document.head || document.documentElement).appendChild(s);
     }
 
+    // ---- SAFETY GATE: validate the split BEFORE writing anything to the editor ----
+    // Returns { ok:true } or { ok:false, reason }. If it returns not-ok, doInsert
+    // aborts and writes nothing — the path is left exactly as it was. This is the
+    // guarantee that we can never push a malformed flight path into Percepto's state.
+    function validateSplit(st, srcArc, M, am, mb, newArcs, newCoords) {
+        // 1. exact count deltas — arcs +1, coords +1, nothing else changed in size
+        if (newArcs.length !== st.arcs.length + 1) return { ok: false, reason: 'arc count delta ≠ +1' };
+        if (newCoords.length !== (st.coords || []).length + 1) return { ok: false, reason: 'coord count delta ≠ +1' };
+        // 2. every coordinate in the resulting path is a finite number (no NaN/null) —
+        //    validates ALL arcs + coords, so we also refuse to edit an already-corrupt path
+        for (const arc of newArcs) if (!finitePt(arc.point_a) || !finitePt(arc.point_b)) return { ok: false, reason: 'non-finite arc endpoint' };
+        for (const c of newCoords) if (!finitePt(c)) return { ok: false, reason: 'non-finite coordinate' };
+        if (!finitePt(M)) return { ok: false, reason: 'non-finite inserted vertex' };
+        // 3. endpoint continuity — the split must preserve the chain A→M→B exactly
+        if (!ptSame(am.point_a, srcArc.point_a)) return { ok: false, reason: 'first half lost original start' };
+        if (!ptSame(mb.point_b, srcArc.point_b)) return { ok: false, reason: 'second half lost original end' };
+        if (!ptSame(am.point_b, mb.point_a)) return { ok: false, reason: 'halves do not meet at the inserted vertex' };
+        if (!ptSame(am.point_b, M)) return { ok: false, reason: 'inserted vertex mismatch' };
+        // 4. degenerate guard — never manufacture a zero-length arc (M must differ from both ends)
+        if (ptSame(M, srcArc.point_a) || ptSame(M, srcArc.point_b)) return { ok: false, reason: 'segment too short to split (midpoint == an endpoint)' };
+        // 5. attribute inheritance — both halves carry the parent arc's bands + flags unchanged
+        for (const f of ['min_alt', 'max_alt', 'min_emergency_alt', 'wait_until_approved']) {
+            if (am[f] !== srcArc[f] || mb[f] !== srcArc[f]) return { ok: false, reason: 'attribute "' + f + '" not inherited' };
+        }
+        // 6. altitude band sanity — strictly-positive band (Percepto's connected-arc rule)
+        if (!(num(srcArc.min_alt) && num(srcArc.max_alt) && srcArc.max_alt > srcArc.min_alt)) return { ok: false, reason: 'source arc has an invalid altitude band' };
+        // 7. ownership preserved — both halves still belong to this map object
+        if (am.mapobject !== srcArc.mapobject || mb.mapobject !== srcArc.mapobject) return { ok: false, reason: 'mapobject ownership changed' };
+        return { ok: true };
+    }
+
+    // ---- post-write self-check: confirm the edit actually landed (non-destructive) ----
+    function verifyAfterInsert(fpId, M, prevArcCount) {
+        setTimeout(() => {
+            try {
+                const wc = findFpWorkingCopies().find(w => w.id === fpId);
+                if (!wc) return; // editor closed before we could verify — nothing to do
+                const arcs = wc.state.arcs || [];
+                if (arcs.length === prevArcCount) {
+                    // the dispatch had no effect — nothing was written; roll back our bookkeeping
+                    warn('post-insert self-check: split did not apply (arc count unchanged) — reverting bookkeeping');
+                    const last = undoStack[undoStack.length - 1];
+                    if (last && last.id === fpId) undoStack.pop();
+                    if (state.inserts > 0) state.inserts--;
+                    renderPanel();
+                    toast('⛔ Split didn’t apply — nothing changed. Try the segment number again.', '#ff8a80');
+                    return;
+                }
+                const present = arcs.some(a => ptSame(a.point_a, M) || ptSame(a.point_b, M));
+                if (!present) warn('post-insert self-check: inserted vertex not found in live state (a native edit may have moved it)');
+            } catch (e) { warn('post-insert self-check threw', e); }
+        }, 60);
+    }
+
     // ---- the Path B insert: splice arc into the open FP's working copy, no network ----
     function doInsert(fpId, A, B, M) {
-        const wcs = findFpWorkingCopies();
-        const wc = wcs.find(w => w.id === fpId) || wcs[0];
-        if (!wc || !wc.dispatch) { toast('Open the flight path\'s editor first (so its segment numbers show).', '#ff8a80'); warn('no FP working copy'); return; }
-        const st = wc.state;
-        // find the arc by its endpoints (geometry, not index — arc ids/order can shift)
-        const idx = st.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
-        if (idx === -1) { toast('That segment just changed — click the segment number again.', '#ffb14e'); return; }
-        const a = st.arcs[idx];
-        const Mpt = M || { lat: (a.point_a.lat + a.point_b.lat) / 2, lng: (a.point_a.lng + a.point_b.lng) / 2 };
-        const dAB = hav(a.point_a, a.point_b) || (a.distance || 1);
-        const fAM = Math.min(0.999, Math.max(0.001, hav(a.point_a, Mpt) / dAB));
-        // two halves inherit the arc's altitude band + flags; mb gets a synthetic local
-        // id so React keys don't collide (the server regenerates all arc ids on save).
-        const am = { ...a, point_b: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * fAM, id: a.id };
-        const mb = { ...a, point_a: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * (1 - fAM), id: (a.id || 0) * 1000 + 1 };
-        const origArcs = clone(st.arcs), origCoords = clone(st.coords || []);
-        const newArcs = st.arcs.slice(); newArcs.splice(idx, 1, am, mb);
-        // coords mirrors the waypoint list (the save rebuilds it from arcs); keep it consistent.
-        const newCoords = (st.coords || []).slice();
-        if (newCoords.length) newCoords.splice(Math.min(idx + 1, newCoords.length), 0, clone(Mpt));
-        else newCoords.push(clone(a.point_a), clone(Mpt), clone(a.point_b));
+        try {
+            const wcs = findFpWorkingCopies();
+            const wc = wcs.find(w => w.id === fpId) || wcs[0];
+            if (!wc || !wc.dispatch) { toast('Open the flight path\'s editor first (so its segment numbers show).', '#ff8a80'); warn('no FP working copy'); return; }
+            const st = wc.state;
+            // find the arc by its endpoints (geometry, not index — arc ids/order can shift)
+            const idx = st.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
+            if (idx === -1) { toast('That segment just changed — click the segment number again.', '#ffb14e'); return; }
+            const a = st.arcs[idx];
+            const Mpt = M || { lat: (a.point_a.lat + a.point_b.lat) / 2, lng: (a.point_a.lng + a.point_b.lng) / 2 };
+            const dAB = hav(a.point_a, a.point_b) || (a.distance || 1);
+            const fAM = Math.min(0.999, Math.max(0.001, hav(a.point_a, Mpt) / dAB));
+            // two halves inherit the arc's altitude band + flags; mb gets a synthetic local
+            // id so React keys don't collide (the server regenerates all arc ids on save).
+            const am = { ...a, point_b: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * fAM, id: a.id };
+            const mb = { ...a, point_a: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * (1 - fAM), id: (a.id || 0) * 1000 + 1 };
+            const origArcs = clone(st.arcs), origCoords = clone(st.coords || []);
+            const newArcs = st.arcs.slice(); newArcs.splice(idx, 1, am, mb);
+            // coords mirrors the waypoint list (the save rebuilds it from arcs); keep it consistent.
+            const newCoords = (st.coords || []).slice();
+            if (newCoords.length) newCoords.splice(Math.min(idx + 1, newCoords.length), 0, clone(Mpt));
+            else newCoords.push(clone(a.point_a), clone(Mpt), clone(a.point_b));
 
-        undoStack.push({ id: fpId, name: st.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
-        // value-form dispatch on the working-copy useState (it holds the FP object itself).
-        wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
-        state.inserts++;
-        log(`inserted vertex on "${st.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (live working copy, no refresh)`);
-        renderPanel();
-        toast(`✚ Vertex added on ${st.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
+            // SAFETY GATE — write nothing unless the result is provably well-formed.
+            const v = validateSplit(st, a, Mpt, am, mb, newArcs, newCoords);
+            if (!v.ok) {
+                warn('split ABORTED —', v.reason, '· source arc:', a);
+                toast(`⛔ Split blocked: ${v.reason}. Nothing changed — path untouched.`, '#ff8a80');
+                return;
+            }
+
+            undoStack.push({ id: fpId, name: st.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
+            // value-form dispatch on the working-copy useState (it holds the FP object itself).
+            wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
+            state.inserts++;
+            log(`inserted vertex on "${st.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (validated · live working copy · no refresh)`);
+            renderPanel();
+            toast(`✚ Vertex added on ${st.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
+            verifyAfterInsert(fpId, Mpt, origArcs.length);
+        } catch (e) {
+            warn('doInsert threw — nothing dispatched after the throw point', e);
+            toast('⛔ Split errored — see console. Path left as-is.', '#ff8a80');
+        }
     }
 
     function doUndo() {
@@ -326,5 +397,5 @@
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
-    log('v0.14 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · auto-blocks the native phantom-vertex-on-drop bug (silent; window.__aim_fpe_debug=true to log, count on __aim_fpe_blocked) · no refresh');
+    log('v0.15 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · pre-write validation gate (aborts any malformed split) + post-write self-check · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
 })();
