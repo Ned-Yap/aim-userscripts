@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. Also auto-blocks Percepto's native "phantom vertex on drop" bug (a stray vertex spawned when you release a dragged waypoint). DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -208,14 +208,20 @@
     function onDownTrack(e) {
         lastDown = { x: e.clientX, y: e.clientY, onVertex: !!(e.target && e.target.closest && e.target.closest(VERTEX_SEL)) };
     }
+    let blockedCount = 0;       // exposed on unsafeWindow.__aim_fpe_blocked
+    function debugOn() { try { return !!unsafeWindow.__aim_fpe_debug; } catch (e) { return false; } }
     function onClickGuard(e) {
         if (!lastDown.onVertex) return;                                                 // press didn't start on a vertex
         if (e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL)) return;     // never touch our split
-        if (Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) <= DRAG_PX) return; // a real click/select, not a drag
+        const moved = Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y);
+        if (moved <= DRAG_PX) return;                                                   // a real click/select, not a drag
         if (!editingFP()) return;                                                       // only while editing a flight path
         e.preventDefault(); e.stopPropagation();
         if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-        log(`blocked Percepto's phantom "drop = new vertex" click (${Math.round(Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y))}px after a vertex drag)`);
+        blockedCount++;
+        try { unsafeWindow.__aim_fpe_blocked = blockedCount; } catch (e2) {}
+        // silent by default (fires on every drag); set window.__aim_fpe_debug = true to log.
+        if (debugOn()) log(`blocked phantom "drop = new vertex" click (${Math.round(moved)}px after a vertex drag) · ${blockedCount} total`);
     }
     function installBadgeListeners() {
         document.addEventListener('click', onBadgeClick, true);
@@ -320,5 +326,5 @@
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
-    log('v0.13 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
+    log('v0.14 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · auto-blocks the native phantom-vertex-on-drop bug (silent; window.__aim_fpe_debug=true to log, count on __aim_fpe_blocked) · no refresh');
 })();

@@ -12,6 +12,12 @@ v3.76 left right-click debug logging on by default while we hunted the hit-test 
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.14 (latest, dev-only) — quiet the phantom-guard log
+
+The v0.13 phantom guard logged on every vertex drag, which buries the console during heavy editing. Now silent by default; set `window.__aim_fpe_debug = true` to see each block, and `window.__aim_fpe_blocked` holds a running count either way. No behavior change.
+
+---
+
 ## 2026-06-10 — AIM Flight Path Editor v0.13 (latest, dev-only) — auto-kill the native "phantom vertex on drop" bug
 
 Long-standing **native** Percepto annoyance (reproduces with Tampermonkey fully off): when you drag a flight-path vertex and release, a synthetic `click` fires at the drop point and Percepto spawns a stray zero-length branch vertex *on top of* the one you moved — invisible until you zoom all the way in, then you have to right-click it off. Probe traced it precisely: `mousedown` on a `.map-marker__flight-path-vertex` → drag → `mouseup` → a `click` with a large `movedΔ` → arc count ++.
