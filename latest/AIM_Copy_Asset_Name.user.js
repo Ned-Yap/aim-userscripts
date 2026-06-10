@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.83
+// @version      3.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.83';
+    const SCRIPT_VERSION = '3.84';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1965,6 +1965,7 @@
             unvalidatedOnly: sumPanelState.unvalidatedOnly,
             unshieldedOnly: sumPanelState.unshieldedOnly,
             notesOnly: sumPanelState.notesOnly,
+            numericFilters: JSON.parse(JSON.stringify(sumPanelState.numericFilters || {})),
             sortKey: sumPanelState.sortKey,
             sortDir: sumPanelState.sortDir,
             unitsFt: sumPanelState.unitsFt,
@@ -1984,6 +1985,8 @@
         sumPanelState.unvalidatedOnly = !!p.unvalidatedOnly;
         sumPanelState.unshieldedOnly = !!p.unshieldedOnly;
         sumPanelState.notesOnly = !!p.notesOnly;
+        sumPanelState.numericFilters = (p.numericFilters && typeof p.numericFilters === 'object' && !Array.isArray(p.numericFilters))
+            ? JSON.parse(JSON.stringify(p.numericFilters)) : {};
         if (p.sortKey) sumPanelState.sortKey = p.sortKey;
         if (p.sortDir === 1 || p.sortDir === -1) sumPanelState.sortDir = p.sortDir;
         if (typeof p.unitsFt === 'boolean') sumPanelState.unitsFt = p.unitsFt;
@@ -2001,6 +2004,7 @@
         sumPanelState.unvalidatedOnly = false;
         sumPanelState.unshieldedOnly = false;
         sumPanelState.notesOnly = false;
+        sumPanelState.numericFilters = {};
         sumPanelState.sortKey = 'typePrio';
         sumPanelState.sortDir = 1;
         sumPanelState.unitsFt = true;
@@ -4216,6 +4220,10 @@
         unvalidatedOnly: false,
         unshieldedOnly: false,
         notesOnly: false,
+        // v3.84: numeric range filters {colKey: {min, max}} in METERS.
+        // Task-specific (like search) — in-memory + captured into presets,
+        // not GM-persisted globally.
+        numericFilters: {},
         unitsFt: true,             // false → display meters
         // Default sort = by type-priority (FP → FFZ → NFZ → Asset → Marker),
         // then A→Z within each type group. Sort by 'typePrio' uses the
@@ -4477,6 +4485,27 @@
         return out;
     }
 
+    // v3.84: numeric range filters. Each meter-valued column can be range-
+    // filtered. Values are stored in METERS in sumPanelState.numericFilters[key]
+    // = {min, max}; the menu shows/accepts them in the current display unit.
+    const NUMERIC_FILTER_COLS = [
+        { key: 'altMin',    label: 'Min Alt',   dataKey: 'altMinM' },
+        { key: 'altMax',    label: 'Max Alt',   dataKey: 'altMaxM' },
+        { key: 'emergAlt',  label: 'Emerg Alt', dataKey: 'emergAltM' },
+        { key: 'altDelta',  label: 'Delta',     dataKey: 'altDeltaM' },
+        { key: 'elevation', label: 'Elevation', dataKey: 'elevationM' },
+        { key: 'agl',       label: 'AGL',       dataKey: 'aglM' },
+        { key: 'segLen',    label: 'Seg Len',   dataKey: 'segLenM' },
+    ];
+    const NUMERIC_FILTER_DATAKEY = Object.fromEntries(NUMERIC_FILTER_COLS.map(c => [c.key, c.dataKey]));
+    // How many range filters are actually active (have a min and/or max).
+    function activeNumericFilterCount(nf) {
+        if (!nf) return 0;
+        let n = 0;
+        for (const k in nf) { const f = nf[k]; if (f && (f.min != null || f.max != null)) n++; }
+        return n;
+    }
+
     function filterAndSortRows(rows, state) {
         const q = (state.search || '').trim().toLowerCase();
         let out = rows.filter(r => {
@@ -4489,6 +4518,22 @@
             if (state.unvalidatedOnly && r.validated !== false) return false;
             if (state.unshieldedOnly && !r.unshielded) return false;
             if (state.notesOnly && !r.hasNotes) return false;
+            // v3.84: numeric range filters (stored in METERS). A row with no
+            // value for an active metric is excluded — an AGL range hides
+            // Asset/Marker rows (no AGL); a Seg Len range hides all but FP segs.
+            const nf = state.numericFilters;
+            if (nf) {
+                for (const k in nf) {
+                    const f = nf[k];
+                    if (!f || (f.min == null && f.max == null)) continue;
+                    const dk = NUMERIC_FILTER_DATAKEY[k];
+                    if (!dk) continue;
+                    const v = r[dk];
+                    if (v == null) return false;
+                    if (f.min != null && v < f.min) return false;
+                    if (f.max != null && v > f.max) return false;
+                }
+            }
             if (q) {
                 // Matches name, subtype, OR Seg ID (segment rows only).
                 // Seg ID stringified so partial matches work — searching
@@ -5687,12 +5732,117 @@
         };
         optsRow.appendChild(analyzerBtn);
 
+        // v3.84: Ranges menu — numeric range filters (min/max) per meter-valued
+        // column. Values entered in the current display unit, stored in meters.
+        const rangesBtn = document.createElement('button');
+        rangesBtn.type = 'button';
+        rangesBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:auto';
+        const updateRangesBtn = () => {
+            const n = activeNumericFilterCount(sumPanelState.numericFilters);
+            rangesBtn.textContent = n > 0 ? `Ranges (${n}) ▾` : 'Ranges ▾';
+            rangesBtn.style.borderColor = n > 0 ? 'rgba(20,210,220,0.7)' : 'rgba(255,255,255,0.20)';
+            rangesBtn.style.color = n > 0 ? '#7adfe6' : '#bbb';
+        };
+        updateRangesBtn();
+        let rangesMenuEl = null;
+        rangesBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (rangesMenuEl) { rangesMenuEl.remove(); rangesMenuEl = null; return; }
+            rangesMenuEl = document.createElement('div');
+            rangesMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:230px';
+            const rebuildRangesMenu = () => {
+                rangesMenuEl.innerHTML = '';
+                const unit = sumPanelState.unitsFt ? 'ft' : 'm';
+                const toDisp = (m) => {
+                    if (m == null) return '';
+                    const v = sumPanelState.unitsFt ? m * 3.28084 : m;
+                    return String(Math.round(v * 10) / 10).replace(/\.0$/, '');
+                };
+                const fromDisp = (s) => {
+                    const n = parseFloat(s);
+                    if (!isFinite(n)) return null;
+                    return sumPanelState.unitsFt ? n / 3.28084 : n;
+                };
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
+                head.textContent = `Numeric ranges (${unit})`;
+                rangesMenuEl.appendChild(head);
+                NUMERIC_FILTER_COLS.forEach(fc => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:3px 12px';
+                    const lbl = document.createElement('span');
+                    lbl.textContent = fc.label;
+                    lbl.style.cssText = 'flex:0 0 64px;color:#cdd6e0';
+                    row.appendChild(lbl);
+                    const mkInput = (which, ph) => {
+                        const inp = document.createElement('input');
+                        inp.type = 'number';
+                        inp.placeholder = ph;
+                        const f = sumPanelState.numericFilters[fc.key] || {};
+                        inp.value = toDisp(f[which]);
+                        inp.style.cssText = 'width:56px;background:#15171b;border:1px solid rgba(255,255,255,0.2);border-radius:3px;color:#e6e6e6;font:inherit;font-size:11px;padding:2px 4px';
+                        inp.onchange = () => {
+                            const m = fromDisp(inp.value);
+                            if (!sumPanelState.numericFilters[fc.key]) sumPanelState.numericFilters[fc.key] = { min: null, max: null };
+                            sumPanelState.numericFilters[fc.key][which] = m;
+                            const cur = sumPanelState.numericFilters[fc.key];
+                            if (cur.min == null && cur.max == null) delete sumPanelState.numericFilters[fc.key];
+                            redrawTable();
+                            updateRangesBtn();
+                        };
+                        return inp;
+                    };
+                    row.appendChild(mkInput('min', 'min'));
+                    const dash = document.createElement('span');
+                    dash.textContent = '–';
+                    dash.style.color = '#888';
+                    row.appendChild(dash);
+                    row.appendChild(mkInput('max', 'max'));
+                    rangesMenuEl.appendChild(row);
+                });
+                const hr = document.createElement('div');
+                hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                rangesMenuEl.appendChild(hr);
+                const clearBtn = document.createElement('button');
+                clearBtn.type = 'button';
+                clearBtn.textContent = 'Clear all ranges';
+                clearBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 4px';
+                clearBtn.onclick = () => {
+                    sumPanelState.numericFilters = {};
+                    redrawTable();
+                    updateRangesBtn();
+                    rebuildRangesMenu();
+                };
+                rangesMenuEl.appendChild(clearBtn);
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:9px;color:#888;padding:0 12px 6px;max-width:230px;line-height:1.3';
+                note.textContent = 'Rows with no value for a filtered metric are hidden (AGL hides assets; Seg Len shows only FP segments).';
+                rangesMenuEl.appendChild(note);
+            };
+            rebuildRangesMenu();
+            const r = rangesBtn.getBoundingClientRect();
+            rangesMenuEl.style.left = r.left + 'px';
+            rangesMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(rangesMenuEl);
+            const mr = rangesMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) rangesMenuEl.style.left = (window.innerWidth - mr.width - 8) + 'px';
+            if (mr.bottom > window.innerHeight - 8) rangesMenuEl.style.top = (r.top - mr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (rangesMenuEl && !rangesMenuEl.contains(e.target) && e.target !== rangesBtn) {
+                    rangesMenuEl.remove(); rangesMenuEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(rangesBtn);
+
         // Columns menu — opens a small popover with one checkbox per column.
         // Hidden columns are also omitted from CSV/TSV exports.
         const colsBtn = document.createElement('button');
         colsBtn.type = 'button';
         colsBtn.textContent = 'Columns ▾';
-        colsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:auto';
+        colsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:6px';
         let colsMenuEl = null;
         colsBtn.onclick = (ev) => {
             ev.stopPropagation();
@@ -7104,7 +7254,12 @@
             };
             recomputeFrozenLeft();
             const FROZEN_BODY_BG = '#1f2228', FROZEN_BODY_HOVER = '#1e333a', FROZEN_HEAD_BG = '#262a31';
-            const frozenBorder = '2px solid rgba(20,210,220,0.30)';
+            // The pane divider is an INSET box-shadow on the last frozen
+            // cell, NOT border-right: with border-collapse the shared border
+            // gets owned by the (scrolling) next cell and drifts off the
+            // frozen edge. A box-shadow paints with the sticky cell, so it
+            // stays anchored to Name's right edge while scrolling.
+            const frozenShadow = 'inset -2px 0 0 0 rgba(20,210,220,0.45)';
             // Apply sticky-left styling to one cell (th or td).
             const applyFrozen = (cell, key, isHead) => {
                 cell.setAttribute('data-frozen-key', key);
@@ -7112,7 +7267,7 @@
                 cell.style.left = (key === '__sel__' ? 0 : frozenLeft[key]) + 'px';
                 cell.style.zIndex = isHead ? '2' : '1';
                 cell.style.background = isHead ? FROZEN_HEAD_BG : FROZEN_BODY_BG;
-                if (key === lastFrozenKey) cell.style.borderRight = frozenBorder;
+                if (key === lastFrozenKey) cell.style.boxShadow = frozenShadow;
             };
             // Live-resize: set one column's width, retotal the table, and
             // reposition frozen cells in place — no full rebuild.
