@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.8';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -800,10 +800,16 @@
             console.log(`${TAG} slack webhook ${slackWebhook ? 'set' : 'cleared'}`);
         } else if (actionId === 'reset-baselines') {
             if (!confirm('Reset ALL site baselines? Next checks re-learn current state (no diffs until something changes again).')) return;
-            state = { sites: {} };
-            persistState();
-            console.log(`${TAG} baselines reset`);
+            doResetBaselines('user');
+            // Tell every other tab (esp. the leader) to clear too, so its stale
+            // in-memory state can't overwrite the reset on its next cycle.
+            try { if (controlChannel) controlChannel.postMessage({ type: 'SW_RESET_SYNC', scriptId: SCRIPT_ID, from: tabId }); } catch (e) { console.warn(TAG, 'reset broadcast', e); }
         }
+    }
+    function doResetBaselines(reason) {
+        state = { sites: {} };
+        persistState();
+        console.log(`${TAG} baselines reset (${reason})`);
     }
     function handleTokenValue(token) {
         const prev = cachedToken;
@@ -820,6 +826,7 @@
             if (msg.type === 'REQUEST_REGISTRATIONS') registerWithControlPanel();
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) handleSetToggle(msg);
             else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID) handleAction(msg.actionId);
+            else if (msg.type === 'SW_RESET_SYNC' && msg.scriptId === SCRIPT_ID && msg.from !== tabId) doResetBaselines('synced from another tab');
             else if (msg.type === 'TOKEN_VALUE') handleTokenValue(msg.token || '');
         };
     }
