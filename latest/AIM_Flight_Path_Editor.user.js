@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.11
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — open the flight path's native editor, toggle the ✚ (insert mode), and click any segment number to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
+// @version      0.12
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -13,11 +13,11 @@
 //
 // AIM Flight Path Editor — on-map mid-segment vertex insert for Percepto flight paths.
 //   - Open a flight path's NATIVE editor so its segment-number badges appear.
-//   - Toggle the ✚ button in .map-tools (iframe only — the map lives there) to enter
-//     insert mode → the segment numbers glow green.
-//   - Click any segment number → a real vertex is inserted at that segment's
-//     midpoint. The new vertex is a genuine branchable/draggable waypoint, and a
-//     native Save persists it with NO refresh.
+//   - Click any segment number → a real vertex is inserted at that segment's midpoint.
+//     No button, no mode — a native segment-number click does nothing, so we always
+//     treat it as a split. The new vertex is a genuine branchable/draggable waypoint,
+//     and a native Save persists it with NO refresh. A small Undo chip appears after
+//     a split (or call window.__aim_fpe_undo()).
 //
 // WHY piggyback on the segment-number badges (.map-marker__arc-index): they are
 // Percepto's OWN markers — already at each segment midpoint, zoom-animated, and
@@ -146,7 +146,6 @@
 
     // ---- state ----
     const state = {
-        insertMode: false,      // ON = clicking a segment number splits it
         inserts: 0,             // count this session (info only — all are live, nothing pending)
     };
     const undoStack = [];       // [{id, name, seg, arcs, coords}] for instant local revert
@@ -170,8 +169,10 @@
         }));
         return best;
     }
+    // A segment badge only exists while you're natively editing a flight path, and a
+    // native click on it does nothing (it's info-only) — so we ALWAYS treat a badge
+    // click as a split. No mode, no button.
     function onBadgeClick(e) {
-        if (!state.insertMode) return;
         const badge = e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL);
         if (!badge) return;
         e.preventDefault(); e.stopPropagation();
@@ -180,10 +181,9 @@
         if (!hit) { toast(`Couldn't match segment "${(badge.textContent || '').trim()}" to a path — zoom in a touch and retry.`, '#ffb14e'); return; }
         doInsert(hit.fpId, hit.A, hit.B, hit.mid);
     }
-    // In insert mode also swallow mousedown/pointerdown/dblclick on a badge so Percepto
-    // doesn't start a native select/drag before our click fires.
+    // Swallow mousedown/pointerdown/dblclick on a badge so Percepto doesn't start a
+    // native select/drag before our click fires. (Badges only exist while editing.)
     function onBadgeSuppress(e) {
-        if (!state.insertMode) return;
         const badge = e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL);
         if (!badge) return;
         e.stopPropagation();
@@ -194,18 +194,16 @@
         ['mousedown', 'pointerdown', 'dblclick'].forEach(t => document.addEventListener(t, onBadgeSuppress, true));
     }
 
-    // green-glow the segment badges while insert mode is on (CSS only, reversible)
+    // Subtle cue that segment numbers are click-to-split while editing (CSS only).
     function ensureStyle() {
         if (document.getElementById('aim-fpe-style')) return;
         const s = document.createElement('style');
         s.id = 'aim-fpe-style';
         s.textContent = `
-            body.aim-fpe-insert-mode ${ARC_BADGE_SEL} {
-                box-shadow: 0 0 0 2px #5fff5f, 0 0 8px 1px rgba(95,255,95,0.75) !important;
-                cursor: copy !important;
+            ${ARC_BADGE_SEL} { cursor: copy !important; }
+            ${ARC_BADGE_SEL}:hover {
+                box-shadow: 0 0 0 2px #5fff5f, 0 0 8px 1px rgba(95,255,95,0.8) !important;
             }
-            .aim-fpe-btn.aim-fpe-on { background: rgba(95,255,95,0.22) !important; box-shadow: 0 0 0 1px rgba(95,255,95,0.7) inset; }
-            .aim-fpe-btn.aim-fpe-on span { color: #5fff5f !important; }
         `;
         (document.head || document.documentElement).appendChild(s);
     }
@@ -257,7 +255,6 @@
     unsafeWindow.__aim_fpe_undo = doUndo;
 
     // ---- UI ----
-    const PANEL_ID = 'aim-fpe-panel';
     function toast(msg, color) {
         try {
             const t = document.createElement('div');
@@ -267,75 +264,29 @@
             setTimeout(() => t.remove(), 5000);
         } catch (e) {}
     }
-    function findToolsBar() { return document.querySelector('.map-tools'); }
-    let buttonEl = null;
-    function injectButton() {
-        const tools = findToolsBar();
-        if (!tools || buttonEl) return;
-        const w = document.createElement('div');
-        w.innerHTML = `<div class="map-tools__button aim-fpe-btn" title="Flight Path Editor — toggle insert mode, then click a segment number to split it" style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none"><span style="font-size:17px;line-height:1">✚</span></div>`;
-        buttonEl = w.firstElementChild;
-        ['mousedown', 'click', 'contextmenu'].forEach(t => buttonEl.addEventListener(t, e => e.stopPropagation()));
-        buttonEl.addEventListener('click', (e) => { e.preventDefault(); toggleInsertMode(); });
-        tools.appendChild(buttonEl);
-        syncButton();
-        log('button injected into .map-tools');
-    }
-    function syncButton() { if (buttonEl) buttonEl.classList.toggle('aim-fpe-on', state.insertMode); }
 
-    function toggleInsertMode() {
-        state.insertMode = !state.insertMode;
-        document.body.classList.toggle('aim-fpe-insert-mode', state.insertMode);
-        syncButton();
-        if (state.insertMode) {
-            const hasBadges = document.querySelector(ARC_BADGE_SEL);
-            if (!findFpWorkingCopies().length) warn('no flight path editor open yet — open a flight path so its segment numbers appear');
-            toast(hasBadges
-                ? 'Insert mode ON — click any glowing segment number to split it.'
-                : 'Insert mode ON — open a flight path\'s editor so its segment numbers appear, then click one.', '#5fff5f');
-            renderPanel();
-        } else {
-            toast('Insert mode off', '#9aa');
-            const p = document.getElementById(PANEL_ID); if (p) p.remove();
-        }
-    }
-
+    // No button, no mode: splitting is just a click on a segment number while editing.
+    // The only persistent UI is a small Undo chip, shown after a split so a mistaken
+    // one is one click to revert. renderPanel() is the chip updater (name kept so the
+    // doInsert/doUndo callers don't change).
+    const CHIP_ID = 'aim-fpe-chip';
     function renderPanel() {
-        let p = document.getElementById(PANEL_ID);
-        if (!state.insertMode) { if (p) p.remove(); return; }
-        if (!p) {
-            p = document.createElement('div');
-            p.id = PANEL_ID;
-            p.style.cssText = 'position:fixed;top:80px;right:18px;width:300px;background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
-            document.body.appendChild(p);
+        let c = document.getElementById(CHIP_ID);
+        if (!undoStack.length) { if (c) c.remove(); return; }
+        if (!c) {
+            c = document.createElement('div');
+            c.id = CHIP_ID;
+            c.style.cssText = 'position:fixed;bottom:24px;right:18px;background:#1f2228;border:1px solid rgba(255,193,71,0.55);border-radius:6px;padding:8px 12px;color:#ffd479;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);cursor:pointer;user-select:none';
+            ['mousedown', 'click'].forEach(t => c.addEventListener(t, e => e.stopPropagation()));
+            c.addEventListener('click', (e) => { e.preventDefault(); doUndo(); });
+            document.body.appendChild(c);
         }
-        const canUndo = undoStack.length > 0;
-        p.innerHTML = `
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                <strong style="color:#5fff5f;font-size:14px">✚ Insert mode ON</strong>
-                <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px" title="Turn insert mode off">×</span>
-            </div>
-            <div style="color:#cfd6dc;margin-bottom:8px;line-height:1.5">Open a flight path's editor, then <b style="color:#5fff5f">click a glowing segment number</b> to split that segment at its midpoint.</div>
-            <div style="margin-bottom:8px;padding:7px 10px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#9be89b;line-height:1.45">
-                ✅ <b>Seamless</b> — the vertex appears live as a real waypoint. Drag/branch it natively, then <b>Save</b>. <b>No refresh.</b>
-                ${state.inserts > 0 ? `<br><span style="color:#cfd6dc">${state.inserts} insert${state.inserts === 1 ? '' : 's'} this session.</span>` : ''}
-            </div>
-            <button id="aim-fpe-undo" ${canUndo ? '' : 'disabled'} style="width:100%;background:rgba(255,193,71,${canUndo ? '0.16' : '0.06'});color:${canUndo ? '#ffd479' : '#7a6f4a'};border:1px solid rgba(255,193,71,${canUndo ? '0.55' : '0.25'});border-radius:4px;padding:7px;cursor:${canUndo ? 'pointer' : 'default'};font:inherit;font-weight:600">↩ Undo last insert${canUndo ? ` (${undoStack.length})` : ''}</button>
-            <div style="color:#888;font-size:11px;line-height:1.5;margin-top:8px">New vertices land at the segment midpoint — drag natively to fine-tune. Undo reverts locally (or just don't Save).</div>
-        `;
-        p.querySelector('#aim-fpe-x').onclick = toggleInsertMode;
-        const u = p.querySelector('#aim-fpe-undo'); if (u && canUndo) u.onclick = doUndo;
+        c.textContent = `↩ Undo split (${undoStack.length})`;
     }
 
     // ---- boot ----
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
-    let tries = 0;
-    const boot = setInterval(() => { tries++; if (findToolsBar() && !buttonEl) injectButton(); if (tries > 60) clearInterval(boot); }, 700);
-    try {
-        const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
-        if (document.body) obs.observe(document.body, { childList: true, subtree: true });
-    } catch (e) {}
-    log('v0.11 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · writes the FP editor working copy (coexists with native drags) · no refresh');
+    log('v0.12 ready (iframe) — click a segment number to split it (no button; live whenever an FP editor is open) · writes the FP editor working copy (coexists with native drags) · no refresh');
 })();

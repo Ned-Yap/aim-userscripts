@@ -12,6 +12,12 @@ v3.76 left right-click debug logging on by default while we hunted the hit-test 
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.12 (latest, dev-only) — drop the button, split on a plain segment-number click
+
+No more ✚ toggle. A native click on a segment number does nothing (the numbers are info-only), so while you're natively editing a flight path, **a plain click on a segment number just splits it** — no button, no mode. The numbers show a copy-cursor and glow green on hover so the capability is discoverable. A small "↩ Undo split (N)" chip appears bottom-right after a split (also `window.__aim_fpe_undo()`). Both halves of a split inherit the original segment's full altitude band (`min_alt`/`max_alt`/`min_emergency_alt`/`wait_until_approved`).
+
+---
+
 ## 2026-06-10 — AIM Flight Path Editor v0.11 (latest, dev-only) — splice the editor working copy, not hook0 (coexist with native drags)
 
 v0.10 still couldn't split a segment *after* you dragged a waypoint ("Couldn't match segment to a path"). Root cause, nailed by probes 6–8: a native waypoint drag does **not** touch `hook0` (the site-wide entities array we were writing) — `hook0` stays at the page-load snapshot during editing. The live geometry a drag mutates, and that a Save serializes, is a **per-flight-path editor working copy**: a React `useState` (component `JBe`) whose value is the FP object itself (`{id,name,type:15,arcs,coords,…}`). We were reading the wrong state, so after a drag our arc midpoints no longer lined up with the rendered segment badges.
