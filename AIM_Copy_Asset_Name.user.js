@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.77
+// @version      3.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.77';
+    const SCRIPT_VERSION = '3.78';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3323,7 +3323,14 @@
 
     // ---- Overlap self-check geometry (rail 3) ----
     // lat/lng treated as planar x/y — fine at site scale. Ray-cast PIP.
-    function pointInPolygon(pt, poly) {
+    // v3.78: renamed from pointInPolygon → pointInPolyPt to stop shadowing
+    // the 3-arg pointInPolygon at line 766. JS function-declaration hoisting
+    // made this 2-arg version win for ALL call sites — including the hit-test
+    // pip that takes (lat, lng, poly). Result: right-click on Asset/FFZ
+    // silently called this 2-arg version with `lat` as `pt` and `lng` as
+    // `poly`, always returned false. Hit-test never matched anything → bail.
+    // Live since v3.67 when this overlap-check pip was first added.
+    function pointInPolyPt(pt, poly) {
         if (!pt || !Array.isArray(poly) || poly.length < 3) return false;
         const x = pt.lng, y = pt.lat;
         let inside = false;
@@ -3348,8 +3355,8 @@
     function fpCrossesPolygon(fp, poly) {
         const arcs = Array.isArray(fp.arcs) ? fp.arcs : [];
         for (const a of arcs) {
-            if (a.point_a && pointInPolygon(a.point_a, poly)) return true;
-            if (a.point_b && pointInPolygon(a.point_b, poly)) return true;
+            if (a.point_a && pointInPolyPt(a.point_a, poly)) return true;
+            if (a.point_b && pointInPolyPt(a.point_b, poly)) return true;
             if (a.point_a && a.point_b) {
                 for (let j = 0; j < poly.length; j++) {
                     if (segIntersect(a.point_a, a.point_b, poly[j], poly[(j + 1) % poly.length])) return true;

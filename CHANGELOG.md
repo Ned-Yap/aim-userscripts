@@ -18,6 +18,26 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Asset Inspector v3.78 (PROD + latest) — THE actual fix: shadowing pointInPolygon
+
+After v3.75, v3.76, and v3.77 each chasing different theories, the diagnostic for v3.77 showed: fresh-fetch pip finds `UNIVERSITY 10-3 5H` at the click coord; AI's pip on the same coord returns nothing. Identical code, identical inputs. Impossible — unless the code AI calls isn't the code we think.
+
+It wasn't.
+
+**Two functions named `pointInPolygon` in the same IIFE:**
+- Line 766: hit-test version, `pointInPolygon(lat, lng, poly)` — 3 args
+- Line 3326: overlap-self-check version added in v3.67 for the Direct-API rails, `pointInPolygon(pt, poly)` — 2 args
+
+JavaScript function-declaration hoisting + same scope = the SECOND declaration wins for every call site. Every hit-test call was actually invoking the 2-arg version with `lat` as `pt` (a number, not an object) and `lng` as `poly` (also a number). The 2-arg version checks `Array.isArray(poly)` → false → returns `false`. Silently. For every right-click on every Asset and FFZ. Since v3.67 (mid-day 2026-06-09).
+
+**Fix:** rename line 3326's helper → `pointInPolyPt`. Update the two overlap-check callers (`fpCrossesPolygon`). Now the hit-test calls correctly resolve to the line-766 version.
+
+The bowtie analysis (v3.75) + sort regression rollback (v3.76) + points/coords fallback (v3.77) all still ship in v3.78 — they were defensive improvements that just couldn't fire because every pip call was hitting the wrong function. With the shadow fixed they now actually run.
+
+Diagnostic value: v3.76's debug logs + v3.77's diagnostic snippet were the only way to localize this — without them we'd have kept guessing at the polygon shape or the cache contents. Lesson for the next time: **when "fresh code returns X, AI returns Y" with identical inputs, suspect name collision in the script body before suspecting the data**.
+
+---
+
 ## 2026-06-09 — AIM Asset Inspector v3.77 (PROD + latest) — points→coords fallback for Apply'd entities
 
 **Real root cause found.** Right-click on Assets/FFZs at Exxon site 1599 was failing for entities AI had hit-tested fine before. v3.76's debug logs caught it: AI's pip on the cached entity returned no match, but a parallel pip on a fresh live fetch of the same entity DID find it. Same code, same coords, different result → cache must hold different data than the live response.
