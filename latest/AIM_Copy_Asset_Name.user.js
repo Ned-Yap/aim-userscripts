@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.82
+// @version      3.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.82';
+    const SCRIPT_VERSION = '3.83';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -236,6 +236,7 @@
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
+    const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
@@ -1919,6 +1920,15 @@
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
     }
+    // v3.83: per-column pixel widths the user set by dragging a header edge.
+    // {colKey: px}. Absent key → fall back to the column def's default `w`.
+    function loadColumnWidths() {
+        const w = elevGmGet(CACHE_KEY_COLUMN_WIDTHS, {});
+        return (w && typeof w === 'object' && !Array.isArray(w)) ? w : {};
+    }
+    function saveColWidths() {
+        elevGmSet(CACHE_KEY_COLUMN_WIDTHS, sumPanelState.columnWidths || {});
+    }
 
     // ── View presets (per-user) ─────────────────────────────────────────────
     // A preset is a saved snapshot of the SUM view: visible columns + order,
@@ -1984,6 +1994,8 @@
     function resetToDefaultView(siteID) {
         sumPanelState.columnOrder = DEFAULT_COL_KEYS.slice();
         saveColumnOrder(sumPanelState.columnOrder);
+        sumPanelState.columnWidths = {};
+        saveColWidths();
         sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
         sumPanelState.validatedOnly = false;
         sumPanelState.unvalidatedOnly = false;
@@ -4225,6 +4237,8 @@
         // so it survives reloads. Hidden columns are simply absent from
         // this array. Reorder via ↑/↓ in the Columns ▾ menu.
         columnOrder: loadColumnOrder(),
+        // v3.83: per-column widths the user dragged (px). {} = all defaults.
+        columnWidths: loadColumnWidths(),
         // Persistent: when ON, the SUM panel drops a small purple dot
         // on the Leaflet map for every sample point used to compute
         // each row's elevation. Off by default to keep the map clean.
@@ -6984,7 +6998,11 @@
             window.__aim_ai_visibleRows = rows;
             tableWrap.innerHTML = '';
             const table = document.createElement('table');
-            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:auto';
+            // v3.83: table-layout:fixed + an explicit <colgroup> give every
+            // column a known, controllable width — the basis for both
+            // resize and the frozen-left pane (sticky offsets = cumulative
+            // widths, computed without measuring the DOM).
+            table.style.cssText = 'border-collapse:collapse;font-size:12px;table-layout:fixed';
 
             // Build the active column list — checkbox column always first,
             // then user-selected columns in canonical order. Each col has
@@ -7046,14 +7064,81 @@
                 .map(k => COL_BY_KEY[k])
                 .filter(Boolean);
 
+            // ---- v3.83: column widths (persisted; default = col def `w`) ----
+            const SEL_W = 32; // checkbox column
+            const colWidth = (col) => {
+                const w = sumPanelState.columnWidths[col.key];
+                return (typeof w === 'number' && w >= 40) ? w : col.w;
+            };
+            // <colgroup> drives the widths. Table width is set to the EXACT
+            // sum (not 100%) so fixed-layout doesn't redistribute leftover
+            // space, which would desync the frozen offsets.
+            const colgroup = document.createElement('colgroup');
+            const colEls = {};
+            const colSel = document.createElement('col');
+            colSel.style.width = SEL_W + 'px';
+            colgroup.appendChild(colSel);
+            cols.forEach(col => {
+                const cEl = document.createElement('col');
+                cEl.style.width = colWidth(col) + 'px';
+                colEls[col.key] = cEl;
+                colgroup.appendChild(cEl);
+            });
+            table.appendChild(colgroup);
+            const totalW = () => SEL_W + cols.reduce((s, c) => s + colWidth(c), 0);
+            table.style.width = totalW() + 'px';
+
+            // ---- Frozen-left pane: checkbox + every column THROUGH Name ----
+            // Sticky panes must be contiguous from the left edge, so we freeze
+            // the run from the checkbox up to and including Name. Drag Name
+            // leftward (or hide columns left of it) to freeze fewer columns.
+            const nameIdx = cols.findIndex(c => c.key === 'name');
+            const frozenCount = nameIdx >= 0 ? nameIdx + 1 : 0;
+            const frozenCols = cols.slice(0, frozenCount);
+            const frozenKeys = new Set(frozenCols.map(c => c.key));
+            const lastFrozenKey = frozenCount > 0 ? frozenCols[frozenCount - 1].key : '__sel__';
+            const frozenLeft = {};
+            const recomputeFrozenLeft = () => {
+                let acc = SEL_W;
+                frozenCols.forEach(c => { frozenLeft[c.key] = acc; acc += colWidth(c); });
+            };
+            recomputeFrozenLeft();
+            const FROZEN_BODY_BG = '#1f2228', FROZEN_BODY_HOVER = '#1e333a', FROZEN_HEAD_BG = '#262a31';
+            const frozenBorder = '2px solid rgba(20,210,220,0.30)';
+            // Apply sticky-left styling to one cell (th or td).
+            const applyFrozen = (cell, key, isHead) => {
+                cell.setAttribute('data-frozen-key', key);
+                cell.style.position = 'sticky';
+                cell.style.left = (key === '__sel__' ? 0 : frozenLeft[key]) + 'px';
+                cell.style.zIndex = isHead ? '2' : '1';
+                cell.style.background = isHead ? FROZEN_HEAD_BG : FROZEN_BODY_BG;
+                if (key === lastFrozenKey) cell.style.borderRight = frozenBorder;
+            };
+            // Live-resize: set one column's width, retotal the table, and
+            // reposition frozen cells in place — no full rebuild.
+            const setColWidth = (col, px) => {
+                px = Math.max(40, Math.round(px));
+                sumPanelState.columnWidths[col.key] = px;
+                if (colEls[col.key]) colEls[col.key].style.width = px + 'px';
+                table.style.width = totalW() + 'px';
+                recomputeFrozenLeft();
+                tableWrap.querySelectorAll('[data-frozen-key]').forEach(el => {
+                    const k = el.getAttribute('data-frozen-key');
+                    if (k && k !== '__sel__' && frozenLeft[k] != null) el.style.left = frozenLeft[k] + 'px';
+                });
+            };
+
             // Header row — first cell is the select-all checkbox, then
             // user-selected columns sorted by their canonical position.
             const thead = document.createElement('thead');
-            thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:1';
+            // z-index:5 keeps the sticky header above frozen BODY cells
+            // (which sit at z-index:1) during vertical scroll.
+            thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:5';
             const headRow = document.createElement('tr');
             // Select-all checkbox
             const thSel = document.createElement('th');
-            thSel.style.cssText = 'width:32px;padding:6px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.12)';
+            thSel.style.cssText = 'padding:6px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.12)';
+            applyFrozen(thSel, '__sel__', true);
             const selAll = document.createElement('input');
             selAll.type = 'checkbox';
             selAll.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
@@ -7073,17 +7158,20 @@
                 const th = document.createElement('th');
                 const key = col.dataKey || col.key;
                 const isSorted = sumPanelState.sortKey === key;
-                // 3-state cycle on every column: asc → desc → default
-                // (typePrio asc, name secondary). Resets when a column
-                // hits its third click instead of locking into desc
-                // forever; user was getting stuck unable to return to the
-                // grouped-by-type default sort without a full refresh.
-                th.textContent = col.label;
-                th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;min-width:${col.w}px;white-space:nowrap`;
-                if (isSorted) th.textContent += sumPanelState.sortDir === 1 ? ' ▲' : ' ▼';
+                // position:relative anchors the × + resize grip; 18px right
+                // padding reserves room for them; overflow:hidden clips long
+                // labels (the inner span ellipsizes).
+                th.style.cssText = `position:relative;padding:6px 18px 6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden`;
+                const lblSpan = document.createElement('span');
+                lblSpan.textContent = col.label + (isSorted ? (sumPanelState.sortDir === 1 ? ' ▲' : ' ▼') : '');
+                lblSpan.style.cssText = 'display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom';
+                th.appendChild(lblSpan);
+
+                // Sort: asc → desc → default (3-state). The × + grip below
+                // stopPropagation so they never trigger a sort.
                 th.title = isSorted
-                    ? (sumPanelState.sortDir === 1 ? 'Click for descending; click again to reset to default sort' : 'Click to reset to default sort (grouped by type)')
-                    : 'Click to sort ascending';
+                    ? (sumPanelState.sortDir === 1 ? 'Click → descending; again → reset · drag to reorder · drag right edge to resize' : 'Click → reset to default sort · drag to reorder · drag right edge to resize')
+                    : 'Click to sort ascending · drag to reorder · drag right edge to resize';
                 th.onclick = () => {
                     if (sumPanelState.sortKey !== key) {
                         sumPanelState.sortKey = key;
@@ -7091,12 +7179,90 @@
                     } else if (sumPanelState.sortDir === 1) {
                         sumPanelState.sortDir = -1;
                     } else {
-                        // Third click → back to default (type-grouped, name asc within)
                         sumPanelState.sortKey = 'typePrio';
                         sumPanelState.sortDir = 1;
                     }
                     redrawTable();
                 };
+
+                // Drag-to-reorder (HTML5 DnD). Drop inserts the dragged column
+                // immediately BEFORE this one.
+                th.draggable = true;
+                th.ondragstart = (ev) => {
+                    ev.dataTransfer.effectAllowed = 'move';
+                    ev.dataTransfer.setData('text/plain', col.key);
+                    th.style.opacity = '0.4';
+                };
+                th.ondragend = () => { th.style.opacity = '1'; };
+                th.ondragover = (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; th.style.boxShadow = 'inset 3px 0 0 #14d2dc'; };
+                th.ondragleave = () => { th.style.boxShadow = ''; };
+                th.ondrop = (ev) => {
+                    ev.preventDefault();
+                    th.style.boxShadow = '';
+                    const fromKey = ev.dataTransfer.getData('text/plain');
+                    if (!fromKey || fromKey === col.key) return;
+                    const order = sumPanelState.columnOrder.slice();
+                    const fi = order.indexOf(fromKey);
+                    if (fi < 0) return;
+                    order.splice(fi, 1);
+                    const ti = order.indexOf(col.key);
+                    if (ti < 0) return;
+                    order.splice(ti, 0, fromKey);
+                    sumPanelState.columnOrder = order;
+                    saveColumnOrder(order);
+                    redrawTable();
+                };
+
+                // Inline × — hide this column (re-add via Columns ▾). Shows on
+                // header hover so it doesn't clutter the resting state.
+                const xBtn = document.createElement('span');
+                xBtn.textContent = '×';
+                xBtn.title = 'Hide this column (re-add via Columns ▾)';
+                xBtn.draggable = false;
+                xBtn.style.cssText = 'position:absolute;top:3px;right:7px;color:#999;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .1s;padding:0 2px;z-index:1';
+                xBtn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    sumPanelState.columnOrder = sumPanelState.columnOrder.filter(k => k !== col.key);
+                    saveColumnOrder(sumPanelState.columnOrder);
+                    redrawTable();
+                };
+                th.onmouseenter = () => { xBtn.style.opacity = '1'; };
+                th.onmouseleave = () => { xBtn.style.opacity = '0'; };
+                th.appendChild(xBtn);
+
+                // Resize grip on the right edge. Drag = resize (live, no
+                // rebuild); double-click = reset that column to default width.
+                const grip = document.createElement('div');
+                grip.title = 'Drag to resize · double-click to reset width';
+                grip.draggable = false;
+                grip.style.cssText = 'position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;z-index:2';
+                grip.onclick = (ev) => ev.stopPropagation();
+                grip.onmousedown = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    th.draggable = false; // stop DnD hijacking the resize drag
+                    const startX = ev.clientX;
+                    const startW = colWidth(col);
+                    const onMove = (e2) => setColWidth(col, startW + (e2.clientX - startX));
+                    const onUp = () => {
+                        document.removeEventListener('mousemove', onMove, true);
+                        document.removeEventListener('mouseup', onUp, true);
+                        th.draggable = true;
+                        saveColWidths();
+                    };
+                    document.addEventListener('mousemove', onMove, true);
+                    document.addEventListener('mouseup', onUp, true);
+                };
+                grip.ondblclick = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    delete sumPanelState.columnWidths[col.key];
+                    saveColWidths();
+                    redrawTable();
+                };
+                th.appendChild(grip);
+
+                if (frozenKeys.has(col.key)) applyFrozen(th, col.key, true);
                 headRow.appendChild(th);
             });
             thead.appendChild(headRow);
@@ -7111,12 +7277,18 @@
                 // the next row's cell via querySelector after commit.
                 tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
-                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
-                tr.onmouseleave = () => { tr.style.background = 'transparent'; };
+                // Frozen (sticky-left) cells need an OPAQUE background or the
+                // scrolling columns show through them; collect them so the
+                // row-hover tint stays in sync across the whole row.
+                const frozenTds = [];
+                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_HOVER); };
+                tr.onmouseleave = () => { tr.style.background = 'transparent'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_BG); };
 
                 // Checkbox cell — clicks here don't trigger row navigation.
                 const tdSel = document.createElement('td');
-                tdSel.style.cssText = 'width:32px;padding:5px 6px;text-align:center';
+                tdSel.style.cssText = 'padding:5px 6px;text-align:center';
+                applyFrozen(tdSel, '__sel__', false);
+                frozenTds.push(tdSel);
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.checked = sumPanelState.selectedIds.has(r._rowKey);
@@ -7545,6 +7717,10 @@
                         } else {
                             td.title = 'No notes';
                         }
+                    }
+                    if (frozenKeys.has(col.key)) {
+                        applyFrozen(td, col.key, false);
+                        frozenTds.push(td);
                     }
                     tr.appendChild(td);
                 });
