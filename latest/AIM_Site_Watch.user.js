@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.5';
+    const SCRIPT_VERSION = '0.6';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -522,9 +522,8 @@
     function logSiteResult(i, batchLen, s, res) {
         const id = s.id;
         const name = nameFor(id) || s.name || '(unnamed)';
-        const done = Object.keys(state.sites).length;
         const c = RESULT_COLOR[res] || '#cccccc';
-        const line = `%c(${i}/${batchLen} · ${done}/${siteList.length})%c ${name} %c(${id})%c → ${res}`;
+        const line = `%c(${i}/${batchLen})%c ${name} %c(${id})%c → ${res}`;
         const styles = [
             'color:#9aa0a6',
             'color:#e6e6e6;font-weight:600',
@@ -649,7 +648,12 @@
             due.sort((a, b) => ((state.sites[a.id] && state.sites[a.id].nextCheckAt) || 0) - ((state.sites[b.id] && state.sites[b.id].nextCheckAt) || 0));
             const batch = due.slice(0, cfg.maxPerCycle);
             if (!batch.length) return;
-            console.log(`%c${TAG} cycle (${trigger}): ${batch.length}/${due.length} due of ${siteList.length} total · ${Object.keys(state.sites).length} baselined so far`, 'color:#5fd0ff;font-weight:600');
+            const hotCount = Object.values(state.sites).filter(st => st.state === 'hot').length;
+            const baselined = Object.keys(state.sites).length;
+            // Show baselining progress only while it's still incomplete; once all
+            // sites are baselined that number is saturated, so switch to HOT count.
+            const progress = baselined < siteList.length ? ` · ${baselined}/${siteList.length} baselined` : '';
+            console.log(`%c${TAG} cycle (${trigger}): checking ${batch.length} of ${due.length} due · ${siteList.length} sites · ${hotCount} HOT${progress}`, 'color:#5fd0ff;font-weight:600');
 
             const pendingCsv = [];
             let checked = 0;
