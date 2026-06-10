@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.7
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a green "+" to split that segment in two. No delete-and-rebuild. Mirrors the Power Line Editor's on-map vertex UX. DEV/personal.
+// @version      0.8
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a cyan "+" to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -13,14 +13,20 @@
 //
 // AIM Flight Path Editor — on-map mid-segment vertex insert for Percepto flight paths.
 //   - Toggle the ✚ button in .map-tools (iframe only — the map lives there).
-//   - CLICK A FLIGHT PATH on the map to focus it → green "+" handles appear at the
+//   - CLICK A FLIGHT PATH on the map to focus it → cyan "+" handles appear at the
 //     midpoint of each of its in-view segments (pan/zoom loads more).
-//   - Click a "+" → a real vertex is inserted there (arcs-splice via
-//     POST /map_objects/). The new vertex is a genuine branchable/draggable waypoint.
-//   - Auto-reload (debounced) re-reads Percepto's editor so the vertex is usable
-//     without a manual refresh. ↩ Undo reverts the last insert.
-// Mechanism proven in ShortKeys/AIM_Insert_Vertex.js. arcs is the geometry source
-// of truth; arc IDs regenerate every save so we key on position, never id. [AIM FPE].
+//   - Click a "+" → a real vertex is inserted there. The new vertex is a genuine
+//     branchable/draggable waypoint, and a native Save persists it with NO refresh.
+//
+// HOW IT WORKS (Path B, confirmed 2026-06-09): Percepto's Site Setup editor keeps
+// the full map-object array in a React hook (component `g$e`, the entities-array
+// useState). We locate that hook by walking the React fiber tree from the Leaflet
+// container, splice the chosen arc A→B into A→M, M→B (M = segment midpoint), and
+// call the hook's dispatch (Percepto's own setState) to update the live model.
+// The map re-renders the new waypoint immediately, and because the native Save
+// reads from this same hook, the insert survives the save — no API POST, no reload.
+// arcs is the geometry source of truth; arc IDs regenerate on save so we key on
+// geometry (endpoints), never id. See ShortKeys/AIM_Editor_Probe[2-5].js. [AIM FPE].
 //
 (function() {
     'use strict';
@@ -28,23 +34,20 @@
     const IS_IFRAME = window !== window.top;
     if (!IS_IFRAME) { try { console.log(`${TAG} top frame — idle (map is in iframe)`); } catch (e) {} return; }
 
-    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
-    const SAVE_URL = 'https://percepto.app/map_objects/';
     const SELECT_PX = 14;       // click within this many px of a path to focus it
-    const RELOAD_DELAY = 2500;  // debounce before auto-reload (ms)
+    const EPS = 1e-7;           // lat/lng match epsilon for arc identity
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
     const warn = (...a) => { try { (unsafeWindow.console || console).warn(TAG, ...a); } catch (e) {} };
     const L_ll = (p) => unsafeWindow.L.latLng(p.lat, p.lng);
-
-    function getCurrentSiteID() {
-        const m = (location.hash || '').match(/#\/site\/(\d+)\//) || (top.location.hash || '').match(/#\/site\/(\d+)\//);
-        return m ? m[1] : null;
-    }
-    function getCsrf() {
-        const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/);
-        return m ? decodeURIComponent(m[1]) : null;
-    }
+    const clone = (o) => JSON.parse(JSON.stringify(o));
+    const hav = (a, b) => {
+        const R = 6371000, t = Math.PI / 180;
+        const dLat = (b.lat - a.lat) * t, dLng = (b.lng - a.lng) * t;
+        const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * t) * Math.cos(b.lat * t) * Math.sin(dLng / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(s));
+    };
+    const ptEq = (p, q) => p && q && Math.abs(p.lat - q.lat) < EPS && Math.abs(p.lng - q.lng) < EPS;
 
     // ---- Leaflet map access (mirrors Map Styler's getLeafletMap) ----
     let leafletMapRef = null;
@@ -78,80 +81,53 @@
         return null;
     }
 
-    // ---- data ----
-    let entities = [];
-    async function fetchEntities() {
-        const sid = getCurrentSiteID();
-        if (!sid) return [];
-        const r = await fetch(MAP_OBJECTS_URL + encodeURIComponent(sid) + '&_t=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        entities = await r.json();
-        return entities;
+    // ---- Percepto live editor state (the entities-array React hook) ----
+    // Walk the fiber tree from the Leaflet container up to the React root, then DFS
+    // down to the function component whose hook state is the map-object array (each
+    // item has arcs/coords) and which exposes a dispatch. Returns {arr, dispatch}
+    // from the CURRENT committed tree every call (so it reflects native edits too).
+    function fiberOf(el) {
+        if (!el) return null;
+        for (const k in el) { if (k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$')) return el[k]; }
+        return null;
     }
-    let siteCfg = null;
-    async function fetchSiteCfg() {
-        const sid = getCurrentSiteID();
-        if (siteCfg && siteCfg.__sid === sid) return siteCfg;
-        const r = await fetch(`https://percepto.app/sites/${encodeURIComponent(sid)}/`, { credentials: 'same-origin' });
-        siteCfg = await r.json(); siteCfg.__sid = sid; return siteCfg;
+    function findEntitiesHook() {
+        const map = getLeafletMap();
+        const container = (map && map.getContainer && map.getContainer()) || document.querySelector('.leaflet-container');
+        let f = fiberOf(container);
+        if (!f) return null;
+        let root = f, g = 0; while (root.return && g++ < 5000) root = root.return;
+        const visited = new Set(); const stack = [root]; let count = 0;
+        while (stack.length && count < 60000) {
+            const fb = stack.pop(); if (!fb || visited.has(fb)) continue; visited.add(fb); count++;
+            const t = fb.type;
+            if (typeof t === 'function' && !(t.prototype && t.prototype.isReactComponent)) {
+                let h = fb.memoizedState, i = 0;
+                while (h && typeof h === 'object' && 'next' in h && i < 80) {
+                    const s = h.memoizedState;
+                    if (Array.isArray(s) && s.length >= 2 && h.queue && h.queue.dispatch
+                        && s.some(x => x && typeof x === 'object' && (x.arcs || x.coords))) {
+                        return { arr: s, dispatch: h.queue.dispatch };
+                    }
+                    h = h.next; i++;
+                }
+            }
+            if (fb.child) stack.push(fb.child);
+            if (fb.sibling) stack.push(fb.sibling);
+        }
+        return null;
     }
-    const flightPaths = () => entities.filter(e => e && e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
-
-    function buildWriteBody(e, cfg) {
-        const b = JSON.parse(JSON.stringify(e));
-        b.site_id = e.site; b.points = (e.coords || []).slice();
-        delete b.site; delete b.coords; delete b.polygon; delete b.asset_waypoints;
-        b.mountain_terrain_site = !!(cfg && cfg.mountain_terrain);
-        if (Array.isArray(b.arcs)) b.arcs.forEach(a => { if (a.point_a && a.point_b && !Array.isArray(a.points)) a.points = [a.point_a, a.point_b]; });
-        return b;
-    }
-
-    async function insertVertex(e, idx, M) {
-        const cfg = await fetchSiteCfg();
-        const csrf = getCsrf();
-        if (!csrf) { warn('no csrftoken'); return { ok: false }; }
-        const before = JSON.parse(JSON.stringify(e));
-        const b = buildWriteBody(e, cfg);
-        const arc = b.arcs[idx];
-        if (!arc) return { ok: false, reason: 'no arc' };
-        const A = arc.point_a, B = arc.point_b;
-        const mk = (pa, pb, frac) => ({
-            point_a: pa, point_b: pb, distance: (arc.distance || 0) * frac,
-            min_alt: arc.min_alt, max_alt: arc.max_alt, min_emergency_alt: arc.min_emergency_alt,
-            wait_until_approved: arc.wait_until_approved || false, mapobject: e.id, points: [pa, pb],
-        });
-        const dAB = Math.hypot(B.lat - A.lat, B.lng - A.lng) || 1;
-        const frac = Math.min(0.999, Math.max(0.001, Math.hypot(M.lat - A.lat, M.lng - A.lng) / dAB));
-        b.arcs.splice(idx, 1, mk(A, M, frac), mk(M, B, 1 - frac));
-        b.points.push(M);
-        let resp;
-        try {
-            const r = await fetch(SAVE_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
-            const txt = await r.text();
-            let j = null; try { j = JSON.parse(txt); } catch (x) {}
-            resp = { status: r.status, json: j, raw: txt };
-        } catch (err) { warn('POST threw', err); return { ok: false }; }
-        if (resp.status !== 200) { warn('server', resp.status, (resp.raw || '').slice(0, 300)); return { ok: false, status: resp.status, raw: resp.raw }; }
-        const vk = p => p ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : '∅';
-        const newArcs = (resp.json.map_objects && resp.json.map_objects.arcs) || [];
-        const newKeys = newArcs.map(a => vk(a.point_a) + '>' + vk(a.point_b));
-        const remap = [];
-        before.arcs.forEach((a, i) => {
-            const ni = newKeys.indexOf(vk(a.point_a) + '>' + vk(a.point_b));
-            if (ni === -1) remap.push(`old seg ${i + 1} → split`);
-            else if (ni !== i) remap.push(`old seg ${i + 1} → seg ${ni + 1}`);
-        });
-        log(`inserted on "${e.name}" seg ${idx + 1}: arcs ${before.arcs.length} → ${newArcs.length}.`, remap.length ? 'renumbered: ' + remap.join(', ') : '');
-        return { ok: true, saved: resp.json.map_objects, remap, backup: before };
-    }
+    function liveEntities() { const hk = findEntitiesHook(); return (hk && hk.arr) || []; }
+    const flightPaths = () => liveEntities().filter(e => e && e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
 
     // ---- state ----
     const state = {
         active: false, selectedFpId: null, handles: [],
         moveHandler: null, clickHandler: null,
-        pending: 0,   // inserts written but not yet synced into Percepto (cleared by a page reload)
+        inserts: 0,             // count this session (info only — all are live, nothing pending)
     };
-    function selectedFP() { return entities.find(e => e && e.id === state.selectedFpId) || null; }
+    const undoStack = [];       // [{id, name, seg, arcs, coords}] for instant local revert
+    function selectedFP() { return liveEntities().find(e => e && e.id === state.selectedFpId) || null; }
 
     function clearHandles() {
         state.handles.forEach(h => { try { h.remove(); } catch (e) {} });
@@ -178,7 +154,6 @@
         return bestId;
     }
 
-    let busy = false;
     function rebuildHandles() {
         clearHandles();
         const map = getLeafletMap();
@@ -191,16 +166,16 @@
         });
         let total = 0;
         const bounds = map.getBounds();
-        (fp.arcs || []).forEach((arc, idx) => {
+        (fp.arcs || []).forEach((arc) => {
             const A = arc.point_a, B = arc.point_b; if (!A || !B) return;
             const mid = { lat: (A.lat + B.lat) / 2, lng: (A.lng + B.lng) / 2 };
             total++;
             if (!bounds.contains([mid.lat, mid.lng])) return;
+            const a0 = clone(A), b0 = clone(B);   // capture endpoints → arc identity at click time
             const mk = L.marker([mid.lat, mid.lng], { icon: ghost, zIndexOffset: 900, keyboard: false });
-            mk.on('click', async (ev) => {
+            mk.on('click', (ev) => {
                 try { if (ev.originalEvent) { ev.originalEvent.preventDefault(); ev.originalEvent.stopPropagation(); } } catch (e) {}
-                const ent = selectedFP();
-                if (ent) await doInsert(ent, idx, mid, mk);
+                doInsert(fp.id, a0, b0, mid);
             });
             mk.addTo(map);
             state.handles.push(mk);
@@ -209,34 +184,48 @@
         renderPanel();
     }
 
-    async function doInsert(fp, idx, M, marker) {
-        if (busy) return;
-        busy = true;
-        try {
-            if (marker) try { marker.getElement().firstChild.style.background = 'rgba(255,213,79,0.95)'; } catch (e) {}
-            const res = await insertVertex(fp, idx, M);
-            if (!res.ok) { toast(`Insert failed${res.status ? ' (' + res.status + ')' : ''} — see console`, '#ff8a80'); return; }
-            window.__aim_fpe_lastBackup = res.backup;
-            state.pending++;
-            await fetchEntities();
-            rebuildHandles();
-            toast(`⚠ Vertex added on ${fp.name}, seg ${idx + 1}. REFRESH before editing this path natively — a native Save would overwrite it.`, '#ffb14e');
-        } catch (e) { warn('insert error', e); }
-        finally { busy = false; }
+    // ---- the Path B insert: splice arc into live React state, no network ----
+    function doInsert(fpId, A, B, M) {
+        const hook = findEntitiesHook();
+        if (!hook || !hook.dispatch) { toast('Live editor state not found — reload the page and try again.', '#ff8a80'); warn('no entities hook'); return; }
+        const ent = hook.arr.find(e => e && e.id === fpId);
+        if (!ent || !Array.isArray(ent.arcs)) { toast('Flight path not found in live state.', '#ff8a80'); return; }
+        // find the arc by its endpoints (geometry, not index — arc ids/order can shift)
+        let idx = ent.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
+        if (idx === -1) { toast('That segment changed — click a fresh handle.', '#ffb14e'); rebuildHandles(); return; }
+        const a = ent.arcs[idx];
+        const Mpt = M || { lat: (a.point_a.lat + a.point_b.lat) / 2, lng: (a.point_a.lng + a.point_b.lng) / 2 };
+        const dAB = hav(a.point_a, a.point_b) || (a.distance || 1);
+        const fAM = Math.min(0.999, Math.max(0.001, hav(a.point_a, Mpt) / dAB));
+        // two halves inherit the arc's altitude band + flags; mb gets a synthetic local
+        // id so React keys don't collide (the server regenerates all arc ids on save).
+        const am = { ...a, point_b: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * fAM, id: a.id };
+        const mb = { ...a, point_a: clone(Mpt), distance: (a.distance != null ? a.distance : dAB) * (1 - fAM), id: (a.id || 0) * 1000 + 1 };
+        const origArcs = clone(ent.arcs), origCoords = clone(ent.coords || []);
+        const newArcs = ent.arcs.slice(); newArcs.splice(idx, 1, am, mb);
+        // coords is cosmetic-for-render (the save rebuilds it from arcs); keep it consistent.
+        const newCoords = (ent.coords || []).slice();
+        if (newCoords.length) newCoords.splice(Math.min(idx + 1, newCoords.length), 0, clone(Mpt));
+        else newCoords.push(clone(a.point_a), clone(Mpt), clone(a.point_b));
+
+        undoStack.push({ id: fpId, name: ent.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
+        hook.dispatch(arr => arr.map(e => (e && e.id === fpId) ? { ...e, arcs: newArcs, coords: newCoords } : e));
+        state.inserts++;
+        log(`inserted vertex on "${ent.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (live, no refresh)`);
+        setTimeout(rebuildHandles, 40);
+        toast(`✚ Vertex added on ${ent.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
     }
 
-    async function doUndo() {
-        const o = window.__aim_fpe_lastBackup;
-        if (!o) { toast('Nothing to undo', '#ffd479'); return; }
-        try {
-            const cfg = await fetchSiteCfg();
-            const csrf = getCsrf();
-            const b = buildWriteBody(o, cfg);
-            const r = await fetch(SAVE_URL, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf }, body: JSON.stringify(b) });
-            log('undo →', r.status);
-            if (r.status === 200) { window.__aim_fpe_lastBackup = null; await fetchEntities(); rebuildHandles(); toast('Reverted last insert · reopen the editor to see it', '#ffd479'); }
-            else toast('Undo failed (' + r.status + ')', '#ff8a80');
-        } catch (e) { warn('undo error', e); toast('Undo errored — see console', '#ff8a80'); }
+    function doUndo() {
+        const snap = undoStack.pop();
+        if (!snap) { toast('Nothing to undo', '#ffd479'); return; }
+        const hook = findEntitiesHook();
+        if (!hook || !hook.dispatch) { toast('Live state not found — refresh.', '#ff8a80'); return; }
+        hook.dispatch(arr => arr.map(e => (e && e.id === snap.id) ? { ...e, arcs: snap.arcs, coords: snap.coords } : e));
+        if (state.inserts > 0) state.inserts--;
+        log(`undid insert on "${snap.name}" seg ${snap.seg}`);
+        setTimeout(rebuildHandles, 40);
+        toast(`↩ Reverted last insert (${snap.name})`, '#ffd479');
     }
     unsafeWindow.__aim_fpe_undo = doUndo;
 
@@ -268,8 +257,7 @@
         if (document.getElementById(PANEL_ID)) { closePanel(); return; }
         openPanel();
     }
-    async function openPanel() {
-        try { await fetchEntities(); } catch (e) { warn('fetch failed', e); }
+    function openPanel() {
         state.active = true;
         const map = getLeafletMap();
         if (map) {
@@ -283,6 +271,7 @@
                 map.on('click', state.clickHandler);
             }
         }
+        if (!findEntitiesHook()) warn('live editor state not found yet — open Site Setup so the map editor is loaded');
         renderPanel();
         rebuildHandles();
     }
@@ -302,28 +291,28 @@
         if (!p) {
             p = document.createElement('div');
             p.id = PANEL_ID;
-            p.style.cssText = 'position:fixed;top:80px;right:18px;width:296px;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
+            p.style.cssText = 'position:fixed;top:80px;right:18px;width:300px;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
             document.body.appendChild(p);
         }
         const fp = selectedFP();
+        const canUndo = undoStack.length > 0;
         p.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                 <strong style="color:#7adfe6;font-size:14px">✚ Flight Path Editor</strong>
                 <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px">×</span>
             </div>
             ${fp
-                ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> handles in view.<br><span style="color:#888">Click a handle to insert. Click another path to switch.</span></div>`
+                ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> handles in view.<br><span style="color:#888">Click a handle to insert a vertex. Click another path to switch.</span></div>`
                 : `<div style="color:#aaa;margin-bottom:8px;line-height:1.5"><b>Click a flight path on the map</b> to focus it — its insert handles appear.</div>`}
-            ${state.pending > 0 ? `<div style="margin-bottom:8px;padding:7px 10px;background:rgba(255,177,78,0.12);border:1px solid rgba(255,177,78,0.5);border-radius:4px;color:#ffb14e;font-weight:600">⚠ ${state.pending} insert${state.pending === 1 ? '' : 's'} pending — Refresh to apply before editing natively.</div>` : ''}
-            <div style="display:flex;gap:6px;margin-bottom:8px">
-                <button id="aim-fpe-undo" style="flex:1;background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↩ Undo</button>
-                <button id="aim-fpe-reload" style="flex:1;background:${state.pending > 0 ? 'rgba(255,177,78,0.2)' : 'rgba(122,223,230,0.16)'};color:${state.pending > 0 ? '#ffb14e' : '#7adfe6'};border:1px solid ${state.pending > 0 ? 'rgba(255,177,78,0.6)' : 'rgba(122,223,230,0.55)'};border-radius:4px;padding:7px;cursor:pointer;font:inherit;font-weight:600">↻ ${state.pending > 0 ? `Refresh to apply (${state.pending})` : 'Reload now'}</button>
+            <div style="margin-bottom:8px;padding:7px 10px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#9be89b;line-height:1.45">
+                ✅ <b>Seamless</b> — inserts appear live as real waypoints. Edit/branch them natively, then <b>Save</b>. <b>No refresh.</b>
+                ${state.inserts > 0 ? `<br><span style="color:#cfd6dc">${state.inserts} insert${state.inserts === 1 ? '' : 's'} this session.</span>` : ''}
             </div>
-            <div style="color:#888;font-size:11px;line-height:1.5">Insert as many as you like, then hit <b>Refresh to apply</b> once. ⚠ Don't native-edit/save this path before refreshing — a native Save overwrites the inserts.</div>
+            <button id="aim-fpe-undo" ${canUndo ? '' : 'disabled'} style="width:100%;background:rgba(255,193,71,${canUndo ? '0.16' : '0.06'});color:${canUndo ? '#ffd479' : '#7a6f4a'};border:1px solid rgba(255,193,71,${canUndo ? '0.55' : '0.25'});border-radius:4px;padding:7px;cursor:${canUndo ? 'pointer' : 'default'};font:inherit;font-weight:600">↩ Undo last insert${canUndo ? ` (${undoStack.length})` : ''}</button>
+            <div style="color:#888;font-size:11px;line-height:1.5;margin-top:8px">New vertices land at the segment midpoint — drag natively to fine-tune. Undo reverts locally (or just don't Save).</div>
         `;
         p.querySelector('#aim-fpe-x').onclick = closePanel;
-        const u = p.querySelector('#aim-fpe-undo'); if (u) u.onclick = doUndo;
-        const rl = p.querySelector('#aim-fpe-reload'); if (rl) rl.onclick = () => location.reload();
+        const u = p.querySelector('#aim-fpe-undo'); if (u && canUndo) u.onclick = doUndo;
     }
 
     // ---- boot ----
@@ -334,5 +323,5 @@
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.7 ready (iframe) — ✚ in .map-tools');
+    log('v0.8 ready (iframe) — ✚ in .map-tools · seamless Path B (live React-state insert, no refresh)');
 })();

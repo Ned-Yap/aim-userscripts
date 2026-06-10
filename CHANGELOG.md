@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Flight Path Editor v0.8 (latest, dev-only) — SEAMLESS vertex insert (Path B), no refresh
+
+**The refresh dance is dead.** v0.7 inserted a mid-segment vertex via `POST /map_objects/`, but Percepto caches the flight path at page load — so you had to refresh before editing natively, and a native Save on an un-refreshed insert silently overwrote it (the footgun).
+
+**v0.8 inserts the vertex straight into Percepto's live React editor state** (the map-object array `useState` hook inside its `Route`/`g$e` component — found by walking the React fiber tree from the Leaflet container). Clicking a "+" handle splices the arc `A→B` into `A→M`, `M→B` and calls the hook's own dispatch. The new waypoint appears **instantly** as a real draggable/branchable/deletable vertex, and because the native Save reads from this same state, it **persists with no refresh**. No API POST, no pending counter, no "Refresh to apply", no footgun.
+
+- Undo is now an instant local state-revert (stacked); or just don't Save.
+- New vertices land at the segment midpoint — drag natively to fine-tune.
+- Still dev-only / personal, not promoted. Reverse-engineering recon in `ShortKeys/AIM_Editor_Probe[2-5].js`.
+
+---
+
 ## 2026-06-09 — AIM Asset Inspector v3.77 (PROD + latest) — points→coords fallback for Apply'd entities
 
 **Real root cause found.** Right-click on Assets/FFZs at Exxon site 1599 was failing for entities AI had hit-tested fine before. v3.76's debug logs caught it: AI's pip on the cached entity returned no match, but a parallel pip on a fresh live fetch of the same entity DID find it. Same code, same coords, different result → cache must hold different data than the live response.
