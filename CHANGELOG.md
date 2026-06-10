@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-09 — AIM Asset Inspector v3.76 (PROD + latest) — Right-click hit-test rollback + debug logs
+
+v3.75 used angular-sort polygon as the SOLE hit-test path. Turned out the sort regressed some normal FFZs (specifically `freezone_4` in site 1599) — their sort produced a polygon shape that excluded the click point the raw polygon included. Result: right-click missed valid FFZ entities.
+
+v3.76 makes it **raw-first, sort-fallback**:
+1. `pointInPolygon(lat, lng, e.coords)` on the raw vertex order (matches v3.74 behavior, works for all normal polygons).
+2. If raw misses, `pointInPolygon(lat, lng, simplifyPolygon(e.coords))` on the angular-sorted polygon (covers Percepto's bowtie-shaped well-pad coords).
+
+Same effect as v3.75 for bowtie wells, but no regression for normal FFZs.
+
+**Debug logging added** to the right-click handler so we can diagnose future "browser menu appears instead of Inspector popup" reports. Every bail logs its reason (`[AIM INSPECT IFRAME] RC bail: master OFF`, `bail: no entity at <lat>,<lng> — bucket has N`, etc.). Default ON in v3.76 (`RIGHT_CLICK_DEBUG = true` at top of `installRightClickHandler`); flip to `false` once stable. Also catchable from outside via `window.__aim_ai_debug = true` (when the const is false).
+
+---
+
 ## 2026-06-09 — AIM Asset Inspector v3.75 (PROD + latest) — Right-click finds well-pad assets again
 
 Bugfix. Right-clicking Assets and FFZs on some sites (notably Exxon-style well pads with horizontal-drilling sites) brought up Chrome's native context menu instead of the Inspector popup. Flight Paths kept working.

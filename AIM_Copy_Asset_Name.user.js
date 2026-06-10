@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.75
+// @version      3.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.75';
+    const SCRIPT_VERSION = '3.76';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -817,14 +817,18 @@
         const entities = bucket.entities || [];
         // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16) — prefer
         //    smaller area on ties so user can pick a small asset inside a
-        //    larger zone. v3.75: pip-test against the angular-sorted polygon
-        //    so Percepto's bowtie-shaped well-pad coords (4 corners + well
-        //    point in non-monotonic order) hit-test correctly.
+        //    larger zone. v3.76: pip on RAW coords first (works for normal
+        //    polygons), fall back to simplifyPolygon (angular-sort) ONLY if
+        //    raw misses (covers Percepto's bowtie-shaped well-pad coords —
+        //    4 corners + well-head point in non-monotonic order). v3.75
+        //    used sort-only which regressed normal FFZs whose sort produced
+        //    a different (invalid) shape; raw-first preserves their behavior.
         let bestPoly = null, bestPolyArea = Infinity;
         for (const e of entities) {
             if ((e.type === 3 || e.type === 4 || e.type === 16) && Array.isArray(e.coords) && e.coords.length >= 3) {
-                const poly = simplifyPolygon(e.coords);
-                if (pointInPolygon(lat, lng, poly)) {
+                let inside = pointInPolygon(lat, lng, e.coords);
+                if (!inside) inside = pointInPolygon(lat, lng, simplifyPolygon(e.coords));
+                if (inside) {
                     // Rough area via bounding box (cheap, no real area calc).
                     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
                     for (const c of e.coords) {
@@ -1576,8 +1580,20 @@
     // Right-click handler — capture phase on window, gated to map area
     // ============================================================
     function installRightClickHandler() {
+        // v3.76: opt-in debug. Set window.__aim_ai_debug = true in console
+        // (or toggle below) to log every step of the right-click handler.
+        // Helps triage "right-click brings up native menu" reports.
+        const RIGHT_CLICK_DEBUG = true; // v3.76 default ON; flip to false once stable.
+        function dbg(...args) {
+            if (RIGHT_CLICK_DEBUG || (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).__aim_ai_debug) {
+                try { console.log(TAG, 'RC', ...args); } catch (e) {}
+            }
+        }
         window.addEventListener('contextmenu', (e) => {
-            if (!masterEnabled) return;
+            if (!masterEnabled) {
+                if (e.isTrusted) dbg('bail: master OFF');
+                return;
+            }
             // Skip synthetic events (e.isTrusted=false). The Altitude and
             // Ruler scripts dispatch synthetic 'contextmenu' as part of
             // their Pin & Clean cleanup pattern — those are meant for
@@ -1585,12 +1601,13 @@
             // Without this guard, dropping an altitude pin near an entity
             // would pop the inspector unexpectedly.
             if (!e.isTrusted) return;
+            dbg('handler fired');
             const target = e.target;
             // Don't intercept inputs / editable areas — preserve native context menu there
             if (target && target.tagName) {
                 const tn = target.tagName;
-                if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || target.isContentEditable) return;
-                if (target.closest && target.closest('.ant-input, .ant-select')) return;
+                if (tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || target.isContentEditable) { dbg('bail: input/editable'); return; }
+                if (target.closest && target.closest('.ant-input, .ant-select')) { dbg('bail: ant-input/ant-select'); return; }
             }
             // v3.54: AIM Issues icons sit ON TOP of Percepto entities. If
             // the right-click landed on an issue marker, bail — let the
@@ -1598,7 +1615,7 @@
             // this, AI's capture-phase handler runs first and pops its own
             // inspector popup over an entity that happens to be beneath the
             // issue icon.
-            if (target && target.closest && target.closest('.aim-issues-icon-marker')) return;
+            if (target && target.closest && target.closest('.aim-issues-icon-marker')) { dbg('bail: issue marker'); return; }
             // v3.61: Don't steal right-clicks meant for UI controls. The
             // Control Panel gear, Issues 🚩, and Power ⚡ buttons all inject
             // into .map-tools and each have their own M2 (right-click)
@@ -1606,47 +1623,56 @@
             // entity *behind* the button by lat/lng and pops the inspector
             // instead of letting the button toggle. Bail on any toolbar
             // button / Leaflet control / generic button.
-            if (target && target.closest && target.closest('.map-tools, .map-tools__button, .leaflet-control, button, .ant-btn')) return;
+            if (target && target.closest && target.closest('.map-tools, .map-tools__button, .leaflet-control, button, .ant-btn')) { dbg('bail: toolbar/button'); return; }
             // v3.61: Power-line paths are owned by Map Styler's contextmenu
             // handler (vertex delete / hide menu in edit mode). We hit-test
             // by lat/lng, so whenever an asset/FFZ/FP polygon overlapped a
             // power line we'd steal the right-click. If the click landed on
             // a KML power-line path, bail and let Map Styler handle it.
-            if (target && target.closest && target.closest('path[data-kml-type]')) return;
+            if (target && target.closest && target.closest('path[data-kml-type]')) { dbg('bail: kml-path'); return; }
             const map = getLeafletMap();
-            if (!map) return;
+            if (!map) { dbg('bail: no map (Map Styler off?)'); return; }
             const container = map.getContainer();
             // Must be a right-click inside the map's container
-            if (!container.contains(target)) return;
+            if (!container.contains(target)) { dbg('bail: target not in map container — target=', target.tagName, target.className); return; }
             const siteID = getCurrentSiteID();
-            if (!siteID) return;
+            if (!siteID) { dbg('bail: no siteID'); return; }
             const cRect = container.getBoundingClientRect();
             const px = e.clientX - cRect.left;
             const py = e.clientY - cRect.top;
             let latlng;
             try { latlng = map.containerPointToLatLng([px, py]); }
-            catch (err) { return; }
-            if (!latlng) return;
+            catch (err) { dbg('bail: containerPointToLatLng threw', err); return; }
+            if (!latlng) { dbg('bail: no latlng'); return; }
             // Lazy-fetch if not loaded yet
             if (!mapObjectsBySite[siteID] && !fetchingSites.has(siteID)) {
                 fetchMapObjects(siteID);
+                dbg('bail: cache empty for site', siteID, '— triggered fetch');
                 showToast('Loading site entities — try right-click again in a sec', 'rgba(255,180,0,0.55)');
                 return;
             }
             if (fetchingSites.has(siteID)) {
+                dbg('bail: cache still fetching for site', siteID);
                 showToast('Still loading…', 'rgba(255,180,0,0.55)');
                 return;
             }
+            const bucketSize = (mapObjectsBySite[siteID]?.entities || []).length;
             const entity = findEntityAtLatLng(latlng.lat, latlng.lng, siteID);
             if (!entity) {
                 // Don't intercept — let native context menu show (user
                 // right-clicked on empty map). Could toast "no entity here"
                 // but that would be annoying for normal map right-clicks.
+                dbg('bail: no entity at', latlng.lat.toFixed(6), latlng.lng.toFixed(6), '— bucket has', bucketSize);
                 return;
             }
+            dbg('HIT →', entity.name, 'type', entity.type);
             e.preventDefault();
             e.stopPropagation();
-            showInspectorPopup(e.clientX, e.clientY, entity);
+            try {
+                showInspectorPopup(e.clientX, e.clientY, entity);
+            } catch (err) {
+                dbg('showInspectorPopup threw', err);
+            }
         }, true);
     }
 
