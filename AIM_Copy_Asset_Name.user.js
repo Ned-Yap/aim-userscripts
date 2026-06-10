@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.79
+// @version      3.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.79';
+    const SCRIPT_VERSION = '3.80';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1646,6 +1646,15 @@
             // power line we'd steal the right-click. If the click landed on
             // a KML power-line path, bail and let Map Styler handle it.
             if (target && target.closest && target.closest('path[data-kml-type]')) { dbg('bail: kml-path'); return; }
+            // v3.80: Flight-path vertex right-click is Percepto's native
+            // "delete vertex" action. Before v3.78 fixed the shadowing pip
+            // bug, the inspector silently missed FP polygons and the user's
+            // right-click fell through to Percepto. v3.78 restored the
+            // inspector — and accidentally stole the FP vertex right-click.
+            // Bail when the target is a vertex marker (.map-marker__flight-path-vertex)
+            // OR a segment-number badge (.map-marker__arc-index — Flight Path
+            // Editor's own right-click target too). Both stay native.
+            if (target && target.closest && target.closest('.map-marker__flight-path-vertex, .map-marker__arc-index')) { dbg('bail: fp-vertex/arc-index'); return; }
             const map = getLeafletMap();
             if (!map) { dbg('bail: no map (Map Styler off?)'); return; }
             const container = map.getContainer();

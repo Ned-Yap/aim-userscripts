@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-10 — AIM Asset Inspector v3.80 (PROD + latest) — don't steal FP vertex right-clicks
+
+v3.78 fixed the shadowing-pip bug that had quietly broken Asset/FFZ right-click since v3.67. Side effect: with the inspector hit-test now actually firing on Flight Paths, it also fired on **flight-path vertex markers** — stealing Percepto's native "delete vertex" right-click. Same for the segment-number badges (which Flight Path Editor's own right-click uses).
+
+**Fix:** one-line bail in `installRightClickHandler`, slotted next to the existing `path[data-kml-type]` (power-line) bail. Right-click on `.map-marker__flight-path-vertex` or `.map-marker__arc-index` now falls through to Percepto / FPE instead of popping the inspector.
+
+---
+
 ## 2026-06-10 — AIM Asset Inspector v3.79 (PROD + latest) — RIGHT_CLICK_DEBUG off by default
 
 v3.76 left right-click debug logging on by default while we hunted the hit-test bug. Right-click is now stable since v3.78 fixed the actual root cause. v3.79 flips `RIGHT_CLICK_DEBUG = false` so the console stops spamming `RC handler fired` / `RC HIT → ...` on every right-click. The instrumentation stays in the code — opt back in with `window.__aim_ai_debug = true` if a future right-click mystery shows up.
