@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.85
+// @version      3.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.85';
+    const SCRIPT_VERSION = '3.86';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1972,8 +1972,8 @@
         },
         {
             name: 'Asset Roster',
-            desc: 'All assets with equipment, state/health, elevation + coordinates.',
-            columnOrder: ['name', 'subtype', 'equipment', 'state', 'elevation', 'lat', 'long', 'gps'],
+            desc: 'All assets with equipment, state/health, notes, elevation + coordinates.',
+            columnOrder: ['name', 'subtype', 'equipment', 'state', 'notes', 'elevation', 'lat', 'long', 'gps'],
             typeFilter: ['3'], sortKey: 'name', sortDir: 1, unitsFt: true,
         },
         {
