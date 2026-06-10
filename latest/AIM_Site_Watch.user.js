@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.6';
+    const SCRIPT_VERSION = '0.7';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -65,7 +65,7 @@
     const DATA_BRANCH = 'main';
     const WATCH_DIR = 'site-watch';
     const CSV_PATH = `${WATCH_DIR}/changes.csv`;
-    const CSV_HEADER = 'timestamp_utc,site_id,site_name,change,object_id,field,was,is';
+    const CSV_HEADER = 'timestamp_utc,site_id,site_name,change,entity_type,entity_name,object_id,field,was,is';
     const TOKEN_KEY = 'aim-github-token';   // shared with Map Styler / AIM Issues
 
     // ---- this script's own GM storage keys ----
@@ -188,6 +188,23 @@
         const keys = Object.keys(value).sort();
         return '{' + keys.map(k => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
     }
+    // Live drone telemetry (battery, position, status of the allocated drone)
+    // changes constantly and is NOT a setup edit. Stripped from the data BEFORE
+    // hashing / diffing / snapshotting so it never triggers a false change or
+    // HOT escalation. Add more keys here if other volatile fields turn up.
+    const VOLATILE_KEYS = ['allocated_by_drone'];
+    function stripVolatile(value) {
+        if (Array.isArray(value)) return value.map(stripVolatile);
+        if (value && typeof value === 'object') {
+            const out = {};
+            for (const k of Object.keys(value)) {
+                if (VOLATILE_KEYS.indexOf(k) !== -1) continue;
+                out[k] = stripVolatile(value[k]);
+            }
+            return out;
+        }
+        return value;
+    }
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     // fetch() has no built-in timeout — without this a single hung request
     // would freeze the whole cycle indefinitely. Aborts after `ms`.
@@ -267,8 +284,17 @@
         if (!rowStrings.length) return;
         for (let attempt = 0; attempt < 3; attempt++) {
             const meta = await ghGetMeta(CSV_PATH);
-            let content = meta ? b64ToText(meta.base64) : (CSV_HEADER + '\n');
-            if (!content.endsWith('\n')) content += '\n';
+            let content;
+            if (!meta) {
+                content = CSV_HEADER + '\n';
+            } else {
+                const existing = b64ToText(meta.base64);
+                const firstLine = (existing.split('\n', 1)[0] || '');
+                // If the column schema changed (older 8-col header), start a fresh
+                // file with the new header rather than producing ragged rows.
+                if (firstLine === CSV_HEADER) content = existing.endsWith('\n') ? existing : existing + '\n';
+                else content = CSV_HEADER + '\n';
+            }
             content += rowStrings.join('\n') + '\n';
             const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(CSV_PATH)}`;
             const body = { message, content: textToB64(content), branch: DATA_BRANCH };
@@ -383,11 +409,26 @@
     function summarize(o) {
         if (!o || typeof o !== 'object') return fmtVal(o);
         const name = o.name || o.title || o.label || '';
-        const type = o.type || o.subtype || o.kind || '';
+        const type = o.type != null ? typeShort(o.type) : '';
         const bits = [];
         if (name) bits.push(`name=${name}`);
         if (type) bits.push(`type=${type}`);
         return bits.length ? bits.join(' ') : fmtVal(o);
+    }
+    // Percepto entity type → short label (mirrors Asset Inspector's TYPE_REG).
+    const TYPE_SHORT = { 3: 'Asset', 4: 'NFZ', 15: 'FP', 16: 'FFZ', 19: 'Marker' };
+    function typeShort(t) { return TYPE_SHORT[t] != null ? TYPE_SHORT[t] : ('type' + t); }
+    function entMeta(o) { return { etype: (o && o.type != null) ? typeShort(o.type) : '', ename: (o && (o.name || o.title || o.label)) || '' }; }
+    // Derived/internal fields that regenerate on every save (arc ids, recomputed
+    // distances) or mirror another field (coords ↔ arc points — arcs is the
+    // geometry source of truth). Skipped in the diff OUTPUT so the CSV shows the
+    // meaningful edit, not the churn. (Still part of the hash, so a real re-save
+    // is still noticed → logged as a non-structural change if nothing else moved.)
+    function isNoiseField(path) {
+        if (path === 'id' || path.endsWith('.id')) return true;
+        if (path === 'distance' || path.endsWith('.distance')) return true;
+        if (path === 'coords' || path.indexOf('coords.') === 0) return true;
+        return false;
     }
     function diffObjects(oldList, newList) {
         const rows = [];
@@ -396,15 +437,17 @@
         const newMap = new Map();
         newList.forEach((o, i) => newMap.set(getObjId(o) || ('idx:' + i), o));
         for (const [id, o] of oldMap) {
-            if (!newMap.has(id)) rows.push({ change: 'removed', objectId: id, field: '(object)', was: summarize(o), is: '' });
+            if (!newMap.has(id)) { const m = entMeta(o); rows.push({ change: 'removed', etype: m.etype, ename: m.ename, objectId: id, field: '(entity)', was: summarize(o), is: '' }); }
         }
         for (const [id, o] of newMap) {
-            if (!oldMap.has(id)) rows.push({ change: 'added', objectId: id, field: '(object)', was: '', is: summarize(o) });
+            if (!oldMap.has(id)) { const m = entMeta(o); rows.push({ change: 'added', etype: m.etype, ename: m.ename, objectId: id, field: '(entity)', was: '', is: summarize(o) }); }
         }
         for (const [id, nObj] of newMap) {
             if (!oldMap.has(id)) continue;
+            const m = entMeta(nObj);
             deepDiff(oldMap.get(id), nObj, '', (path, was, is) => {
-                rows.push({ change: 'modified', objectId: id, field: path || '(root)', was: fmtVal(was), is: fmtVal(is) });
+                if (isNoiseField(path)) return;
+                rows.push({ change: 'modified', etype: m.etype, ename: m.ename, objectId: id, field: path || '(root)', was: fmtVal(was), is: fmtVal(is) });
             });
         }
         return rows;
@@ -485,26 +528,40 @@
         } catch (e) { console.warn(TAG, 'slack notify error', e); }
     }
 
-    // Dump a live status table to the console: what's been checked, each
-    // site's COLD/HOT state, last check, next due, and snapshot count.
+    // Live status: HOT sites (recently changed) highlighted in orange up top —
+    // those are the ones you care about — and the quiet cold majority tucked
+    // into a collapsed table. console.table can't color cells, so HOT rows are
+    // rendered as individual colored lines.
     function showStatus() {
         const ids = Object.keys(state.sites);
-        const rows = ids.map(id => {
+        const mk = id => {
             const st = state.sites[id];
             return {
                 site: id,
                 name: nameFor(id) || '',
-                state: st.state,
                 lastChecked: st.lastCheckAt ? new Date(st.lastCheckAt).toLocaleString() : '(baseline)',
                 nextDue: st.nextCheckAt ? new Date(st.nextCheckAt).toLocaleString() : '',
                 snapshots: st.slot || 0,
             };
-        }).sort((a, b) => (a.state === b.state ? a.site.localeCompare(b.site, undefined, { numeric: true }) : (a.state === 'hot' ? -1 : 1)));
-        const hot = rows.filter(r => r.state === 'hot').length;
+        };
+        const byId = (a, b) => a.site.localeCompare(b.site, undefined, { numeric: true });
+        const hot = ids.filter(id => state.sites[id].state === 'hot').map(mk).sort(byId);
+        const cold = ids.filter(id => state.sites[id].state !== 'hot').map(mk).sort(byId);
         const dueNow = ids.filter(id => (state.sites[id].nextCheckAt || 0) <= Date.now()).length;
-        console.log(`${TAG} STATUS — ${ids.length}/${siteList.length} sites checked · ${hot} HOT · ${ids.length - hot} cold · ${dueNow} due now · paused=${pausedForAuth} · leader=${amLeader}`);
-        try { console.table(rows); } catch (e) { console.log(rows); }
-        return rows;
+        console.log(
+            `%c${TAG} STATUS — ${ids.length}/${siteList.length} checked · %c${hot.length} HOT%c · ${cold.length} cold · ${dueNow} due now · paused=${pausedForAuth} · leader=${amLeader}`,
+            'color:#5fd0ff;font-weight:700', 'color:#ff8c42;font-weight:800', 'color:#5fd0ff;font-weight:700'
+        );
+        if (hot.length) {
+            console.log(`%c🔥 HOT (${hot.length}) — recently changed, re-checked every ${cfg.hotHours}h:`, 'color:#ff8c42;font-weight:800');
+            hot.forEach(r => console.log(
+                `%c   ${r.name} (${r.site})%c  last ${r.lastChecked} · next ${r.nextDue} · ${r.snapshots} snap`,
+                'color:#ffb37a;font-weight:700', 'color:#9aa0a6'
+            ));
+        }
+        try { console.groupCollapsed(`%c   cold (${cold.length}) — click to expand`, 'color:#8a8f98'); console.table(cold); console.groupEnd(); }
+        catch (e) { console.table(cold); }
+        return { hot, cold };
     }
 
     const RESULT_COLOR = {
@@ -548,7 +605,8 @@
             if (st) scheduleNext(st, 'cold');     // back off; don't hammer a flaky endpoint
             return 'error';
         }
-        const norm = stableStringify(r.data);
+        const cleaned = stripVolatile(r.data);      // drop live drone telemetry before hashing/diffing
+        const norm = stableStringify(cleaned);
         const hash = await sha256Hex(norm);
         let st = state.sites[id];
 
@@ -585,16 +643,16 @@
         const ts = new Date().toISOString();
         const nm = nameFor(id) || s.name || '';
         if (prevData) {
-            const rows = diffObjects(extractList(prevData), extractList(r.data));
+            const rows = diffObjects(extractList(stripVolatile(prevData)), extractList(cleaned));
             if (rows.length) {
-                for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.objectId, row.field, row.was, row.is]));
+                for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.etype, row.ename, row.objectId, row.field, row.was, row.is]));
             } else {
-                // Hash moved but no structural diff — a volatile field or key reorder.
-                pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '(non-structural change)', '', '']));
+                // Hash moved but no meaningful field diff — a derived/noise field (id, distance, coords mirror) or a key reorder.
+                pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '', '', '(non-structural change)', '', '']));
             }
             console.log(`${TAG} site ${id}: ${rows.length} field change(s)`);
         } else {
-            pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '(changed; no prior snapshot)', '', '']));
+            pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '', '', '(changed; no prior snapshot)', '', '']));
         }
 
         // Store new snapshot: overwrite latest + push into the 10-deep ring.
