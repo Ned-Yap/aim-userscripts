@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.8
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment from the map — click a flight path to focus it, then click a cyan "+" to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
+// @version      0.9
+// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — open the flight path's native editor, toggle the ✚ (insert mode), and click any segment number to split that segment in two. SEAMLESS (Path B): the vertex is spliced straight into Percepto's live React editor state, so it appears instantly as a real draggable/branchable waypoint and a native Save persists it — NO page refresh. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -12,21 +12,29 @@
 // ==/UserScript==
 //
 // AIM Flight Path Editor — on-map mid-segment vertex insert for Percepto flight paths.
-//   - Toggle the ✚ button in .map-tools (iframe only — the map lives there).
-//   - CLICK A FLIGHT PATH on the map to focus it → cyan "+" handles appear at the
-//     midpoint of each of its in-view segments (pan/zoom loads more).
-//   - Click a "+" → a real vertex is inserted there. The new vertex is a genuine
-//     branchable/draggable waypoint, and a native Save persists it with NO refresh.
+//   - Open a flight path's NATIVE editor so its segment-number badges appear.
+//   - Toggle the ✚ button in .map-tools (iframe only — the map lives there) to enter
+//     insert mode → the segment numbers glow green.
+//   - Click any segment number → a real vertex is inserted at that segment's
+//     midpoint. The new vertex is a genuine branchable/draggable waypoint, and a
+//     native Save persists it with NO refresh.
 //
-// HOW IT WORKS (Path B, confirmed 2026-06-09): Percepto's Site Setup editor keeps
-// the full map-object array in a React hook (component `g$e`, the entities-array
-// useState). We locate that hook by walking the React fiber tree from the Leaflet
-// container, splice the chosen arc A→B into A→M, M→B (M = segment midpoint), and
-// call the hook's dispatch (Percepto's own setState) to update the live model.
-// The map re-renders the new waypoint immediately, and because the native Save
-// reads from this same hook, the insert survives the save — no API POST, no reload.
-// arcs is the geometry source of truth; arc IDs regenerate on save so we key on
-// geometry (endpoints), never id. See ShortKeys/AIM_Editor_Probe[2-5].js. [AIM FPE].
+// WHY piggyback on the segment-number badges (.map-marker__arc-index): they are
+// Percepto's OWN markers — already at each segment midpoint, zoom-animated, and
+// re-rendered by Percepto whenever the geometry changes. So they never drift and
+// never overlap our own dots (we draw none). Insert mode intercepts a badge click
+// (capture phase, suppresses the native handler) and matches it to the nearest arc
+// midpoint across all flight paths in live state → that's the (path, segment).
+//
+// HOW THE INSERT WORKS (Path B, confirmed 2026-06-09): Percepto's Site Setup editor
+// keeps the full map-object array in a React hook (component `g$e`, the entities-
+// array useState). We locate that hook by walking the React fiber tree from the
+// Leaflet container, splice the chosen arc A→B into A→M, M→B (M = segment midpoint),
+// and call the hook's dispatch (Percepto's own setState). The map re-renders the new
+// waypoint immediately, and because the native Save reads from this same hook, the
+// insert survives the save — no API POST, no reload. arcs is the geometry source of
+// truth; arc IDs regenerate on save so we key on geometry (endpoints), never id.
+// See ShortKeys/AIM_Editor_Probe[2-5].js + reference_percepto_editor_react_state. [AIM FPE].
 //
 (function() {
     'use strict';
@@ -34,8 +42,9 @@
     const IS_IFRAME = window !== window.top;
     if (!IS_IFRAME) { try { console.log(`${TAG} top frame — idle (map is in iframe)`); } catch (e) {} return; }
 
-    const SELECT_PX = 14;       // click within this many px of a path to focus it
+    const BADGE_MATCH_PX = 30;  // a clicked segment badge must be within this many px of an arc midpoint
     const EPS = 1e-7;           // lat/lng match epsilon for arc identity
+    const ARC_BADGE_SEL = '.map-marker__arc-index';  // Percepto's per-segment number badge
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
     const warn = (...a) => { try { (unsafeWindow.console || console).warn(TAG, ...a); } catch (e) {} };
@@ -122,66 +131,68 @@
 
     // ---- state ----
     const state = {
-        active: false, selectedFpId: null, handles: [],
-        moveHandler: null, clickHandler: null,
+        insertMode: false,      // ON = clicking a segment number splits it
         inserts: 0,             // count this session (info only — all are live, nothing pending)
     };
     const undoStack = [];       // [{id, name, seg, arcs, coords}] for instant local revert
-    function selectedFP() { return liveEntities().find(e => e && e.id === state.selectedFpId) || null; }
 
-    function clearHandles() {
-        state.handles.forEach(h => { try { h.remove(); } catch (e) {} });
-        state.handles = [];
-    }
-
-    // Nearest flight path to a map click (container-px), or null.
-    function nearestFP(clickLatLng) {
+    // ---- segment-badge interception (the trigger) ----
+    // Match a clicked segment-number badge to the nearest arc midpoint across all
+    // flight paths in live state → returns {fpId, A, B, mid} or null.
+    function arcForBadge(badgeEl) {
         const map = getLeafletMap();
         if (!map) return null;
-        const cp = map.latLngToContainerPoint(clickLatLng);
-        let bestId = null, bestD = SELECT_PX;
-        flightPaths().forEach(fp => {
-            (fp.arcs || []).forEach(arc => {
-                const A = arc.point_a, B = arc.point_b; if (!A || !B) return;
-                const pa = map.latLngToContainerPoint(L_ll(A)), pb = map.latLngToContainerPoint(L_ll(B));
-                const dx = pb.x - pa.x, dy = pb.y - pa.y, len2 = dx * dx + dy * dy; if (len2 < 1e-6) return;
-                let t = ((cp.x - pa.x) * dx + (cp.y - pa.y) * dy) / len2; t = Math.max(0, Math.min(1, t));
-                const fx = pa.x + t * dx, fy = pa.y + t * dy;
-                const d = Math.hypot(fx - cp.x, fy - cp.y);
-                if (d < bestD) { bestD = d; bestId = fp.id; }
-            });
-        });
-        return bestId;
-    }
-
-    function rebuildHandles() {
-        clearHandles();
-        const map = getLeafletMap();
-        const L = unsafeWindow.L;
-        const fp = selectedFP();
-        if (!map || !L || !state.active || !fp) { renderPanel(); return; }
-        const ghost = L.divIcon({
-            html: '<div style="width:12px;height:12px;border-radius:50%;background:rgba(122,223,230,0.55);border:1.5px solid rgba(255,255,255,0.75);cursor:copy;box-shadow:0 0 4px rgba(0,0,0,0.5)" title="Click to add a vertex here"></div>',
-            className: 'aim-fpe-mid', iconSize: [16, 16], iconAnchor: [8, 8],
-        });
-        let total = 0;
-        const bounds = map.getBounds();
-        (fp.arcs || []).forEach((arc) => {
+        const cr = map.getContainer().getBoundingClientRect();
+        const r = badgeEl.getBoundingClientRect();
+        const bx = r.left + r.width / 2 - cr.left, by = r.top + r.height / 2 - cr.top;
+        let best = null, bestD = BADGE_MATCH_PX;
+        flightPaths().forEach(fp => (fp.arcs || []).forEach(arc => {
             const A = arc.point_a, B = arc.point_b; if (!A || !B) return;
             const mid = { lat: (A.lat + B.lat) / 2, lng: (A.lng + B.lng) / 2 };
-            total++;
-            if (!bounds.contains([mid.lat, mid.lng])) return;
-            const a0 = clone(A), b0 = clone(B);   // capture endpoints → arc identity at click time
-            const mk = L.marker([mid.lat, mid.lng], { icon: ghost, zIndexOffset: 900, keyboard: false });
-            mk.on('click', (ev) => {
-                try { if (ev.originalEvent) { ev.originalEvent.preventDefault(); ev.originalEvent.stopPropagation(); } } catch (e) {}
-                doInsert(fp.id, a0, b0, mid);
-            });
-            mk.addTo(map);
-            state.handles.push(mk);
-        });
-        log(`"${fp.name}": ${state.handles.length} of ${total} insert points in view`);
-        renderPanel();
+            let p; try { p = map.latLngToContainerPoint(L_ll(mid)); } catch (e) { return; }
+            const d = Math.hypot(p.x - bx, p.y - by);
+            if (d < bestD) { bestD = d; best = { fpId: fp.id, A: clone(A), B: clone(B), mid }; }
+        }));
+        return best;
+    }
+    function onBadgeClick(e) {
+        if (!state.insertMode) return;
+        const badge = e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL);
+        if (!badge) return;
+        e.preventDefault(); e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        const hit = arcForBadge(badge);
+        if (!hit) { toast(`Couldn't match segment "${(badge.textContent || '').trim()}" to a path — zoom in a touch and retry.`, '#ffb14e'); return; }
+        doInsert(hit.fpId, hit.A, hit.B, hit.mid);
+    }
+    // In insert mode also swallow mousedown/pointerdown/dblclick on a badge so Percepto
+    // doesn't start a native select/drag before our click fires.
+    function onBadgeSuppress(e) {
+        if (!state.insertMode) return;
+        const badge = e.target && e.target.closest && e.target.closest(ARC_BADGE_SEL);
+        if (!badge) return;
+        e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    }
+    function installBadgeListeners() {
+        document.addEventListener('click', onBadgeClick, true);
+        ['mousedown', 'pointerdown', 'dblclick'].forEach(t => document.addEventListener(t, onBadgeSuppress, true));
+    }
+
+    // green-glow the segment badges while insert mode is on (CSS only, reversible)
+    function ensureStyle() {
+        if (document.getElementById('aim-fpe-style')) return;
+        const s = document.createElement('style');
+        s.id = 'aim-fpe-style';
+        s.textContent = `
+            body.aim-fpe-insert-mode ${ARC_BADGE_SEL} {
+                box-shadow: 0 0 0 2px #5fff5f, 0 0 8px 1px rgba(95,255,95,0.75) !important;
+                cursor: copy !important;
+            }
+            .aim-fpe-btn.aim-fpe-on { background: rgba(95,255,95,0.22) !important; box-shadow: 0 0 0 1px rgba(95,255,95,0.7) inset; }
+            .aim-fpe-btn.aim-fpe-on span { color: #5fff5f !important; }
+        `;
+        (document.head || document.documentElement).appendChild(s);
     }
 
     // ---- the Path B insert: splice arc into live React state, no network ----
@@ -192,7 +203,7 @@
         if (!ent || !Array.isArray(ent.arcs)) { toast('Flight path not found in live state.', '#ff8a80'); return; }
         // find the arc by its endpoints (geometry, not index — arc ids/order can shift)
         let idx = ent.arcs.findIndex(a => ptEq(a.point_a, A) && ptEq(a.point_b, B));
-        if (idx === -1) { toast('That segment changed — click a fresh handle.', '#ffb14e'); rebuildHandles(); return; }
+        if (idx === -1) { toast('That segment just changed — click the segment number again.', '#ffb14e'); return; }
         const a = ent.arcs[idx];
         const Mpt = M || { lat: (a.point_a.lat + a.point_b.lat) / 2, lng: (a.point_a.lng + a.point_b.lng) / 2 };
         const dAB = hav(a.point_a, a.point_b) || (a.distance || 1);
@@ -212,7 +223,7 @@
         hook.dispatch(arr => arr.map(e => (e && e.id === fpId) ? { ...e, arcs: newArcs, coords: newCoords } : e));
         state.inserts++;
         log(`inserted vertex on "${ent.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (live, no refresh)`);
-        setTimeout(rebuildHandles, 40);
+        renderPanel();
         toast(`✚ Vertex added on ${ent.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
     }
 
@@ -224,7 +235,7 @@
         hook.dispatch(arr => arr.map(e => (e && e.id === snap.id) ? { ...e, arcs: snap.arcs, coords: snap.coords } : e));
         if (state.inserts > 0) state.inserts--;
         log(`undid insert on "${snap.name}" seg ${snap.seg}`);
-        setTimeout(rebuildHandles, 40);
+        renderPanel();
         toast(`↩ Reverted last insert (${snap.name})`, '#ffd479');
     }
     unsafeWindow.__aim_fpe_undo = doUndo;
@@ -246,82 +257,69 @@
         const tools = findToolsBar();
         if (!tools || buttonEl) return;
         const w = document.createElement('div');
-        w.innerHTML = `<div class="map-tools__button aim-fpe-btn" title="Flight Path Editor — insert vertices" style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none"><span style="font-size:17px;line-height:1">✚</span></div>`;
+        w.innerHTML = `<div class="map-tools__button aim-fpe-btn" title="Flight Path Editor — toggle insert mode, then click a segment number to split it" style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none"><span style="font-size:17px;line-height:1">✚</span></div>`;
         buttonEl = w.firstElementChild;
         ['mousedown', 'click', 'contextmenu'].forEach(t => buttonEl.addEventListener(t, e => e.stopPropagation()));
-        buttonEl.addEventListener('click', (e) => { e.preventDefault(); togglePanel(); });
+        buttonEl.addEventListener('click', (e) => { e.preventDefault(); toggleInsertMode(); });
         tools.appendChild(buttonEl);
+        syncButton();
         log('button injected into .map-tools');
     }
-    function togglePanel() {
-        if (document.getElementById(PANEL_ID)) { closePanel(); return; }
-        openPanel();
-    }
-    function openPanel() {
-        state.active = true;
-        const map = getLeafletMap();
-        if (map) {
-            if (!state.moveHandler) { state.moveHandler = () => rebuildHandles(); map.on('moveend zoomend', state.moveHandler); }
-            if (!state.clickHandler) {
-                state.clickHandler = (e) => {
-                    if (!state.active) return;
-                    const id = nearestFP(e.latlng);
-                    if (id && id !== state.selectedFpId) { state.selectedFpId = id; const fp = selectedFP(); log('focused flight path:', fp && fp.name); rebuildHandles(); }
-                };
-                map.on('click', state.clickHandler);
-            }
+    function syncButton() { if (buttonEl) buttonEl.classList.toggle('aim-fpe-on', state.insertMode); }
+
+    function toggleInsertMode() {
+        state.insertMode = !state.insertMode;
+        document.body.classList.toggle('aim-fpe-insert-mode', state.insertMode);
+        syncButton();
+        if (state.insertMode) {
+            const hasBadges = document.querySelector(ARC_BADGE_SEL);
+            if (!findEntitiesHook()) warn('live editor state not found — open Site Setup so the map editor is loaded');
+            toast(hasBadges
+                ? 'Insert mode ON — click any glowing segment number to split it.'
+                : 'Insert mode ON — open a flight path\'s editor so its segment numbers appear, then click one.', '#5fff5f');
+            renderPanel();
+        } else {
+            toast('Insert mode off', '#9aa');
+            const p = document.getElementById(PANEL_ID); if (p) p.remove();
         }
-        if (!findEntitiesHook()) warn('live editor state not found yet — open Site Setup so the map editor is loaded');
-        renderPanel();
-        rebuildHandles();
     }
-    function closePanel() {
-        state.active = false;
-        clearHandles();
-        const map = getLeafletMap();
-        if (map) {
-            if (state.moveHandler) { try { map.off('moveend zoomend', state.moveHandler); } catch (e) {} state.moveHandler = null; }
-            if (state.clickHandler) { try { map.off('click', state.clickHandler); } catch (e) {} state.clickHandler = null; }
-        }
-        const p = document.getElementById(PANEL_ID); if (p) p.remove();
-    }
+
     function renderPanel() {
         let p = document.getElementById(PANEL_ID);
-        if (!state.active) { if (p) p.remove(); return; }
+        if (!state.insertMode) { if (p) p.remove(); return; }
         if (!p) {
             p = document.createElement('div');
             p.id = PANEL_ID;
-            p.style.cssText = 'position:fixed;top:80px;right:18px;width:300px;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
+            p.style.cssText = 'position:fixed;top:80px;right:18px;width:300px;background:#1f2228;border:1px solid rgba(95,255,95,0.5);border-radius:8px;padding:14px 16px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.6)';
             document.body.appendChild(p);
         }
-        const fp = selectedFP();
         const canUndo = undoStack.length > 0;
         p.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                <strong style="color:#7adfe6;font-size:14px">✚ Flight Path Editor</strong>
-                <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px">×</span>
+                <strong style="color:#5fff5f;font-size:14px">✚ Insert mode ON</strong>
+                <span id="aim-fpe-x" style="cursor:pointer;color:#888;font-size:16px" title="Turn insert mode off">×</span>
             </div>
-            ${fp
-                ? `<div style="color:#cfd6dc;margin-bottom:8px">Focused: <b style="color:#7adfe6">${String(fp.name).replace(/</g, '&lt;')}</b> · <b>${state.handles.length}</b> handles in view.<br><span style="color:#888">Click a handle to insert a vertex. Click another path to switch.</span></div>`
-                : `<div style="color:#aaa;margin-bottom:8px;line-height:1.5"><b>Click a flight path on the map</b> to focus it — its insert handles appear.</div>`}
+            <div style="color:#cfd6dc;margin-bottom:8px;line-height:1.5">Open a flight path's editor, then <b style="color:#5fff5f">click a glowing segment number</b> to split that segment at its midpoint.</div>
             <div style="margin-bottom:8px;padding:7px 10px;background:rgba(95,255,95,0.08);border:1px solid rgba(95,255,95,0.35);border-radius:4px;color:#9be89b;line-height:1.45">
-                ✅ <b>Seamless</b> — inserts appear live as real waypoints. Edit/branch them natively, then <b>Save</b>. <b>No refresh.</b>
+                ✅ <b>Seamless</b> — the vertex appears live as a real waypoint. Drag/branch it natively, then <b>Save</b>. <b>No refresh.</b>
                 ${state.inserts > 0 ? `<br><span style="color:#cfd6dc">${state.inserts} insert${state.inserts === 1 ? '' : 's'} this session.</span>` : ''}
             </div>
             <button id="aim-fpe-undo" ${canUndo ? '' : 'disabled'} style="width:100%;background:rgba(255,193,71,${canUndo ? '0.16' : '0.06'});color:${canUndo ? '#ffd479' : '#7a6f4a'};border:1px solid rgba(255,193,71,${canUndo ? '0.55' : '0.25'});border-radius:4px;padding:7px;cursor:${canUndo ? 'pointer' : 'default'};font:inherit;font-weight:600">↩ Undo last insert${canUndo ? ` (${undoStack.length})` : ''}</button>
             <div style="color:#888;font-size:11px;line-height:1.5;margin-top:8px">New vertices land at the segment midpoint — drag natively to fine-tune. Undo reverts locally (or just don't Save).</div>
         `;
-        p.querySelector('#aim-fpe-x').onclick = closePanel;
+        p.querySelector('#aim-fpe-x').onclick = toggleInsertMode;
         const u = p.querySelector('#aim-fpe-undo'); if (u && canUndo) u.onclick = doUndo;
     }
 
     // ---- boot ----
     patchLeafletMap();
+    ensureStyle();
+    installBadgeListeners();
     let tries = 0;
     const boot = setInterval(() => { tries++; if (findToolsBar() && !buttonEl) injectButton(); if (tries > 60) clearInterval(boot); }, 700);
     try {
         const obs = new MutationObserver(() => { if (buttonEl && !document.body.contains(buttonEl)) { buttonEl = null; injectButton(); } else if (!buttonEl) injectButton(); });
         if (document.body) obs.observe(document.body, { childList: true, subtree: true });
     } catch (e) {}
-    log('v0.8 ready (iframe) — ✚ in .map-tools · seamless Path B (live React-state insert, no refresh)');
+    log('v0.9 ready (iframe) — ✚ insert-mode toggle · click a segment number to split it · seamless Path B (no refresh)');
 })();

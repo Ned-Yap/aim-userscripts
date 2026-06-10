@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-10 — AIM Flight Path Editor v0.9 (latest, dev-only) — click Percepto's own segment numbers
+
+v0.8 drew its own cyan "+" handles, which (a) sat on top of Percepto's segment-number badges (hard to see) and (b) didn't follow a waypoint when you dragged it (they only rebuilt on pan/zoom). v0.9 drops our handles entirely and **piggybacks on Percepto's segment-number badges** (`.map-marker__arc-index`) — they're already at each segment midpoint, zoom-animated, and re-rendered by Percepto on every geometry change, so they never drift or overlap.
+
+The ✚ button is now a plain **insert-mode toggle** (no more click-the-path focus step). With it on, the segment numbers glow green and **clicking a number splits that segment** at its midpoint (matched to the nearest arc in live state; native badge click suppressed in capture phase). Workflow: open the flight path's native editor → toggle ✚ → click a segment number → vertex appears live → drag/branch natively → Save.
+
+---
+
 ## 2026-06-09 — AIM Flight Path Editor v0.8 (latest, dev-only) — SEAMLESS vertex insert (Path B), no refresh
 
 **The refresh dance is dead.** v0.7 inserted a mid-segment vertex via `POST /map_objects/`, but Percepto caches the flight path at page load — so you had to refresh before editing natively, and a native Save on an un-refreshed insert silently overwrote it (the footgun).
