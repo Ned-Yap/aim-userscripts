@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.8
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -56,7 +56,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.8';
+    const SCRIPT_VERSION = '0.9';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -580,7 +580,13 @@
         const id = s.id;
         const name = nameFor(id) || s.name || '(unnamed)';
         const c = RESULT_COLOR[res] || '#cccccc';
-        const line = `%c(${i}/${batchLen})%c ${name} %c(${id})%c → ${res}`;
+        // Batch position always; a running "done/total" only WHILE the sweep is
+        // still climbing (e.g. baselining) — drop it once fully baselined so it
+        // doesn't pin at the saturated 443/443.
+        const done = Object.keys(state.sites).length;
+        const total = siteList.length;
+        const prog = (total && done < total) ? `${i}/${batchLen} · ${done}/${total}` : `${i}/${batchLen}`;
+        const line = `%c(${prog})%c ${name} %c(${id})%c → ${res}`;
         const styles = [
             'color:#9aa0a6',
             'color:#e6e6e6;font-weight:600',
