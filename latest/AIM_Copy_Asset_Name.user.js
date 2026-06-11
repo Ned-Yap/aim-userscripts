@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.94
+// @version      3.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.94';
+    const SCRIPT_VERSION = '3.95';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -8061,12 +8061,22 @@
                         const ci = rows.findIndex(rr => rr._rowKey === r._rowKey);
                         if (ai >= 0 && ci >= 0) {
                             const lo = Math.min(ai, ci), hi = Math.max(ai, ci);
+                            // v3.95: flip the affected checkboxes IN PLACE — a
+                            // full redrawTable() on a big table was the ~500ms
+                            // lag. One-pass rowKey→checkbox lookup (avoids
+                            // CSS.escape on segment keys like "123:456").
+                            const boxByKey = {};
+                            tableWrap.querySelectorAll('tr[data-row-key]').forEach(trEl => {
+                                boxByKey[trEl.getAttribute('data-row-key')] = trEl.querySelector('td input[type="checkbox"]');
+                            });
                             for (let i = lo; i <= hi; i++) {
-                                if (target) sumPanelState.selectedIds.add(rows[i]._rowKey);
-                                else sumPanelState.selectedIds.delete(rows[i]._rowKey);
+                                const k = rows[i]._rowKey;
+                                if (target) sumPanelState.selectedIds.add(k);
+                                else sumPanelState.selectedIds.delete(k);
+                                if (boxByKey[k]) boxByKey[k].checked = target;
                             }
                             sumPanelState._lastSelKey = r._rowKey;
-                            redrawTable(); // many checkboxes changed — rebuild
+                            syncSelHeader();
                             return;
                         }
                     }
