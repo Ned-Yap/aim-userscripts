@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.97
+// @version      3.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.97';
+    const SCRIPT_VERSION = '3.98';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1008,7 +1008,22 @@
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
         const entities = bucket.entities || [];
-        // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16). v3.77:
+        // 1. POINT entities first (GM 19, Base 8, Safe Zone 98) — nearest
+        //    within 18m. v3.98: these sit ON TOP of everything. A base/safe/GM
+        //    is almost always dropped INSIDE an FFZ, so if we hit-test polygons
+        //    first the FFZ wins and you can never inspect the point. Checking
+        //    points first (within a small radius) fixes that; click elsewhere
+        //    in the FFZ (>18m from any point) still selects the FFZ.
+        let bestPt = null, bestPtDist = 18;
+        for (const e of entities) {
+            if (e.type !== 8 && e.type !== 19 && e.type !== 98) continue;
+            const mc = entityCoords(e);
+            if (!mc || !mc[0]) continue;
+            const d = approxMeters(lat, lng, mc[0].lat, mc[0].lng);
+            if (d < bestPtDist) { bestPt = e; bestPtDist = d; }
+        }
+        if (bestPt) return bestPt;
+        // 2. Polygon hit (assets type 3, NFZs type 4, FFZs type 16). v3.77:
         //    use entityCoords(e) helper so Apply'd entities (whose `.coords`
         //    was replaced with `.points` by the server's write-shape echo)
         //    still hit-test. Raw first, sort fallback for bowtie wells.
@@ -1034,7 +1049,7 @@
             }
         }
         if (bestPoly) return bestPoly;
-        // 2. Flight paths (type 15) — distance to nearest segment < 8m.
+        // 3. Flight paths (type 15) — distance to nearest segment < 8m.
         //    Arcs preferred; if missing, fall back to entityCoords (v3.77).
         let bestFP = null, bestFPDist = 8;
         for (const e of entities) {
@@ -1056,17 +1071,7 @@
                 }
             }
         }
-        if (bestFP) return bestFP;
-        // 3. Point markers (type 19) — nearest within 15m. v3.77 entityCoords fallback.
-        let bestPt = null, bestPtDist = 15;
-        for (const e of entities) {
-            if (e.type !== 19) continue;
-            const mc = entityCoords(e);
-            if (!mc || !mc[0]) continue;
-            const d = approxMeters(lat, lng, mc[0].lat, mc[0].lng);
-            if (d < bestPtDist) { bestPt = e; bestPtDist = d; }
-        }
-        return bestPt;
+        return bestFP;
     }
 
     // ============================================================
