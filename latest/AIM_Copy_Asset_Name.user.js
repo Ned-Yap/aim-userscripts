@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.96
+// @version      3.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.96';
+    const SCRIPT_VERSION = '3.97';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -488,7 +488,14 @@
         if (e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3) {
             return samplePolygon(e.coords);
         }
-        // FFZ only — NFZ + Asset intentionally return no sample points.
+        // v3.97: Base Station (8) + Safe Zone (98) are single points — sample
+        // their coord so the Elevation column shows the DEM ground there, to
+        // compare against their manually-entered Alt (a mismatch = land into
+        // the ground). NFZ + Asset intentionally return no sample points.
+        if ((e.type === 8 || e.type === 98) && Array.isArray(e.coords) && e.coords[0]
+            && typeof e.coords[0].lat === 'number') {
+            return [{ lat: e.coords[0].lat, lng: e.coords[0].lng }];
+        }
         return [];
     }
     // ---- Sample-point map visualization (v3.20) ----
@@ -1230,6 +1237,27 @@
             }
             if (Array.isArray(e.coords) && e.coords[0]) {
                 out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        // v3.97: Base / Safe Zone — compare the MANUALLY-entered altitude
+        // against the DEM ground at the same GPS. A large mismatch means the
+        // stored alt is wrong (land-into-ground risk). Needs DEM in cache
+        // (open the SUM panel once to fetch it for the site).
+        if ((e.type === 8 || e.type === 98) && Array.isArray(e.coords) && e.coords[0]) {
+            const storedM = e.type === 8
+                ? (e.custom && typeof e.custom.relative_alt === 'number' ? e.custom.relative_alt : null)
+                : (e.custom && typeof e.custom.altitude === 'number' ? e.custom.altitude : null);
+            const groundM = maxCachedElevation([e.coords[0]]);
+            if (groundM != null) {
+                const gr = meterRow('Ground (DEM)', groundM);
+                if (gr) out.push(gr);
+                if (storedM != null) {
+                    const dM = storedM - groundM, dFt = dM * 3.28084;
+                    const warn = Math.abs(dFt) > 50;
+                    out.push({ label: 'Alt vs ground', value: `${dFt >= 0 ? '+' : ''}${dFt.toFixed(0)} ft / ${dM >= 0 ? '+' : ''}${dM.toFixed(1)} m${warn ? '  ⚠ MISMATCH' : '  ✓ ok'}` });
+                }
+            } else {
+                out.push({ label: 'Ground (DEM)', value: '— open SUM to fetch elevation' });
             }
         }
         if (e.description) {
@@ -2106,14 +2134,14 @@
         },
         {
             name: 'Base Stations',
-            desc: 'Installed bases (type 8) — ID, altitude, allocated drone, coords.',
-            columnOrder: ['name', 'entId', 'ptAlt', 'droneName', 'droneId', 'lat', 'long', 'gps', 'notes'],
+            desc: 'Installed bases (type 8) — stored Alt vs DEM ground elevation, drone, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'elevation', 'droneName', 'droneId', 'lat', 'long', 'gps', 'notes'],
             typeFilter: ['8'], sortKey: 'name', sortDir: 1, unitsFt: true,
         },
         {
             name: 'Safe Zones',
-            desc: 'Safe zones (type 98) — ID, altitude, coords.',
-            columnOrder: ['name', 'entId', 'ptAlt', 'lat', 'long', 'gps', 'notes'],
+            desc: 'Safe zones (type 98) — stored Alt vs DEM ground elevation, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'elevation', 'lat', 'long', 'gps', 'notes'],
             typeFilter: ['98'], sortKey: 'name', sortDir: 1, unitsFt: true,
         },
         {
