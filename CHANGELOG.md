@@ -6,6 +6,28 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Flight Path Editor v0.16 (latest, dev-only) — OPEN PATH (un-close a snapped loop)
+
+New companion to the splitter: reverse Percepto's native **CLOSE PATH**. Native "close" snaps a loose end onto an existing vertex (byte-identical coords) so two vertices merge and the loop closes — and there's no native way to undo it, so a segment trapped inside a closed loop can't be cleaned up if it goes unshielded. v0.16 adds an **"OPEN PATH"** item to Percepto's own double-click vertex popup (`flight-path-vertex-popup__menu`), shown only when the clicked vertex sits on a loop. Clicking it detaches the **loop-closing arc** to a fresh coordinate ~50 px off the junction (a draggable loose end), re-opening the loop.
+
+Picking the right arc is provably safe: among the arcs meeting at that vertex it only ever detaches a **cycle edge (non-bridge)** — never a tail/bridge — so the operation can *never* sever the path into two pieces; it verifies full graph connectivity before and refuses otherwise. Same working-copy splice + validation-gate + instant-undo machinery as the segment splitter; native Save persists it, no refresh.
+
+---
+
+## 2026-06-11 — SOP Validators (Phase 4a) — Asset Inspector v4.1 + AIM Issues v1.02 (latest, dev-only)
+
+First slice of the Site-Setup SOP validators. Geometric proximity checks run off the same entity data the SUM already loads and flag each violation on the map as an issue.
+
+- **New "SOP Validators" Control Panel section** (Site Setup only) with a master toggle, per-check enable, and an **editable threshold** for each check:
+  - **FFZ → Asset** standoff (default ≥ 15 ft from the asset boundary)
+  - **FP → Asset** standoff (default ≥ 15 ft)
+  - **FFZ ↔ FFZ** overlap / separation (default: flag overlap only; raise to flag near-misses)
+- **🚩 Draw issues** runs the checks and hands each violation to **AIM Issues**, which draws the offending shape on the map authored as **"Validator"** with the note `violation: …` (includes the measured ft vs the threshold). **Clear validator issues** removes them.
+- Validator issues are **ephemeral** — never saved, never synced to GitHub; re-running replaces them. (Needs AIM Issues enabled for the on-map drawing; the section + thresholds work regardless.)
+- Validated offline against site 1583 (163 assets / 42 FFZs / 4 FPs): 10 FFZ→Asset and 1 FP→Asset near-misses surfaced; FFZ↔FFZ correctly clean (closest pair 62 ft).
+
+Coworkers (prod) are unaffected — they run Asset Inspector v4.0 (no validators) and AIM Issues v1.01; the v1.02 bridge is dormant until a v4.1 Asset Inspector sends it findings.
+
 ## 2026-06-11 — AIM Map Styler v34.72 (latest, dev-only) — refresh stale asset data
 
 The styler caches each site's asset state/equipment at load, so editing an asset in Percepto (e.g. fixing a mislabeled "- Empty") left its color/visibility stale. Two ways to refresh now:

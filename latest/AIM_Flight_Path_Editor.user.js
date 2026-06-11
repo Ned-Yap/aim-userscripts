@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.15
-// @description  Insert a vertex in the MIDDLE of a Percepto flight-path segment — while natively editing a flight path, just click any segment number to split that segment in two. No button, no mode. SEAMLESS (Path B): the vertex is spliced straight into the flight path's live React editor working copy, so it appears instantly as a real draggable/branchable waypoint, coexists with native drags, and a native Save persists it — NO page refresh. Every split passes a pre-write validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.16
+// @description  Edit Percepto flight paths from the map while natively editing one: (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). No button, no mode. SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -51,6 +51,11 @@
     const BADGE_MATCH_PX = 30;  // a clicked segment badge must be within this many px of an arc midpoint
     const EPS = 1e-7;           // lat/lng match epsilon for arc identity
     const ARC_BADGE_SEL = '.map-marker__arc-index';  // Percepto's per-segment number badge
+    const VERTEX_POPUP_SEL = '.flight-path-vertex-popup';        // Percepto's double-click vertex popup
+    const POPUP_MENU_SEL = '.flight-path-vertex-popup__menu';    // its menu container
+    const POPUP_ITEM_CLASS = 'flight-path-vertex-popup__menu-item';
+    const OPEN_ITEM_CLASS = 'aim-fpe-open-path';                 // our injected "OPEN PATH" item
+    const UNSNAP_OFFSET_PX = 50;  // how far (screen px) the freed vertex lands off the junction
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
     const warn = (...a) => { try { (unsafeWindow.console || console).warn(TAG, ...a); } catch (e) {} };
@@ -357,11 +362,175 @@
         if (!wc || !wc.dispatch) { toast('Open the path\'s editor to undo.', '#ff8a80'); return; }
         wc.dispatch({ ...wc.state, arcs: snap.arcs, coords: snap.coords });
         if (state.inserts > 0) state.inserts--;
-        log(`undid insert on "${snap.name}" seg ${snap.seg}`);
+        log(`undid ${snap.kind || 'insert'} on "${snap.name}"`);
         renderPanel();
-        toast(`↩ Reverted last insert (${snap.name})`, '#ffd479');
+        toast(`↩ Reverted last ${snap.kind === 'open' ? 'loop-open' : 'split'} (${snap.name})`, '#ffd479');
     }
     unsafeWindow.__aim_fpe_undo = doUndo;
+
+    // ==================================================================
+    // OPEN PATH (unsnap) — reverse Percepto's native "CLOSE PATH" merge.
+    // A close moves a loose end onto an existing vertex (byte-identical
+    // coords) so two vertices become one and the loop closes. We reverse
+    // it: detach the loop-closing arc's shared endpoint to a new offset
+    // coordinate, re-opening the loop. Triggered from an "OPEN PATH" item
+    // we inject into Percepto's own double-click vertex popup.
+    // ==================================================================
+    const nodeKey = (p) => p.lat.toFixed(7) + ',' + p.lng.toFixed(7);
+
+    function arcsIncidentTo(arcs, V) {
+        const res = [];
+        arcs.forEach((a, i) => {
+            if (ptEq(a.point_a, V)) res.push({ arcIdx: i, endpoint: 'a' });
+            else if (ptEq(a.point_b, V)) res.push({ arcIdx: i, endpoint: 'b' });
+        });
+        return res;
+    }
+    // Is arc[skipIdx] a BRIDGE? (removing it disconnects its two endpoints)
+    function isBridge(arcs, skipIdx) {
+        const a = arcs[skipIdx];
+        const srcKey = nodeKey(a.point_a), dstKey = nodeKey(a.point_b);
+        if (srcKey === dstKey) return false; // zero-length self-loop: not a bridge
+        const adj = new Map();
+        arcs.forEach((arc, i) => {
+            if (i === skipIdx) return;
+            const ka = nodeKey(arc.point_a), kb = nodeKey(arc.point_b);
+            if (!adj.has(ka)) adj.set(ka, []); if (!adj.has(kb)) adj.set(kb, []);
+            adj.get(ka).push(kb); adj.get(kb).push(ka);
+        });
+        const seen = new Set([srcKey]); const stack = [srcKey];
+        while (stack.length) { const n = stack.pop(); for (const m of (adj.get(n) || [])) { if (m === dstKey) return false; if (!seen.has(m)) { seen.add(m); stack.push(m); } } }
+        return true; // dst unreachable without this arc → it's a bridge
+    }
+    function graphConnected(arcs) {
+        if (!arcs.length) return true;
+        const adj = new Map(); const nodes = new Set();
+        arcs.forEach(a => {
+            const ka = nodeKey(a.point_a), kb = nodeKey(a.point_b);
+            nodes.add(ka); nodes.add(kb);
+            if (!adj.has(ka)) adj.set(ka, []); if (!adj.has(kb)) adj.set(kb, []);
+            adj.get(ka).push(kb); adj.get(kb).push(ka);
+        });
+        const start = nodes.values().next().value;
+        const seen = new Set([start]); const stack = [start];
+        while (stack.length) { const n = stack.pop(); for (const m of (adj.get(n) || [])) if (!seen.has(m)) { seen.add(m); stack.push(m); } }
+        return seen.size === nodes.size;
+    }
+    // At vertex V, the loop-closer = the most-recently-added incident arc that is
+    // part of a cycle (NOT a bridge). Returns {arcIdx, endpoint} or null. Because we
+    // only ever pick a non-bridge, opening the loop can never sever the path.
+    function findCloserAt(arcs, V) {
+        const incident = arcsIncidentTo(arcs, V);
+        if (incident.length < 2) return null;
+        const cycleEdges = incident.filter(inc => !isBridge(arcs, inc.arcIdx));
+        if (!cycleEdges.length) return null;
+        cycleEdges.sort((x, y) => y.arcIdx - x.arcIdx); // highest index = most recently added = the closer
+        return cycleEdges[0];
+    }
+
+    function validateUnsnap(st, V, Vprime, newArcs, newCoords) {
+        if (newArcs.length !== st.arcs.length) return { ok: false, reason: 'arc count changed' };
+        if (newCoords.length !== (st.coords || []).length + 1) return { ok: false, reason: 'coord count delta ≠ +1' };
+        if (!finitePt(Vprime)) return { ok: false, reason: 'freed vertex is non-finite' };
+        if (ptSame(Vprime, V)) return { ok: false, reason: 'freed vertex did not move' };
+        for (const arc of newArcs) if (!finitePt(arc.point_a) || !finitePt(arc.point_b)) return { ok: false, reason: 'non-finite arc endpoint' };
+        if (!graphConnected(newArcs)) return { ok: false, reason: 'edit would disconnect the flight path' };
+        return { ok: true };
+    }
+
+    function doUnsnap(fpId, V) {
+        try {
+            const wc = findFpWorkingCopies().find(w => w.id === fpId);
+            if (!wc || !wc.dispatch) { toast('Open the flight path editor first.', '#ff8a80'); return; }
+            const st = wc.state;
+            const closer = findCloserAt(st.arcs, V);
+            if (!closer) { toast('No closed loop to open at this vertex.', '#ffb14e'); return; }
+            const map = getLeafletMap();
+            if (!map) { toast('Map not ready.', '#ff8a80'); return; }
+            const arc = st.arcs[closer.arcIdx];
+            const far = closer.endpoint === 'b' ? arc.point_a : arc.point_b; // the endpoint that is NOT V
+            // place the freed vertex ~50px off the junction, pointing AWAY from the arc's far end
+            const Vpx = map.latLngToContainerPoint(L_ll(V));
+            const Fpx = map.latLngToContainerPoint(L_ll(far));
+            let dx = Vpx.x - Fpx.x, dy = Vpx.y - Fpx.y;
+            const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;
+            const Vpll = map.containerPointToLatLng(unsafeWindow.L.point(Vpx.x + dx * UNSNAP_OFFSET_PX, Vpx.y + dy * UNSNAP_OFFSET_PX));
+            const Vprime = { lat: Vpll.lat, lng: Vpll.lng };
+
+            const origArcs = clone(st.arcs), origCoords = clone(st.coords || []);
+            const newArcs = clone(st.arcs);
+            if (closer.endpoint === 'b') newArcs[closer.arcIdx].point_b = clone(Vprime);
+            else newArcs[closer.arcIdx].point_a = clone(Vprime);
+            const na = newArcs[closer.arcIdx];
+            na.distance = hav(na.point_a, na.point_b); // server recomputes on save anyway
+            const newCoords = clone(st.coords || []); newCoords.push(clone(Vprime));
+
+            const v = validateUnsnap(st, V, Vprime, newArcs, newCoords);
+            if (!v.ok) { warn('OPEN PATH aborted —', v.reason); toast(`⛔ Open Path blocked: ${v.reason}. Nothing changed.`, '#ff8a80'); return; }
+
+            undoStack.push({ id: fpId, name: st.name, kind: 'open', arcs: origArcs, coords: origCoords });
+            wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
+            state.inserts++;
+            log(`opened loop on "${st.name}" — detached arc ${closer.arcIdx + 1} from the junction (coords ${origCoords.length} → ${newCoords.length}, validated)`);
+            renderPanel();
+            toast(`✂ Loop opened on ${st.name}. The freed vertex is ~50px away — drag it where you want, then Save.`, '#5fff5f');
+        } catch (e) {
+            warn('doUnsnap threw — path left as-is', e);
+            toast('⛔ Open Path errored — see console. Path left as-is.', '#ff8a80');
+        }
+    }
+
+    // ---- inject "OPEN PATH" into Percepto's double-click vertex popup ----
+    function nearestVertexToLatLng(ll) {
+        let best = null, bestD = Infinity;
+        findFpWorkingCopies().forEach(wc => {
+            (wc.state.arcs || []).forEach(a => {
+                for (const p of [a.point_a, a.point_b]) {
+                    if (!finitePt(p)) continue;
+                    const d = hav(ll, p);
+                    if (d < bestD) { bestD = d; best = { wc, V: { lat: p.lat, lng: p.lng } }; }
+                }
+            });
+        });
+        return (best && bestD <= 8) ? best : null; // within ~8 m of a real vertex
+    }
+    function injectOpenPathItem(popupEl, fpId, V, popup) {
+        const menu = popupEl.querySelector(POPUP_MENU_SEL);
+        if (!menu || menu.querySelector('.' + OPEN_ITEM_CLASS)) return;
+        const item = document.createElement('div');
+        item.className = POPUP_ITEM_CLASS + ' ' + OPEN_ITEM_CLASS;
+        item.textContent = 'OPEN PATH';
+        item.style.color = '#5fff5f';
+        item.addEventListener('click', (ev) => {
+            ev.preventDefault(); ev.stopPropagation();
+            try { const m = getLeafletMap(); if (m && popup) m.closePopup(popup); } catch (e) {}
+            doUnsnap(fpId, V);
+        });
+        menu.appendChild(item);
+        log('injected OPEN PATH into the vertex popup');
+    }
+    function handlePopupOpen(e) {
+        try {
+            const popup = e.popup;
+            const el = popup && popup.getElement && popup.getElement();
+            if (!el || !el.classList || !el.classList.contains(VERTEX_POPUP_SEL.slice(1))) return;
+            const ll = popup.getLatLng && popup.getLatLng();
+            if (!ll) return;
+            const hit = nearestVertexToLatLng({ lat: ll.lat, lng: ll.lng });
+            if (!hit) return;
+            if (!findCloserAt(hit.wc.state.arcs, hit.V)) return; // only when there's a loop to open here
+            injectOpenPathItem(el, hit.wc.id, hit.V, popup);
+        } catch (err) { warn('handlePopupOpen threw', err); }
+    }
+    let popupHooked = false;
+    function hookPopups() {
+        if (popupHooked) return;
+        const map = getLeafletMap();
+        if (!map || !map.on) return;
+        map.on('popupopen', handlePopupOpen);
+        popupHooked = true;
+        log('OPEN PATH ready — popupopen hook attached');
+    }
 
     // ---- UI ----
     function toast(msg, color) {
@@ -390,12 +559,14 @@
             c.addEventListener('click', (e) => { e.preventDefault(); doUndo(); });
             document.body.appendChild(c);
         }
-        c.textContent = `↩ Undo split (${undoStack.length})`;
+        c.textContent = `↩ Undo last edit (${undoStack.length})`;
     }
 
     // ---- boot ----
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
-    log('v0.15 ready (iframe) — click a segment number to split it (no button) · writes the FP editor working copy (coexists with native drags) · pre-write validation gate (aborts any malformed split) + post-write self-check · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
+    let bootTries = 0;
+    const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
+    log('v0.16 ready (iframe) — click a segment number to split it · OPEN PATH item in the vertex popup un-closes a loop · writes the FP editor working copy (coexists with native drags) · validation gate on every edit · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
 })();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -55,7 +55,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.01';
+    const SCRIPT_VERSION = '1.02';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -432,7 +432,14 @@
     function saveIssuesToStorage(id, issues) {
         if (!id) return;
         try {
-            const payload = { version: 1, siteID: id, issues };
+            // v1.02: validator-generated issues (source:'validator', authored
+            // 'Validator') are EPHEMERAL — never persisted, never synced. They
+            // regenerate on demand from the Asset Inspector's SOP validators,
+            // so storing them would just leave stale violations on the map
+            // after the geometry is fixed. Strip them here so no caller can
+            // accidentally persist them, and so they're absent on next load.
+            const persist = (issues || []).filter(i => i.source !== 'validator');
+            const payload = { version: 1, siteID: id, issues: persist };
             localStorage.setItem(storageKeyForSite(id), JSON.stringify(payload));
         } catch (e) {
             console.warn(`${TAG} saveIssuesToStorage threw:`, e);
@@ -723,7 +730,7 @@
                 // No file on GitHub yet. Push local issues to create it —
                 // but only authored ones (v0.7: local-only never syncs).
                 delete shaBySite[sid];
-                const authoredCount = currentSiteIssues.filter(i => i.createdBy !== 'local-only').length;
+                const authoredCount = currentSiteIssues.filter(i => i.createdBy !== 'local-only' && i.source !== 'validator').length;
                 if (authoredCount > 0) {
                     console.log(`${TAG} no remote file for site ${sid} but ${authoredCount} authored issue${authoredCount === 1 ? '' : 's'} local — pushing to create file`);
                     await commitIssuesToGitHub('initial push to migrate local issues');
@@ -802,7 +809,7 @@
             // either drop them entirely on next refresh (loadIssuesFromStorage
             // purge) or wait for the user to delete via UI. Either way,
             // commits to GitHub exclude them.
-            const issuesToSync = currentSiteIssues.filter(i => i.createdBy !== 'local-only');
+            const issuesToSync = currentSiteIssues.filter(i => i.createdBy !== 'local-only' && i.source !== 'validator');
             const payload = { version: 1, siteID: sid, issues: issuesToSync };
             const b64 = textToB64(JSON.stringify(payload, null, 2));
             const sha = shaBySite[sid];
@@ -4311,8 +4318,104 @@
     }
 
     // ------- Init -------
+    // ============================================================
+    // v1.02 — SOP Validator bridge.
+    // The Asset Inspector's SOP validators compute geometric SOP
+    // violations (FFZ↔Asset standoff, FP↔Asset, FFZ↔FFZ overlap, …) and
+    // hand them to us over the dedicated AIM_VALIDATOR_ISSUES channel.
+    // We render them through the normal issue pipeline (markers, polygon,
+    // panel, click-to-zoom) authored as 'Validator' with note 'violation:
+    // …'. They are EPHEMERAL: tagged source:'validator', wiped+redrawn on
+    // every run, never persisted to localStorage, never synced to GitHub
+    // (see saveIssuesToStorage / commitIssuesToGitHub filters). GM storage
+    // is per-script so the Asset Inspector cannot write our store directly
+    // — this channel is the only handoff.
+    // ============================================================
+    const VALIDATOR_CHANNEL_NAME = 'AIM_VALIDATOR_ISSUES';
+    let validatorChannel = null;
+
+    function setupValidatorChannel() {
+        try { validatorChannel = new BroadcastChannel(VALIDATOR_CHANNEL_NAME); }
+        catch (e) { console.warn(`${TAG} validator channel unavailable:`, e); return; }
+        validatorChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'VALIDATOR_ISSUES') applyValidatorIssues(m);
+            else if (m.type === 'CLEAR_VALIDATOR_ISSUES') clearValidatorIssues(m.siteID);
+        };
+    }
+
+    // Remove every previously-drawn validator issue for the given site
+    // (drops Leaflet layers + the in-memory records). No persistence to
+    // touch — validator issues never reach storage.
+    function clearValidatorIssues(forSite) {
+        if (forSite != null && String(forSite) !== String(siteID)) return;
+        const map = getLeafletMap();
+        let removed = 0;
+        currentSiteIssues = currentSiteIssues.filter(i => {
+            if (i.source !== 'validator') return true;
+            const layers = issueLayers.get(i.id);
+            if (layers && map) {
+                try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
+                try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+            }
+            issueLayers.delete(i.id);
+            hiddenIds.delete(i.id);
+            removed++;
+            return false;
+        });
+        if (removed) {
+            renderButtonState();
+            try { renderIssuesPanel(); } catch (e) {}
+            console.log(`${TAG} cleared ${removed} validator issue${removed === 1 ? '' : 's'}`);
+        }
+    }
+
+    // Render a fresh batch of validator findings. Wipes any prior validator
+    // issues for this site first (re-runs replace, never accumulate).
+    function applyValidatorIssues(m) {
+        if (IS_TOP) return;                         // IFRAME owns rendering
+        if (!siteID) return;
+        if (m.siteID != null && String(m.siteID) !== String(siteID)) {
+            console.log(`${TAG} ignoring validator issues for site ${m.siteID} (current ${siteID})`);
+            return;
+        }
+        clearValidatorIssues(siteID);
+        const incoming = Array.isArray(m.issues) ? m.issues : [];
+        const nowIso = new Date().toISOString();
+        let drawn = 0;
+        incoming.forEach((vi, idx) => {
+            const polygon = Array.isArray(vi.polygon) ? vi.polygon : null;
+            if (!polygon || polygon.length < 3) return;
+            const note = vi.note || 'violation';
+            const id = `val_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`;
+            const pri = (vi.priority && PRIORITY_LABEL && PRIORITY_LABEL[vi.priority]) ? vi.priority : null;
+            const issue = {
+                id,
+                surface: 'site-setup',
+                shape: vi.shape || 'polygon',
+                polygon,
+                note,
+                status: 'open',
+                priority: pri,
+                createdAt: nowIso,
+                createdBy: 'Validator',
+                source: 'validator',
+                history: [
+                    { at: nowIso, by: 'Validator', fromStatus: null, toStatus: 'open', note },
+                ],
+            };
+            currentSiteIssues.push(issue);
+            try { renderOneIssue(issue); drawn++; } catch (e) { console.warn(`${TAG} renderOneIssue (validator) threw:`, e); }
+        });
+        renderButtonState();
+        try { renderIssuesPanel(); } catch (e) {}
+        showToast(`Validator: ${drawn} issue${drawn === 1 ? '' : 's'} drawn on the map.`, 3200);
+        console.log(`${TAG} drew ${drawn} validator issue${drawn === 1 ? '' : 's'} for site ${siteID}`);
+    }
+
     function init() {
         setupControlChannel();
+        setupValidatorChannel();
         registerWithControlPanel();
         // v0.5: seed sync status from the cached token recovered from
         // GM storage (survives refresh). Control Panel will broadcast

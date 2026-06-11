@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.0';
+    const SCRIPT_VERSION = '4.2';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -43,6 +43,56 @@
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
+
+    // ============================================================
+    // SOP Validators (Phase 4) — state + thresholds.
+    // Geometric Site-Setup SOP checks (proximity / overlap) computed off
+    // the same cached entity set the SUM uses, reusing the Phase-3 spatial
+    // core. Surfaced as its OWN "SOP Validators" Control Panel section
+    // (second registration, scriptId aim-sop-validators) where each check
+    // has a master toggle + an EDITABLE threshold. Findings are handed to
+    // AIM Issues over the AIM_VALIDATOR_ISSUES channel, which draws them as
+    // ephemeral 'Validator' issues (note 'violation: …'). Thresholds are
+    // stored in FEET (the unit coworkers reason about standoffs in);
+    // geometry math is in meters, converted at the boundary (3.28084).
+    // ============================================================
+    const SOP_SCRIPT_ID = 'aim-sop-validators';
+    const VALIDATOR_CHANNEL_NAME = 'AIM_VALIDATOR_ISSUES';
+    const SOP_THRESH_KEY = 'aim-sop-thresholds';
+    const SOP_ENABLE_KEY = 'aim-sop-enabled';
+    // Defaults: FFZ must stay ≥15 ft from an asset boundary; a flight path
+    // ≥15 ft from an asset; two FFZs may not overlap (0 ft separation =
+    // flag overlap only — raise to flag near-misses). All user-editable.
+    const SOP_THRESH_DEFAULTS = { ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0 };
+    const SOP_ENABLE_DEFAULTS = { ffzAsset: true, fpAsset: true, ffzFfz: true };
+    let sopValidatorChannel = null;
+    let sopMasterEnabled = true;
+    function loadSopThresholds() {
+        const out = Object.assign({}, SOP_THRESH_DEFAULTS);
+        try {
+            const raw = elevGmGet(SOP_THRESH_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in SOP_THRESH_DEFAULTS) if (typeof o[k] === 'number') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadSopThresholds threw:`, e); }
+        return out;
+    }
+    function saveSopThresholds() {
+        try { elevGmSet(SOP_THRESH_KEY, JSON.stringify(sopThresholds)); }
+        catch (e) { console.warn(`${TAG} saveSopThresholds threw:`, e); }
+    }
+    function loadSopEnabled() {
+        const out = Object.assign({}, SOP_ENABLE_DEFAULTS);
+        try {
+            const raw = elevGmGet(SOP_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in SOP_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadSopEnabled threw:`, e); }
+        return out;
+    }
+    function saveSopEnabled() {
+        try { elevGmSet(SOP_ENABLE_KEY, JSON.stringify(sopEnabled)); }
+        catch (e) { console.warn(`${TAG} saveSopEnabled threw:`, e); }
+    }
+    let sopThresholds = loadSopThresholds();
+    let sopEnabled = loadSopEnabled();
 
     // ============================================================
     // Leaflet map ref (read from Map Styler's __aim_map__ patch when
@@ -1005,6 +1055,225 @@
         }
         return best;
     }
+    // ============================================================
+    // SOP VALIDATOR GEOMETRY (Phase 4) — builds on the spatial core above.
+    //
+    // Ring rule (v3.99): asset pads (type 3) store a bowtie vertex order
+    // that breaks ray-casting/edge-walks → angular-sort (simplifyPolygon).
+    // FFZ/NFZ polygons (16/4) are drawn as simple closed shapes → use the
+    // RAW ring (simplify can scramble a non-star FFZ and report distances
+    // outside its true green border). ringForEntity centralizes this.
+    // ============================================================
+    const M_TO_FT = 3.28084;
+    function ringForEntity(e) {
+        const ring = entityCoords(e);
+        if (!ring || ring.length < 3) return null;
+        return e.type === 3 ? simplifyPolygon(ring) : ring;
+    }
+    // Projected closest point of p onto segment a-b (returns {lat,lng}).
+    function nearestOnSeg(p, a, b) {
+        const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat;
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 === 0 ? 0 : ((p.lng - ax) * dx + (p.lat - ay) * dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        return { lat: ay + t * dy, lng: ax + t * dx };
+    }
+    // Boundary-to-boundary minimum distance (m) between two rings. Walks
+    // every vertex of each ring against every edge of the other (both
+    // directions), so it returns the true closest approach EVEN WHEN one
+    // ring contains the other — an FFZ legitimately surrounds its asset and
+    // we want the inner gap, not 0. (For "do they overlap?" use
+    // polygonsIntersect, not this.)
+    function boundaryMinMeters(ringA, ringB) {
+        let best = Infinity;
+        const scan = (pts, ring) => {
+            for (const p of pts) {
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                    const c = nearestOnSeg(p, ring[j], ring[i]);
+                    const d = approxMeters(p.lat, p.lng, c.lat, c.lng);
+                    if (d < best) best = d;
+                }
+            }
+        };
+        scan(ringA, ringB);
+        scan(ringB, ringA);
+        return best;
+    }
+    // Do segments p1-p2 and p3-p4 properly cross? (lng=x, lat=y)
+    function segmentsCross(p1, p2, p3, p4) {
+        const cr = (ax, ay, bx, by, cx, cy) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        const d1 = cr(p3.lng, p3.lat, p4.lng, p4.lat, p1.lng, p1.lat);
+        const d2 = cr(p3.lng, p3.lat, p4.lng, p4.lat, p2.lng, p2.lat);
+        const d3 = cr(p1.lng, p1.lat, p2.lng, p2.lat, p3.lng, p3.lat);
+        const d4 = cr(p1.lng, p1.lat, p2.lng, p2.lat, p4.lng, p4.lat);
+        return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+    }
+    // True if two polygon rings share area: any vertex of one inside the
+    // other, or any edge pair crosses.
+    function polygonsIntersect(ringA, ringB) {
+        for (const p of ringA) if (pointInPolygon(p.lat, p.lng, ringB)) return true;
+        for (const p of ringB) if (pointInPolygon(p.lat, p.lng, ringA)) return true;
+        for (let i = 0, j = ringA.length - 1; i < ringA.length; j = i++) {
+            for (let m = 0, n = ringB.length - 1; m < ringB.length; n = m++) {
+                if (segmentsCross(ringA[j], ringA[i], ringB[n], ringB[m])) return true;
+            }
+        }
+        return false;
+    }
+    // Minimum distance (m) from a flight path's arcs to a polygon ring:
+    // each ring vertex vs each arc segment, and each arc endpoint vs each
+    // ring edge (covers both vertex-on-segment and endpoint-near-edge).
+    function fpToRingMeters(fp, ring) {
+        let best = Infinity;
+        const arcs = Array.isArray(fp.arcs) ? fp.arcs : [];
+        for (const arc of arcs) {
+            if (!arc.point_a || !arc.point_b) continue;
+            for (const v of ring) {
+                const d = pointToSegMeters(v.lat, v.lng, arc.point_a, arc.point_b);
+                if (d < best) best = d;
+            }
+            for (const ep of [arc.point_a, arc.point_b]) {
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                    const d = pointToSegMeters(ep.lat, ep.lng, ring[j], ring[i]);
+                    if (d < best) best = d;
+                }
+            }
+        }
+        return best;
+    }
+
+    // Run the enabled SOP proximity checks for a site. Returns
+    // [{ check, severity, distFt, threshFt, note, polygon:[[lat,lng]…] }].
+    // Geometry in meters, thresholds/output in feet.
+    function runSopValidators(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket || !Array.isArray(bucket.entities)) return [];
+        const ents = bucket.entities;
+        const assets = ents.filter(e => e.type === 3 && entityCoords(e));
+        const ffzs   = ents.filter(e => e.type === 16 && entityCoords(e));
+        const fps    = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const nameOf = (e) => (e && (e.name || (e.id != null ? `#${e.id}` : null))) || '?';
+        const ringCache = new Map();
+        const getRing = (e) => { if (!ringCache.has(e)) ringCache.set(e, ringForEntity(e)); return ringCache.get(e); };
+        // Within 10% of the threshold = warn, otherwise a hard violation.
+        const sev = (distFt, threshFt) => (threshFt > 0 && distFt > threshFt * 0.9) ? 'warn' : 'high';
+        const out = [];
+
+        // 1. FFZ ↔ Asset standoff — each FFZ surrounds one asset; flag if
+        //    the inner boundary gap drops below the threshold.
+        if (sopEnabled.ffzAsset && assets.length && ffzs.length) {
+            const th = sopThresholds.ffzAssetFt;
+            for (const ffz of ffzs) {
+                const fr = getRing(ffz); if (!fr) continue;
+                let nearest = null;
+                for (const a of assets) {
+                    const ar = getRing(a); if (!ar) continue;
+                    const d = boundaryMinMeters(fr, ar);
+                    if (!nearest || d < nearest.d) nearest = { a, d };
+                }
+                if (!nearest) continue;
+                const ft = nearest.d * M_TO_FT;
+                if (ft < th) {
+                    out.push({
+                        check: 'FFZ↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
+                        note: `violation: FFZ "${nameOf(ffz)}" is ${Math.round(ft)} ft from asset "${nameOf(nearest.a)}" (min ${th} ft)`,
+                        polygon: fr.map(p => [p.lat, p.lng]),
+                    });
+                }
+            }
+        }
+
+        // 2. FP ↔ Asset standoff — a flight path must stay ≥ threshold ft
+        //    from any asset boundary.
+        if (sopEnabled.fpAsset && assets.length && fps.length) {
+            const th = sopThresholds.fpAssetFt;
+            for (const a of assets) {
+                const ar = getRing(a); if (!ar) continue;
+                let nearest = null;
+                for (const fp of fps) {
+                    const d = fpToRingMeters(fp, ar);
+                    if (!nearest || d < nearest.d) nearest = { fp, d };
+                }
+                if (!nearest) continue;
+                const ft = nearest.d * M_TO_FT;
+                if (ft < th) {
+                    out.push({
+                        check: 'FP↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
+                        note: `violation: flight path "${nameOf(nearest.fp)}" is ${Math.round(ft)} ft from asset "${nameOf(a)}" (min ${th} ft)`,
+                        polygon: ar.map(p => [p.lat, p.lng]),
+                    });
+                }
+            }
+        }
+
+        // 3. FFZ ↔ FFZ — two FFZs must not overlap; with a positive
+        //    separation threshold they must also stay that far apart. Each
+        //    unordered pair reported once.
+        if (sopEnabled.ffzFfz && ffzs.length > 1) {
+            const th = sopThresholds.ffzFfzFt;
+            for (let i = 0; i < ffzs.length; i++) {
+                const ra = getRing(ffzs[i]); if (!ra) continue;
+                for (let k = i + 1; k < ffzs.length; k++) {
+                    const rb = getRing(ffzs[k]); if (!rb) continue;
+                    const overlap = polygonsIntersect(ra, rb);
+                    const gapFt = overlap ? 0 : boundaryMinMeters(ra, rb) * M_TO_FT;
+                    if (overlap || gapFt < th) {
+                        const desc = overlap ? 'overlaps' : `is ${Math.round(gapFt)} ft from`;
+                        out.push({
+                            check: 'FFZ↔FFZ', severity: overlap ? 'high' : sev(gapFt, th), distFt: gapFt, threshFt: th,
+                            note: `violation: FFZ "${nameOf(ffzs[i])}" ${desc} FFZ "${nameOf(ffzs[k])}"${(th > 0 && !overlap) ? ` (min ${th} ft)` : ''}`,
+                            polygon: ra.map(p => [p.lat, p.lng]),
+                        });
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    // ---- Validator → AIM Issues bridge (AIM_VALIDATOR_ISSUES channel) ----
+    function ensureValidatorChannel() {
+        if (sopValidatorChannel) return sopValidatorChannel;
+        try { sopValidatorChannel = new BroadcastChannel(VALIDATOR_CHANNEL_NAME); }
+        catch (e) { console.warn(`${TAG} validator channel unavailable:`, e); }
+        return sopValidatorChannel;
+    }
+    function drawSopIssues() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        if (!(mapObjectsBySite[sid] && Array.isArray(mapObjectsBySite[sid].entities))) {
+            showToast(`Fetching entities for site ${sid}…`);
+        }
+        Promise.resolve(fetchMapObjects(sid, false)).then(() => {
+            const bucket = mapObjectsBySite[sid];
+            if (!bucket || !Array.isArray(bucket.entities)) {
+                showToast('Entities not ready — try again in a moment', 'rgba(255,96,96,0.55)');
+                return;
+            }
+            const violations = runSopValidators(sid);
+            const ch = ensureValidatorChannel();
+            if (!ch) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
+            ch.postMessage({
+                type: 'VALIDATOR_ISSUES', siteID: sid,
+                issues: violations.map(v => ({ shape: 'polygon', polygon: v.polygon, note: v.note })),
+            });
+            const byCheck = {};
+            violations.forEach(v => { byCheck[v.check] = (byCheck[v.check] || 0) + 1; });
+            const breakdown = Object.keys(byCheck).map(k => `${k} ${byCheck[k]}`).join(', ') || 'none';
+            console.log(`${TAG} SOP validators: ${violations.length} violation(s) [${breakdown}]`);
+            showToast(violations.length
+                ? `SOP: ${violations.length} violation(s) drawn (${breakdown}). Needs AIM Issues enabled.`
+                : 'SOP: no violations found ✓');
+        }).catch(e => console.warn(`${TAG} drawSopIssues threw:`, e));
+    }
+    function clearSopIssues() {
+        const sid = getCurrentSiteID();
+        const ch = ensureValidatorChannel();
+        if (ch) ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
+        showToast('Cleared validator issues.');
+    }
+
     function findEntityAtLatLng(lat, lng, siteID) {
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
@@ -1977,7 +2246,11 @@
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                 }
-            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SOP_SCRIPT_ID) {
+                handleSopToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Gate to IFRAME + focused tab (same pattern as Map Styler v34.28)
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'refresh-entities') {
@@ -1991,7 +2264,39 @@
                     }
                 }
             }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SOP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'sop-draw') {
+                    if (!sopMasterEnabled) { showToast('SOP validators are disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    drawSopIssues();
+                } else if (msg.actionId === 'sop-clear') {
+                    clearSopIssues();
+                }
+            }
         };
+    }
+    // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
+    // the panel runs in TOP + IFRAME so duplicate SET_TOGGLE is normal.
+    function handleSopToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'sop-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === sopMasterEnabled) return;
+            sopMasterEnabled = v;
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === sopEnabled[id]) return;
+            sopEnabled[id] = v;
+            saveSopEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === sopThresholds[id]) return;
+            sopThresholds[id] = msg.value;
+            saveSopThresholds();
+        }
     }
     function registerWithControlPanel() {
         if (!controlChannel) return;
@@ -2005,6 +2310,28 @@
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
+            ],
+            hotkeys: [],
+        });
+        // v4.1: SOP Validators register as their OWN Control Panel card
+        // (second scriptId) so every check + its threshold is visible and
+        // editable in one place, scoped to Site Setup where SOP geometry
+        // applies. 'Draw issues' runs the checks and hands each violation to
+        // AIM Issues to flag on the map (authored 'Validator').
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SOP_SCRIPT_ID, name: 'SOP Validators',
+            description: 'Geometric Site-Setup SOP checks (proximity / overlap). “Draw issues” flags each violation on the map as a Validator issue (needs AIM Issues enabled).',
+            version: SCRIPT_VERSION, group: 'SOP Validators', scope: 'site-setup', priority: 10,
+            toggles: [
+                { id: 'sop-master', label: 'Enable SOP validators', type: 'boolean', default: true, master: true },
+                { id: 'ffzAsset', label: 'Check · FFZ → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzAsset },
+                { id: 'ffzAssetFt', label: 'FFZ → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.ffzAssetFt, unit: 'ft' },
+                { id: 'fpAsset', label: 'Check · FP → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpAsset },
+                { id: 'fpAssetFt', label: 'FP → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.fpAssetFt, unit: 'ft' },
+                { id: 'ffzFfz', label: 'Check · FFZ ↔ FFZ overlap', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzFfz },
+                { id: 'ffzFfzFt', label: 'FFZ ↔ FFZ min separation (0 = overlap only)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.ffzFfzFt, unit: 'ft' },
+                { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
+                { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
             hotkeys: [],
         });
@@ -5739,6 +6066,294 @@
     // Site Setup Analyzer modal — KML format toggle + folder
     // checkboxes + download/copy buttons. Floating draggable like
     // the Stats popup; closes on Cancel or outside-click.
+    // ============================================================
+    // SITE SETUP GENERATOR (v4.2 · Phase A1) — auto-build the
+    // FOUNDATION of a site setup for a CSM to finetune. Inverse of
+    // the Analyzer (which exports a finished setup). A1 builds
+    // per-asset inspection FFZs (frame of 4 corner-connected side
+    // boxes, inner edge 15 ft off the asset face, ≥30×30×30 ft,
+    // X/Y extend along the asset's long axis = 4 type-16 FFZ
+    // entities/asset) and PREVIEWS them on the map. Commit (A1.5),
+    // corridor FP routing (A2) + DEM altitudes (A3) follow.
+    // Log tag [AIM GEN]. Design:
+    // ShortKeys/AIM_Site_Setup_Generator_Design.md.
+    // ============================================================
+    const GEN_TAG = `[AIM GEN ${CONTEXT}]`;
+    const GEN_FT_TO_M = 0.3048;
+    const GEN_MODAL_ID = 'aim-ai-generator-modal';
+    const GEN_DEFAULTS = {
+        standoffFt: 15,   // inner edge of each box sits this far off the asset face
+        depthFt: 30,      // flyable thickness (perpendicular) of each box
+        minSizeFt: 30,    // floor on the box's short dimension (SOP minimum)
+        minAltFt: 50,     // FFZ floor — placeholder AGL; A3 refines via DEM
+        bandFt: 30,       // FFZ vertical band (maxAlt = minAlt + band)
+    };
+    let genPreviewLayers = [];
+
+    // Local east/north meters projection around an origin, and its
+    // inverse — equirectangular, consistent with approxMeters. Good
+    // over a single pad.
+    function genProjector(lat0, lng0) {
+        const R = 6371000;
+        const cosPhi0 = Math.cos(lat0 * Math.PI / 180);
+        return {
+            fwd(p) {
+                return {
+                    x: (p.lng - lng0) * Math.PI / 180 * cosPhi0 * R, // east
+                    y: (p.lat - lat0) * Math.PI / 180 * R,           // north
+                };
+            },
+            inv(pt) {
+                return {
+                    lat: lat0 + (pt.y / R) * 180 / Math.PI,
+                    lng: lng0 + (pt.x / (R * cosPhi0)) * 180 / Math.PI,
+                };
+            },
+        };
+    }
+
+    // Min-area oriented bounding box of a polygon. Returns
+    // { proj, cx, cy, a, hu, hv } in a local meters frame centered at
+    // the box center: `a` is the box rotation (rad), hu/hv the half-
+    // extents along the rotated u/v axes. A box corner given in
+    // centered (u,v) maps to world via R(a) then proj.inv. We search
+    // rotation 0..90° at 1° (rectangle symmetry) — pads are small, so
+    // this is cheap and robust (no convex-hull/rotating-calipers dep).
+    function orientedBBox(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return null;
+        let cLat = 0, cLng = 0;
+        for (const p of coords) { cLat += p.lat; cLng += p.lng; }
+        cLat /= coords.length; cLng /= coords.length;
+        const proj = genProjector(cLat, cLng);
+        const pts = coords.map(p => proj.fwd(p));
+        let best = null;
+        const STEP = Math.PI / 180;
+        for (let a = 0; a < Math.PI / 2 + 1e-9; a += STEP) {
+            const ca = Math.cos(a), sa = Math.sin(a);
+            let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+            for (const q of pts) {
+                const u = q.x * ca + q.y * sa;
+                const v = -q.x * sa + q.y * ca;
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            const area = (maxU - minU) * (maxV - minV);
+            if (!best || area < best.area) best = { area, a, minU, maxU, minV, maxV };
+        }
+        const { a, minU, maxU, minV, maxV } = best;
+        const hu = (maxU - minU) / 2, hv = (maxV - minV) / 2;
+        // AABB center in the rotated frame → back to world meters
+        const cu = (minU + maxU) / 2, cv = (minV + maxV) / 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const cx = cu * ca - cv * sa;
+        const cy = cu * sa + cv * ca;
+        return { proj, cx, cy, a, hu, hv };
+    }
+
+    // Map a rectangle in the OBB's centered (u,v) frame to a closed
+    // ring of {lat,lng} corners (CCW).
+    function genBoxRing(obb, uLo, uHi, vLo, vHi) {
+        const ca = Math.cos(obb.a), sa = Math.sin(obb.a);
+        const toLL = (u, v) => obb.proj.inv({
+            x: obb.cx + u * ca - v * sa,
+            y: obb.cy + u * sa + v * ca,
+        });
+        return [toLL(uLo, vLo), toLL(uHi, vLo), toLL(uHi, vHi), toLL(uLo, vHi)];
+    }
+
+    // Build the 4-box inspection-FFZ frame for one asset. Each box's
+    // inner edge sits `standoff` off the asset face; depth (flyable
+    // thickness) is ≥ minSize; E/W boxes extend in v and N/S in u to
+    // the same outer reach so they OVERLAP at the corners → the union
+    // is a continuous, traversable ring with no diagonal gap. Returns
+    // up to 4 write-shape FFZ (type 16) payloads.
+    function generateFfzsForAsset(asset, params) {
+        const coords = entityCoords(asset);
+        if (!coords || coords.length < 3) return [];
+        const obb = orientedBBox(coords);
+        if (!obb) return [];
+        const s = params.standoffFt * GEN_FT_TO_M;
+        const d = Math.max(params.depthFt, params.minSizeFt) * GEN_FT_TO_M;
+        const { hu, hv } = obb;
+        const eU = hu + s + d; // outer reach along u (for N/S corner overlap)
+        const eV = hv + s + d; // outer reach along v (for E/W corner overlap)
+        const sides = [
+            { side: 'E', uLo: hu + s,        uHi: hu + s + d,  vLo: -eV,         vHi: eV },
+            { side: 'W', uLo: -(hu + s + d), uHi: -(hu + s),   vLo: -eV,         vHi: eV },
+            { side: 'N', uLo: -eU,           uHi: eU,          vLo: hv + s,      vHi: hv + s + d },
+            { side: 'S', uLo: -eU,           uHi: eU,          vLo: -(hv + s + d), vHi: -(hv + s) },
+        ];
+        const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
+        const minAltM = params.minAltFt * GEN_FT_TO_M;
+        const maxAltM = (params.minAltFt + params.bandFt) * GEN_FT_TO_M;
+        return sides.map(sd => ({
+            type: 16,
+            name: `${nm} FFZ-${sd.side}`,
+            site_id: asset.site != null ? asset.site : genState.siteID,
+            points: genBoxRing(obb, sd.uLo, sd.uHi, sd.vLo, sd.vHi),
+            restrictions: { minAlt: minAltM, maxAlt: maxAltM },
+            // generator metadata (not persisted; stripped before any POST)
+            _gen: true, _assetId: asset.id, _assetName: nm, _side: sd.side,
+        }));
+    }
+
+    // Generate the full FFZ set for every asset on the site.
+    function generateAllFfzs(siteID, params) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const assets = ents.filter(e => e.type === 3 && entityCoords(e));
+        const ffzs = [];
+        let failed = 0;
+        assets.forEach(a => {
+            try {
+                const boxes = generateFfzsForAsset(a, params);
+                if (boxes.length) ffzs.push(...boxes);
+                else failed++;
+            } catch (e) {
+                failed++;
+                console.warn(`${GEN_TAG} FFZ gen failed for asset ${a && a.id}:`, e);
+            }
+        });
+        return { assetCount: assets.length, ffzs, failed };
+    }
+
+    function clearGenPreview() {
+        const map = getLeafletMap();
+        genPreviewLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        genPreviewLayers = [];
+    }
+
+    // Draw proposed FFZ frames as green polygons on the Leaflet map —
+    // PREVIEW ONLY, nothing is written. Mirrors showSampleMarkersFor's
+    // canvas-renderer pattern. Returns the number drawn.
+    function renderGenPreview(ffzs) {
+        clearGenPreview();
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) {
+            console.warn(`${GEN_TAG} cannot preview — Leaflet or map not reachable`);
+            showToast('Map not reachable — open the map tab to preview', 'rgba(255,82,82,0.6)');
+            return 0;
+        }
+        let renderer = null;
+        try { renderer = L.canvas({ padding: 0.5 }); } catch (e) { renderer = null; }
+        ffzs.forEach(f => {
+            try {
+                const latlngs = (f.points || []).map(p => [p.lat, p.lng]);
+                if (latlngs.length < 3) return;
+                const opts = {
+                    color: '#5fff5f', weight: 1.5, opacity: 0.95,
+                    fillColor: '#5fff5f', fillOpacity: 0.18,
+                    interactive: true, bubblingMouseEvents: false,
+                };
+                if (renderer) opts.renderer = renderer;
+                const poly = L.polygon(latlngs, opts);
+                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> — preview only, not saved`, { sticky: true, opacity: 0.95 });
+                poly.addTo(map);
+                genPreviewLayers.push(poly);
+            } catch (e) { /* one bad polygon shouldn't kill the rest */ }
+        });
+        console.log(`${GEN_TAG} preview rendered ${genPreviewLayers.length} FFZ polygons`);
+        return genPreviewLayers.length;
+    }
+
+    const GEN_MODAL_PARAM_IDS = {
+        standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
+        minSizeFt: 'aim-gen-minsize', minAltFt: 'aim-gen-minalt', bandFt: 'aim-gen-band',
+    };
+    let genState = { siteID: null, lastResult: null };
+
+    function closeSiteGenerator() {
+        const m = document.getElementById(GEN_MODAL_ID);
+        if (m) m.remove();
+    }
+
+    function openSiteGenerator(siteID) {
+        closeSiteGenerator();
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket || !bucket.entities) {
+            showToast('No site data loaded', 'rgba(255,82,82,0.6)');
+            return;
+        }
+        genState.siteID = siteID;
+        const assetCount = bucket.entities.filter(e => e.type === 3 && entityCoords(e)).length;
+        const siteName = getCurrentSiteName() || `Site ${siteID}`;
+        const d = GEN_DEFAULTS;
+        const m = document.createElement('div');
+        m.id = GEN_MODAL_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:20px 24px;min-width:460px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const numField = (key, label, hint, step) => `
+            <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
+                <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
+                <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
+            </label>`;
+        box.innerHTML = `
+            <div style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px">⊕ Site Setup Generator</div>
+            <div style="color:#888;font-size:11px;margin-bottom:14px">${xmlEscape(siteName)} · ${assetCount} asset${assetCount === 1 ? '' : 's'} · Phase A1 — inspection FFZs</div>
+            <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
+                Builds a <b>4-box inspection-FFZ frame</b> around every asset: each box's inner edge sits the standoff distance off the asset border, with a flyable depth ≥ the minimum. Output is a <b>DRAFT</b> a CSM finetunes — <b>preview first, nothing is written</b> until you Commit (coming next).
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
+                    ${numField('depthFt', 'Box depth', '(flyable thickness)', 1)}
+                    ${numField('minSizeFt', 'Minimum size', '(SOP floor)', 1)}
+                </div>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude band <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— placeholder; A3 will set from DEM</span></div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    ${numField('minAltFt', 'Floor (min alt)', '(AGL placeholder)', 5)}
+                    ${numField('bandFt', 'Band height', '(max = floor + band)', 5)}
+                </div>
+            </div>
+            <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
+                <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
+                <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        m.onclick = (ev) => { if (ev.target === m) closeSiteGenerator(); };
+
+        const readParams = () => {
+            const out = {};
+            Object.keys(GEN_MODAL_PARAM_IDS).forEach(key => {
+                const el = box.querySelector('#' + GEN_MODAL_PARAM_IDS[key]);
+                const v = el ? parseFloat(el.value) : NaN;
+                out[key] = isFinite(v) && v >= 0 ? v : d[key];
+            });
+            return out;
+        };
+        const statsEl = box.querySelector('#aim-gen-stats');
+        box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
+        box.querySelector('#aim-gen-clear').onclick = () => {
+            clearGenPreview();
+            statsEl.textContent = 'Preview cleared.';
+        };
+        box.querySelector('#aim-gen-preview').onclick = () => {
+            try {
+                const params = readParams();
+                const res = generateAllFfzs(siteID, params);
+                genState.lastResult = res;
+                const drawn = renderGenPreview(res.ffzs);
+                const failNote = res.failed ? ` · ${res.failed} asset${res.failed === 1 ? '' : 's'} skipped (bad geometry)` : '';
+                statsEl.innerHTML = `Generated <b style="color:#5fff5f">${res.ffzs.length}</b> draft FFZs across <b>${res.assetCount}</b> asset${res.assetCount === 1 ? '' : 's'} · drew <b>${drawn}</b> on map${failNote}.<br><span style="color:#888">Green frames are DRAFT — not saved. Tune + re-Preview, or close.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} preview failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Preview failed: ${String(e.message || e)}</span>`;
+            }
+        };
+        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assetCount} assets`);
+    }
+
     const ANALYZER_MODAL_ID = 'aim-ai-analyzer-modal';
     function openSiteAnalyzer(siteID) {
         closeSiteAnalyzer();
@@ -6248,6 +6863,20 @@
             openSiteAnalyzer(siteID);
         };
         optsRow.appendChild(analyzerBtn);
+
+        // "Generate" button — opens the Site Setup Generator modal
+        // (auto-build the foundation: A1 = inspection FFZs). Inverse of
+        // the Analyzer; placed right after it for visual grouping.
+        const generateBtn = document.createElement('button');
+        generateBtn.type = 'button';
+        generateBtn.textContent = '⊕ Generate';
+        generateBtn.title = 'Site Setup Generator — auto-build draft FFZs (and later flight paths) for a CSM to finetune';
+        generateBtn.style.cssText = 'background:rgba(95,255,95,0.13);color:#7dffae;border:1px solid rgba(95,255,95,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        generateBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            openSiteGenerator(siteID);
+        };
+        optsRow.appendChild(generateBtn);
 
         // v3.88: 📍 Base picker — choose the basestation GM used by the Route
         // column. Auto-detected (name contains "base") unless overridden per site.
