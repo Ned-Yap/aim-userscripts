@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.92
+// @version      3.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.92';
+    const SCRIPT_VERSION = '3.93';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4772,14 +4772,6 @@
         const graph = buildFlightPathGraph(entities);
         summary.graphVerts = graph.verts.size;
         if (graph.verts.size === 0) { summary.reason = 'no-flight-paths'; return summary; }
-        // Per base: nearest FP vertex + Dijkstra map + base→vertex connector.
-        const baseRuns = resolved.bases.map(b => {
-            const pt = gmPoint(b);
-            if (!pt) return null;
-            const bv = nearestGraphVertex(graph, pt.lat, pt.lng);
-            return { entity: b, baseConn: bv.dist, dist: dijkstraFrom(graph, bv.key) };
-        }).filter(Boolean);
-        if (!baseRuns.length) { summary.reason = 'base-no-coord'; return summary; }
         // FFZ polygons (ring pre-SIMPLIFIED once — Percepto stores them in a
         // bowtie vertex order that breaks pip/edge math) + flat FP vertex list.
         const ffzs = entities
@@ -4787,8 +4779,34 @@
             .map(e => ({ entity: e, ring: simplifyPolygon(entityCoords(e)) }));
         const fpVerts = [];
         graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
-        const reachM = REACH_FFZ_FT / 3.28084;
         const entryMarginM = ENTRY_FFZ_FT / 3.28084;
+        // FFZ CONNECTORS: the drone can fly anywhere inside an FFZ, so any FFZ
+        // touched by ≥2 flight paths BRIDGES them. Without this the separate
+        // FPs form disconnected graph components and the base reaches only its
+        // own (here: 4 components → the base saw just 1, ~10 assets). Add an
+        // edge (straight-line weight = the in-FFZ hop) between every pair of FP
+        // vertices inside/within-ENTRY of the same FFZ, so the base can route
+        // across the whole network. Done BEFORE the per-base Dijkstra.
+        ffzs.forEach(f => {
+            const inside = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, f.ring) <= entryMarginM);
+            for (let i = 0; i < inside.length; i++) {
+                for (let j = i + 1; j < inside.length; j++) {
+                    const w = approxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng);
+                    graph.adj.get(inside[i].key).push({ to: inside[j].key, w });
+                    graph.adj.get(inside[j].key).push({ to: inside[i].key, w });
+                }
+            }
+        });
+        // Per base: nearest FP vertex + Dijkstra map (on the BRIDGED graph) +
+        // base→vertex connector.
+        const baseRuns = resolved.bases.map(b => {
+            const pt = gmPoint(b);
+            if (!pt) return null;
+            const bv = nearestGraphVertex(graph, pt.lat, pt.lng);
+            return { entity: b, baseConn: bv.dist, dist: dijkstraFrom(graph, bv.key) };
+        }).filter(Boolean);
+        if (!baseRuns.length) { summary.reason = 'base-no-coord'; return summary; }
+        const reachM = REACH_FFZ_FT / 3.28084;
         rows.forEach(r => {
             if (r.type !== 3 || r._isSegment) return;
             // Asset FOOTPRINT: the pad polygon (entity.coords / .points) or its
