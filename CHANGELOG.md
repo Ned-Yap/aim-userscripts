@@ -6,6 +6,25 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Asset Inspector v3.82 → v4.0 + AIM Map Nav v0.8 (latest, dev-only) — Smarter SUM: columns, routing, battery
+
+A large arc on the SUM (Site Setup Summary) panel — all on the `latest/` channel, **not yet promoted to prod root**. Headlines:
+
+- **More data (v3.82):** 7 new off-by-default columns — Unshielded, Notes, Equipment, State (severity-colored), GM Group, Emergency Alt, Segment Length.
+- **Table ergonomics (v3.83–v3.84):** the Name column is now a **frozen left pane**, headers **drag-to-reorder**, hover **✕** to hide a column, and columns are **resizable** (drag the right edge, double-click to reset; widths persist).
+- **Numeric range filters (v3.84):** a **Ranges ▾** menu — min/max on AGL, Delta, Elevation, Route, etc. (entered in your display unit, stored in meters so a ft↔m toggle never breaks them).
+- **Built-in preset views (v3.85):** read-only **★ Built-in** views above your saved ones — FP Altitude Audit, AGL Safety (<90 ft), Unvalidated Triage, Asset Roster, Shielding Review, Base Stations, Safe Zones, Route from Base.
+- **Export presets (v3.87):** a **📤 Export ▾** that copies *any* preset's table (its own columns + filters) to the clipboard for Sheets without changing your live view; plus "Copy ALL (stacked)".
+- **Shift-click range select (v3.94–v3.95):** click a checkbox, Shift-click another, everything between toggles — instant.
+- **Basestation → asset routing (v3.88–v3.93):** a **Route** column giving each asset's one-way flight-path distance from the base (📍 Base picker auto-detects the installed type-8 base, else a "…base…" marker; closest of multiple wins). Reachability is gated on an inspection FFZ within 70 ft of the pad **edge** plus a flight path that reaches it. The big find: **FFZ connectors bridge separate flight paths** — without that the base only reached ~10 assets; with it, 32. Validated to ~0.4% against a manual measure.
+- **Base Station + Safe Zone entities (v3.96):** type 8 and type 98 are now first-class SUM rows (filter chips, sortable, inspector detail, columns for ID / Altitude / Drone / Drone ID).
+- **Ground-elevation safety check (v3.97):** because the base/safe-zone altitude is hand-entered, the inspector now pulls the **DEM ground** at that GPS and flags an **⚠ MISMATCH** if the stored altitude is off by >50 ft (land-into-the-ground guard).
+- **Right-click precision (v3.98–v3.99):** Base/Safe/GM markers (which sit inside FFZs) are now detected **pixel-perfectly** off the marker icon, so a point only wins when you click directly on it; and the FFZ no longer false-hits outside its green border.
+- **Battery recommendation (v4.0):** a **Battery** column — Tattu ≤ 14k ft, Tulip ≤ 18k ft, beyond = ⚠ out of range — with a **🔋 Battery ▾** menu to edit the thresholds. On a sample site: 25 Tattu / 5 Tulip / 2 over of 32 routable assets.
+- **Map Nav v0.8:** fixed the Alt+diagonal WASD hang — ALT now `preventDefault`s so the browser can't steal keyboard focus to the menu bar.
+
+---
+
 ## 2026-06-11 — AIM Flight Path Editor v0.15 (latest, dev-only) — pre-write validation gate + self-check
 
 Hardening so the splitter can **never** push a malformed flight path into Percepto's state. Before any split is written, a validation gate asserts: arc/coord counts grew by exactly 1; every resulting coordinate is a finite number (also refuses to edit an already-corrupt path); the split preserves the chain `A→M→B` exactly (`am.point_a==src.point_a`, `mb.point_b==src.point_b`, `am.point_b==mb.point_a==M`); the midpoint isn't degenerate (never manufactures a zero-length arc); both halves inherit the parent's `min_alt`/`max_alt`/`min_emergency_alt`/`wait_until_approved`; the source band is strictly positive (`max>min`); and `mapobject` ownership is unchanged. **If any check fails, it aborts — writes nothing, leaves the path untouched, and shows a visible error.** A post-write self-check then confirms the edit actually landed (and rolls back bookkeeping if it didn't). `doInsert` is wrapped so a throw can't leave partial state. Backs the data-integrity write-up (`ShortKeys/AIM_FPE_Data_Integrity_Writeup.md`).
