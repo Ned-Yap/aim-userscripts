@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.69
+// @version      34.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.69';
+    const SCRIPT_VERSION = '34.70';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -53,6 +53,53 @@
     // category controls what applies to itself. Shielding's visual styling
     // (color/opacity/distance) lives in Advanced as a shared knob since
     // toggles in different categories share the same shielding appearance.
+    // --- Asset state styling (v34.70) ---
+    // Assets render as white SVG polygons that carry NO state info. Their
+    // state (Normal / Empty / Unshielded / Unreachable / HY / Inactive) lives
+    // in /map_objects — derived from the asset's subtype (custom.poi_type_str,
+    // the text after " - ", e.g. "battery - empty") plus the is_unshielded
+    // flag. When "Color assets by state" is on we fetch the entity list once
+    // per site, geometry-match each white path to its asset (point-in-polygon
+    // on the path centroid), tag it data-aim-asset-state, and style it
+    // per-state instead of with the single uniform white-asset look.
+    const ASSET_STATE_ORDER = ['Normal', 'Empty', 'Unshielded', 'Unreachable', 'HY', 'Inactive'];
+    const ASSET_STATE_DEFAULTS = {
+        // Normal = the build-to-it good state — pink, solid, with a subtle
+        // fill so healthy assets pop against the dashed problem states.
+        'Normal':      { color: '#ff5fb0', width: 10, dashed: false, fill: true,  fillColor: '#ff5fb0', opacity: 0.25 },
+        'Empty':       { color: '#cfcfcf', width: 10, dashed: true,  fill: false, fillColor: '#cfcfcf', opacity: 0.25 },
+        'Unshielded':  { color: '#ff5722', width: 10, dashed: true,  fill: false, fillColor: '#ff5722', opacity: 0.25 },
+        'Unreachable': { color: '#ffffff', width: 10, dashed: true,  fill: false, fillColor: '#ffffff', opacity: 0.25 },
+        'HY':          { color: '#22d3ee', width: 10, dashed: false, fill: false, fillColor: '#22d3ee', opacity: 0.25 },
+        'Inactive':    { color: '#ffa040', width: 10, dashed: true,  fill: false, fillColor: '#ffa040', opacity: 0.25 },
+    };
+    // Used for any state we discover at runtime that isn't in the fixed list
+    // above (e.g. midstream / T&D taxonomies) — gray dashed, no panel row.
+    const ASSET_STATE_FALLBACK = { color: '#9aa0a6', width: 10, dashed: true, fill: false, fillColor: '#9aa0a6', opacity: 0.25 };
+    const stateSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    // Builds the per-state Control Panel rows appended to the Assets category.
+    function buildAssetStateToggles() {
+        const out = [
+            { type: 'header', label: 'Color assets by state' },
+            { id: 'asset.by-state', label: 'Color assets by state (overrides white)', type: 'boolean', default: false },
+        ];
+        ASSET_STATE_ORDER.forEach(state => {
+            const slug = stateSlug(state);
+            const d = ASSET_STATE_DEFAULTS[state];
+            out.push({ type: 'header', label: `· ${state}` });
+            out.push({ id: `astate.${slug}.color`, label: `${state} outline color`, type: 'color', default: d.color });
+            out.push({ id: `astate.${slug}.width`, label: `${state} outline width`, type: 'number',
+                      min: 1, max: 20, step: 1, default: d.width, unit: 'px' });
+            out.push({ id: `astate.${slug}.dashed`, label: `${state} dashed`, type: 'boolean', default: d.dashed });
+            out.push({ id: `astate.${slug}.fill`, label: `${state} show fill`, type: 'boolean', default: d.fill });
+            out.push({ id: `astate.${slug}.fill-color`, label: `${state} fill color`, type: 'color', default: d.fillColor });
+            out.push({ id: `astate.${slug}.opacity`, label: `${state} fill opacity`, type: 'number',
+                      min: 0.05, max: 1, step: 0.05, default: d.opacity, unit: 'fill' });
+        });
+        return out;
+    }
+
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
         {
@@ -137,6 +184,7 @@
                 { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
                 { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
+                ...buildAssetStateToggles(),
             ],
         },
         {
@@ -363,6 +411,12 @@
     const kmlResolvedPath = {};
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
+    // Asset-state cache for "Color assets by state". Holds the type-3 asset
+    // polygons (lat/lng) + derived state for the CURRENT site only. Fetched
+    // lazily from /map_objects (cookie auth) the first time runUpdate needs
+    // it with by-state on; re-fetched when the site changes. polys[] entries:
+    // { state, coords:[{lat,lng}...], cLat, cLng }.
+    let assetStateData = { siteID: null, polys: [], loading: false, failed: false };
     // Tracks whether we've already warned about no-token in the current
     // session, so we don't spam (each panel-driven SET_TOGGLE echo
     // triggered a render → fetch attempt → warn). Cleared whenever a
@@ -494,6 +548,33 @@
         document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => { el.style.display = fpHide; });
         document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => { el.style.display = fpHide; });
 
+        // 3b. ASSET STATE — lazy-fetch entity data + tag each white asset
+        // path with its state so the per-line loop can style it per-state.
+        // Runs after the buffer wipe (above) and before the loop creates new
+        // buffers, so querySelectorAll(WHITE_ASSET_SELECTOR) sees only native
+        // asset paths, never our clones. We re-match every run (cheap: dozens
+        // of paths × point-in-polygon) rather than tag once — runUpdate only
+        // re-fires on zoom/pan/mutation, which is exactly when a path's `d`
+        // could have been read mid-animation, so re-matching self-corrects any
+        // stale projection. We only OVERWRITE a tag on a positive match, so a
+        // transient (data still loading) never blanks an existing tag. No-op
+        // unless asset.show && asset.by-state are both on.
+        const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
+        if (assetByStateOn) {
+            const sid = getCurrentSiteID();
+            const needFetch = sid && (assetStateData.siteID !== sid
+                || (!assetStateData.loading && !assetStateData.polys.length && !assetStateData.failed));
+            if (needFetch) fetchAssetStates(sid);
+            const stMap = getLeafletMap();
+            if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
+                document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(p => {
+                    if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
+                    const st = matchPathState(p, stMap);
+                    if (st) p.setAttribute('data-aim-asset-state', st);
+                });
+            }
+        }
+
         // 4. REBUILD & ENFORCE
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
         lines.forEach(line => {
@@ -532,6 +613,13 @@
             // outlines without fill even when halos are off.
             const wantAssetFillOverride = isWhiteAsset;
 
+            // Per-state asset styling. Non-null only for a white asset that
+            // we've tagged with a state while "Color assets by state" is on.
+            // When null, assets fall back to the uniform asset.* settings.
+            const assetState = (assetByStateOn && isWhiteAsset)
+                ? line.getAttribute('data-aim-asset-state') : null;
+            const assetStyle = assetState ? assetStateStyle(assetState) : null;
+
             // --- Line color / opacity override (runs every iteration,
             // before the early-return below, so it applies / clears even
             // when no other category sub-toggle is active).
@@ -550,12 +638,22 @@
                 }
             } else if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
-                    line.style.stroke = toggleState['asset.line-color'] || '';
-                    const op = Number(toggleState['asset.line-opacity']);
-                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                    if (assetStyle) {
+                        // Per-state: state color + optional dashed outline.
+                        // strokeOpacity left at full so the state color reads true.
+                        line.style.stroke = assetStyle.color || '';
+                        line.style.strokeOpacity = '';
+                        line.style.strokeDasharray = assetStyle.dashed ? assetDash(assetStyle.width) : '';
+                    } else {
+                        line.style.stroke = toggleState['asset.line-color'] || '';
+                        const op = Number(toggleState['asset.line-opacity']);
+                        line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                        line.style.strokeDasharray = '';
+                    }
                 } else {
                     line.style.stroke = '';
                     line.style.strokeOpacity = '';
+                    line.style.strokeDasharray = '';
                 }
             } else if (isBlueFlight) {
                 if (toggleState['fp.show']) {
@@ -578,15 +676,20 @@
             }
 
             // --- Force line thickness (per-category) ---
-            if (wantForce) {
+            if (assetStyle) {
+                // Per-state width wins over the global force-thickness setting.
+                if (currentAttrWidth !== String(assetStyle.width)) {
+                    line.setAttribute('stroke-width', String(assetStyle.width));
+                }
+            } else if (wantForce) {
                 if (currentAttrWidth !== String(lineThickness)) {
                     line.setAttribute('stroke-width', lineThickness);
                 }
-            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset) && originalWidth !== lineThickness) {
-                // Revert anything we previously forced.
-                if (currentAttrWidth === String(lineThickness)) {
-                    line.setAttribute('stroke-width', String(originalWidth));
-                }
+            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset)
+                       && !isNaN(originalWidth) && currentAttrWidth !== String(originalWidth)) {
+                // Revert anything we previously forced (global thickness OR a
+                // now-disabled per-state width) back to the native width.
+                line.setAttribute('stroke-width', String(originalWidth));
             }
 
             // --- Asset fill override ---
@@ -595,12 +698,14 @@
             // When asset.fill is on, applies user-chosen fill color + opacity.
             if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
-                    if (toggleState['asset.fill'] === false) {
+                    // Per-state fill when tagged; otherwise the uniform asset.* fill.
+                    const fillOn = assetStyle ? assetStyle.fill : (toggleState['asset.fill'] !== false);
+                    if (!fillOn) {
                         line.style.fillOpacity = '0';
                         line.style.fill = '';
                     } else {
-                        line.style.fill = toggleState['asset.fill-color'] || '';
-                        const fo = Number(toggleState['asset.fill-opacity']);
+                        line.style.fill = (assetStyle ? assetStyle.fillColor : toggleState['asset.fill-color']) || '';
+                        const fo = assetStyle ? assetStyle.fillOpacity : Number(toggleState['asset.fill-opacity']);
                         line.style.fillOpacity = isNaN(fo) ? '' : String(fo);
                     }
                 } else {
@@ -641,7 +746,9 @@
                 bufferOpacity = readOpacity('fp.opacity', 0.5);
                 finalBufferWidth = ftToUnits(Number(toggleState['fp.distance']) || 40);
             } else if (isWhiteAsset) {
-                bufferStroke = toggleState['asset.color'] || '#ffffff';
+                // Per-state assets tint their halo to the state color so the
+                // buffer reads as the same category at a glance.
+                bufferStroke = assetStyle ? (assetStyle.color || '#ffffff') : (toggleState['asset.color'] || '#ffffff');
                 bufferOpacity = readOpacity('asset.opacity', 0.4);
                 finalBufferWidth = ftToUnits(Number(toggleState['asset.distance']) || 15);
             } else {
@@ -1078,6 +1185,166 @@
     function getCurrentSiteID() {
         const m = (location.hash || '').match(SITE_ID_RE);
         return m ? m[1] : null;
+    }
+
+    // ============================================================
+    // ASSET STATE — fetch /map_objects, classify, geometry-match
+    // ============================================================
+
+    // Title-case an unknown modifier so it reads cleanly in logs.
+    function prettyState(s) {
+        s = String(s || '').trim();
+        if (!s) return '';
+        return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+
+    // Ray-casting point-in-polygon on lat/lng. Ported from the Asset
+    // Inspector's hit-test — same algorithm so matches agree across scripts.
+    function pointInPolygon(lat, lng, poly) {
+        if (!poly || poly.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].lng, yi = poly[i].lat;
+            const xj = poly[j].lng, yj = poly[j].lat;
+            const intersect = ((yi > lat) !== (yj > lat))
+                && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    // Derive a single state for a type-3 asset. Precedence is safety-first so
+    // a glance surfaces the worst problem: Unreachable > Unshielded > Empty >
+    // Inactive > HY > Normal. State text lives in custom.poi_type_str as
+    // " - "-separated modifiers ("battery - empty"); is_unshielded is also an
+    // independent boolean flag, honored even when the subtype omits it.
+    function classifyAssetState(e) {
+        const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
+        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase()).filter(Boolean);
+        const has = (k) => mods.indexOf(k) !== -1;
+        if (has('unreachable')) return 'Unreachable';
+        if ((e && e.is_unshielded) || has('unshielded')) return 'Unshielded';
+        if (has('empty')) return 'Empty';
+        if (has('inactive')) return 'Inactive';
+        if (has('hy')) return 'HY';
+        if (mods.length) return prettyState(mods[0]); // unknown modifier — best effort
+        return 'Normal';
+    }
+
+    // Resolve the effective style for a state from the per-state toggles,
+    // falling back to ASSET_STATE_DEFAULTS (or the gray fallback for states
+    // with no Control Panel row, e.g. midstream taxonomies).
+    function assetStateStyle(state) {
+        const slug = stateSlug(state);
+        const def = ASSET_STATE_DEFAULTS[state] || ASSET_STATE_FALLBACK;
+        const get = (suffix, d) => {
+            const v = toggleState[`astate.${slug}.${suffix}`];
+            return v === undefined ? d : v;
+        };
+        const w = Number(get('width', def.width));
+        const fo = Number(get('opacity', def.opacity));
+        return {
+            color: get('color', def.color),
+            width: isNaN(w) ? def.width : w,
+            dashed: !!get('dashed', def.dashed),
+            fill: get('fill', def.fill) !== false,
+            fillColor: get('fill-color', def.fillColor),
+            fillOpacity: isNaN(fo) ? def.opacity : fo,
+        };
+    }
+
+    // SVG dash pattern scaled to the line width so it reads at any thickness.
+    function assetDash(width) {
+        const w = Number(width) || 10;
+        return `${Math.max(6, w * 1.4).toFixed(1)},${Math.max(4, w * 1.0).toFixed(1)}`;
+    }
+
+    // Fetch the current site's type-3 assets (cookie auth, no PAT). Self-
+    // contained — does not depend on the Asset Inspector being installed.
+    // Stores polygons + derived state in assetStateData, clears stale path
+    // tags, and re-renders when done. Idempotent per site while in flight.
+    function fetchAssetStates(siteID, force) {
+        if (!siteID) return;
+        if (!force && assetStateData.siteID === siteID
+            && (assetStateData.loading || assetStateData.polys.length || assetStateData.failed)) return;
+        assetStateData = { siteID, polys: [], loading: true, failed: false };
+        // New data incoming — drop existing tags so paths re-match.
+        try {
+            document.querySelectorAll('[data-aim-asset-state]')
+                .forEach(p => p.removeAttribute('data-aim-asset-state'));
+        } catch (e) {}
+        fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const polys = [];
+                list.forEach(e => {
+                    if (!e || e.type !== 3) return;
+                    const raw = Array.isArray(e.coords) ? e.coords
+                              : (Array.isArray(e.points) ? e.points : []);
+                    const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                    if (pts.length < 3) return;
+                    let sLat = 0, sLng = 0;
+                    pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    polys.push({
+                        state: classifyAssetState(e),
+                        coords: pts,
+                        cLat: sLat / pts.length,
+                        cLng: sLng / pts.length,
+                    });
+                });
+                // Ignore a stale response if the user navigated away mid-flight.
+                if (getCurrentSiteID() !== siteID) {
+                    assetStateData = { siteID: null, polys: [], loading: false, failed: false };
+                    return;
+                }
+                assetStateData = { siteID, polys, loading: false, failed: false };
+                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID}`);
+                if (isActive) runUpdate();
+            })
+            .catch(err => {
+                assetStateData = { siteID, polys: [], loading: false, failed: true };
+                console.warn(`${TAG} asset-state: fetch failed for site ${siteID}:`, err);
+            });
+    }
+
+    // Layer-point centroid of an SVG asset path → lat/lng. Leaflet draws path
+    // `d` coordinates in the overlay pane's layer-point space, so we average
+    // the vertices and convert back with the live map. Returns null on a path
+    // we can't parse or before the map is ready.
+    function pathCentroidLatLng(path, map) {
+        const d = path.getAttribute('d') || '';
+        const nums = d.match(/-?\d+(?:\.\d+)?/g);
+        if (!nums || nums.length < 4) return null;
+        let sx = 0, sy = 0, n = 0;
+        for (let i = 0; i + 1 < nums.length; i += 2) {
+            const x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
+            if (isNaN(x) || isNaN(y)) continue;
+            sx += x; sy += y; n++;
+        }
+        if (!n) return null;
+        try { return map.layerPointToLatLng({ x: sx / n, y: sy / n }); }
+        catch (e) { return null; }
+    }
+
+    // Match a white asset path to its asset's state: containment first, then
+    // nearest-centroid (covers self-intersecting "bowtie" assets where ray-
+    // casting on the raw polygon can miss). Returns null if nothing loaded.
+    function matchPathState(path, map) {
+        const polys = assetStateData.polys;
+        if (!polys.length) return null;
+        const ll = pathCentroidLatLng(path, map);
+        if (!ll) return null;
+        for (let i = 0; i < polys.length; i++) {
+            if (pointInPolygon(ll.lat, ll.lng, polys[i].coords)) return polys[i].state;
+        }
+        let best = null, bestD = Infinity;
+        for (let i = 0; i < polys.length; i++) {
+            const dLat = polys[i].cLat - ll.lat, dLng = polys[i].cLng - ll.lng;
+            const dd = dLat * dLat + dLng * dLng;
+            if (dd < bestD) { bestD = dd; best = polys[i]; }
+        }
+        return best ? best.state : null;
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -4897,6 +5164,21 @@
                 // for the next runUpdate or interaction.
                 if (msg.toggleId === 'asset.locked') {
                     applyAssetLockClass();
+                }
+                // Color-by-state flipped on → kick off the entity fetch now so
+                // the styling appears without waiting for another interaction.
+                // Flipped off → drop the path tags so a future re-enable
+                // re-matches against fresh data. (runUpdate still runs below.)
+                if (msg.toggleId === 'asset.by-state') {
+                    if (newVal) {
+                        const sid = getCurrentSiteID();
+                        if (sid) fetchAssetStates(sid, true);
+                    } else {
+                        try {
+                            document.querySelectorAll('[data-aim-asset-state]')
+                                .forEach(p => p.removeAttribute('data-aim-asset-state'));
+                        } catch (e) {}
+                    }
                 }
                 if (msg.toggleId === 'master') {
                     // Only log when the value actually transitions. The Control
