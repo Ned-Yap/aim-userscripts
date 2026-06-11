@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Flight Path Editor v0.18 (latest, dev-only) — post-edit integrity checker + OPEN PATH jank fix
+
+**Integrity checker on every edit.** Added `checkFlightPath()` — flags non-finite coords, a severed (disconnected) path, coords/arcs mismatch (orphan coords or arc endpoints missing from coords), zero-length arcs, inverted altitude bands, and connected-arc altitude-band gaps. Both split and OPEN PATH now snapshot the path's health *before* the edit and re-check *after*; if the edit introduced **any new problem** (or didn't apply with the expected arc count), it **auto-reverts** and says why. So every edit is verified not to have hurt the path — pre-existing issues aren't blamed on us. New manual command `window.__aim_fpe_check()` prints the integrity of every open flight path on demand.
+
+**OPEN PATH live-drag jank fix.** The freed vertex is now inserted **positionally** in the coords list (right after the junction it split from) instead of appended at the end — appending left Percepto's editor mis-binding the marker until a refresh; matching the splitter's positional insert should keep the live marker↔arc binding consistent (no refresh needed to drag).
+
+---
+
 ## 2026-06-11 — AIM Flight Path Editor v0.17 (latest, dev-only) — OPEN PATH shows on first open
 
 v0.16's "OPEN PATH" item sometimes only appeared after closing and reopening the vertex popup — Percepto renders the menu via React *after* `popupopen` fired, wiping our one-shot injection. v0.17 re-injects the item under a MutationObserver for the popup's lifetime (disconnected on `popupclose`), so it's reliably present on the first open.

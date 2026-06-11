@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.18
 // @description  Edit Percepto flight paths from the map while natively editing one: (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). No button, no mode. SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -285,26 +285,78 @@
         return { ok: true };
     }
 
-    // ---- post-write self-check: confirm the edit actually landed (non-destructive) ----
-    function verifyAfterInsert(fpId, M, prevArcCount) {
+    // ---- flight-path integrity checker ----
+    // Returns an array of issue strings ([] = clean). Catches the kinds of corruption
+    // an edit could introduce: non-finite coords, a severed (disconnected) path,
+    // coords/arcs mismatch (orphan coords or arc endpoints missing from coords),
+    // zero-length arcs, inverted altitude bands, and connected-arc altitude-band gaps
+    // (Percepto's rule that arcs sharing a vertex must share a strictly-positive band).
+    function checkFlightPath(fp) {
+        const issues = [];
+        const arcs = (fp && fp.arcs) || [], coords = (fp && fp.coords) || [];
+        arcs.forEach((a, i) => {
+            if (!finitePt(a.point_a)) issues.push(`arc ${i + 1} point_a is non-finite`);
+            if (!finitePt(a.point_b)) issues.push(`arc ${i + 1} point_b is non-finite`);
+            if (finitePt(a.point_a) && finitePt(a.point_b) && ptSame(a.point_a, a.point_b)) issues.push(`arc ${i + 1} is zero-length (point_a == point_b)`);
+            if (num(a.min_alt) && num(a.max_alt) && a.max_alt < a.min_alt) issues.push(`arc ${i + 1} altitude band inverted (max < min)`);
+        });
+        coords.forEach((c, i) => { if (!finitePt(c)) issues.push(`coord ${i} is non-finite`); });
+        if (arcs.length && !graphConnected(arcs)) issues.push('path is split into disconnected pieces');
+        // coords set must equal the arc-endpoint set (no orphan coords, no missing waypoints)
+        const arcNodes = new Set(), coordNodes = new Set();
+        arcs.forEach(a => { if (finitePt(a.point_a)) arcNodes.add(nodeKey(a.point_a)); if (finitePt(a.point_b)) arcNodes.add(nodeKey(a.point_b)); });
+        coords.forEach(c => { if (finitePt(c)) coordNodes.add(nodeKey(c)); });
+        arcNodes.forEach(k => { if (!coordNodes.has(k)) issues.push(`arc endpoint ${k} missing from coords`); });
+        coordNodes.forEach(k => { if (!arcNodes.has(k)) issues.push(`orphan coord ${k} (no arc uses it)`); });
+        // connected-arc altitude overlap: any two arcs sharing a vertex must overlap with positive width
+        for (let i = 0; i < arcs.length; i++) for (let j = i + 1; j < arcs.length; j++) {
+            const a = arcs[i], b = arcs[j];
+            const shares = ptEq(a.point_a, b.point_a) || ptEq(a.point_a, b.point_b) || ptEq(a.point_b, b.point_a) || ptEq(a.point_b, b.point_b);
+            if (!shares) continue;
+            if (num(a.min_alt) && num(a.max_alt) && num(b.min_alt) && num(b.max_alt)) {
+                const lo = Math.max(a.min_alt, b.min_alt), hi = Math.min(a.max_alt, b.max_alt);
+                if (hi <= lo) issues.push(`arcs ${i + 1} & ${j + 1} share a vertex but their altitude bands don't overlap`);
+            }
+        }
+        return issues;
+    }
+    // Manual command: window.__aim_fpe_check() — report integrity of every open FP.
+    function runIntegrityReport() {
+        const wcs = findFpWorkingCopies();
+        if (!wcs.length) { log('integrity check: no flight path editor open'); return []; }
+        const report = wcs.map(wc => ({ name: wc.state.name, id: wc.id, issues: checkFlightPath(wc.state) }));
+        report.forEach(r => r.issues.length
+            ? warn(`integrity: "${r.name}" has ${r.issues.length} issue(s):`, r.issues)
+            : log(`integrity: "${r.name}" — CLEAN (${(wcs.find(w => w.id === r.id).state.arcs || []).length} arcs)`));
+        return report;
+    }
+    unsafeWindow.__aim_fpe_check = runIntegrityReport;
+
+    // ---- post-edit verification: confirm the edit applied AND introduced no NEW
+    //      integrity problem vs the pre-edit snapshot; auto-revert if it did. ----
+    function verifyEdit(fpId, preIssues, expectedArcCount, label) {
         setTimeout(() => {
             try {
                 const wc = findFpWorkingCopies().find(w => w.id === fpId);
-                if (!wc) return; // editor closed before we could verify — nothing to do
+                if (!wc) return; // editor closed — can't verify
                 const arcs = wc.state.arcs || [];
-                if (arcs.length === prevArcCount) {
-                    // the dispatch had no effect — nothing was written; roll back our bookkeeping
-                    warn('post-insert self-check: split did not apply (arc count unchanged) — reverting bookkeeping');
+                const revert = (reason) => {
                     const last = undoStack[undoStack.length - 1];
-                    if (last && last.id === fpId) undoStack.pop();
+                    if (last && last.id === fpId) {
+                        undoStack.pop();
+                        wc.dispatch({ ...wc.state, arcs: last.arcs, coords: last.coords });
+                    }
                     if (state.inserts > 0) state.inserts--;
                     renderPanel();
-                    toast('⛔ Split didn’t apply — nothing changed. Try the segment number again.', '#ff8a80');
-                    return;
-                }
-                const present = arcs.some(a => ptSame(a.point_a, M) || ptSame(a.point_b, M));
-                if (!present) warn('post-insert self-check: inserted vertex not found in live state (a native edit may have moved it)');
-            } catch (e) { warn('post-insert self-check threw', e); }
+                    warn(`${label}: ${reason} — auto-reverted`);
+                    toast(`⛔ ${label} reverted — ${reason}. Path left as it was.`, '#ff8a80');
+                };
+                if (arcs.length !== expectedArcCount) { revert(`edit didn't apply cleanly (expected ${expectedArcCount} arcs, got ${arcs.length})`); return; }
+                const post = checkFlightPath(wc.state);
+                const fresh = post.filter(p => !preIssues.includes(p));
+                if (fresh.length) { revert(`integrity check failed: ${fresh[0]}`); return; }
+                log(`${label}: verified clean${post.length ? ' (' + post.length + ' pre-existing issue(s), unchanged)' : ''}`);
+            } catch (e) { warn(`${label} post-edit verify threw`, e); }
         }, 60);
     }
 
@@ -341,6 +393,7 @@
                 return;
             }
 
+            const preIssues = checkFlightPath(st); // health BEFORE the edit (don't blame us for pre-existing)
             undoStack.push({ id: fpId, name: st.name, seg: idx + 1, arcs: origArcs, coords: origCoords });
             // value-form dispatch on the working-copy useState (it holds the FP object itself).
             wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
@@ -348,7 +401,7 @@
             log(`inserted vertex on "${st.name}" seg ${idx + 1}: arcs ${origArcs.length} → ${newArcs.length} (validated · live working copy · no refresh)`);
             renderPanel();
             toast(`✚ Vertex added on ${st.name} (seg ${idx + 1}). Drag/branch it natively, then Save — no refresh needed.`, '#5fff5f');
-            verifyAfterInsert(fpId, Mpt, origArcs.length);
+            verifyEdit(fpId, preIssues, origArcs.length + 1, 'Split');
         } catch (e) {
             warn('doInsert threw — nothing dispatched after the throw point', e);
             toast('⛔ Split errored — see console. Path left as-is.', '#ff8a80');
@@ -463,17 +516,25 @@
             else newArcs[closer.arcIdx].point_a = clone(Vprime);
             const na = newArcs[closer.arcIdx];
             na.distance = hav(na.point_a, na.point_b); // server recomputes on save anyway
-            const newCoords = clone(st.coords || []); newCoords.push(clone(Vprime));
+            // Insert the freed vertex POSITIONALLY (right after the junction it split off
+            // from) rather than appending — appending at the end left Percepto's editor
+            // mis-binding the marker until a refresh; matching the splitter's positional
+            // insert keeps the live marker↔arc binding consistent.
+            const newCoords = clone(st.coords || []);
+            const vIdx = newCoords.findIndex(c => ptEq(c, V));
+            if (vIdx >= 0) newCoords.splice(vIdx + 1, 0, clone(Vprime)); else newCoords.push(clone(Vprime));
 
             const v = validateUnsnap(st, V, Vprime, newArcs, newCoords);
             if (!v.ok) { warn('OPEN PATH aborted —', v.reason); toast(`⛔ Open Path blocked: ${v.reason}. Nothing changed.`, '#ff8a80'); return; }
 
+            const preIssues = checkFlightPath(st); // health BEFORE the edit
             undoStack.push({ id: fpId, name: st.name, kind: 'open', arcs: origArcs, coords: origCoords });
             wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
             state.inserts++;
             log(`opened loop on "${st.name}" — detached arc ${closer.arcIdx + 1} from the junction (coords ${origCoords.length} → ${newCoords.length}, validated)`);
             renderPanel();
             toast(`✂ Loop opened on ${st.name}. The freed vertex is ~50px away — drag it where you want, then Save.`, '#5fff5f');
+            verifyEdit(fpId, preIssues, st.arcs.length, 'Open Path');
         } catch (e) {
             warn('doUnsnap threw — path left as-is', e);
             toast('⛔ Open Path errored — see console. Path left as-is.', '#ff8a80');
@@ -579,5 +640,5 @@
     installBadgeListeners();
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log('v0.17 ready (iframe) — click a segment number to split it · OPEN PATH item in the vertex popup un-closes a loop (now re-injected via observer so it shows on first open) · writes the FP editor working copy · validation gate on every edit · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
+    log('v0.18 ready (iframe) — split (click a segment number) + OPEN PATH (vertex popup, un-close a loop) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts if it introduced any new problem) · window.__aim_fpe_check() reports path health · writes the FP editor working copy · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
 })();
