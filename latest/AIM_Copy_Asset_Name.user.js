@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.99
+// @version      4.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.99';
+    const SCRIPT_VERSION = '4.0';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -238,6 +238,7 @@
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
+    const CACHE_KEY_BATTERY_THRESHOLDS = 'aim-ai-battery-thresholds'; // {tattuMaxFt, tulipMaxFt} battery cutoffs (editable)
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
@@ -2038,7 +2039,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -2153,8 +2154,8 @@
         },
         {
             name: 'Route from Base',
-            desc: 'Assets by flight-path distance from the basestation (set the base via 📍 Base), nearest first.',
-            columnOrder: ['name', 'subtype', 'equipment', 'route'],
+            desc: 'Assets by flight-path distance from the basestation (set via 📍 Base) + recommended battery, nearest first.',
+            columnOrder: ['name', 'subtype', 'equipment', 'route', 'battery'],
             typeFilter: ['3'], sortKey: 'routeM', sortDir: 1, unitsFt: true,
         },
         {
@@ -2221,6 +2222,7 @@
             agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
             segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
             route: { label: `Route (${u})`, val: r => num(r.routeM) },
+            battery: { label: 'Battery', val: r => { const b = batteryFor(r.routeM, loadBatteryThresholds()); return b ? b.label.replace(/^⚠\s*/, '') : ''; } },
             ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
             validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
             unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
@@ -4847,6 +4849,27 @@
     //     edge (the full-FFZ traversal).
     const REACH_FFZ_FT = 70;            // asset pad EDGE → FFZ gate (starting value; tunable)
     const ENTRY_FFZ_FT = 25;            // FP vertex counts as reaching an FFZ if inside or within this (ft)
+    // ---- Battery recommendation (slice 3b, v4.0) ----
+    // One-way route distance picks the battery: ≤ tattuMaxFt → Tattu;
+    // ≤ tulipMaxFt → Tulip required; beyond → out of range. Editable.
+    const BATTERY_DEFAULTS = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    function loadBatteryThresholds() {
+        const t = elevGmGet(CACHE_KEY_BATTERY_THRESHOLDS, null);
+        const num = (v, d) => (typeof v === 'number' && isFinite(v) && v > 0) ? v : d;
+        return (t && typeof t === 'object')
+            ? { tattuMaxFt: num(t.tattuMaxFt, BATTERY_DEFAULTS.tattuMaxFt), tulipMaxFt: num(t.tulipMaxFt, BATTERY_DEFAULTS.tulipMaxFt) }
+            : { tattuMaxFt: BATTERY_DEFAULTS.tattuMaxFt, tulipMaxFt: BATTERY_DEFAULTS.tulipMaxFt };
+    }
+    function saveBatteryThresholds(th) { elevGmSet(CACHE_KEY_BATTERY_THRESHOLDS, th); }
+    // Battery pick from one-way route distance (meters) + thresholds (ft).
+    // Returns {label, color, level} or null when there's no route.
+    function batteryFor(routeM, th) {
+        if (routeM == null) return null;
+        const ft = routeM * 3.28084;
+        if (ft <= th.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 };
+        if (ft <= th.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 };
+        return { label: `⚠ over ${Math.round(th.tulipMaxFt).toLocaleString()} ft`, color: '#ff5252', level: 2 };
+    }
     function loadBaseGmMap() {
         const m = elevGmGet(CACHE_KEY_BASE_GM, {});
         return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
@@ -6324,6 +6347,86 @@
         };
         optsRow.appendChild(baseBtn);
 
+        // v4.0: 🔋 Battery — editable Tattu/Tulip thresholds (one-way ft) that
+        // drive the Battery column from each asset's route distance.
+        const battBtn = document.createElement('button');
+        battBtn.type = 'button';
+        battBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const updateBattBtn = () => {
+            const th = loadBatteryThresholds();
+            battBtn.textContent = `🔋 Tattu ≤${th.tattuMaxFt / 1000}k · Tulip ≤${th.tulipMaxFt / 1000}k ▾`;
+        };
+        updateBattBtn();
+        battBtn.title = 'Battery thresholds (one-way ft): ≤Tattu → Tattu, ≤Tulip → Tulip, beyond → out of range';
+        let battMenuEl = null;
+        battBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (battMenuEl) { battMenuEl.remove(); battMenuEl = null; return; }
+            battMenuEl = document.createElement('div');
+            battMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:8px 12px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:230px';
+            const th = loadBatteryThresholds();
+            const bh = document.createElement('div');
+            bh.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding-bottom:6px;font-weight:700';
+            bh.textContent = 'Battery thresholds (one-way ft)';
+            battMenuEl.appendChild(bh);
+            const mkRow = (label, key, colr) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0';
+                const lbl = document.createElement('span');
+                lbl.textContent = label;
+                lbl.style.cssText = `flex:1;color:${colr};font-weight:600`;
+                row.appendChild(lbl);
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.value = th[key];
+                inp.style.cssText = 'width:80px;background:#15171b;border:1px solid rgba(255,255,255,0.2);border-radius:3px;color:#e6e6e6;font:inherit;font-size:11px;padding:2px 4px;text-align:right';
+                inp.onchange = () => {
+                    const v = parseFloat(inp.value);
+                    if (isFinite(v) && v > 0) {
+                        const cur = loadBatteryThresholds();
+                        cur[key] = v;
+                        saveBatteryThresholds(cur);
+                        updateBattBtn();
+                        redrawTable();
+                    }
+                };
+                row.appendChild(inp);
+                const ft = document.createElement('span'); ft.textContent = 'ft'; ft.style.color = '#888'; row.appendChild(ft);
+                battMenuEl.appendChild(row);
+            };
+            mkRow('Tattu ≤', 'tattuMaxFt', '#5fff5f');
+            mkRow('Tulip ≤', 'tulipMaxFt', '#ffd54f');
+            const bnote = document.createElement('div');
+            bnote.style.cssText = 'font-size:9px;color:#888;padding-top:6px;max-width:220px;line-height:1.3';
+            bnote.textContent = '≤Tattu → Tattu · ≤Tulip → Tulip · beyond → ⚠ out of range. Drives the Battery column.';
+            battMenuEl.appendChild(bnote);
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.textContent = `Reset (${BATTERY_DEFAULTS.tattuMaxFt / 1000}k / ${BATTERY_DEFAULTS.tulipMaxFt / 1000}k)`;
+            reset.style.cssText = 'margin-top:6px;background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px';
+            reset.onclick = () => {
+                saveBatteryThresholds({ tattuMaxFt: BATTERY_DEFAULTS.tattuMaxFt, tulipMaxFt: BATTERY_DEFAULTS.tulipMaxFt });
+                updateBattBtn(); redrawTable();
+                if (battMenuEl) { battMenuEl.remove(); battMenuEl = null; }
+            };
+            battMenuEl.appendChild(reset);
+            const br = battBtn.getBoundingClientRect();
+            battMenuEl.style.left = br.left + 'px';
+            battMenuEl.style.top = (br.bottom + 4) + 'px';
+            document.body.appendChild(battMenuEl);
+            const bmr = battMenuEl.getBoundingClientRect();
+            if (bmr.right > window.innerWidth - 8) battMenuEl.style.left = Math.max(8, window.innerWidth - bmr.width - 8) + 'px';
+            if (bmr.bottom > window.innerHeight - 8) battMenuEl.style.top = Math.max(8, br.top - bmr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (battMenuEl && !battMenuEl.contains(e.target) && e.target !== battBtn) {
+                    battMenuEl.remove(); battMenuEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(battBtn);
+
         // v3.84: Ranges menu — numeric range filters (min/max) per meter-valued
         // column. Values entered in the current display unit, stored in meters.
         const rangesBtn = document.createElement('button');
@@ -6462,6 +6565,7 @@
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
                 route:     'Route from base (asset)',
+                battery:   'Battery (from route)',
                 ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
                 unshielded:'Unshielded',
@@ -7873,6 +7977,9 @@
             // dataKey (the property on the row for the value) and a render
             // function for the cell.
             const unitLbl = sumPanelState.unitsFt ? 'ft' : 'm';
+            // v4.0: current battery thresholds, loaded once per redraw so the
+            // 🔋 Battery menu's edits apply on the next redrawTable().
+            const batteryTh = loadBatteryThresholds();
             // Display: comma-grouped whole feet (or meters with one
             // decimal). Used for every altitude/elevation column so the
             // numbers line up + are easy to read at a glance.
@@ -7914,6 +8021,7 @@
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
+                { key: 'battery',   label: 'Battery',        w: 95,  num: false, dataKey: 'routeM' },
                 { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
                 { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
@@ -8656,6 +8764,21 @@
                                 : 'Route from base. Right-click: copy raw.';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
+                    } else if (col.key === 'battery') {
+                        // Recommended battery from the one-way route distance.
+                        const b = batteryFor(r.routeM, batteryTh);
+                        if (!b) {
+                            td.style.cssText = 'padding:5px 8px;color:#555;font-size:11px;cursor:pointer';
+                            td.textContent = '—';
+                            td.title = (r.type === 3 && !r._isSegment)
+                                ? 'No route from base → battery N/A'
+                                : 'Battery is computed for routable assets';
+                        } else {
+                            td.style.cssText = `padding:5px 8px;color:${b.color};font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap`;
+                            td.textContent = b.label;
+                            const ft = Math.round(r.routeM * 3.28084).toLocaleString();
+                            td.title = `One-way route ${ft} ft → ${b.label}.\nTattu ≤ ${batteryTh.tattuMaxFt.toLocaleString()} ft · Tulip ≤ ${batteryTh.tulipMaxFt.toLocaleString()} ft (set via 🔋 Battery).`;
+                        }
                     } else if (col.key === 'unshielded') {
                         // ✓ = unshielded (a drone-safety concern), ✗ = shielded,
                         // — = N/A. The flag is meaningful for FFZ + Assets.
@@ -8743,6 +8866,10 @@
                         || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route'
                         || col.key === 'ptAlt') {
                         return num(r[col.dataKey]);
+                    }
+                    if (col.key === 'battery') {
+                        const b = batteryFor(r.routeM, loadBatteryThresholds());
+                        return b ? b.label.replace(/^⚠\s*/, '') : '';
                     }
                     if (col.key === 'validated') {
                         if (r.validated === true) return 'yes';
