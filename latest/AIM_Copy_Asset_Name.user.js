@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.89
+// @version      3.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.89';
+    const SCRIPT_VERSION = '3.90';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -981,6 +981,28 @@
             const d = approxMeters(lat, lng, v.lat, v.lng);
             if (!best || d < best.dist) best = { key: k, dist: d, vert: v };
         });
+        return best;
+    }
+    // Ray-casting point-in-polygon. ring = [{lat,lng}…] (open or closed).
+    function pointInPolygon(lat, lng, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].lng, yi = ring[i].lat;
+            const xj = ring[j].lng, yj = ring[j].lat;
+            const intersect = ((yi > lat) !== (yj > lat)) &&
+                (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    // Distance (m) from a point to a polygon: 0 if inside, else min edge dist.
+    function pointToPolygonMeters(lat, lng, ring) {
+        if (pointInPolygon(lat, lng, ring)) return 0;
+        let best = Infinity;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const d = pointToSegMeters(lat, lng, ring[j], ring[i]);
+            if (d < best) best = d;
+        }
         return best;
     }
     function findEntityAtLatLng(lat, lng, siteID) {
@@ -4703,9 +4725,19 @@
         return out;
     }
 
-    // ---- Route from basestation (Phase 3, v3.88) ----
-    // Per-site chosen base GM: a stored override wins; otherwise auto-detect a
-    // General Marker whose name contains "base" (e.g. "Requested Base Location").
+    // ---- Route from basestation (Phase 3, v3.90) ----
+    // Operational model (per user): drone leaves the base (which sits in its
+    // own FFZ) → flies connected FP segments → reaches the ASSET's inspection
+    // FFZ → must traverse the FULL FFZ to its far edge. All one-way.
+    //   • Base = type-8 installed base(s) if present, else GM named /base/i.
+    //     With multiple bases, each asset routes from the CLOSEST (min route).
+    //   • Reachable = an FFZ lies within REACH_FFZ_FT of the asset AND a flight
+    //     path actually reaches that FFZ (an FP vertex inside it). Otherwise the
+    //     asset is unreachable (no route).
+    //   • Distance = base→nearest FP vertex (straight) + on-network (Dijkstra)
+    //     to the FP vertex inside the asset's FFZ + that entry → the FFZ's far
+    //     edge (the full-FFZ traversal).
+    const REACH_FFZ_FT = 70;            // asset→FFZ gate (starting value; tunable)
     function loadBaseGmMap() {
         const m = elevGmGet(CACHE_KEY_BASE_GM, {});
         return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
@@ -4716,52 +4748,80 @@
         else m[String(siteID)] = gmId;
         elevGmSet(CACHE_KEY_BASE_GM, m);
     }
-    function autoDetectBaseGm(entities) {
-        const gms = (entities || []).filter(e => e.type === 19 && e.name && /base/i.test(e.name));
-        return gms.length ? gms[0] : null;
-    }
-    // Resolve the base GM for a site: stored override (if it still exists) else
-    // auto-detected. Returns {entity, auto:boolean}|null.
-    function resolveBaseGm(siteID, entities) {
-        const stored = loadBaseGmMap()[String(siteID)];
-        if (stored != null) {
-            const e = (entities || []).find(x => x.type === 19 && x.id === stored);
-            if (e) return { entity: e, auto: false };
-        }
-        const auto = autoDetectBaseGm(entities);
-        return auto ? { entity: auto, auto: true } : null;
-    }
     function gmPoint(e) {
         return (e && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number')
             ? { lat: e.coords[0].lat, lng: e.coords[0].lng } : null;
     }
-    // Annotate ASSET rows in-place with routeM (base→asset, meters, following
-    // connected flight paths) + a breakdown for the tooltip. Distance =
-    // in-connector (base→entry vertex, straight line) + on-network (Dijkstra)
-    // + out-connector (exit vertex→asset, straight line) — the conservative
-    // model the user chose. Returns a summary for the base-picker UI.
+    // Resolve the basestation entities for a site. A stored override pins ONE
+    // (type-8 or GM). Otherwise: all type-8 installed bases, else all GMs named
+    // /base/i. Returns { bases: [entity…], auto: boolean }.
+    function resolveBases(siteID, entities) {
+        const stored = loadBaseGmMap()[String(siteID)];
+        if (stored != null) {
+            const e = (entities || []).find(x => (x.type === 8 || x.type === 19) && x.id === stored && gmPoint(x));
+            if (e) return { bases: [e], auto: false };
+        }
+        const type8 = (entities || []).filter(e => e.type === 8 && gmPoint(e));
+        if (type8.length) return { bases: type8, auto: true };
+        const gmBases = (entities || []).filter(e => e.type === 19 && e.name && /base/i.test(e.name) && gmPoint(e));
+        return { bases: gmBases, auto: true };
+    }
+    // Annotate ASSET rows in-place with routeM (base→FFZ-far-edge, meters,
+    // following connected flight paths) + breakdown + the base used. Returns a
+    // summary for the base-picker UI.
     function annotateRoutes(siteID, rows) {
         const bucket = mapObjectsBySite[siteID];
         const entities = bucket ? (bucket.entities || []) : [];
-        const summary = { baseEntity: null, baseAuto: false, graphVerts: 0, reachable: 0, unreachable: 0, reason: '' };
-        const base = resolveBaseGm(siteID, entities);
-        if (!base) { summary.reason = 'no-base'; return summary; }
-        summary.baseEntity = base.entity; summary.baseAuto = base.auto;
-        const basePt = gmPoint(base.entity);
-        if (!basePt) { summary.reason = 'base-no-coord'; return summary; }
+        const summary = { bases: [], baseAuto: true, graphVerts: 0, reachable: 0, unreachable: 0, reason: '' };
+        const resolved = resolveBases(siteID, entities);
+        summary.bases = resolved.bases; summary.baseAuto = resolved.auto;
+        if (!resolved.bases.length) { summary.reason = 'no-base'; return summary; }
         const graph = buildFlightPathGraph(entities);
         summary.graphVerts = graph.verts.size;
         if (graph.verts.size === 0) { summary.reason = 'no-flight-paths'; return summary; }
-        const baseV = nearestGraphVertex(graph, basePt.lat, basePt.lng);
-        const inConn = baseV.dist; // base → entry vertex (off-network hop)
-        const dist = dijkstraFrom(graph, baseV.key);
+        // Per base: nearest FP vertex + Dijkstra map + base→vertex connector.
+        const baseRuns = resolved.bases.map(b => {
+            const pt = gmPoint(b);
+            if (!pt) return null;
+            const bv = nearestGraphVertex(graph, pt.lat, pt.lng);
+            return { entity: b, baseConn: bv.dist, dist: dijkstraFrom(graph, bv.key) };
+        }).filter(Boolean);
+        if (!baseRuns.length) { summary.reason = 'base-no-coord'; return summary; }
+        // FFZ polygons + flat list of FP vertices (for in-FFZ entry detection).
+        const ffzs = entities.filter(e => e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3);
+        const fpVerts = [];
+        graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const reachM = REACH_FFZ_FT / 3.28084;
         rows.forEach(r => {
-            if (r.type !== 3 || r._isSegment || typeof r._lat !== 'number') return; // assets w/ coords only
-            const av = nearestGraphVertex(graph, r._lat, r._lng);
-            const net = (av && dist.has(av.key)) ? dist.get(av.key) : null;
-            if (net == null) { r.routeM = null; r._routeReason = 'unreachable'; summary.unreachable++; return; }
-            r.routeM = inConn + net + av.dist;
-            r._routeBreak = { inM: inConn, netM: net, outM: av.dist };
+            if (r.type !== 3 || r._isSegment || typeof r._lat !== 'number') return;
+            // 1. Asset's FFZ = nearest FFZ within REACH_FFZ_FT of the asset.
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => {
+                const d = pointToPolygonMeters(r._lat, r._lng, f.coords);
+                if (d < ffzD) { ffzD = d; ffz = f; }
+            });
+            if (!ffz || ffzD > reachM) { r.routeM = null; r._routeReason = 'no-ffz'; summary.unreachable++; return; }
+            r._ffzEntity = ffz;
+            // 2. Entry candidates = FP vertices inside that FFZ (FP reaches pad).
+            const entries = fpVerts.filter(v => pointInPolygon(v.lat, v.lng, ffz.coords));
+            if (!entries.length) { r.routeM = null; r._routeReason = 'ffz-no-fp'; summary.unreachable++; return; }
+            // 3. Route = min over (base, entry) of baseConn + net(entry) +
+            //    (entry → FFZ far edge). Closest base + best entry win.
+            let best = null;
+            baseRuns.forEach(br => {
+                entries.forEach(en => {
+                    const net = br.dist.has(en.key) ? br.dist.get(en.key) : null;
+                    if (net == null) return;
+                    let far = 0;
+                    ffz.coords.forEach(p => { const dd = approxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; });
+                    const total = br.baseConn + net + far;
+                    if (!best || total < best.total) best = { total, base: br.entity, inM: br.baseConn, netM: net, ffzM: far };
+                });
+            });
+            if (!best) { r.routeM = null; r._routeReason = 'unreachable'; summary.unreachable++; return; }
+            r.routeM = best.total;
+            r._routeBreak = { inM: best.inM, netM: best.netM, ffzM: best.ffzM };
+            r._routeBase = best.base;
             r._routeReason = '';
             summary.reachable++;
         });
@@ -6024,34 +6084,39 @@
         const baseBtn = document.createElement('button');
         baseBtn.type = 'button';
         baseBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const bases = (routeSummary && routeSummary.bases) || [];
         const baseLabelText = () => {
-            const be = routeSummary && routeSummary.baseEntity;
-            if (!be) return '📍 Base: (none) ▾';
-            const raw = be.name || `#${be.id}`;
-            const nm = raw.length > 22 ? raw.slice(0, 21) + '…' : raw;
-            return `📍 Base: ${nm}${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
+            if (!bases.length) return '📍 Base: (none) ▾';
+            if (bases.length === 1) {
+                const raw = bases[0].name || `#${bases[0].id}`;
+                const nm = raw.length > 20 ? raw.slice(0, 19) + '…' : raw;
+                return `📍 Base: ${nm}${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
+            }
+            return `📍 Base: ${bases.length} bases${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
         };
         baseBtn.textContent = baseLabelText();
-        baseBtn.title = (routeSummary && routeSummary.baseEntity)
-            ? `Routing from "${routeSummary.baseEntity.name}" — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
+        baseBtn.title = bases.length
+            ? `Routing from ${bases.length === 1 ? `"${bases[0].name}"` : bases.length + ' bases (closest wins)'} — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
             : (routeSummary && routeSummary.reason === 'no-flight-paths'
                 ? 'No flight paths on this site — routing unavailable.'
-                : 'No basestation found (no GM named "…base…"). Click to pick one.');
-        if (routeSummary && routeSummary.baseEntity) { baseBtn.style.borderColor = 'rgba(20,210,220,0.55)'; baseBtn.style.color = '#7adfe6'; }
+                : 'No basestation found (no type-8 base, no GM named "…base…"). Click to pick one.');
+        if (bases.length) { baseBtn.style.borderColor = 'rgba(20,210,220,0.55)'; baseBtn.style.color = '#7adfe6'; }
         let baseMenuEl = null;
         const closeBaseMenu = () => { if (baseMenuEl) { baseMenuEl.remove(); baseMenuEl = null; } };
         baseBtn.onclick = (ev) => {
             ev.stopPropagation();
             if (baseMenuEl) { closeBaseMenu(); return; }
             baseMenuEl = document.createElement('div');
-            baseMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:240px;max-height:60vh;overflow:auto';
+            baseMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:250px;max-height:60vh;overflow:auto';
             const bhead = document.createElement('div');
             bhead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
             bhead.textContent = 'Basestation (for Route column)';
             baseMenuEl.appendChild(bhead);
             const bucket = mapObjectsBySite[siteID];
-            const gms = bucket ? (bucket.entities || []).filter(e => e.type === 19 && gmPoint(e)) : [];
-            const curId = (routeSummary && routeSummary.baseEntity) ? routeSummary.baseEntity.id : null;
+            const ents = bucket ? (bucket.entities || []) : [];
+            const type8 = ents.filter(e => e.type === 8 && gmPoint(e));
+            const gms = ents.filter(e => e.type === 19 && gmPoint(e));
+            const overrideId = loadBaseGmMap()[String(siteID)];
             const mkBaseRow = (label, onPick, opts) => {
                 opts = opts || {};
                 const row = document.createElement('div');
@@ -6065,12 +6130,25 @@
                 row.onclick = onPick;
                 return row;
             };
-            baseMenuEl.appendChild(mkBaseRow('Auto-detect (name contains "base")', () => {
+            const sect = (txt) => {
+                const h = document.createElement('div');
+                h.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:5px 12px 2px;font-weight:700';
+                h.textContent = txt;
+                baseMenuEl.appendChild(h);
+            };
+            baseMenuEl.appendChild(mkBaseRow(`Auto-detect (installed type-8 base → else GM "…base…")`, () => {
                 closeBaseMenu(); setBaseGmId(siteID, null); renderSummaryPanel(siteID);
-            }, { check: routeSummary && routeSummary.baseAuto, accent: '#cfe8ec' }));
+            }, { check: overrideId == null, accent: '#cfe8ec' }));
             const bhr = document.createElement('div');
             bhr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:5px 0';
             baseMenuEl.appendChild(bhr);
+            if (type8.length) {
+                sect('Installed bases (type 8)');
+                type8.forEach(g => baseMenuEl.appendChild(mkBaseRow(g.name || `#${g.id}`, () => {
+                    closeBaseMenu(); setBaseGmId(siteID, g.id); renderSummaryPanel(siteID);
+                }, { check: overrideId === g.id })));
+            }
+            sect('General Markers');
             if (!gms.length) {
                 const empty = document.createElement('div');
                 empty.style.cssText = 'padding:3px 12px;color:#888';
@@ -6080,7 +6158,7 @@
             gms.forEach(g => {
                 baseMenuEl.appendChild(mkBaseRow(g.name || `#${g.id}`, () => {
                     closeBaseMenu(); setBaseGmId(siteID, g.id); renderSummaryPanel(siteID);
-                }, { check: curId === g.id && !(routeSummary && routeSummary.baseAuto) }));
+                }, { check: overrideId === g.id }));
             });
             const br = baseBtn.getBoundingClientRect();
             baseMenuEl.style.left = br.left + 'px';
@@ -8344,24 +8422,28 @@
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
                     } else if (col.key === 'route') {
-                        // Route from basestation along connected flight paths
-                        // (asset rows only). Hover = in/network/out breakdown.
-                        // — when not an asset / no base; ⚠ when unreachable.
+                        // Route from base → asset's FFZ far edge along connected
+                        // flight paths (asset rows only). Hover = breakdown.
+                        // — non-asset / no base; ⚠ unreachable (no FFZ / no FP).
                         const m = r.routeM;
                         const isAsset = r.type === 3 && !r._isSegment;
                         td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         if (m == null) {
-                            td.textContent = (isAsset && r._routeReason === 'unreachable') ? '⚠' : '—';
+                            const reasons = {
+                                'no-ffz': `Unreachable — no inspection FFZ within ${REACH_FFZ_FT} ft of this asset.`,
+                                'ffz-no-fp': "Unreachable — the asset's FFZ has no flight path reaching it.",
+                                'unreachable': "Unreachable — no connected flight-path route from the base reaches the asset's FFZ.",
+                            };
+                            td.textContent = (isAsset && r._routeReason) ? '⚠' : '—';
                             td.title = !isAsset ? 'Route is computed for assets only'
-                                : (r._routeReason === 'unreachable'
-                                    ? 'No flight-path route from the basestation reaches this asset (different/disconnected FP network)'
-                                    : 'No route — set a basestation via 📍 Base, and ensure flight paths exist on this site');
+                                : (reasons[r._routeReason] || 'No route — set a basestation via 📍 Base, and ensure flight paths exist on this site');
                         } else {
                             td.textContent = col.fmt(m);
                             const bk = r._routeBreak;
                             const u = sumPanelState.unitsFt ? 'ft' : 'm';
+                            const baseNm = (r._routeBase && r._routeBase.name) ? r._routeBase.name : 'base';
                             td.title = bk
-                                ? `Route from base ≈ ${col.fmt(m)} ${u} (one-way, along flight paths).\nBase→network ${col.fmt(bk.inM)} + on-network ${col.fmt(bk.netM)} + network→asset ${col.fmt(bk.outM)}.\nRight-click: copy raw.`
+                                ? `Route ≈ ${col.fmt(m)} ${u} one-way, from "${baseNm}" to the far edge of this asset's FFZ.\nBase→FP ${col.fmt(bk.inM)} + along FPs ${col.fmt(bk.netM)} + FFZ traversal ${col.fmt(bk.ffzM)}.\nRight-click: copy raw.`
                                 : 'Route from base. Right-click: copy raw.';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
