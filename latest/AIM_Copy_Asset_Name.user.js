@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.90
+// @version      3.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.90';
+    const SCRIPT_VERSION = '3.91';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4737,7 +4737,8 @@
     //   • Distance = base→nearest FP vertex (straight) + on-network (Dijkstra)
     //     to the FP vertex inside the asset's FFZ + that entry → the FFZ's far
     //     edge (the full-FFZ traversal).
-    const REACH_FFZ_FT = 70;            // asset→FFZ gate (starting value; tunable)
+    const REACH_FFZ_FT = 70;            // asset pad EDGE → FFZ gate (starting value; tunable)
+    const ENTRY_FFZ_FT = 25;            // FP vertex counts as reaching an FFZ if inside or within this (ft)
     function loadBaseGmMap() {
         const m = elevGmGet(CACHE_KEY_BASE_GM, {});
         return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
@@ -4792,18 +4793,34 @@
         const fpVerts = [];
         graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const reachM = REACH_FFZ_FT / 3.28084;
+        const entryMarginM = ENTRY_FFZ_FT / 3.28084;
         rows.forEach(r => {
-            if (r.type !== 3 || r._isSegment || typeof r._lat !== 'number') return;
-            // 1. Asset's FFZ = nearest FFZ within REACH_FFZ_FT of the asset.
+            if (r.type !== 3 || r._isSegment) return;
+            // Asset FOOTPRINT: the pad polygon (multiple coords) or its single
+            // point. Measure from ANY edge/vertex of the pad, NOT the center —
+            // the center can sit 100+ ft inside the pad, so center-only
+            // distance wrongly excludes assets whose FFZ hugs the pad edge.
+            const ac = (r.entity && Array.isArray(r.entity.coords) && r.entity.coords.length)
+                ? r.entity.coords
+                : (typeof r._lat === 'number' ? [{ lat: r._lat, lng: r._lng }] : null);
+            if (!ac) return;
+            const padToFfz = (ring) => {
+                let best = Infinity;
+                ac.forEach(c => { const d = pointToPolygonMeters(c.lat, c.lng, ring); if (d < best) best = d; });
+                return best;
+            };
+            // 1. Asset's FFZ = nearest FFZ within REACH_FFZ_FT of the pad edge.
             let ffz = null, ffzD = Infinity;
             ffzs.forEach(f => {
-                const d = pointToPolygonMeters(r._lat, r._lng, f.coords);
+                const d = padToFfz(f.coords);
                 if (d < ffzD) { ffzD = d; ffz = f; }
             });
             if (!ffz || ffzD > reachM) { r.routeM = null; r._routeReason = 'no-ffz'; summary.unreachable++; return; }
             r._ffzEntity = ffz;
-            // 2. Entry candidates = FP vertices inside that FFZ (FP reaches pad).
-            const entries = fpVerts.filter(v => pointInPolygon(v.lat, v.lng, ffz.coords));
+            // 2. Entry candidates = FP vertices inside the FFZ OR within
+            //    ENTRY_FFZ_FT of it (an FP that reaches the pad, vertex-at-edge
+            //    included — strict inside-only missed edge-terminating FPs).
+            const entries = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, ffz.coords) <= entryMarginM);
             if (!entries.length) { r.routeM = null; r._routeReason = 'ffz-no-fp'; summary.unreachable++; return; }
             // 3. Route = min over (base, entry) of baseConn + net(entry) +
             //    (entry → FFZ far edge). Closest base + best entry win.
