@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Map Styler v34.70 (latest, dev-only) — color assets by state
+
+Assets used to all render as identical white boxes, so you had to right-click each one to know whether to build to it. New opt-in **"Color assets by state"** toggle in the **Assets** category styles every asset by its health at a glance:
+
+- **Normal** = pink solid (with a subtle fill so the good ones pop), **Empty** = grey dashed, **Unreachable** = white dashed, **Unshielded** = orange-red dashed — plus **HY** (cyan) and **Inactive** (orange) for sites that use them.
+- **Fully customizable per state:** outline color, outline width, dashed/solid, fill on/off, fill color, fill opacity. The halo/buffer tints to match the state color.
+- Self-contained: the styler fetches the site's entities itself (no dependency on the Asset Inspector), derives state from each asset's subtype + unshielded flag, and geometry-matches each box to its asset. When an asset has multiple problems, the most safety-critical one wins the color (Unreachable > Unshielded > Empty > Inactive > HY > Normal).
+- Toggle off = exactly the old uniform white behavior.
+
 ## 2026-06-11 — AIM Asset Inspector v3.82 → v4.0 + AIM Map Nav v0.8 (latest, dev-only) — Smarter SUM: columns, routing, battery
 
 A large arc on the SUM (Site Setup Summary) panel — all on the `latest/` channel, **not yet promoted to prod root**. Headlines:
