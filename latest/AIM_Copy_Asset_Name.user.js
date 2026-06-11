@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.91
+// @version      3.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.91';
+    const SCRIPT_VERSION = '3.92';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -983,20 +983,12 @@
         });
         return best;
     }
-    // Ray-casting point-in-polygon. ring = [{lat,lng}…] (open or closed).
-    function pointInPolygon(lat, lng, ring) {
-        let inside = false;
-        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-            const xi = ring[i].lng, yi = ring[i].lat;
-            const xj = ring[j].lng, yj = ring[j].lat;
-            const intersect = ((yi > lat) !== (yj > lat)) &&
-                (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
-            if (intersect) inside = !inside;
-        }
-        return inside;
-    }
     // Distance (m) from a point to a polygon: 0 if inside, else min edge dist.
+    // IMPORTANT: pass a SIMPLIFIED ring (simplifyPolygon) — Percepto stores
+    // pad/FFZ rings in a bowtie order that breaks both pointInPolygon and the
+    // edge walk. Reuses the canonical pointInPolygon defined above.
     function pointToPolygonMeters(lat, lng, ring) {
+        if (!ring || ring.length < 3) return Infinity;
         if (pointInPolygon(lat, lng, ring)) return 0;
         let best = Infinity;
         for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -4788,21 +4780,23 @@
             return { entity: b, baseConn: bv.dist, dist: dijkstraFrom(graph, bv.key) };
         }).filter(Boolean);
         if (!baseRuns.length) { summary.reason = 'base-no-coord'; return summary; }
-        // FFZ polygons + flat list of FP vertices (for in-FFZ entry detection).
-        const ffzs = entities.filter(e => e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3);
+        // FFZ polygons (ring pre-SIMPLIFIED once — Percepto stores them in a
+        // bowtie vertex order that breaks pip/edge math) + flat FP vertex list.
+        const ffzs = entities
+            .filter(e => e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3)
+            .map(e => ({ entity: e, ring: simplifyPolygon(entityCoords(e)) }));
         const fpVerts = [];
         graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
         const reachM = REACH_FFZ_FT / 3.28084;
         const entryMarginM = ENTRY_FFZ_FT / 3.28084;
         rows.forEach(r => {
             if (r.type !== 3 || r._isSegment) return;
-            // Asset FOOTPRINT: the pad polygon (multiple coords) or its single
-            // point. Measure from ANY edge/vertex of the pad, NOT the center —
+            // Asset FOOTPRINT: the pad polygon (entity.coords / .points) or its
+            // single point. Measure from ANY vertex of the pad, NOT the center —
             // the center can sit 100+ ft inside the pad, so center-only
             // distance wrongly excludes assets whose FFZ hugs the pad edge.
-            const ac = (r.entity && Array.isArray(r.entity.coords) && r.entity.coords.length)
-                ? r.entity.coords
-                : (typeof r._lat === 'number' ? [{ lat: r._lat, lng: r._lng }] : null);
+            const ac = (r.entity && entityCoords(r.entity))
+                || (typeof r._lat === 'number' ? [{ lat: r._lat, lng: r._lng }] : null);
             if (!ac) return;
             const padToFfz = (ring) => {
                 let best = Infinity;
@@ -4812,15 +4806,15 @@
             // 1. Asset's FFZ = nearest FFZ within REACH_FFZ_FT of the pad edge.
             let ffz = null, ffzD = Infinity;
             ffzs.forEach(f => {
-                const d = padToFfz(f.coords);
+                const d = padToFfz(f.ring);
                 if (d < ffzD) { ffzD = d; ffz = f; }
             });
             if (!ffz || ffzD > reachM) { r.routeM = null; r._routeReason = 'no-ffz'; summary.unreachable++; return; }
-            r._ffzEntity = ffz;
+            r._ffzEntity = ffz.entity;
             // 2. Entry candidates = FP vertices inside the FFZ OR within
             //    ENTRY_FFZ_FT of it (an FP that reaches the pad, vertex-at-edge
             //    included — strict inside-only missed edge-terminating FPs).
-            const entries = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, ffz.coords) <= entryMarginM);
+            const entries = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryMarginM);
             if (!entries.length) { r.routeM = null; r._routeReason = 'ffz-no-fp'; summary.unreachable++; return; }
             // 3. Route = min over (base, entry) of baseConn + net(entry) +
             //    (entry → FFZ far edge). Closest base + best entry win.
@@ -4830,7 +4824,7 @@
                     const net = br.dist.has(en.key) ? br.dist.get(en.key) : null;
                     if (net == null) return;
                     let far = 0;
-                    ffz.coords.forEach(p => { const dd = approxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; });
+                    ffz.ring.forEach(p => { const dd = approxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; });
                     const total = br.baseConn + net + far;
                     if (!best || total < best.total) best = { total, base: br.entity, inM: br.baseConn, netM: net, ffzM: far };
                 });
