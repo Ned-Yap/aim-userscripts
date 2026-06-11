@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.70
+// @version      34.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,13 +33,20 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.70';
+    const SCRIPT_VERSION = '34.71';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
-        if (event.data.action === "TOGGLE") setActiveState(event.data.state);
+        const d = event.data || {};
+        if (d.action === "TOGGLE") setActiveState(d.state);
+        // The map iframe is the only frame that fetches asset data, so it
+        // broadcasts the discovered equipment set; every frame adopts it and
+        // re-registers so the panel schema is identical across frames (same
+        // scriptId → last register wins, so they MUST agree). See
+        // applyEquipFromBroadcast.
+        else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
     };
 
     // --- AIM Control Panel integration ---
@@ -88,6 +95,7 @@
             const slug = stateSlug(state);
             const d = ASSET_STATE_DEFAULTS[state];
             out.push({ type: 'header', label: `· ${state}` });
+            out.push({ id: `astate.${slug}.show`, label: `${state} — show on map`, type: 'boolean', default: true });
             out.push({ id: `astate.${slug}.color`, label: `${state} outline color`, type: 'color', default: d.color });
             out.push({ id: `astate.${slug}.width`, label: `${state} outline width`, type: 'number',
                       min: 1, max: 20, step: 1, default: d.width, unit: 'px' });
@@ -96,6 +104,23 @@
             out.push({ id: `astate.${slug}.fill-color`, label: `${state} fill color`, type: 'color', default: d.fillColor });
             out.push({ id: `astate.${slug}.opacity`, label: `${state} fill opacity`, type: 'number',
                       min: 0.05, max: 1, step: 0.05, default: d.opacity, unit: 'fill' });
+        });
+        return out;
+    }
+
+    // Equipment types (battery / v-well / h-well / sat / …) are the HEAD of
+    // the subtype before " - ". They vary per site, so the show/hide
+    // checkboxes are built dynamically: fetchAssetStates discovers the set on
+    // the loaded site, stores it here, and re-registers with the Control Panel
+    // so the panel renders one checkbox per type. Each entry: { name, slug }.
+    let assetEquipTypes = [];
+    // Builds the per-equipment-type "show" checkboxes appended to the Assets
+    // category. Empty until a site's assets have loaded.
+    function buildAssetEquipToggles() {
+        if (!assetEquipTypes.length) return [];
+        const out = [{ type: 'header', label: 'Show equipment types' }];
+        assetEquipTypes.forEach(eq => {
+            out.push({ id: `aeq.${eq.slug}.show`, label: `${eq.name} — show on map`, type: 'boolean', default: true });
         });
         return out;
     }
@@ -557,20 +582,31 @@
         // re-fires on zoom/pan/mutation, which is exactly when a path's `d`
         // could have been read mid-animation, so re-matching self-corrects any
         // stale projection. We only OVERWRITE a tag on a positive match, so a
-        // transient (data still loading) never blanks an existing tag. No-op
-        // unless asset.show && asset.by-state are both on.
+        // transient (data still loading) never blanks an existing tag.
+        //
+        // We need entity data whenever Assets are shown — by-state coloring
+        // uses it, the per-state/equipment hide filters use it, and we also
+        // fetch once per site (even with nothing engaged) so the equipment
+        // checkboxes can populate the panel. Fetch is cached + idempotent per
+        // site, so calling it each run is cheap.
         const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
-        if (assetByStateOn) {
+        const assetDataWanted = !!toggleState['asset.show'];
+        if (assetDataWanted) {
             const sid = getCurrentSiteID();
             const needFetch = sid && (assetStateData.siteID !== sid
                 || (!assetStateData.loading && !assetStateData.polys.length && !assetStateData.failed));
-            if (needFetch) fetchAssetStates(sid);
+            // Only the iframe fetches (it owns the map + the cookie-auth'd
+            // same-origin context); it broadcasts the equipment set to TOP.
+            if (needFetch && CONTEXT === 'IFRAME') fetchAssetStates(sid);
             const stMap = getLeafletMap();
             if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
                 document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(p => {
                     if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
-                    const st = matchPathState(p, stMap);
-                    if (st) p.setAttribute('data-aim-asset-state', st);
+                    const a = matchPathAsset(p, stMap);
+                    if (a) {
+                        if (a.state) p.setAttribute('data-aim-asset-state', a.state);
+                        if (a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
+                    }
                 });
             }
         }
@@ -619,6 +655,23 @@
             const assetState = (assetByStateOn && isWhiteAsset)
                 ? line.getAttribute('data-aim-asset-state') : null;
             const assetStyle = assetState ? assetStateStyle(assetState) : null;
+
+            // --- Asset hide filter (per-state + per-equipment "show" boxes) ---
+            // Independent of by-state coloring: an asset box (and its halo)
+            // disappears when its STATE or its EQUIPMENT type is unchecked.
+            // display is always reset to '' when not hiding — including when
+            // the whole Assets category is off — so nothing stays stuck hidden.
+            if (isWhiteAsset) {
+                let hide = false;
+                if (toggleState['asset.show']) {
+                    const sTag = line.getAttribute('data-aim-asset-state');
+                    const eTag = line.getAttribute('data-aim-asset-equip');
+                    hide = (!!sTag && toggleState[`astate.${stateSlug(sTag)}.show`] === false)
+                        || (!!eTag && toggleState[`aeq.${eTag}.show`] === false);
+                }
+                line.style.display = hide ? 'none' : '';
+                if (hide) return; // skip styling + buffer creation for hidden assets
+            }
 
             // --- Line color / opacity override (runs every iteration,
             // before the early-return below, so it applies / clears even
@@ -1231,6 +1284,17 @@
         return 'Normal';
     }
 
+    // Equipment type = the HEAD of the subtype before " - " (e.g.
+    // "battery - empty" → "battery", "v-well" → "v-well"). Hyphens inside the
+    // equipment name are preserved because we split on " - " (space-dash-space)
+    // only. Assets with no subtype bucket as "Other". Returns { name, slug }.
+    function classifyAssetEquipment(e) {
+        const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
+        const head = sub.split(' - ')[0].trim();
+        const name = head ? prettyState(head) : 'Other';
+        return { name, slug: stateSlug(name) };
+    }
+
     // Resolve the effective style for a state from the per-state toggles,
     // falling back to ASSET_STATE_DEFAULTS (or the gray fallback for states
     // with no Control Panel row, e.g. midstream taxonomies).
@@ -1270,14 +1334,16 @@
         assetStateData = { siteID, polys: [], loading: true, failed: false };
         // New data incoming — drop existing tags so paths re-match.
         try {
-            document.querySelectorAll('[data-aim-asset-state]')
-                .forEach(p => p.removeAttribute('data-aim-asset-state'));
+            document.querySelectorAll('[data-aim-asset-state],[data-aim-asset-equip]')
+                .forEach(p => { p.removeAttribute('data-aim-asset-state'); p.removeAttribute('data-aim-asset-equip'); });
         } catch (e) {}
         fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
             .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
             .then(data => {
                 const list = Array.isArray(data) ? data : ((data && data.results) || []);
                 const polys = [];
+                const equipByName = new Map(); // name → slug, de-duped + ordered by count
+                const equipCount = {};
                 list.forEach(e => {
                     if (!e || e.type !== 3) return;
                     const raw = Array.isArray(e.coords) ? e.coords
@@ -1286,8 +1352,12 @@
                     if (pts.length < 3) return;
                     let sLat = 0, sLng = 0;
                     pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    const eq = classifyAssetEquipment(e);
+                    equipByName.set(eq.name, eq.slug);
+                    equipCount[eq.name] = (equipCount[eq.name] || 0) + 1;
                     polys.push({
                         state: classifyAssetState(e),
+                        equip: eq.slug,
                         coords: pts,
                         cLat: sLat / pts.length,
                         cLng: sLng / pts.length,
@@ -1299,7 +1369,23 @@
                     return;
                 }
                 assetStateData = { siteID, polys, loading: false, failed: false };
-                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID}`);
+                // Publish the discovered equipment set (most-common first) and
+                // re-register so the panel shows a checkbox per type. Seed
+                // toggleState so hiding works before the panel echoes values.
+                const newEquip = [...equipByName.keys()]
+                    .sort((a, b) => (equipCount[b] - equipCount[a]) || a.localeCompare(b))
+                    .map(name => ({ name, slug: equipByName.get(name) }));
+                const sig = newEquip.map(e => e.slug).join('|');
+                const prevSig = assetEquipTypes.map(e => e.slug).join('|');
+                if (sig !== prevSig) {
+                    assetEquipTypes = newEquip;
+                    newEquip.forEach(e => {
+                        const k = `aeq.${e.slug}.show`;
+                        if (toggleState[k] === undefined) toggleState[k] = true;
+                    });
+                    registerWithControlPanel(); // pushes the new schema to the panel
+                }
+                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID} (${newEquip.length} equipment types)`);
                 if (isActive) runUpdate();
             })
             .catch(err => {
@@ -1327,16 +1413,17 @@
         catch (e) { return null; }
     }
 
-    // Match a white asset path to its asset's state: containment first, then
-    // nearest-centroid (covers self-intersecting "bowtie" assets where ray-
-    // casting on the raw polygon can miss). Returns null if nothing loaded.
-    function matchPathState(path, map) {
+    // Match a white asset path to its asset: containment first, then nearest-
+    // centroid (covers self-intersecting "bowtie" assets where ray-casting on
+    // the raw polygon can miss). Returns { state, equip } or null if nothing
+    // loaded / unparseable.
+    function matchPathAsset(path, map) {
         const polys = assetStateData.polys;
         if (!polys.length) return null;
         const ll = pathCentroidLatLng(path, map);
         if (!ll) return null;
         for (let i = 0; i < polys.length; i++) {
-            if (pointInPolygon(ll.lat, ll.lng, polys[i].coords)) return polys[i].state;
+            if (pointInPolygon(ll.lat, ll.lng, polys[i].coords)) return polys[i];
         }
         let best = null, bestD = Infinity;
         for (let i = 0; i < polys.length; i++) {
@@ -1344,7 +1431,44 @@
             const dd = dLat * dLat + dLng * dLng;
             if (dd < bestD) { bestD = dd; best = polys[i]; }
         }
-        return best ? best.state : null;
+        return best || null;
+    }
+
+    // The registration schema = static TOGGLES with the dynamically-discovered
+    // equipment checkboxes spliced into the Assets category. Posted to the
+    // Control Panel on every register; the panel only re-renders when the
+    // equipment set actually changes (it signatures the payload).
+    function buildRegistrationToggles() {
+        const extra = buildAssetEquipToggles();
+        if (!extra.length) return TOGGLES;
+        return TOGGLES.map(cat => (cat && cat.id === 'asset-cat')
+            ? { ...cat, children: [...cat.children, ...extra] }
+            : cat);
+    }
+
+    // True if the user has unchecked any state or equipment "show" box — i.e.
+    // an asset hide filter is engaged. Drives whether we need entity data even
+    // when by-state coloring is off.
+    function anyAssetHidden() {
+        for (const k in toggleState) {
+            if (toggleState[k] !== false) continue;
+            if ((k.indexOf('astate.') === 0 || k.indexOf('aeq.') === 0) && k.endsWith('.show')) return true;
+        }
+        return false;
+    }
+
+    // Adopt an equipment set broadcast by the map iframe (cross-frame sync so
+    // every frame registers an identical schema). No-op if it's for a
+    // different site or matches what we already have.
+    function applyEquipFromBroadcast(d) {
+        if (!d || d.siteID !== getCurrentSiteID()) return;
+        const equip = Array.isArray(d.equip) ? d.equip : [];
+        const sig = equip.map(e => e.slug).join('|');
+        const prevSig = assetEquipTypes.map(e => e.slug).join('|');
+        if (sig === prevSig) return;
+        assetEquipTypes = equip;
+        equip.forEach(e => { const k = `aeq.${e.slug}.show`; if (toggleState[k] === undefined) toggleState[k] = true; });
+        registerWithControlPanel();
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -5167,18 +5291,11 @@
                 }
                 // Color-by-state flipped on → kick off the entity fetch now so
                 // the styling appears without waiting for another interaction.
-                // Flipped off → drop the path tags so a future re-enable
-                // re-matches against fresh data. (runUpdate still runs below.)
-                if (msg.toggleId === 'asset.by-state') {
-                    if (newVal) {
-                        const sid = getCurrentSiteID();
-                        if (sid) fetchAssetStates(sid, true);
-                    } else {
-                        try {
-                            document.querySelectorAll('[data-aim-asset-state]')
-                                .forEach(p => p.removeAttribute('data-aim-asset-state'));
-                        } catch (e) {}
-                    }
+                // (Tags are re-matched every runUpdate, so no clearing needed on
+                // flip-off; the runUpdate below repaints with coloring removed.)
+                if (msg.toggleId === 'asset.by-state' && newVal) {
+                    const sid = getCurrentSiteID();
+                    if (sid) fetchAssetStates(sid, true);
                 }
                 if (msg.toggleId === 'master') {
                     // Only log when the value actually transitions. The Control
@@ -5314,9 +5431,19 @@
             description: 'Horizontal safety buffers (FFZs, assets, flight paths)',
             version: SCRIPT_VERSION,
             frame: FRAME_ID,
-            toggles: TOGGLES,
+            toggles: buildRegistrationToggles(),
             hotkeys: HOTKEYS,
         });
+        // Keep TOP's schema in sync: whenever the iframe (which owns the data)
+        // registers and has a discovered equipment set, broadcast it so other
+        // frames adopt the same schema. Idempotent on the receiving side.
+        if (CONTEXT === 'IFRAME' && assetEquipTypes.length) {
+            try {
+                stateChannel.postMessage({
+                    action: 'ASSET_EQUIP', siteID: getCurrentSiteID(), equip: assetEquipTypes,
+                });
+            } catch (e) {}
+        }
         // Also ask for the PAT — the control panel responds with TOKEN_VALUE
         // if it has one. (The panel also auto-sends on REGISTER, but asking
         // explicitly covers the case where this script loaded first.)

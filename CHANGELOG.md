@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Map Styler v34.71 (latest, dev-only) — hide assets by type / state
+
+Builds on v34.70's color-by-state. The **Assets** category now has **show/hide checkboxes** so you can declutter the map while building:
+
+- **By equipment type** — one checkbox per type the site actually contains (battery, v-well, h-well, sat, …), auto-populated when the site loads.
+- **By state** — one checkbox per state (Normal / Empty / Unshielded / Unreachable / HY / Inactive), sitting next to that state's color controls.
+- An asset shows only if **both** its equipment type **and** its state are checked. Hiding removes the box and its halo; re-check to bring it back. Works whether or not by-state coloring is on.
+
 ## 2026-06-11 — AIM Map Styler v34.70 (latest, dev-only) — color assets by state
 
 Assets used to all render as identical white boxes, so you had to right-click each one to know whether to build to it. New opt-in **"Color assets by state"** toggle in the **Assets** category styles every asset by its health at a glance:
