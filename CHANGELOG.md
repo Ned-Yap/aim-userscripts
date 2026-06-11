@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Flight Path Editor v0.19 (latest, dev-only) — OPEN PATH "save + refresh" reminder
+
+The v0.18 positional-coords change did NOT fix the post-open live-drag jank, which confirms the cause is Percepto's editor not re-binding the vertex marker after a junction is restructured (the saved data is correct — verified clean on a 65-arc production path: 1 component, 0 orphans). Decision: leave it. OPEN PATH's success toast now reminds you to **SAVE then REFRESH before editing that path again**, since the freed vertex only drags cleanly after a refresh re-seeds the markers. Also added `ShortKeys/AIM_FP_Check.js` — a standalone console integrity checker for the live server copy of every flight path on a site.
+
+---
+
 ## 2026-06-11 — AIM Flight Path Editor v0.18 (latest, dev-only) — post-edit integrity checker + OPEN PATH jank fix
 
 **Integrity checker on every edit.** Added `checkFlightPath()` — flags non-finite coords, a severed (disconnected) path, coords/arcs mismatch (orphan coords or arc endpoints missing from coords), zero-length arcs, inverted altitude bands, and connected-arc altitude-band gaps. Both split and OPEN PATH now snapshot the path's health *before* the edit and re-check *after*; if the edit introduced **any new problem** (or didn't apply with the expected arc count), it **auto-reverts** and says why. So every edit is verified not to have hurt the path — pre-existing issues aren't blamed on us. New manual command `window.__aim_fpe_check()` prints the integrity of every open flight path on demand.

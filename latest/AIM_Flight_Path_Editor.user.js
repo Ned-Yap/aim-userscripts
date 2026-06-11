@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.18
+// @version      0.19
 // @description  Edit Percepto flight paths from the map while natively editing one: (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). No button, no mode. SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -533,7 +533,7 @@
             state.inserts++;
             log(`opened loop on "${st.name}" — detached arc ${closer.arcIdx + 1} from the junction (coords ${origCoords.length} → ${newCoords.length}, validated)`);
             renderPanel();
-            toast(`✂ Loop opened on ${st.name}. The freed vertex is ~50px away — drag it where you want, then Save.`, '#5fff5f');
+            toast(`✂ Loop opened on ${st.name}. ⚠ SAVE now, then REFRESH before editing this path again — the freed vertex only drags cleanly after a refresh.`, '#ffd479');
             verifyEdit(fpId, preIssues, st.arcs.length, 'Open Path');
         } catch (e) {
             warn('doUnsnap threw — path left as-is', e);
@@ -640,5 +640,5 @@
     installBadgeListeners();
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log('v0.18 ready (iframe) — split (click a segment number) + OPEN PATH (vertex popup, un-close a loop) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts if it introduced any new problem) · window.__aim_fpe_check() reports path health · writes the FP editor working copy · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
+    log('v0.19 ready (iframe) — split (click a segment number) + OPEN PATH (vertex popup, un-close a loop; toast reminds to SAVE+refresh before editing again) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug');
 })();
