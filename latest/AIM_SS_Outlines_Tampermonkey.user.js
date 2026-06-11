@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.71
+// @version      34.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.71';
+    const SCRIPT_VERSION = '34.72';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -90,6 +90,9 @@
         const out = [
             { type: 'header', label: 'Color assets by state' },
             { id: 'asset.by-state', label: 'Color assets by state (overrides white)', type: 'boolean', default: false },
+            // Asset state/equipment is cached per site at load; after editing an
+            // asset in Percepto this re-fetches so its color/visibility updates.
+            { id: 'asset-refresh', label: '↻ Refresh asset data (after edits)', type: 'button', action: 'refresh-asset-data' },
         ];
         ASSET_STATE_ORDER.forEach(state => {
             const slug = stateSlug(state);
@@ -5022,6 +5025,13 @@
                     }
                 });
                 console.log(`${TAG} 🦵 Kick — forced redraw on ${redrawn} tile layer(s)`);
+                // Also force-refresh the cached asset state/equipment data —
+                // users reach for Shift+K after editing an asset and expect
+                // its color/visibility to update. (IFRAME owns the fetch.)
+                if (CONTEXT === 'IFRAME') {
+                    const sid = getCurrentSiteID();
+                    if (sid) fetchAssetStates(sid, true);
+                }
                 runUpdate();
             }, 200);
         }, 100);
@@ -5361,6 +5371,10 @@
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'refresh-asset-data') {
+                    const sid = getCurrentSiteID();
+                    if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
+                }
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.

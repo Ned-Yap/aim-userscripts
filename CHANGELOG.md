@@ -6,6 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Map Styler v34.72 (latest, dev-only) — refresh stale asset data
+
+The styler caches each site's asset state/equipment at load, so editing an asset in Percepto (e.g. fixing a mislabeled "- Empty") left its color/visibility stale. Two ways to refresh now:
+
+- A new **↻ Refresh asset data** button in the **Assets** category re-pulls the entity list and recolors/re-filters immediately.
+- **Shift+K** (Kick) now also force-refreshes the asset data, since that's the natural reflex.
+
 ## 2026-06-11 — AIM Map Styler v34.71 (latest, dev-only) — hide assets by type / state
 
 Builds on v34.70's color-by-state. The **Assets** category now has **show/hide checkboxes** so you can declutter the map while building:
