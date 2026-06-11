@@ -15,6 +15,14 @@ Assets used to all render as identical white boxes, so you had to right-click ea
 - Self-contained: the styler fetches the site's entities itself (no dependency on the Asset Inspector), derives state from each asset's subtype + unshielded flag, and geometry-matches each box to its asset. When an asset has multiple problems, the most safety-critical one wins the color (Unreachable > Unshielded > Empty > Inactive > HY > Normal).
 - Toggle off = exactly the old uniform white behavior.
 
+## 2026-06-11 — AIM Asset Inspector **v4.0 PROMOTED TO PROD** — Smarter SUM reaches everyone
+
+The whole Smarter SUM arc below is now in **prod** — coworkers jump **v3.81 → v4.0** on the next Tampermonkey check. That's a big update: 7 new SUM columns, a frozen/resizable/reorderable table with numeric range filters, built-in + export preset views, **basestation→asset routing with a recommended-battery column** (Tattu/Tulip, editable thresholds), Base Station + Safe Zone entities with a hand-entered-altitude-vs-ground safety check, and pixel-perfect right-click on map markers. Full feature detail in the dev entry directly below. (AIM Map Nav stays dev-only / personal — not promoted.)
+
+If anything reads oddly right after updating, an empty-cache + hard reload clears stale Tampermonkey state.
+
+---
+
 ## 2026-06-11 — AIM Asset Inspector v3.82 → v4.0 + AIM Map Nav v0.8 (latest, dev-only) — Smarter SUM: columns, routing, battery
 
 A large arc on the SUM (Site Setup Summary) panel — all on the `latest/` channel, **not yet promoted to prod root**. Headlines:

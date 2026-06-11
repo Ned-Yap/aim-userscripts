@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.81
+// @version      4.0
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.81';
+    const SCRIPT_VERSION = '4.0';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -236,6 +236,9 @@
     // ============================================================
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
+    const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
+    const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
+    const CACHE_KEY_BATTERY_THRESHOLDS = 'aim-ai-battery-thresholds'; // {tattuMaxFt, tulipMaxFt} battery cutoffs (editable)
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
@@ -486,7 +489,14 @@
         if (e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3) {
             return samplePolygon(e.coords);
         }
-        // FFZ only — NFZ + Asset intentionally return no sample points.
+        // v3.97: Base Station (8) + Safe Zone (98) are single points — sample
+        // their coord so the Elevation column shows the DEM ground there, to
+        // compare against their manually-entered Alt (a mismatch = land into
+        // the ground). NFZ + Asset intentionally return no sample points.
+        if ((e.type === 8 || e.type === 98) && Array.isArray(e.coords) && e.coords[0]
+            && typeof e.coords[0].lat === 'number') {
+            return [{ lat: e.coords[0].lat, lng: e.coords[0].lng }];
+        }
         return [];
     }
     // ---- Sample-point map visualization (v3.20) ----
@@ -908,21 +918,114 @@
         const cx = ax + t * dx, cy = ay + t * dy;
         return approxMeters(lat, lng, cy, cx);
     }
+
+    // ============================================================
+    // SPATIAL CORE (v3.88) — flight-path graph + shortest path.
+    // Shared by the route/battery feature (Phase 3) and, later, the
+    // SOP proximity/overlap validators (Phase 4). Connectivity uses the
+    // established 6-decimal shared-vertex model: two arcs are adjacent
+    // iff they share a waypoint rounded to 6 dp (~0.1 m). Edge weight is
+    // the server's arc.distance (meters), falling back to approxMeters.
+    // ============================================================
+    function vkey(p) {
+        return `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+    }
+    // Build the undirected flight-path graph for a site's entities.
+    // Returns { adj: Map<vkey,[{to,w}]>, verts: Map<vkey,{lat,lng}> }.
+    function buildFlightPathGraph(entities) {
+        const adj = new Map();
+        const verts = new Map();
+        const addVert = (p) => {
+            const k = vkey(p);
+            if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng });
+            if (!adj.has(k)) adj.set(k, []);
+            return k;
+        };
+        (entities || []).forEach(e => {
+            if (e.type !== 15 || !Array.isArray(e.arcs)) return;
+            e.arcs.forEach(arc => {
+                if (!arc.point_a || !arc.point_b) return;
+                if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return;
+                const ka = addVert(arc.point_a), kb = addVert(arc.point_b);
+                if (ka === kb) return; // degenerate zero-length arc
+                const w = (typeof arc.distance === 'number' && arc.distance > 0)
+                    ? arc.distance
+                    : approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng);
+                adj.get(ka).push({ to: kb, w });
+                adj.get(kb).push({ to: ka, w });
+            });
+        });
+        return { adj, verts };
+    }
+    // Single-source Dijkstra from a start vertex key. Returns Map<vkey,
+    // distMeters>. Linear extract-min — graphs here are a few hundred
+    // vertices at most, so O(V²) is negligible and avoids a heap dep.
+    function dijkstraFrom(graph, startKey) {
+        const dist = new Map();
+        if (!graph.adj.has(startKey)) return dist;
+        dist.set(startKey, 0);
+        const visited = new Set();
+        const pq = [{ k: startKey, d: 0 }];
+        while (pq.length) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const { k, d } = pq.splice(mi, 1)[0];
+            if (visited.has(k)) continue;
+            visited.add(k);
+            (graph.adj.get(k) || []).forEach(({ to, w }) => {
+                const nd = d + w;
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) {
+                    dist.set(to, nd);
+                    pq.push({ k: to, d: nd });
+                }
+            });
+        }
+        return dist;
+    }
+    // Nearest graph vertex to a lat/lng. Returns {key, dist(m), vert}|null.
+    function nearestGraphVertex(graph, lat, lng) {
+        let best = null;
+        graph.verts.forEach((v, k) => {
+            const d = approxMeters(lat, lng, v.lat, v.lng);
+            if (!best || d < best.dist) best = { key: k, dist: d, vert: v };
+        });
+        return best;
+    }
+    // Distance (m) from a point to a polygon: 0 if inside, else min edge dist.
+    // IMPORTANT: pass a SIMPLIFIED ring (simplifyPolygon) — Percepto stores
+    // pad/FFZ rings in a bowtie order that breaks both pointInPolygon and the
+    // edge walk. Reuses the canonical pointInPolygon defined above.
+    function pointToPolygonMeters(lat, lng, ring) {
+        if (!ring || ring.length < 3) return Infinity;
+        if (pointInPolygon(lat, lng, ring)) return 0;
+        let best = Infinity;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const d = pointToSegMeters(lat, lng, ring[j], ring[i]);
+            if (d < best) best = d;
+        }
+        return best;
+    }
     function findEntityAtLatLng(lat, lng, siteID) {
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
         const entities = bucket.entities || [];
         // 1. Polygon hit (assets type 3, NFZs type 4, FFZs type 16). v3.77:
-        //    use entityCoords(e) helper so Apply'd entities (whose `.coords`
-        //    was replaced with `.points` by the server's write-shape echo)
-        //    still hit-test. Raw first, sort fallback for bowtie wells.
+        //    entityCoords(e) handles Apply'd entities whose `.coords` became
+        //    `.points`. Points (GM/Base/Safe) are NOT tested here — the
+        //    right-click handler identifies those pixel-perfectly off the DOM
+        //    marker icon, so a point only wins when you click directly on it.
+        //    v3.99: the simplifyPolygon (angular-sort) fallback is applied ONLY
+        //    to ASSET pads (type 3), whose raw vertex order is a self-
+        //    intersecting bowtie. For FFZ/NFZ the raw order IS the drawn
+        //    polygon — angular-sort SCRAMBLES non-star FFZs (e.g. freezone_9)
+        //    into a wrong shape that false-positives OUTSIDE the green border.
         let bestPoly = null, bestPolyArea = Infinity;
         for (const e of entities) {
             if (e.type === 3 || e.type === 4 || e.type === 16) {
                 const polyCoords = entityCoords(e);
                 if (!polyCoords || polyCoords.length < 3) continue;
                 let inside = pointInPolygon(lat, lng, polyCoords);
-                if (!inside) inside = pointInPolygon(lat, lng, simplifyPolygon(polyCoords));
+                if (!inside && e.type === 3) inside = pointInPolygon(lat, lng, simplifyPolygon(polyCoords));
                 if (inside) {
                     // Rough area via bounding box (cheap, no real area calc).
                     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
@@ -960,17 +1063,7 @@
                 }
             }
         }
-        if (bestFP) return bestFP;
-        // 3. Point markers (type 19) — nearest within 15m. v3.77 entityCoords fallback.
-        let bestPt = null, bestPtDist = 15;
-        for (const e of entities) {
-            if (e.type !== 19) continue;
-            const mc = entityCoords(e);
-            if (!mc || !mc[0]) continue;
-            const d = approxMeters(lat, lng, mc[0].lat, mc[0].lng);
-            if (d < bestPtDist) { bestPt = e; bestPtDist = d; }
-        }
-        return bestPt;
+        return bestFP;
     }
 
     // ============================================================
@@ -1008,6 +1101,8 @@
         15: { short: 'FP',  long: 'Flight Path',     color: '#1ca0de', sortPrio: 1, hasValidStatus: true  },
         16: { short: 'FFZ', long: 'Free Fly Zone',   color: '#5fff5f', sortPrio: 2, hasValidStatus: true  },
         19: { short: 'Mkr', long: 'Marker',          color: '#c084fc', sortPrio: 5, hasValidStatus: false },
+        8:  { short: 'Base', long: 'Base Station',   color: '#ffd54f', sortPrio: 6, hasValidStatus: false },
+        98: { short: 'Safe', long: 'Safe Zone',      color: '#ff9eb5', sortPrio: 7, hasValidStatus: false },
     };
     function typeReg(t) { return TYPE_REG[t] || { short: '?', long: `Type ${t}`, color: '#7adfe6', sortPrio: 99, hasValidStatus: false }; }
 
@@ -1113,6 +1208,53 @@
             if (e.general_marker_type) out.push({ label: 'Marker type', value: e.general_marker_type });
             if (Array.isArray(e.coords) && e.coords[0]) {
                 out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        if (e.type === 8 && e.custom) {
+            if (typeof e.custom.relative_alt === 'number') {
+                const row = meterRow('Rel Alt', e.custom.relative_alt);
+                if (row) out.push(row);
+            }
+            const dr = e.custom.allocated_by_drone;
+            if (dr && typeof dr === 'object') {
+                if (dr.name) out.push({ label: 'Drone', value: dr.name });
+                if (dr.id != null) out.push({ label: 'Drone ID', value: dr.id });
+                if (typeof dr.battery_status === 'number') out.push({ label: 'Drone battery', value: `${dr.battery_status}%` });
+                if (dr.robot_type_name) out.push({ label: 'Drone type', value: dr.robot_type_name });
+            }
+            if (typeof e.custom.ground_station_id === 'number') out.push({ label: 'Ground station', value: e.custom.ground_station_id });
+            if (Array.isArray(e.coords) && e.coords[0]) {
+                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        if (e.type === 98 && e.custom) {
+            if (typeof e.custom.altitude === 'number') {
+                const row = meterRow('Altitude', e.custom.altitude);
+                if (row) out.push(row);
+            }
+            if (Array.isArray(e.coords) && e.coords[0]) {
+                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        // v3.97: Base / Safe Zone — compare the MANUALLY-entered altitude
+        // against the DEM ground at the same GPS. A large mismatch means the
+        // stored alt is wrong (land-into-ground risk). Needs DEM in cache
+        // (open the SUM panel once to fetch it for the site).
+        if ((e.type === 8 || e.type === 98) && Array.isArray(e.coords) && e.coords[0]) {
+            const storedM = e.type === 8
+                ? (e.custom && typeof e.custom.relative_alt === 'number' ? e.custom.relative_alt : null)
+                : (e.custom && typeof e.custom.altitude === 'number' ? e.custom.altitude : null);
+            const groundM = maxCachedElevation([e.coords[0]]);
+            if (groundM != null) {
+                const gr = meterRow('Ground (DEM)', groundM);
+                if (gr) out.push(gr);
+                if (storedM != null) {
+                    const dM = storedM - groundM, dFt = dM * 3.28084;
+                    const warn = Math.abs(dFt) > 50;
+                    out.push({ label: 'Alt vs ground', value: `${dFt >= 0 ? '+' : ''}${dFt.toFixed(0)} ft / ${dM >= 0 ? '+' : ''}${dM.toFixed(1)} m${warn ? '  ⚠ MISMATCH' : '  ✓ ok'}` });
+                }
+            } else {
+                out.push({ label: 'Ground (DEM)', value: '— open SUM to fetch elevation' });
             }
         }
         if (e.description) {
@@ -1765,7 +1907,36 @@
                 return;
             }
             const bucketSize = (mapObjectsBySite[siteID]?.entities || []).length;
-            const entity = findEntityAtLatLng(latlng.lat, latlng.lng, siteID);
+            // v3.99: pixel-perfect POINT detection. GM / Base / Safe Zone are
+            // real Leaflet marker <img> icons; if the right-click landed ON one
+            // (or its container div), resolve THAT entity by its marker class +
+            // the icon's alt (= entity name). This way a point only wins when
+            // you're directly on the icon; off it falls through to the polygon
+            // hit-test (so inside the green FFZ → FFZ, outside → nothing).
+            let entity = null;
+            const markerEl = target && target.closest
+                && target.closest('.map-marker__ground-station, .map-marker__safe-zone, .map-marker__general-marker');
+            if (markerEl) {
+                const ptType = markerEl.classList.contains('map-marker__ground-station') ? 8
+                    : markerEl.classList.contains('map-marker__safe-zone') ? 98 : 19;
+                const img = markerEl.querySelector('img');
+                const nm = img && img.getAttribute('alt');
+                const ents = (mapObjectsBySite[siteID] && mapObjectsBySite[siteID].entities) || [];
+                const cands = ents.filter(en => en.type === ptType && nm && en.name === nm
+                    && Array.isArray(en.coords) && en.coords[0]);
+                if (cands.length === 1) entity = cands[0];
+                else if (cands.length > 1) {
+                    // Same name appears twice (e.g. multiple "Base" GMs) — pick
+                    // the one whose coord is nearest the click.
+                    let bd = Infinity;
+                    cands.forEach(en => {
+                        const d = approxMeters(latlng.lat, latlng.lng, en.coords[0].lat, en.coords[0].lng);
+                        if (d < bd) { bd = d; entity = en; }
+                    });
+                }
+                if (entity) dbg('point marker hit →', entity.name, 'type', entity.type);
+            }
+            if (!entity) entity = findEntityAtLatLng(latlng.lat, latlng.lng, siteID);
             if (!entity) {
                 // Don't intercept — let native context menu show (user
                 // right-clicked on empty map). Could toast "no entity here"
@@ -1862,7 +2033,14 @@
     // 'sel' is the multi-select checkbox column (always on, not in the menu).
     // Source-of-truth column order — used as the default when the user
     // hasn't customized + as the upper bound when validating stored order.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
+    // ALL_COL_KEYS = every KNOWN column, in canonical display order.
+    // DEFAULT_COL_KEYS = the subset shown by default on a fresh install.
+    // The optional columns added 2026-06-10 (equipment/state/gmGroup/
+    // emergAlt/segLen/unshielded/notes) are known but OFF by default —
+    // they'd be mostly-blank for most rows. They surface via the Columns ▾
+    // menu's "Hidden" list, or get switched on by a built-in preset.
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
     // default order. Filters out any unknown keys (forwards-compat with
@@ -1878,7 +2056,11 @@
             // user actually SEES the new column instead of having to
             // manually toggle it on from the hidden list.
             const storedSet = new Set(cleaned);
-            const newKeys = ALL_COL_KEYS.filter(k => !storedSet.has(k));
+            // Only auto-append columns that are DEFAULT-ON. Optional columns
+            // (off by default) must NOT suddenly appear in an existing user's
+            // view — they'd be 7 mostly-blank columns. They stay in the
+            // Columns ▾ "Hidden" list until toggled on or enabled by a preset.
+            const newKeys = DEFAULT_COL_KEYS.filter(k => !storedSet.has(k));
             if (cleaned.length > 0) {
                 if (newKeys.length > 0) {
                     // Insert each new key right after its left neighbor
@@ -1903,10 +2085,19 @@
                 return cleaned;
             }
         }
-        return ALL_COL_KEYS.slice();
+        return DEFAULT_COL_KEYS.slice();
     }
     function saveColumnOrder(order) {
         elevGmSet(CACHE_KEY_COLUMN_ORDER, order);
+    }
+    // v3.83: per-column pixel widths the user set by dragging a header edge.
+    // {colKey: px}. Absent key → fall back to the column def's default `w`.
+    function loadColumnWidths() {
+        const w = elevGmGet(CACHE_KEY_COLUMN_WIDTHS, {});
+        return (w && typeof w === 'object' && !Array.isArray(w)) ? w : {};
+    }
+    function saveColWidths() {
+        elevGmSet(CACHE_KEY_COLUMN_WIDTHS, sumPanelState.columnWidths || {});
     }
 
     // ── View presets (per-user) ─────────────────────────────────────────────
@@ -1915,26 +2106,187 @@
     // Search text is intentionally NOT captured (it's transient, per-task).
     // Stored in GM storage so it survives reloads and is global across sites.
     function loadViewPresets() {
+        // User-saved views only. The canonical starter views now live in
+        // BUILTIN_PRESETS (read-only, always current), so there's nothing to
+        // seed — a brand-new user still sees the built-ins in the menu.
         const stored = elevGmGet(CACHE_KEY_VIEW_PRESETS, null);
-        if (stored == null) {
-            // First run: seed the example the user asked for so the feature
-            // is immediately useful. Deleting it sticks (we only seed when the
-            // key has never been written).
-            const seed = [{
-                name: 'GMs · Name/Lat/Long',
-                columnOrder: ['name', 'lat', 'long'],
-                typeFilter: ['19'],
-                validatedOnly: false, unvalidatedOnly: false, unshieldedOnly: false, notesOnly: false,
-                sortKey: 'name', sortDir: 1, unitsFt: true,
-            }];
-            elevGmSet(CACHE_KEY_VIEW_PRESETS, seed);
-            return seed;
-        }
         return Array.isArray(stored) ? stored : [];
     }
+    // v3.85: curated built-in views. Read-only / apply-only, shown above the
+    // user's saved views in the Presets ▾ menu, and always current because
+    // they live in code. Only the fields that DIFFER from default need to be
+    // set — applyViewPreset coerces missing booleans to false and missing
+    // numericFilters to {}, so applying a built-in fully (re)defines the view.
+    // numericFilters are stored in METERS (90 ft ≈ 27.43 m).
+    const FT_TO_M = 1 / 3.28084;
+    const BUILTIN_PRESETS = [
+        {
+            name: 'FP Altitude Audit',
+            desc: 'Every flight-path segment with the full altitude picture — lowest AGL first.',
+            columnOrder: ['name', 'segId', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'validated'],
+            typeFilter: ['15'], sortKey: 'aglM', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'AGL Safety (< 90 ft)',
+            desc: 'Flight-path segments flying below 90 ft AGL — the red danger band.',
+            columnOrder: ['name', 'segId', 'altMin', 'elevation', 'agl', 'segLen', 'validated'],
+            typeFilter: ['15'], numericFilters: { agl: { min: null, max: 90 * FT_TO_M } },
+            sortKey: 'aglM', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Unvalidated Triage',
+            desc: 'Everything not yet validated (FFZ / FP / NFZ), grouped by type.',
+            columnOrder: ['typeShort', 'name', 'subtype', 'validated', 'notes'],
+            typeFilter: ['3', '4', '15', '16', '19'], unvalidatedOnly: true,
+            sortKey: 'typePrio', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Asset Roster',
+            desc: 'All assets with equipment, state/health, notes, elevation + coordinates.',
+            columnOrder: ['name', 'subtype', 'equipment', 'state', 'notes', 'elevation', 'lat', 'long', 'gps'],
+            typeFilter: ['3'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Shielding Review',
+            desc: 'FFZs + assets with shielded/unshielded status + altitudes.',
+            columnOrder: ['typeShort', 'name', 'subtype', 'unshielded', 'altMin', 'altMax', 'notes'],
+            typeFilter: ['16', '3'], sortKey: 'typePrio', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Route from Base',
+            desc: 'Assets by flight-path distance from the basestation (set via 📍 Base) + recommended battery, nearest first.',
+            columnOrder: ['name', 'subtype', 'equipment', 'route', 'battery'],
+            typeFilter: ['3'], sortKey: 'routeM', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Base Stations',
+            desc: 'Installed bases (type 8) — stored Alt vs DEM ground elevation, drone, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'elevation', 'droneName', 'droneId', 'lat', 'long', 'gps', 'notes'],
+            typeFilter: ['8'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Safe Zones',
+            desc: 'Safe zones (type 98) — stored Alt vs DEM ground elevation, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'elevation', 'lat', 'long', 'gps', 'notes'],
+            typeFilter: ['98'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'GMs · Name/Lat/Long',
+            desc: 'General markers with coordinates — for Copy → Sheets.',
+            columnOrder: ['name', 'lat', 'long'],
+            typeFilter: ['19'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+    ];
     function saveViewPresets(arr) {
         elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
     }
+
+    // ---- v3.87 (Phase 2): cross-preset export ----
+    // Copy ANY preset's table (its columns + filters) to the clipboard,
+    // Sheets-ready, WITHOUT switching the live view — so the user can pull
+    // several field-sets in a row. Built standalone (the live table's column
+    // defs live inside redrawTable's closure).
+    function presetToFilterState(p) {
+        return {
+            search: '',
+            typeFilter: new Set((Array.isArray(p.typeFilter) ? p.typeFilter : ['3', '4', '8', '15', '16', '19', '98']).map(String)),
+            validatedOnly: !!p.validatedOnly,
+            unvalidatedOnly: !!p.unvalidatedOnly,
+            unshieldedOnly: !!p.unshieldedOnly,
+            notesOnly: !!p.notesOnly,
+            numericFilters: (p.numericFilters && typeof p.numericFilters === 'object') ? p.numericFilters : {},
+            sortKey: p.sortKey || 'typePrio',
+            sortDir: (p.sortDir === 1 || p.sortDir === -1) ? p.sortDir : 1,
+        };
+    }
+    // Column label + value-extractor registry for export. unitsFt controls the
+    // altitude/distance m→ft conversion + the (ft|m) label suffix.
+    function exportColumnDefs(columnKeys, unitsFt) {
+        const u = unitsFt ? 'ft' : 'm';
+        const num = (m) => m == null ? '' : (unitsFt ? Math.round(m * 3.28084).toString() : m.toFixed(1));
+        const reg = {
+            visibility: { label: 'Visibility', val: () => '' },
+            typeShort: { label: 'Type', val: r => r.typeShort || '' },
+            name: { label: 'Name', val: r => r.name || '' },
+            segId: { label: 'Seg ID', val: r => r._segId != null ? String(r._segId) : '' },
+            entId: { label: 'ID', val: r => r.entId != null ? String(r.entId) : '' },
+            subtype: { label: 'Subtype', val: r => r.subtype || '' },
+            equipment: { label: 'Equipment', val: r => r.equipment || '' },
+            state: { label: 'State', val: r => r.state || '' },
+            gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
+            altMin: { label: `Min Alt (${u})`, val: r => num(r.altMinM) },
+            altMax: { label: `Max Alt (${u})`, val: r => num(r.altMaxM) },
+            emergAlt: { label: `Emerg Alt (${u})`, val: r => num(r.emergAltM) },
+            altDelta: { label: `Delta (${u})`, val: r => num(r.altDeltaM) },
+            elevation: { label: `Elevation (${u})`, val: r => num(r.elevationM) },
+            agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
+            segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
+            route: { label: `Route (${u})`, val: r => num(r.routeM) },
+            battery: { label: 'Battery', val: r => { const b = batteryFor(r.routeM, loadBatteryThresholds()); return b ? b.label.replace(/^⚠\s*/, '') : ''; } },
+            ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
+            validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
+            unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
+            notes: { label: 'Notes', val: r => r.notesText || '' },
+            droneName: { label: 'Drone', val: r => r.droneName || '' },
+            droneId: { label: 'Drone ID', val: r => (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '' },
+            lat: { label: 'Lat', val: r => r._lat != null ? r._lat.toFixed(6) : '' },
+            long: { label: 'Long', val: r => r._lng != null ? r._lng.toFixed(6) : '' },
+            gps: { label: 'GPS', val: r => r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '' },
+        };
+        return (columnKeys || []).map(k => reg[k]).filter(Boolean);
+    }
+    const exportHtmlEscape = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Build {html, text, count} for one preset against the given row set.
+    function buildPresetExport(p, allRows) {
+        const rows = filterAndSortRows(allRows, presetToFilterState(p));
+        const cols = exportColumnDefs(p.columnOrder, typeof p.unitsFt === 'boolean' ? p.unitsFt : true);
+        const headHtml = '<tr>' + cols.map(c => `<th style="background:#1f2933;color:#ffffff;border:1px solid #888888;padding:3px 7px;text-align:left;font-weight:bold">${exportHtmlEscape(c.label)}</th>`).join('') + '</tr>';
+        const bodyHtml = rows.map(r => '<tr>' + cols.map(c => `<td style="border:1px solid #cccccc;padding:2px 7px">${exportHtmlEscape(c.val(r))}</td>`).join('') + '</tr>').join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">${headHtml}${bodyHtml}</table>`;
+        const text = [cols.map(c => c.label).join('\t')]
+            .concat(rows.map(r => cols.map(c => String(c.val(r)).replace(/[\t\n\r]/g, ' ')).join('\t')))
+            .join('\n');
+        return { html, text, count: rows.length };
+    }
+    // Generic rich-clipboard writer (text/html + text/plain) — mirrors
+    // copyStatsAsSheet's path.
+    async function writeSheetsClipboard(html, text, toastMsg) {
+        try {
+            if (navigator.clipboard && window.ClipboardItem) {
+                const item = new ClipboardItem({
+                    'text/html': new Blob([html], { type: 'text/html' }),
+                    'text/plain': new Blob([text], { type: 'text/plain' }),
+                });
+                await navigator.clipboard.write([item]);
+                showToast(toastMsg);
+                return;
+            }
+        } catch (e) {
+            console.warn(`${TAG} export ClipboardItem write failed, falling back:`, e);
+        }
+        try {
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            tmp.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+            document.body.appendChild(tmp);
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(tmp);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            document.execCommand('copy');
+            sel.removeAllRanges();
+            document.body.removeChild(tmp);
+            showToast(toastMsg);
+        } catch (e) {
+            console.error(`${TAG} export Sheets fallback failed:`, e);
+            copyToClipboard(text, 'Copied as plain text (HTML copy unavailable)');
+        }
+    }
+    function allExportPresets() {
+        return BUILTIN_PRESETS.concat(loadViewPresets());
+    }
+
     // Snapshot the live SUM state into a plain preset object (sans name).
     function captureCurrentView() {
         return {
@@ -1944,6 +2296,7 @@
             unvalidatedOnly: sumPanelState.unvalidatedOnly,
             unshieldedOnly: sumPanelState.unshieldedOnly,
             notesOnly: sumPanelState.notesOnly,
+            numericFilters: JSON.parse(JSON.stringify(sumPanelState.numericFilters || {})),
             sortKey: sumPanelState.sortKey,
             sortDir: sumPanelState.sortDir,
             unitsFt: sumPanelState.unitsFt,
@@ -1963,6 +2316,8 @@
         sumPanelState.unvalidatedOnly = !!p.unvalidatedOnly;
         sumPanelState.unshieldedOnly = !!p.unshieldedOnly;
         sumPanelState.notesOnly = !!p.notesOnly;
+        sumPanelState.numericFilters = (p.numericFilters && typeof p.numericFilters === 'object' && !Array.isArray(p.numericFilters))
+            ? JSON.parse(JSON.stringify(p.numericFilters)) : {};
         if (p.sortKey) sumPanelState.sortKey = p.sortKey;
         if (p.sortDir === 1 || p.sortDir === -1) sumPanelState.sortDir = p.sortDir;
         if (typeof p.unitsFt === 'boolean') sumPanelState.unitsFt = p.unitsFt;
@@ -1971,13 +2326,16 @@
     // Reset to the out-of-box view: all columns, all types, no filters,
     // default type-grouped sort, feet, no search.
     function resetToDefaultView(siteID) {
-        sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+        sumPanelState.columnOrder = DEFAULT_COL_KEYS.slice();
         saveColumnOrder(sumPanelState.columnOrder);
-        sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
+        sumPanelState.columnWidths = {};
+        saveColWidths();
+        sumPanelState.typeFilter = new Set(['3', '4', '8', '15', '16', '19', '98']);
         sumPanelState.validatedOnly = false;
         sumPanelState.unvalidatedOnly = false;
         sumPanelState.unshieldedOnly = false;
         sumPanelState.notesOnly = false;
+        sumPanelState.numericFilters = {};
         sumPanelState.sortKey = 'typePrio';
         sumPanelState.sortDir = 1;
         sumPanelState.unitsFt = true;
@@ -4188,11 +4546,15 @@
     }
     let sumPanelState = {
         search: '',
-        typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
+        typeFilter: new Set(['3', '4', '8', '15', '16', '19', '98']), // All types on by default
         validatedOnly: false,
         unvalidatedOnly: false,
         unshieldedOnly: false,
         notesOnly: false,
+        // v3.84: numeric range filters {colKey: {min, max}} in METERS.
+        // Task-specific (like search) — in-memory + captured into presets,
+        // not GM-persisted globally.
+        numericFilters: {},
         unitsFt: true,             // false → display meters
         // Default sort = by type-priority (FP → FFZ → NFZ → Asset → Marker),
         // then A→Z within each type group. Sort by 'typePrio' uses the
@@ -4214,6 +4576,8 @@
         // so it survives reloads. Hidden columns are simply absent from
         // this array. Reorder via ↑/↓ in the Columns ▾ menu.
         columnOrder: loadColumnOrder(),
+        // v3.83: per-column widths the user dragged (px). {} = all defaults.
+        columnWidths: loadColumnWidths(),
         // Persistent: when ON, the SUM panel drops a small purple dot
         // on the Leaflet map for every sample point used to compute
         // each row's elevation. Off by default to keep the map clean.
@@ -4355,6 +4719,15 @@
                         validated: reg.hasValidStatus ? !!e.validated : null,
                         unshielded: !!e.is_unshielded,
                         hasNotes: !!(e.description && String(e.description).trim()),
+                        // v3.82 columns. Emergency ceiling + segment length are
+                        // per-arc. Notes come from the parent FP (shared across
+                        // its segments). Equipment/state/gmGroup don't apply to
+                        // FP segments — left undefined → blank cell.
+                        emergAltM: typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null,
+                        segLenM: typeof arc.distance === 'number' ? arc.distance
+                            : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
+                        notesText: e.description ? String(e.description).trim() : '',
+                        entId: e.id, // parent FP id
                     });
                 });
                 return;
@@ -4385,6 +4758,20 @@
                 validated: reg.hasValidStatus ? !!e.validated : null,
                 unshielded: !!e.is_unshielded,
                 hasNotes: !!(e.description && String(e.description).trim()),
+                // v3.82 columns. notesText is the raw description; equipment/
+                // state (assets) + gmGroup (markers) are parsed below. emergAlt/
+                // segLen are FP-segment-only → null here.
+                notesText: e.description ? String(e.description).trim() : '',
+                equipment: '',
+                state: '',
+                gmGroup: '',
+                emergAltM: null,
+                segLenM: null,
+                // v3.96: generic entity ID + Base/Safe-Zone fields.
+                entId: e.id,
+                ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
+                droneName: '',      // Base allocated drone name
+                droneId: '',        // Base allocated drone id
             };
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
@@ -4399,11 +4786,37 @@
                 if (row.altMinM != null && row.altMaxM != null) row.altDeltaM = row.altMaxM - row.altMinM;
             }
             if (e.type === 19) row.subtype = e.general_marker_type || '';
-            // Point coordinate — only single-point entities (GMs type 19,
-            // Assets type 3) have a meaningful lat/lng. Polygons/lines leave
+            // v3.82: parse Equipment + State from the asset subtype, and
+            // GM Group from the marker name — mirrors computeSiteStats so the
+            // columns read identically to the 📊 Stats popup. Equipment = head
+            // before " - "; State = first modifier after " - " (no modifier =
+            // "Normal", the baseline-good state). GM Group = name with trailing
+            // numeric tokens stripped ("Elevator 1"/"Elevator 2" → "Elevator").
+            if (e.type === 3 && row.subtype) {
+                const parts = row.subtype.split(' - ');
+                row.equipment = prettyKey((parts[0] || '').trim());
+                const mods = parts.slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
+                row.state = mods.length ? mods.join(' + ') : 'Normal';
+            }
+            if (e.type === 19) row.gmGroup = gmBaseName(e.name || '');
+            // v3.96: Base Station (type 8) — relative_alt + allocated drone.
+            if (e.type === 8 && e.custom) {
+                if (typeof e.custom.relative_alt === 'number') row.ptAltM = e.custom.relative_alt;
+                const dr = e.custom.allocated_by_drone;
+                if (dr && typeof dr === 'object') {
+                    row.droneName = dr.name || '';
+                    row.droneId = (dr.id != null ? dr.id : '');
+                }
+            }
+            // v3.96: Safe Zone (type 98) — single altitude.
+            if (e.type === 98 && e.custom && typeof e.custom.altitude === 'number') {
+                row.ptAltM = e.custom.altitude;
+            }
+            // Point coordinate — single-point entities (GMs 19, Assets 3, Base
+            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons/lines leave
             // these null so the Lat/Long/GPS cells render blank.
-            if ((e.type === 19 || e.type === 3) && Array.isArray(e.coords) && e.coords[0]
-                && typeof e.coords[0].lat === 'number') {
+            if ((e.type === 19 || e.type === 3 || e.type === 8 || e.type === 98)
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') {
                 row._lat = e.coords[0].lat;
                 row._lng = e.coords[0].lng;
             }
@@ -4422,6 +4835,189 @@
         return out;
     }
 
+    // ---- Route from basestation (Phase 3, v3.90) ----
+    // Operational model (per user): drone leaves the base (which sits in its
+    // own FFZ) → flies connected FP segments → reaches the ASSET's inspection
+    // FFZ → must traverse the FULL FFZ to its far edge. All one-way.
+    //   • Base = type-8 installed base(s) if present, else GM named /base/i.
+    //     With multiple bases, each asset routes from the CLOSEST (min route).
+    //   • Reachable = an FFZ lies within REACH_FFZ_FT of the asset AND a flight
+    //     path actually reaches that FFZ (an FP vertex inside it). Otherwise the
+    //     asset is unreachable (no route).
+    //   • Distance = base→nearest FP vertex (straight) + on-network (Dijkstra)
+    //     to the FP vertex inside the asset's FFZ + that entry → the FFZ's far
+    //     edge (the full-FFZ traversal).
+    const REACH_FFZ_FT = 70;            // asset pad EDGE → FFZ gate (starting value; tunable)
+    const ENTRY_FFZ_FT = 25;            // FP vertex counts as reaching an FFZ if inside or within this (ft)
+    // ---- Battery recommendation (slice 3b, v4.0) ----
+    // One-way route distance picks the battery: ≤ tattuMaxFt → Tattu;
+    // ≤ tulipMaxFt → Tulip required; beyond → out of range. Editable.
+    const BATTERY_DEFAULTS = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    function loadBatteryThresholds() {
+        const t = elevGmGet(CACHE_KEY_BATTERY_THRESHOLDS, null);
+        const num = (v, d) => (typeof v === 'number' && isFinite(v) && v > 0) ? v : d;
+        return (t && typeof t === 'object')
+            ? { tattuMaxFt: num(t.tattuMaxFt, BATTERY_DEFAULTS.tattuMaxFt), tulipMaxFt: num(t.tulipMaxFt, BATTERY_DEFAULTS.tulipMaxFt) }
+            : { tattuMaxFt: BATTERY_DEFAULTS.tattuMaxFt, tulipMaxFt: BATTERY_DEFAULTS.tulipMaxFt };
+    }
+    function saveBatteryThresholds(th) { elevGmSet(CACHE_KEY_BATTERY_THRESHOLDS, th); }
+    // Battery pick from one-way route distance (meters) + thresholds (ft).
+    // Returns {label, color, level} or null when there's no route.
+    function batteryFor(routeM, th) {
+        if (routeM == null) return null;
+        const ft = routeM * 3.28084;
+        if (ft <= th.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 };
+        if (ft <= th.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 };
+        return { label: `⚠ over ${Math.round(th.tulipMaxFt).toLocaleString()} ft`, color: '#ff5252', level: 2 };
+    }
+    function loadBaseGmMap() {
+        const m = elevGmGet(CACHE_KEY_BASE_GM, {});
+        return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+    }
+    function setBaseGmId(siteID, gmId) {
+        const m = loadBaseGmMap();
+        if (gmId == null) delete m[String(siteID)];
+        else m[String(siteID)] = gmId;
+        elevGmSet(CACHE_KEY_BASE_GM, m);
+    }
+    function gmPoint(e) {
+        return (e && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number')
+            ? { lat: e.coords[0].lat, lng: e.coords[0].lng } : null;
+    }
+    // Resolve the basestation entities for a site. A stored override pins ONE
+    // (type-8 or GM). Otherwise: all type-8 installed bases, else all GMs named
+    // /base/i. Returns { bases: [entity…], auto: boolean }.
+    function resolveBases(siteID, entities) {
+        const stored = loadBaseGmMap()[String(siteID)];
+        if (stored != null) {
+            const e = (entities || []).find(x => (x.type === 8 || x.type === 19) && x.id === stored && gmPoint(x));
+            if (e) return { bases: [e], auto: false };
+        }
+        const type8 = (entities || []).filter(e => e.type === 8 && gmPoint(e));
+        if (type8.length) return { bases: type8, auto: true };
+        const gmBases = (entities || []).filter(e => e.type === 19 && e.name && /base/i.test(e.name) && gmPoint(e));
+        return { bases: gmBases, auto: true };
+    }
+    // Annotate ASSET rows in-place with routeM (base→FFZ-far-edge, meters,
+    // following connected flight paths) + breakdown + the base used. Returns a
+    // summary for the base-picker UI.
+    function annotateRoutes(siteID, rows) {
+        const bucket = mapObjectsBySite[siteID];
+        const entities = bucket ? (bucket.entities || []) : [];
+        const summary = { bases: [], baseAuto: true, graphVerts: 0, reachable: 0, unreachable: 0, reason: '' };
+        const resolved = resolveBases(siteID, entities);
+        summary.bases = resolved.bases; summary.baseAuto = resolved.auto;
+        if (!resolved.bases.length) { summary.reason = 'no-base'; return summary; }
+        const graph = buildFlightPathGraph(entities);
+        summary.graphVerts = graph.verts.size;
+        if (graph.verts.size === 0) { summary.reason = 'no-flight-paths'; return summary; }
+        // FFZ polygons (ring pre-SIMPLIFIED once — Percepto stores them in a
+        // bowtie vertex order that breaks pip/edge math) + flat FP vertex list.
+        const ffzs = entities
+            .filter(e => e.type === 16 && entityCoords(e) && entityCoords(e).length >= 3)
+            .map(e => ({ entity: e, ring: simplifyPolygon(entityCoords(e)) }));
+        const fpVerts = [];
+        graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const entryMarginM = ENTRY_FFZ_FT / 3.28084;
+        // FFZ CONNECTORS: the drone can fly anywhere inside an FFZ, so any FFZ
+        // touched by ≥2 flight paths BRIDGES them. Without this the separate
+        // FPs form disconnected graph components and the base reaches only its
+        // own (here: 4 components → the base saw just 1, ~10 assets). Add an
+        // edge (straight-line weight = the in-FFZ hop) between every pair of FP
+        // vertices inside/within-ENTRY of the same FFZ, so the base can route
+        // across the whole network. Done BEFORE the per-base Dijkstra.
+        ffzs.forEach(f => {
+            const inside = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, f.ring) <= entryMarginM);
+            for (let i = 0; i < inside.length; i++) {
+                for (let j = i + 1; j < inside.length; j++) {
+                    const w = approxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng);
+                    graph.adj.get(inside[i].key).push({ to: inside[j].key, w });
+                    graph.adj.get(inside[j].key).push({ to: inside[i].key, w });
+                }
+            }
+        });
+        // Per base: nearest FP vertex + Dijkstra map (on the BRIDGED graph) +
+        // base→vertex connector.
+        const baseRuns = resolved.bases.map(b => {
+            const pt = gmPoint(b);
+            if (!pt) return null;
+            const bv = nearestGraphVertex(graph, pt.lat, pt.lng);
+            return { entity: b, baseConn: bv.dist, dist: dijkstraFrom(graph, bv.key) };
+        }).filter(Boolean);
+        if (!baseRuns.length) { summary.reason = 'base-no-coord'; return summary; }
+        const reachM = REACH_FFZ_FT / 3.28084;
+        rows.forEach(r => {
+            if (r.type !== 3 || r._isSegment) return;
+            // Asset FOOTPRINT: the pad polygon (entity.coords / .points) or its
+            // single point. Measure from ANY vertex of the pad, NOT the center —
+            // the center can sit 100+ ft inside the pad, so center-only
+            // distance wrongly excludes assets whose FFZ hugs the pad edge.
+            const ac = (r.entity && entityCoords(r.entity))
+                || (typeof r._lat === 'number' ? [{ lat: r._lat, lng: r._lng }] : null);
+            if (!ac) return;
+            const padToFfz = (ring) => {
+                let best = Infinity;
+                ac.forEach(c => { const d = pointToPolygonMeters(c.lat, c.lng, ring); if (d < best) best = d; });
+                return best;
+            };
+            // 1. Asset's FFZ = nearest FFZ within REACH_FFZ_FT of the pad edge.
+            let ffz = null, ffzD = Infinity;
+            ffzs.forEach(f => {
+                const d = padToFfz(f.ring);
+                if (d < ffzD) { ffzD = d; ffz = f; }
+            });
+            if (!ffz || ffzD > reachM) { r.routeM = null; r._routeReason = 'no-ffz'; summary.unreachable++; return; }
+            r._ffzEntity = ffz.entity;
+            // 2. Entry candidates = FP vertices inside the FFZ OR within
+            //    ENTRY_FFZ_FT of it (an FP that reaches the pad, vertex-at-edge
+            //    included — strict inside-only missed edge-terminating FPs).
+            const entries = fpVerts.filter(v => pointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryMarginM);
+            if (!entries.length) { r.routeM = null; r._routeReason = 'ffz-no-fp'; summary.unreachable++; return; }
+            // 3. Route = min over (base, entry) of baseConn + net(entry) +
+            //    (entry → FFZ far edge). Closest base + best entry win.
+            let best = null;
+            baseRuns.forEach(br => {
+                entries.forEach(en => {
+                    const net = br.dist.has(en.key) ? br.dist.get(en.key) : null;
+                    if (net == null) return;
+                    let far = 0;
+                    ffz.ring.forEach(p => { const dd = approxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; });
+                    const total = br.baseConn + net + far;
+                    if (!best || total < best.total) best = { total, base: br.entity, inM: br.baseConn, netM: net, ffzM: far };
+                });
+            });
+            if (!best) { r.routeM = null; r._routeReason = 'unreachable'; summary.unreachable++; return; }
+            r.routeM = best.total;
+            r._routeBreak = { inM: best.inM, netM: best.netM, ffzM: best.ffzM };
+            r._routeBase = best.base;
+            r._routeReason = '';
+            summary.reachable++;
+        });
+        return summary;
+    }
+
+    // v3.84: numeric range filters. Each meter-valued column can be range-
+    // filtered. Values are stored in METERS in sumPanelState.numericFilters[key]
+    // = {min, max}; the menu shows/accepts them in the current display unit.
+    const NUMERIC_FILTER_COLS = [
+        { key: 'altMin',    label: 'Min Alt',   dataKey: 'altMinM' },
+        { key: 'altMax',    label: 'Max Alt',   dataKey: 'altMaxM' },
+        { key: 'emergAlt',  label: 'Emerg Alt', dataKey: 'emergAltM' },
+        { key: 'altDelta',  label: 'Delta',     dataKey: 'altDeltaM' },
+        { key: 'elevation', label: 'Elevation', dataKey: 'elevationM' },
+        { key: 'agl',       label: 'AGL',       dataKey: 'aglM' },
+        { key: 'segLen',    label: 'Seg Len',   dataKey: 'segLenM' },
+        { key: 'route',     label: 'Route',     dataKey: 'routeM' },
+    ];
+    const NUMERIC_FILTER_DATAKEY = Object.fromEntries(NUMERIC_FILTER_COLS.map(c => [c.key, c.dataKey]));
+    // How many range filters are actually active (have a min and/or max).
+    function activeNumericFilterCount(nf) {
+        if (!nf) return 0;
+        let n = 0;
+        for (const k in nf) { const f = nf[k]; if (f && (f.min != null || f.max != null)) n++; }
+        return n;
+    }
+
     function filterAndSortRows(rows, state) {
         const q = (state.search || '').trim().toLowerCase();
         let out = rows.filter(r => {
@@ -4434,6 +5030,22 @@
             if (state.unvalidatedOnly && r.validated !== false) return false;
             if (state.unshieldedOnly && !r.unshielded) return false;
             if (state.notesOnly && !r.hasNotes) return false;
+            // v3.84: numeric range filters (stored in METERS). A row with no
+            // value for an active metric is excluded — an AGL range hides
+            // Asset/Marker rows (no AGL); a Seg Len range hides all but FP segs.
+            const nf = state.numericFilters;
+            if (nf) {
+                for (const k in nf) {
+                    const f = nf[k];
+                    if (!f || (f.min == null && f.max == null)) continue;
+                    const dk = NUMERIC_FILTER_DATAKEY[k];
+                    if (!dk) continue;
+                    const v = r[dk];
+                    if (v == null) return false;
+                    if (f.min != null && v < f.min) return false;
+                    if (f.max != null && v > f.max) return false;
+                }
+            }
             if (q) {
                 // Matches name, subtype, OR Seg ID (segment rows only).
                 // Seg ID stringified so partial matches work — searching
@@ -5366,6 +5978,9 @@
         ensurePendingForSite(siteID);
         ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
+        // v3.88: annotate asset rows with route-from-base distance (one graph
+        // build + one Dijkstra). routeSummary feeds the 📍 Base picker below.
+        const routeSummary = annotateRoutes(siteID, allRows);
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
@@ -5485,6 +6100,8 @@
             { tNum: '4',  label: 'NFZs'   },
             { tNum: '3',  label: 'Assets' },
             { tNum: '19', label: 'GMs'    },
+            { tNum: '8',  label: 'Bases'  },
+            { tNum: '98', label: 'Safe Z' },
         ];
         // v3.44: chipUpdates collects every chip's update fn so M2-solo
         // can refresh ALL chips' visual state, not just the clicked one.
@@ -5632,12 +6249,295 @@
         };
         optsRow.appendChild(analyzerBtn);
 
+        // v3.88: 📍 Base picker — choose the basestation GM used by the Route
+        // column. Auto-detected (name contains "base") unless overridden per site.
+        const baseBtn = document.createElement('button');
+        baseBtn.type = 'button';
+        baseBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const bases = (routeSummary && routeSummary.bases) || [];
+        const baseLabelText = () => {
+            if (!bases.length) return '📍 Base: (none) ▾';
+            if (bases.length === 1) {
+                const raw = bases[0].name || `#${bases[0].id}`;
+                const nm = raw.length > 20 ? raw.slice(0, 19) + '…' : raw;
+                return `📍 Base: ${nm}${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
+            }
+            return `📍 Base: ${bases.length} bases${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
+        };
+        baseBtn.textContent = baseLabelText();
+        baseBtn.title = bases.length
+            ? `Routing from ${bases.length === 1 ? `"${bases[0].name}"` : bases.length + ' bases (closest wins)'} — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
+            : (routeSummary && routeSummary.reason === 'no-flight-paths'
+                ? 'No flight paths on this site — routing unavailable.'
+                : 'No basestation found (no type-8 base, no GM named "…base…"). Click to pick one.');
+        if (bases.length) { baseBtn.style.borderColor = 'rgba(20,210,220,0.55)'; baseBtn.style.color = '#7adfe6'; }
+        let baseMenuEl = null;
+        const closeBaseMenu = () => { if (baseMenuEl) { baseMenuEl.remove(); baseMenuEl = null; } };
+        baseBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (baseMenuEl) { closeBaseMenu(); return; }
+            baseMenuEl = document.createElement('div');
+            baseMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:250px;max-height:60vh;overflow:auto';
+            const bhead = document.createElement('div');
+            bhead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+            bhead.textContent = 'Basestation (for Route column)';
+            baseMenuEl.appendChild(bhead);
+            const bucket = mapObjectsBySite[siteID];
+            const ents = bucket ? (bucket.entities || []) : [];
+            const type8 = ents.filter(e => e.type === 8 && gmPoint(e));
+            const gms = ents.filter(e => e.type === 19 && gmPoint(e));
+            const overrideId = loadBaseGmMap()[String(siteID)];
+            const mkBaseRow = (label, onPick, opts) => {
+                opts = opts || {};
+                const row = document.createElement('div');
+                row.style.cssText = `display:flex;align-items:center;padding:3px 12px;cursor:pointer;${opts.accent ? 'color:' + opts.accent : ''}`;
+                row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                row.onmouseleave = () => { row.style.background = 'transparent'; };
+                const lbl = document.createElement('span');
+                lbl.textContent = (opts.check ? '✓ ' : '') + label;
+                lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                row.appendChild(lbl);
+                row.onclick = onPick;
+                return row;
+            };
+            const sect = (txt) => {
+                const h = document.createElement('div');
+                h.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:5px 12px 2px;font-weight:700';
+                h.textContent = txt;
+                baseMenuEl.appendChild(h);
+            };
+            baseMenuEl.appendChild(mkBaseRow(`Auto-detect (installed type-8 base → else GM "…base…")`, () => {
+                closeBaseMenu(); setBaseGmId(siteID, null); renderSummaryPanel(siteID);
+            }, { check: overrideId == null, accent: '#cfe8ec' }));
+            const bhr = document.createElement('div');
+            bhr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:5px 0';
+            baseMenuEl.appendChild(bhr);
+            if (type8.length) {
+                sect('Installed bases (type 8)');
+                type8.forEach(g => baseMenuEl.appendChild(mkBaseRow(g.name || `#${g.id}`, () => {
+                    closeBaseMenu(); setBaseGmId(siteID, g.id); renderSummaryPanel(siteID);
+                }, { check: overrideId === g.id })));
+            }
+            sect('General Markers');
+            if (!gms.length) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'padding:3px 12px;color:#888';
+                empty.textContent = 'No General Markers on this site.';
+                baseMenuEl.appendChild(empty);
+            }
+            gms.forEach(g => {
+                baseMenuEl.appendChild(mkBaseRow(g.name || `#${g.id}`, () => {
+                    closeBaseMenu(); setBaseGmId(siteID, g.id); renderSummaryPanel(siteID);
+                }, { check: overrideId === g.id }));
+            });
+            const br = baseBtn.getBoundingClientRect();
+            baseMenuEl.style.left = br.left + 'px';
+            baseMenuEl.style.top = (br.bottom + 4) + 'px';
+            document.body.appendChild(baseMenuEl);
+            const bmr = baseMenuEl.getBoundingClientRect();
+            if (bmr.right > window.innerWidth - 8) baseMenuEl.style.left = Math.max(8, window.innerWidth - bmr.width - 8) + 'px';
+            if (bmr.bottom > window.innerHeight - 8) baseMenuEl.style.top = Math.max(8, br.top - bmr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (baseMenuEl && !baseMenuEl.contains(e.target) && e.target !== baseBtn) {
+                    closeBaseMenu();
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(baseBtn);
+
+        // v4.0: 🔋 Battery — editable Tattu/Tulip thresholds (one-way ft) that
+        // drive the Battery column from each asset's route distance.
+        const battBtn = document.createElement('button');
+        battBtn.type = 'button';
+        battBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const updateBattBtn = () => {
+            const th = loadBatteryThresholds();
+            battBtn.textContent = `🔋 Tattu ≤${th.tattuMaxFt / 1000}k · Tulip ≤${th.tulipMaxFt / 1000}k ▾`;
+        };
+        updateBattBtn();
+        battBtn.title = 'Battery thresholds (one-way ft): ≤Tattu → Tattu, ≤Tulip → Tulip, beyond → out of range';
+        let battMenuEl = null;
+        battBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (battMenuEl) { battMenuEl.remove(); battMenuEl = null; return; }
+            battMenuEl = document.createElement('div');
+            battMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:8px 12px;z-index:99999;font-size:11px;color:#e6e6e6;min-width:230px';
+            const th = loadBatteryThresholds();
+            const bh = document.createElement('div');
+            bh.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding-bottom:6px;font-weight:700';
+            bh.textContent = 'Battery thresholds (one-way ft)';
+            battMenuEl.appendChild(bh);
+            const mkRow = (label, key, colr) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 0';
+                const lbl = document.createElement('span');
+                lbl.textContent = label;
+                lbl.style.cssText = `flex:1;color:${colr};font-weight:600`;
+                row.appendChild(lbl);
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.value = th[key];
+                inp.style.cssText = 'width:80px;background:#15171b;border:1px solid rgba(255,255,255,0.2);border-radius:3px;color:#e6e6e6;font:inherit;font-size:11px;padding:2px 4px;text-align:right';
+                inp.onchange = () => {
+                    const v = parseFloat(inp.value);
+                    if (isFinite(v) && v > 0) {
+                        const cur = loadBatteryThresholds();
+                        cur[key] = v;
+                        saveBatteryThresholds(cur);
+                        updateBattBtn();
+                        redrawTable();
+                    }
+                };
+                row.appendChild(inp);
+                const ft = document.createElement('span'); ft.textContent = 'ft'; ft.style.color = '#888'; row.appendChild(ft);
+                battMenuEl.appendChild(row);
+            };
+            mkRow('Tattu ≤', 'tattuMaxFt', '#5fff5f');
+            mkRow('Tulip ≤', 'tulipMaxFt', '#ffd54f');
+            const bnote = document.createElement('div');
+            bnote.style.cssText = 'font-size:9px;color:#888;padding-top:6px;max-width:220px;line-height:1.3';
+            bnote.textContent = '≤Tattu → Tattu · ≤Tulip → Tulip · beyond → ⚠ out of range. Drives the Battery column.';
+            battMenuEl.appendChild(bnote);
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.textContent = `Reset (${BATTERY_DEFAULTS.tattuMaxFt / 1000}k / ${BATTERY_DEFAULTS.tulipMaxFt / 1000}k)`;
+            reset.style.cssText = 'margin-top:6px;background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px';
+            reset.onclick = () => {
+                saveBatteryThresholds({ tattuMaxFt: BATTERY_DEFAULTS.tattuMaxFt, tulipMaxFt: BATTERY_DEFAULTS.tulipMaxFt });
+                updateBattBtn(); redrawTable();
+                if (battMenuEl) { battMenuEl.remove(); battMenuEl = null; }
+            };
+            battMenuEl.appendChild(reset);
+            const br = battBtn.getBoundingClientRect();
+            battMenuEl.style.left = br.left + 'px';
+            battMenuEl.style.top = (br.bottom + 4) + 'px';
+            document.body.appendChild(battMenuEl);
+            const bmr = battMenuEl.getBoundingClientRect();
+            if (bmr.right > window.innerWidth - 8) battMenuEl.style.left = Math.max(8, window.innerWidth - bmr.width - 8) + 'px';
+            if (bmr.bottom > window.innerHeight - 8) battMenuEl.style.top = Math.max(8, br.top - bmr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (battMenuEl && !battMenuEl.contains(e.target) && e.target !== battBtn) {
+                    battMenuEl.remove(); battMenuEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(battBtn);
+
+        // v3.84: Ranges menu — numeric range filters (min/max) per meter-valued
+        // column. Values entered in the current display unit, stored in meters.
+        const rangesBtn = document.createElement('button');
+        rangesBtn.type = 'button';
+        rangesBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:auto';
+        const updateRangesBtn = () => {
+            const n = activeNumericFilterCount(sumPanelState.numericFilters);
+            rangesBtn.textContent = n > 0 ? `Ranges (${n}) ▾` : 'Ranges ▾';
+            rangesBtn.style.borderColor = n > 0 ? 'rgba(20,210,220,0.7)' : 'rgba(255,255,255,0.20)';
+            rangesBtn.style.color = n > 0 ? '#7adfe6' : '#bbb';
+        };
+        updateRangesBtn();
+        let rangesMenuEl = null;
+        rangesBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (rangesMenuEl) { rangesMenuEl.remove(); rangesMenuEl = null; return; }
+            rangesMenuEl = document.createElement('div');
+            rangesMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:230px';
+            const rebuildRangesMenu = () => {
+                rangesMenuEl.innerHTML = '';
+                const unit = sumPanelState.unitsFt ? 'ft' : 'm';
+                const toDisp = (m) => {
+                    if (m == null) return '';
+                    const v = sumPanelState.unitsFt ? m * 3.28084 : m;
+                    return String(Math.round(v * 10) / 10).replace(/\.0$/, '');
+                };
+                const fromDisp = (s) => {
+                    const n = parseFloat(s);
+                    if (!isFinite(n)) return null;
+                    return sumPanelState.unitsFt ? n / 3.28084 : n;
+                };
+                const head = document.createElement('div');
+                head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
+                head.textContent = `Numeric ranges (${unit})`;
+                rangesMenuEl.appendChild(head);
+                NUMERIC_FILTER_COLS.forEach(fc => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:5px;padding:3px 12px';
+                    const lbl = document.createElement('span');
+                    lbl.textContent = fc.label;
+                    lbl.style.cssText = 'flex:0 0 64px;color:#cdd6e0';
+                    row.appendChild(lbl);
+                    const mkInput = (which, ph) => {
+                        const inp = document.createElement('input');
+                        inp.type = 'number';
+                        inp.placeholder = ph;
+                        const f = sumPanelState.numericFilters[fc.key] || {};
+                        inp.value = toDisp(f[which]);
+                        inp.style.cssText = 'width:56px;background:#15171b;border:1px solid rgba(255,255,255,0.2);border-radius:3px;color:#e6e6e6;font:inherit;font-size:11px;padding:2px 4px';
+                        inp.onchange = () => {
+                            const m = fromDisp(inp.value);
+                            if (!sumPanelState.numericFilters[fc.key]) sumPanelState.numericFilters[fc.key] = { min: null, max: null };
+                            sumPanelState.numericFilters[fc.key][which] = m;
+                            const cur = sumPanelState.numericFilters[fc.key];
+                            if (cur.min == null && cur.max == null) delete sumPanelState.numericFilters[fc.key];
+                            redrawTable();
+                            updateRangesBtn();
+                        };
+                        return inp;
+                    };
+                    row.appendChild(mkInput('min', 'min'));
+                    const dash = document.createElement('span');
+                    dash.textContent = '–';
+                    dash.style.color = '#888';
+                    row.appendChild(dash);
+                    row.appendChild(mkInput('max', 'max'));
+                    rangesMenuEl.appendChild(row);
+                });
+                const hr = document.createElement('div');
+                hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                rangesMenuEl.appendChild(hr);
+                const clearBtn = document.createElement('button');
+                clearBtn.type = 'button';
+                clearBtn.textContent = 'Clear all ranges';
+                clearBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 4px';
+                clearBtn.onclick = () => {
+                    sumPanelState.numericFilters = {};
+                    redrawTable();
+                    updateRangesBtn();
+                    rebuildRangesMenu();
+                };
+                rangesMenuEl.appendChild(clearBtn);
+                const note = document.createElement('div');
+                note.style.cssText = 'font-size:9px;color:#888;padding:0 12px 6px;max-width:230px;line-height:1.3';
+                note.textContent = 'Rows with no value for a filtered metric are hidden (AGL hides assets; Seg Len shows only FP segments).';
+                rangesMenuEl.appendChild(note);
+            };
+            rebuildRangesMenu();
+            const r = rangesBtn.getBoundingClientRect();
+            rangesMenuEl.style.left = r.left + 'px';
+            rangesMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(rangesMenuEl);
+            const mr = rangesMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) rangesMenuEl.style.left = (window.innerWidth - mr.width - 8) + 'px';
+            if (mr.bottom > window.innerHeight - 8) rangesMenuEl.style.top = (r.top - mr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (rangesMenuEl && !rangesMenuEl.contains(e.target) && e.target !== rangesBtn) {
+                    rangesMenuEl.remove(); rangesMenuEl = null;
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(rangesBtn);
+
         // Columns menu — opens a small popover with one checkbox per column.
         // Hidden columns are also omitted from CSV/TSV exports.
         const colsBtn = document.createElement('button');
         colsBtn.type = 'button';
         colsBtn.textContent = 'Columns ▾';
-        colsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:auto';
+        colsBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;margin-left:6px';
         let colsMenuEl = null;
         colsBtn.onclick = (ev) => {
             ev.stopPropagation();
@@ -5652,13 +6552,26 @@
                 typeShort: 'Type',
                 name:      'Name',
                 segId:     'Segment ID',
+                entId:     'Entity ID',
                 subtype:   'Subtype',
+                equipment: 'Equipment (asset)',
+                state:     'State / Health (asset)',
+                gmGroup:   'GM Group',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
+                emergAlt:  'Emergency Alt (FP seg)',
                 altDelta:  'Min/Max Delta',
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
+                segLen:    'Segment Length (FP seg)',
+                route:     'Route from base (asset)',
+                battery:   'Battery (from route)',
+                ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
+                unshielded:'Unshielded',
+                notes:     'Notes',
+                droneName: 'Drone (base)',
+                droneId:   'Drone ID (base)',
             };
             // MBT-style menu: visible columns first with ↑/↓ reorder
             // arrows + remove checkbox, then a divider, then hidden
@@ -5770,7 +6683,7 @@
                 resetBtn.textContent = 'Reset to defaults';
                 resetBtn.style.cssText = 'background:transparent;border:1px solid rgba(255,255,255,0.20);color:#bbb;border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:10px;display:block;margin:0 12px 4px';
                 resetBtn.onclick = () => {
-                    sumPanelState.columnOrder = ALL_COL_KEYS.slice();
+                    sumPanelState.columnOrder = DEFAULT_COL_KEYS.slice();
                     saveColumnOrder(sumPanelState.columnOrder);
                     redrawTable();
                     rebuildColsMenu();
@@ -5825,6 +6738,28 @@
             presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
             const rebuildPresetsMenu = () => {
                 presetsMenuEl.innerHTML = '';
+                // --- Built-in views (read-only, apply-only) ---
+                const biHead = document.createElement('div');
+                biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
+                biHead.textContent = '★ Built-in views';
+                presetsMenuEl.appendChild(biHead);
+                BUILTIN_PRESETS.forEach(p => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                    row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                    row.onmouseleave = () => { row.style.background = 'transparent'; };
+                    row.title = p.desc || 'Apply this view';
+                    const lbl = document.createElement('span');
+                    lbl.textContent = p.name;
+                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    row.appendChild(lbl);
+                    row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    presetsMenuEl.appendChild(row);
+                });
+                const biHr = document.createElement('div');
+                biHr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+                presetsMenuEl.appendChild(biHr);
+                // --- User-saved views ---
                 const head = document.createElement('div');
                 head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:4px 12px 4px;font-weight:700';
                 head.textContent = 'Apply a saved view';
@@ -6698,8 +7633,103 @@
                 if (mapObjectsBySite[sid]) renderSummaryPanel(sid);
             }, 1500);
         };
+        // v3.87 (Phase 2): Export ▾ — copy ANY preset's table (its columns +
+        // filters) to the clipboard, Sheets-ready, without changing the live
+        // view. The CSV/Sheets/JSON buttons export the CURRENT view; this
+        // exports a chosen preset's view so you can pull several field-sets
+        // back-to-back.
+        const exportBtn = document.createElement('button');
+        exportBtn.textContent = '📤 Export ▾';
+        exportBtn.title = 'Copy a preset\'s table (its own columns + filters) for paste into Sheets — without switching your current view';
+        exportBtn.style.cssText = BTN_CSS;
+        let exportMenuEl = null;
+        const closeExportMenu = () => { if (exportMenuEl) { exportMenuEl.remove(); exportMenuEl = null; } };
+        exportBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (exportMenuEl) { closeExportMenu(); return; }
+            exportMenuEl = document.createElement('div');
+            exportMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:240px;max-height:65vh;overflow:auto';
+            const head = document.createElement('div');
+            head.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+            head.textContent = 'Copy a preset → Sheets';
+            exportMenuEl.appendChild(head);
+            const sub = document.createElement('div');
+            sub.style.cssText = 'font-size:9px;color:#888;padding:0 12px 4px;max-width:236px;line-height:1.3';
+            sub.textContent = "Uses that preset's columns + filters, not your current view.";
+            exportMenuEl.appendChild(sub);
+            const mkRow = (label, desc, onPick, accent) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;padding:3px 12px;cursor:pointer';
+                row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                row.onmouseleave = () => { row.style.background = 'transparent'; };
+                if (desc) row.title = desc;
+                const lbl = document.createElement('span');
+                lbl.textContent = label;
+                lbl.style.cssText = `flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${accent ? 'color:' + accent : ''}`;
+                row.appendChild(lbl);
+                row.onclick = onPick;
+                return row;
+            };
+            const doExport = (p) => {
+                closeExportMenu();
+                try {
+                    const { html, text, count } = buildPresetExport(p, allRows);
+                    writeSheetsClipboard(html, text, `Copied "${p.name}" (${count} row${count === 1 ? '' : 's'}) → paste into Sheets`);
+                } catch (e) {
+                    console.error(`${TAG} export "${p.name}" failed:`, e);
+                    showToast(`Export failed: ${p.name}`, 'rgba(255,96,96,0.55)');
+                }
+            };
+            const biHead = document.createElement('div');
+            biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:4px 12px 2px;font-weight:700';
+            biHead.textContent = '★ Built-in';
+            exportMenuEl.appendChild(biHead);
+            BUILTIN_PRESETS.forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
+            const userPresets = loadViewPresets();
+            if (userPresets.length) {
+                const uHead = document.createElement('div');
+                uHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+                uHead.textContent = 'Saved';
+                exportMenuEl.appendChild(uHead);
+                userPresets.forEach(p => exportMenuEl.appendChild(mkRow(p.name, 'Your saved view', () => doExport(p))));
+            }
+            const hr = document.createElement('div');
+            hr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
+            exportMenuEl.appendChild(hr);
+            exportMenuEl.appendChild(mkRow('⧉ Copy ALL (stacked)', 'Every preset stacked into one plain-text paste, section by section (best for a single multi-section paste)', () => {
+                closeExportMenu();
+                try {
+                    const all = allExportPresets();
+                    const sections = all.map(p => {
+                        const { text, count } = buildPresetExport(p, allRows);
+                        return `=== ${p.name} (${count} row${count === 1 ? '' : 's'}) ===\n${text}`;
+                    });
+                    copyToClipboard(sections.join('\n\n'), `Copied ALL ${all.length} preset tables (stacked, plain text)`);
+                } catch (e) {
+                    console.error(`${TAG} export ALL failed:`, e);
+                    showToast('Export ALL failed', 'rgba(255,96,96,0.55)');
+                }
+            }, '#ffd54f'));
+            const r = exportBtn.getBoundingClientRect();
+            exportMenuEl.style.left = r.left + 'px';
+            exportMenuEl.style.top = (r.bottom + 4) + 'px';
+            document.body.appendChild(exportMenuEl);
+            const mr = exportMenuEl.getBoundingClientRect();
+            if (mr.right > window.innerWidth - 8) exportMenuEl.style.left = Math.max(8, window.innerWidth - mr.width - 8) + 'px';
+            // Footer sits near the bottom — flip the menu up if it would
+            // overflow below the viewport.
+            if (mr.bottom > window.innerHeight - 8) exportMenuEl.style.top = Math.max(8, r.top - mr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (exportMenuEl && !exportMenuEl.contains(e.target) && e.target !== exportBtn) {
+                    closeExportMenu();
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
         footer.appendChild(csvBtn);
         footer.appendChild(tsvBtn);
+        footer.appendChild(exportBtn);
         footer.appendChild(jsonBtn);
         footer.appendChild(refreshBtn);
 
@@ -6936,13 +7966,20 @@
             window.__aim_ai_visibleRows = rows;
             tableWrap.innerHTML = '';
             const table = document.createElement('table');
-            table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:auto';
+            // v3.83: table-layout:fixed + an explicit <colgroup> give every
+            // column a known, controllable width — the basis for both
+            // resize and the frozen-left pane (sticky offsets = cumulative
+            // widths, computed without measuring the DOM).
+            table.style.cssText = 'border-collapse:collapse;font-size:12px;table-layout:fixed';
 
             // Build the active column list — checkbox column always first,
             // then user-selected columns in canonical order. Each col has
             // dataKey (the property on the row for the value) and a render
             // function for the cell.
             const unitLbl = sumPanelState.unitsFt ? 'ft' : 'm';
+            // v4.0: current battery thresholds, loaded once per redraw so the
+            // 🔋 Battery menu's edits apply on the next redrawTable().
+            const batteryTh = loadBatteryThresholds();
             // Display: comma-grouped whole feet (or meters with one
             // decimal). Used for every altitude/elevation column so the
             // numbers line up + are easy to read at a glance.
@@ -6956,18 +7993,41 @@
                 if (m == null) return '';
                 return sumPanelState.unitsFt ? String(Math.round(m * 3.28084)) : m.toFixed(1);
             };
+            // v3.82: State→color, mirroring the Stats popup's STATE_COLORS so
+            // the State column reads as health-at-a-glance. "Normal" is muted
+            // (it's the healthy baseline — no need to shout); any modifier
+            // state gets its semantic color so problems pop while scanning.
+            const SUM_STATE_COLORS = { 'HY': '#00e5ff', 'Empty': '#ffd54f', 'Inactive': '#ff9800', 'Unshielded': '#ff5722', 'Unreachable': '#a855f7' };
+            const stateCellColor = (s) => {
+                if (!s) return '#555';
+                if (s === 'Normal') return '#7a8a92';
+                return SUM_STATE_COLORS[s] || '#ffb347'; // unknown modifier → amber flag
+            };
             const allColDefs = [
                 { key: 'visibility', label: '👁',            w: 28,  num: false, dataKey: '_vis' },
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
+                { key: 'entId',     label: 'ID',             w: 75,  num: true,  dataKey: 'entId' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
+                { key: 'equipment', label: 'Equipment',      w: 110, num: false, dataKey: 'equipment' },
+                { key: 'state',     label: 'State',          w: 100, num: false, dataKey: 'state' },
+                { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'emergAlt',  label: `Emerg Alt (${unitLbl})`,     w: 90,  num: true, dataKey: 'emergAltM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altDelta',  label: `Min/Max Delta (${unitLbl})`, w: 100, num: true, dataKey: 'altDeltaM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
+                { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
+                { key: 'battery',   label: 'Battery',        w: 95,  num: false, dataKey: 'routeM' },
+                { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
+                { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
+                { key: 'droneName', label: 'Drone',          w: 95,  num: false, dataKey: 'droneName' },
+                { key: 'droneId',   label: 'Drone ID',       w: 75,  num: true,  dataKey: 'droneId' },
                 // Point-entity coordinates — populated only for GMs + Assets.
                 { key: 'lat',       label: 'Lat',            w: 90,  num: true,  dataKey: '_lat' },
                 { key: 'long',      label: 'Long',           w: 90,  num: true,  dataKey: '_lng' },
@@ -6981,14 +8041,86 @@
                 .map(k => COL_BY_KEY[k])
                 .filter(Boolean);
 
+            // ---- v3.83: column widths (persisted; default = col def `w`) ----
+            const SEL_W = 32; // checkbox column
+            const colWidth = (col) => {
+                const w = sumPanelState.columnWidths[col.key];
+                return (typeof w === 'number' && w >= 40) ? w : col.w;
+            };
+            // <colgroup> drives the widths. Table width is set to the EXACT
+            // sum (not 100%) so fixed-layout doesn't redistribute leftover
+            // space, which would desync the frozen offsets.
+            const colgroup = document.createElement('colgroup');
+            const colEls = {};
+            const colSel = document.createElement('col');
+            colSel.style.width = SEL_W + 'px';
+            colgroup.appendChild(colSel);
+            cols.forEach(col => {
+                const cEl = document.createElement('col');
+                cEl.style.width = colWidth(col) + 'px';
+                colEls[col.key] = cEl;
+                colgroup.appendChild(cEl);
+            });
+            table.appendChild(colgroup);
+            const totalW = () => SEL_W + cols.reduce((s, c) => s + colWidth(c), 0);
+            table.style.width = totalW() + 'px';
+
+            // ---- Frozen-left pane: checkbox + every column THROUGH Name ----
+            // Sticky panes must be contiguous from the left edge, so we freeze
+            // the run from the checkbox up to and including Name. Drag Name
+            // leftward (or hide columns left of it) to freeze fewer columns.
+            const nameIdx = cols.findIndex(c => c.key === 'name');
+            const frozenCount = nameIdx >= 0 ? nameIdx + 1 : 0;
+            const frozenCols = cols.slice(0, frozenCount);
+            const frozenKeys = new Set(frozenCols.map(c => c.key));
+            const lastFrozenKey = frozenCount > 0 ? frozenCols[frozenCount - 1].key : '__sel__';
+            const frozenLeft = {};
+            const recomputeFrozenLeft = () => {
+                let acc = SEL_W;
+                frozenCols.forEach(c => { frozenLeft[c.key] = acc; acc += colWidth(c); });
+            };
+            recomputeFrozenLeft();
+            const FROZEN_BODY_BG = '#1f2228', FROZEN_BODY_HOVER = '#1e333a', FROZEN_HEAD_BG = '#262a31';
+            // The pane divider is an INSET box-shadow on the last frozen
+            // cell, NOT border-right: with border-collapse the shared border
+            // gets owned by the (scrolling) next cell and drifts off the
+            // frozen edge. A box-shadow paints with the sticky cell, so it
+            // stays anchored to Name's right edge while scrolling.
+            const frozenShadow = 'inset -2px 0 0 0 rgba(20,210,220,0.45)';
+            // Apply sticky-left styling to one cell (th or td).
+            const applyFrozen = (cell, key, isHead) => {
+                cell.setAttribute('data-frozen-key', key);
+                cell.style.position = 'sticky';
+                cell.style.left = (key === '__sel__' ? 0 : frozenLeft[key]) + 'px';
+                cell.style.zIndex = isHead ? '2' : '1';
+                cell.style.background = isHead ? FROZEN_HEAD_BG : FROZEN_BODY_BG;
+                if (key === lastFrozenKey) cell.style.boxShadow = frozenShadow;
+            };
+            // Live-resize: set one column's width, retotal the table, and
+            // reposition frozen cells in place — no full rebuild.
+            const setColWidth = (col, px) => {
+                px = Math.max(40, Math.round(px));
+                sumPanelState.columnWidths[col.key] = px;
+                if (colEls[col.key]) colEls[col.key].style.width = px + 'px';
+                table.style.width = totalW() + 'px';
+                recomputeFrozenLeft();
+                tableWrap.querySelectorAll('[data-frozen-key]').forEach(el => {
+                    const k = el.getAttribute('data-frozen-key');
+                    if (k && k !== '__sel__' && frozenLeft[k] != null) el.style.left = frozenLeft[k] + 'px';
+                });
+            };
+
             // Header row — first cell is the select-all checkbox, then
             // user-selected columns sorted by their canonical position.
             const thead = document.createElement('thead');
-            thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:1';
+            // z-index:5 keeps the sticky header above frozen BODY cells
+            // (which sit at z-index:1) during vertical scroll.
+            thead.style.cssText = 'position:sticky;top:0;background:#262a31;z-index:5';
             const headRow = document.createElement('tr');
             // Select-all checkbox
             const thSel = document.createElement('th');
-            thSel.style.cssText = 'width:32px;padding:6px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.12)';
+            thSel.style.cssText = 'padding:6px 6px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.12)';
+            applyFrozen(thSel, '__sel__', true);
             const selAll = document.createElement('input');
             selAll.type = 'checkbox';
             selAll.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
@@ -7008,17 +8140,20 @@
                 const th = document.createElement('th');
                 const key = col.dataKey || col.key;
                 const isSorted = sumPanelState.sortKey === key;
-                // 3-state cycle on every column: asc → desc → default
-                // (typePrio asc, name secondary). Resets when a column
-                // hits its third click instead of locking into desc
-                // forever; user was getting stuck unable to return to the
-                // grouped-by-type default sort without a full refresh.
-                th.textContent = col.label;
-                th.style.cssText = `padding:6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;min-width:${col.w}px;white-space:nowrap`;
-                if (isSorted) th.textContent += sumPanelState.sortDir === 1 ? ' ▲' : ' ▼';
+                // position:relative anchors the × + resize grip; 18px right
+                // padding reserves room for them; overflow:hidden clips long
+                // labels (the inner span ellipsizes).
+                th.style.cssText = `position:relative;padding:6px 18px 6px 8px;text-align:${col.num ? 'right' : 'left'};color:${isSorted ? '#7adfe6' : '#bbb'};font-weight:600;font-size:11px;border-bottom:1px solid rgba(255,255,255,0.12);cursor:pointer;user-select:none;white-space:nowrap;overflow:hidden`;
+                const lblSpan = document.createElement('span');
+                lblSpan.textContent = col.label + (isSorted ? (sumPanelState.sortDir === 1 ? ' ▲' : ' ▼') : '');
+                lblSpan.style.cssText = 'display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom';
+                th.appendChild(lblSpan);
+
+                // Sort: asc → desc → default (3-state). The × + grip below
+                // stopPropagation so they never trigger a sort.
                 th.title = isSorted
-                    ? (sumPanelState.sortDir === 1 ? 'Click for descending; click again to reset to default sort' : 'Click to reset to default sort (grouped by type)')
-                    : 'Click to sort ascending';
+                    ? (sumPanelState.sortDir === 1 ? 'Click → descending; again → reset · drag to reorder · drag right edge to resize' : 'Click → reset to default sort · drag to reorder · drag right edge to resize')
+                    : 'Click to sort ascending · drag to reorder · drag right edge to resize';
                 th.onclick = () => {
                     if (sumPanelState.sortKey !== key) {
                         sumPanelState.sortKey = key;
@@ -7026,12 +8161,90 @@
                     } else if (sumPanelState.sortDir === 1) {
                         sumPanelState.sortDir = -1;
                     } else {
-                        // Third click → back to default (type-grouped, name asc within)
                         sumPanelState.sortKey = 'typePrio';
                         sumPanelState.sortDir = 1;
                     }
                     redrawTable();
                 };
+
+                // Drag-to-reorder (HTML5 DnD). Drop inserts the dragged column
+                // immediately BEFORE this one.
+                th.draggable = true;
+                th.ondragstart = (ev) => {
+                    ev.dataTransfer.effectAllowed = 'move';
+                    ev.dataTransfer.setData('text/plain', col.key);
+                    th.style.opacity = '0.4';
+                };
+                th.ondragend = () => { th.style.opacity = '1'; };
+                th.ondragover = (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; th.style.boxShadow = 'inset 3px 0 0 #14d2dc'; };
+                th.ondragleave = () => { th.style.boxShadow = ''; };
+                th.ondrop = (ev) => {
+                    ev.preventDefault();
+                    th.style.boxShadow = '';
+                    const fromKey = ev.dataTransfer.getData('text/plain');
+                    if (!fromKey || fromKey === col.key) return;
+                    const order = sumPanelState.columnOrder.slice();
+                    const fi = order.indexOf(fromKey);
+                    if (fi < 0) return;
+                    order.splice(fi, 1);
+                    const ti = order.indexOf(col.key);
+                    if (ti < 0) return;
+                    order.splice(ti, 0, fromKey);
+                    sumPanelState.columnOrder = order;
+                    saveColumnOrder(order);
+                    redrawTable();
+                };
+
+                // Inline × — hide this column (re-add via Columns ▾). Shows on
+                // header hover so it doesn't clutter the resting state.
+                const xBtn = document.createElement('span');
+                xBtn.textContent = '×';
+                xBtn.title = 'Hide this column (re-add via Columns ▾)';
+                xBtn.draggable = false;
+                xBtn.style.cssText = 'position:absolute;top:3px;right:7px;color:#999;font-size:13px;line-height:1;cursor:pointer;opacity:0;transition:opacity .1s;padding:0 2px;z-index:1';
+                xBtn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    sumPanelState.columnOrder = sumPanelState.columnOrder.filter(k => k !== col.key);
+                    saveColumnOrder(sumPanelState.columnOrder);
+                    redrawTable();
+                };
+                th.onmouseenter = () => { xBtn.style.opacity = '1'; };
+                th.onmouseleave = () => { xBtn.style.opacity = '0'; };
+                th.appendChild(xBtn);
+
+                // Resize grip on the right edge. Drag = resize (live, no
+                // rebuild); double-click = reset that column to default width.
+                const grip = document.createElement('div');
+                grip.title = 'Drag to resize · double-click to reset width';
+                grip.draggable = false;
+                grip.style.cssText = 'position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;z-index:2';
+                grip.onclick = (ev) => ev.stopPropagation();
+                grip.onmousedown = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    th.draggable = false; // stop DnD hijacking the resize drag
+                    const startX = ev.clientX;
+                    const startW = colWidth(col);
+                    const onMove = (e2) => setColWidth(col, startW + (e2.clientX - startX));
+                    const onUp = () => {
+                        document.removeEventListener('mousemove', onMove, true);
+                        document.removeEventListener('mouseup', onUp, true);
+                        th.draggable = true;
+                        saveColWidths();
+                    };
+                    document.addEventListener('mousemove', onMove, true);
+                    document.addEventListener('mouseup', onUp, true);
+                };
+                grip.ondblclick = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    delete sumPanelState.columnWidths[col.key];
+                    saveColWidths();
+                    redrawTable();
+                };
+                th.appendChild(grip);
+
+                if (frozenKeys.has(col.key)) applyFrozen(th, col.key, true);
                 headRow.appendChild(th);
             });
             thead.appendChild(headRow);
@@ -7046,25 +8259,65 @@
                 // the next row's cell via querySelector after commit.
                 tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
-                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; };
-                tr.onmouseleave = () => { tr.style.background = 'transparent'; };
+                // Frozen (sticky-left) cells need an OPAQUE background or the
+                // scrolling columns show through them; collect them so the
+                // row-hover tint stays in sync across the whole row.
+                const frozenTds = [];
+                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_HOVER); };
+                tr.onmouseleave = () => { tr.style.background = 'transparent'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_BG); };
 
                 // Checkbox cell — clicks here don't trigger row navigation.
                 const tdSel = document.createElement('td');
-                tdSel.style.cssText = 'width:32px;padding:5px 6px;text-align:center';
+                tdSel.style.cssText = 'padding:5px 6px;text-align:center';
+                applyFrozen(tdSel, '__sel__', false);
+                frozenTds.push(tdSel);
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.checked = sumPanelState.selectedIds.has(r._rowKey);
                 cb.style.cssText = 'accent-color:rgb(20,210,220);cursor:pointer';
-                cb.onclick = (ev) => ev.stopPropagation();
-                cb.onchange = () => {
-                    if (cb.checked) sumPanelState.selectedIds.add(r._rowKey);
-                    else sumPanelState.selectedIds.delete(r._rowKey);
-                    // Update header select-all state without full redraw
+                // v3.94: Shift+click range select. A plain click toggles one
+                // row + sets the anchor; Shift+click applies THIS click's new
+                // state to every row between the anchor and here (in current
+                // display order). All logic is on click (it carries shiftKey);
+                // onchange is intentionally not used.
+                const syncSelHeader = () => {
                     const newSel = rowIds.filter(id => sumPanelState.selectedIds.has(id)).length;
                     selAll.checked = newSel > 0 && newSel === rows.length;
                     selAll.indeterminate = newSel > 0 && newSel < rows.length;
                     countEl.textContent = makeCountText(rows.length, allRows.length, sumPanelState.selectedIds.size);
+                };
+                cb.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const target = cb.checked; // checkbox already flipped to its new state
+                    const anchorKey = sumPanelState._lastSelKey;
+                    if (ev.shiftKey && anchorKey != null && anchorKey !== r._rowKey) {
+                        const ai = rows.findIndex(rr => rr._rowKey === anchorKey);
+                        const ci = rows.findIndex(rr => rr._rowKey === r._rowKey);
+                        if (ai >= 0 && ci >= 0) {
+                            const lo = Math.min(ai, ci), hi = Math.max(ai, ci);
+                            // v3.95: flip the affected checkboxes IN PLACE — a
+                            // full redrawTable() on a big table was the ~500ms
+                            // lag. One-pass rowKey→checkbox lookup (avoids
+                            // CSS.escape on segment keys like "123:456").
+                            const boxByKey = {};
+                            tableWrap.querySelectorAll('tr[data-row-key]').forEach(trEl => {
+                                boxByKey[trEl.getAttribute('data-row-key')] = trEl.querySelector('td input[type="checkbox"]');
+                            });
+                            for (let i = lo; i <= hi; i++) {
+                                const k = rows[i]._rowKey;
+                                if (target) sumPanelState.selectedIds.add(k);
+                                else sumPanelState.selectedIds.delete(k);
+                                if (boxByKey[k]) boxByKey[k].checked = target;
+                            }
+                            sumPanelState._lastSelKey = r._rowKey;
+                            syncSelHeader();
+                            return;
+                        }
+                    }
+                    if (target) sumPanelState.selectedIds.add(r._rowKey);
+                    else sumPanelState.selectedIds.delete(r._rowKey);
+                    sumPanelState._lastSelKey = r._rowKey;
+                    syncSelHeader();
                 };
                 tdSel.appendChild(cb);
                 tr.appendChild(tdSel);
@@ -7183,6 +8436,12 @@
                         if (isEditable) {
                             td.onclick = (ev) => {
                                 ev.stopPropagation();
+                                // v3.89: pan to the asset too, so clicking the
+                                // (frozen, prominent) Name cell still moves the
+                                // map — not just opens the rename editor. No
+                                // inspector popup here so it doesn't cover the
+                                // inline editor.
+                                if (r._isSegment && r.arc) panToSegment(r.arc); else panToEntity(r.entity);
                                 startInlineNameEdit(td, r.entity);
                             };
                         }
@@ -7242,6 +8501,7 @@
                         if (isAsset) {
                             td.onclick = (ev) => {
                                 ev.stopPropagation();
+                                panToEntity(r.entity); // v3.89: pan + edit (see Name cell)
                                 startInlineSubtypeEdit(td, r.entity);
                             };
                         }
@@ -7421,6 +8681,130 @@
                             };
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
                         }
+                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName') {
+                        // Plain text (asset equipment / GM group / base drone).
+                        // Blank for rows it doesn't apply to. Right-click copies.
+                        const v = r[col.dataKey] || '';
+                        const color = col.key === 'gmGroup' ? '#c4a8f0' : (col.key === 'droneName' ? '#ffd54f' : '#cdd6e0');
+                        td.style.cssText = `padding:5px 8px;color:${v ? color : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = `${v} — Right-click: copy`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
+                        } else {
+                            td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only'
+                                : col.key === 'droneName' ? 'Drone applies to Base Stations only'
+                                : 'Equipment is parsed from asset subtype (before " - ")';
+                        }
+                    } else if (col.key === 'entId' || col.key === 'droneId') {
+                        // Entity ID / allocated drone ID — right-aligned, copyable.
+                        const v = r[col.dataKey];
+                        const show = (v != null && v !== '') ? String(v) : '—';
+                        td.style.cssText = `padding:5px 8px;color:${show === '—' ? '#555' : '#9aa7b0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        td.textContent = show;
+                        if (show !== '—') {
+                            td.title = (col.key === 'entId' ? 'Entity ID' : 'Allocated drone ID') + ' — Right-click: copy';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(show, `Copied ${show}`); };
+                        } else {
+                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : '';
+                        }
+                    } else if (col.key === 'state') {
+                        // Asset state, colored by severity (Normal muted, any
+                        // modifier in its semantic color so problems pop).
+                        const v = r.state || '';
+                        td.style.cssText = `padding:5px 8px;color:${stateCellColor(v)};font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = `Asset state "${v}" (subtype after " - "; no modifier = Normal). Right-click: copy`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
+                        } else {
+                            td.title = 'State applies to assets only';
+                        }
+                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt') {
+                        // Numerics converted m→ft per the unit toggle. emergAlt/
+                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only.
+                        const m = r[col.dataKey];
+                        td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        td.textContent = col.fmt(m);
+                        const naLbl = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only'
+                            : col.key === 'segLen' ? 'Segment length — FP segments only'
+                            : 'Altitude — Base Stations / Safe Zones only';
+                        if (m == null) {
+                            td.title = naLbl;
+                        } else {
+                            const desc = col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). '
+                                : col.key === 'segLen' ? 'Segment length (arc.distance). '
+                                : 'Base relative_alt / Safe Zone altitude. ';
+                            td.title = desc + 'Right-click: copy raw';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
+                        }
+                    } else if (col.key === 'route') {
+                        // Route from base → asset's FFZ far edge along connected
+                        // flight paths (asset rows only). Hover = breakdown.
+                        // — non-asset / no base; ⚠ unreachable (no FFZ / no FP).
+                        const m = r.routeM;
+                        const isAsset = r.type === 3 && !r._isSegment;
+                        td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        if (m == null) {
+                            const reasons = {
+                                'no-ffz': `Unreachable — no inspection FFZ within ${REACH_FFZ_FT} ft of this asset.`,
+                                'ffz-no-fp': "Unreachable — the asset's FFZ has no flight path reaching it.",
+                                'unreachable': "Unreachable — no connected flight-path route from the base reaches the asset's FFZ.",
+                            };
+                            td.textContent = (isAsset && r._routeReason) ? '⚠' : '—';
+                            td.title = !isAsset ? 'Route is computed for assets only'
+                                : (reasons[r._routeReason] || 'No route — set a basestation via 📍 Base, and ensure flight paths exist on this site');
+                        } else {
+                            td.textContent = col.fmt(m);
+                            const bk = r._routeBreak;
+                            const u = sumPanelState.unitsFt ? 'ft' : 'm';
+                            const baseNm = (r._routeBase && r._routeBase.name) ? r._routeBase.name : 'base';
+                            td.title = bk
+                                ? `Route ≈ ${col.fmt(m)} ${u} one-way, from "${baseNm}" to the far edge of this asset's FFZ.\nBase→FP ${col.fmt(bk.inM)} + along FPs ${col.fmt(bk.netM)} + FFZ traversal ${col.fmt(bk.ffzM)}.\nRight-click: copy raw.`
+                                : 'Route from base. Right-click: copy raw.';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
+                        }
+                    } else if (col.key === 'battery') {
+                        // Recommended battery from the one-way route distance.
+                        const b = batteryFor(r.routeM, batteryTh);
+                        if (!b) {
+                            td.style.cssText = 'padding:5px 8px;color:#555;font-size:11px;cursor:pointer';
+                            td.textContent = '—';
+                            td.title = (r.type === 3 && !r._isSegment)
+                                ? 'No route from base → battery N/A'
+                                : 'Battery is computed for routable assets';
+                        } else {
+                            td.style.cssText = `padding:5px 8px;color:${b.color};font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap`;
+                            td.textContent = b.label;
+                            const ft = Math.round(r.routeM * 3.28084).toLocaleString();
+                            td.title = `One-way route ${ft} ft → ${b.label}.\nTattu ≤ ${batteryTh.tattuMaxFt.toLocaleString()} ft · Tulip ≤ ${batteryTh.tulipMaxFt.toLocaleString()} ft (set via 🔋 Battery).`;
+                        }
+                    } else if (col.key === 'unshielded') {
+                        // ✓ = unshielded (a drone-safety concern), ✗ = shielded,
+                        // — = N/A. The flag is meaningful for FFZ + Assets.
+                        let txt = '—', color = '#666';
+                        if (r.unshielded) { txt = '✓'; color = '#ff5722'; }
+                        else if (r.type === 16 || r.type === 3) { txt = '✗'; color = '#5fff5f'; }
+                        td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
+                        td.textContent = txt;
+                        td.title = (r.type === 16 || r.type === 3)
+                            ? (r.unshielded ? 'Unshielded (drone-safety concern)' : 'Shielded')
+                            : 'Unshielded flag applies to FFZ + Assets';
+                    } else if (col.key === 'notes') {
+                        // Description text, single-line with full text on hover.
+                        const v = r.notesText || '';
+                        td.style.cssText = `padding:5px 8px;color:${v ? '#b8c2cc' : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px`;
+                        td.textContent = v || '—';
+                        if (v) {
+                            td.title = v + '\n\nRight-click: copy';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, 'Copied note'); };
+                        } else {
+                            td.title = 'No notes';
+                        }
+                    }
+                    if (frozenKeys.has(col.key)) {
+                        applyFrozen(td, col.key, false);
+                        frozenTds.push(td);
                     }
                     tr.appendChild(td);
                 });
@@ -7470,16 +8854,34 @@
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
+                    if (col.key === 'entId') return r.entId != null ? String(r.entId) : '';
                     if (col.key === 'subtype') return r.subtype || '';
+                    if (col.key === 'equipment') return r.equipment || '';
+                    if (col.key === 'state') return r.state || '';
+                    if (col.key === 'gmGroup') return r.gmGroup || '';
+                    if (col.key === 'droneName') return r.droneName || '';
+                    if (col.key === 'droneId') return (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '';
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
-                        || col.key === 'elevation' || col.key === 'agl') {
+                        || col.key === 'elevation' || col.key === 'agl'
+                        || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route'
+                        || col.key === 'ptAlt') {
                         return num(r[col.dataKey]);
+                    }
+                    if (col.key === 'battery') {
+                        const b = batteryFor(r.routeM, loadBatteryThresholds());
+                        return b ? b.label.replace(/^⚠\s*/, '') : '';
                     }
                     if (col.key === 'validated') {
                         if (r.validated === true) return 'yes';
                         if (r.validated === false) return 'no';
                         return ''; // N/A
                     }
+                    if (col.key === 'unshielded') {
+                        if (r.unshielded) return 'yes';
+                        if (r.type === 16 || r.type === 3) return 'no';
+                        return ''; // N/A
+                    }
+                    if (col.key === 'notes') return r.notesText || '';
                     if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
                     if (col.key === 'long') return r._lng != null ? r._lng.toFixed(6) : '';
                     if (col.key === 'gps') return r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '';
