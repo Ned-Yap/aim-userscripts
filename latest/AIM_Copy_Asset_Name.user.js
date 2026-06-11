@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.95
+// @version      3.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.95';
+    const SCRIPT_VERSION = '3.96';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1097,6 +1097,8 @@
         15: { short: 'FP',  long: 'Flight Path',     color: '#1ca0de', sortPrio: 1, hasValidStatus: true  },
         16: { short: 'FFZ', long: 'Free Fly Zone',   color: '#5fff5f', sortPrio: 2, hasValidStatus: true  },
         19: { short: 'Mkr', long: 'Marker',          color: '#c084fc', sortPrio: 5, hasValidStatus: false },
+        8:  { short: 'Base', long: 'Base Station',   color: '#ffd54f', sortPrio: 6, hasValidStatus: false },
+        98: { short: 'Safe', long: 'Safe Zone',      color: '#ff9eb5', sortPrio: 7, hasValidStatus: false },
     };
     function typeReg(t) { return TYPE_REG[t] || { short: '?', long: `Type ${t}`, color: '#7adfe6', sortPrio: 99, hasValidStatus: false }; }
 
@@ -1200,6 +1202,32 @@
         }
         if (e.type === 19) {
             if (e.general_marker_type) out.push({ label: 'Marker type', value: e.general_marker_type });
+            if (Array.isArray(e.coords) && e.coords[0]) {
+                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        if (e.type === 8 && e.custom) {
+            if (typeof e.custom.relative_alt === 'number') {
+                const row = meterRow('Rel Alt', e.custom.relative_alt);
+                if (row) out.push(row);
+            }
+            const dr = e.custom.allocated_by_drone;
+            if (dr && typeof dr === 'object') {
+                if (dr.name) out.push({ label: 'Drone', value: dr.name });
+                if (dr.id != null) out.push({ label: 'Drone ID', value: dr.id });
+                if (typeof dr.battery_status === 'number') out.push({ label: 'Drone battery', value: `${dr.battery_status}%` });
+                if (dr.robot_type_name) out.push({ label: 'Drone type', value: dr.robot_type_name });
+            }
+            if (typeof e.custom.ground_station_id === 'number') out.push({ label: 'Ground station', value: e.custom.ground_station_id });
+            if (Array.isArray(e.coords) && e.coords[0]) {
+                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
+            }
+        }
+        if (e.type === 98 && e.custom) {
+            if (typeof e.custom.altitude === 'number') {
+                const row = meterRow('Altitude', e.custom.altitude);
+                if (row) out.push(row);
+            }
             if (Array.isArray(e.coords) && e.coords[0]) {
                 out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
             }
@@ -1957,7 +1985,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'validated', 'unshielded', 'notes', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -2077,6 +2105,18 @@
             typeFilter: ['3'], sortKey: 'routeM', sortDir: 1, unitsFt: true,
         },
         {
+            name: 'Base Stations',
+            desc: 'Installed bases (type 8) — ID, altitude, allocated drone, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'droneName', 'droneId', 'lat', 'long', 'gps', 'notes'],
+            typeFilter: ['8'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
+            name: 'Safe Zones',
+            desc: 'Safe zones (type 98) — ID, altitude, coords.',
+            columnOrder: ['name', 'entId', 'ptAlt', 'lat', 'long', 'gps', 'notes'],
+            typeFilter: ['98'], sortKey: 'name', sortDir: 1, unitsFt: true,
+        },
+        {
             name: 'GMs · Name/Lat/Long',
             desc: 'General markers with coordinates — for Copy → Sheets.',
             columnOrder: ['name', 'lat', 'long'],
@@ -2095,7 +2135,7 @@
     function presetToFilterState(p) {
         return {
             search: '',
-            typeFilter: new Set((Array.isArray(p.typeFilter) ? p.typeFilter : ['3', '4', '15', '16', '19']).map(String)),
+            typeFilter: new Set((Array.isArray(p.typeFilter) ? p.typeFilter : ['3', '4', '8', '15', '16', '19', '98']).map(String)),
             validatedOnly: !!p.validatedOnly,
             unvalidatedOnly: !!p.unvalidatedOnly,
             unshieldedOnly: !!p.unshieldedOnly,
@@ -2115,6 +2155,7 @@
             typeShort: { label: 'Type', val: r => r.typeShort || '' },
             name: { label: 'Name', val: r => r.name || '' },
             segId: { label: 'Seg ID', val: r => r._segId != null ? String(r._segId) : '' },
+            entId: { label: 'ID', val: r => r.entId != null ? String(r.entId) : '' },
             subtype: { label: 'Subtype', val: r => r.subtype || '' },
             equipment: { label: 'Equipment', val: r => r.equipment || '' },
             state: { label: 'State', val: r => r.state || '' },
@@ -2127,9 +2168,12 @@
             agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
             segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
             route: { label: `Route (${u})`, val: r => num(r.routeM) },
+            ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
             validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
             unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
             notes: { label: 'Notes', val: r => r.notesText || '' },
+            droneName: { label: 'Drone', val: r => r.droneName || '' },
+            droneId: { label: 'Drone ID', val: r => (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '' },
             lat: { label: 'Lat', val: r => r._lat != null ? r._lat.toFixed(6) : '' },
             long: { label: 'Long', val: r => r._lng != null ? r._lng.toFixed(6) : '' },
             gps: { label: 'GPS', val: r => r._lat != null ? `https://www.google.com/maps?q=${r._lat},${r._lng}` : '' },
@@ -2231,7 +2275,7 @@
         saveColumnOrder(sumPanelState.columnOrder);
         sumPanelState.columnWidths = {};
         saveColWidths();
-        sumPanelState.typeFilter = new Set(['3', '4', '15', '16', '19']);
+        sumPanelState.typeFilter = new Set(['3', '4', '8', '15', '16', '19', '98']);
         sumPanelState.validatedOnly = false;
         sumPanelState.unvalidatedOnly = false;
         sumPanelState.unshieldedOnly = false;
@@ -4447,7 +4491,7 @@
     }
     let sumPanelState = {
         search: '',
-        typeFilter: new Set(['3', '4', '15', '16', '19']), // All types on by default
+        typeFilter: new Set(['3', '4', '8', '15', '16', '19', '98']), // All types on by default
         validatedOnly: false,
         unvalidatedOnly: false,
         unshieldedOnly: false,
@@ -4628,6 +4672,7 @@
                         segLenM: typeof arc.distance === 'number' ? arc.distance
                             : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
                         notesText: e.description ? String(e.description).trim() : '',
+                        entId: e.id, // parent FP id
                     });
                 });
                 return;
@@ -4667,6 +4712,11 @@
                 gmGroup: '',
                 emergAltM: null,
                 segLenM: null,
+                // v3.96: generic entity ID + Base/Safe-Zone fields.
+                entId: e.id,
+                ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
+                droneName: '',      // Base allocated drone name
+                droneId: '',        // Base allocated drone id
             };
             if (e.type === 3 && e.custom) {
                 row.subtype = e.custom.poi_type_str || '';
@@ -4694,11 +4744,24 @@
                 row.state = mods.length ? mods.join(' + ') : 'Normal';
             }
             if (e.type === 19) row.gmGroup = gmBaseName(e.name || '');
-            // Point coordinate — only single-point entities (GMs type 19,
-            // Assets type 3) have a meaningful lat/lng. Polygons/lines leave
+            // v3.96: Base Station (type 8) — relative_alt + allocated drone.
+            if (e.type === 8 && e.custom) {
+                if (typeof e.custom.relative_alt === 'number') row.ptAltM = e.custom.relative_alt;
+                const dr = e.custom.allocated_by_drone;
+                if (dr && typeof dr === 'object') {
+                    row.droneName = dr.name || '';
+                    row.droneId = (dr.id != null ? dr.id : '');
+                }
+            }
+            // v3.96: Safe Zone (type 98) — single altitude.
+            if (e.type === 98 && e.custom && typeof e.custom.altitude === 'number') {
+                row.ptAltM = e.custom.altitude;
+            }
+            // Point coordinate — single-point entities (GMs 19, Assets 3, Base
+            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons/lines leave
             // these null so the Lat/Long/GPS cells render blank.
-            if ((e.type === 19 || e.type === 3) && Array.isArray(e.coords) && e.coords[0]
-                && typeof e.coords[0].lat === 'number') {
+            if ((e.type === 19 || e.type === 3 || e.type === 8 || e.type === 98)
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') {
                 row._lat = e.coords[0].lat;
                 row._lng = e.coords[0].lng;
             }
@@ -5961,6 +6024,8 @@
             { tNum: '4',  label: 'NFZs'   },
             { tNum: '3',  label: 'Assets' },
             { tNum: '19', label: 'GMs'    },
+            { tNum: '8',  label: 'Bases'  },
+            { tNum: '98', label: 'Safe Z' },
         ];
         // v3.44: chipUpdates collects every chip's update fn so M2-solo
         // can refresh ALL chips' visual state, not just the clicked one.
@@ -6331,6 +6396,7 @@
                 typeShort: 'Type',
                 name:      'Name',
                 segId:     'Segment ID',
+                entId:     'Entity ID',
                 subtype:   'Subtype',
                 equipment: 'Equipment (asset)',
                 state:     'State / Health (asset)',
@@ -6343,9 +6409,12 @@
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
                 route:     'Route from base (asset)',
+                ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
                 unshielded:'Unshielded',
                 notes:     'Notes',
+                droneName: 'Drone (base)',
+                droneId:   'Drone ID (base)',
             };
             // MBT-style menu: visible columns first with ↑/↓ reorder
             // arrows + remove checkbox, then a divider, then hidden
@@ -7779,6 +7848,7 @@
                 { key: 'typeShort', label: 'Type',           w: 50,  num: false, dataKey: 'typeShort' },
                 { key: 'name',      label: 'Name',           w: 240, num: false, dataKey: 'name' },
                 { key: 'segId',     label: 'Seg ID',         w: 80,  num: true,  dataKey: '_segId' },
+                { key: 'entId',     label: 'ID',             w: 75,  num: true,  dataKey: 'entId' },
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
                 { key: 'equipment', label: 'Equipment',      w: 110, num: false, dataKey: 'equipment' },
                 { key: 'state',     label: 'State',          w: 100, num: false, dataKey: 'state' },
@@ -7791,9 +7861,12 @@
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
+                { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
                 { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
                 { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
+                { key: 'droneName', label: 'Drone',          w: 95,  num: false, dataKey: 'droneName' },
+                { key: 'droneId',   label: 'Drone ID',       w: 75,  num: true,  dataKey: 'droneId' },
                 // Point-entity coordinates — populated only for GMs + Assets.
                 { key: 'lat',       label: 'Lat',            w: 90,  num: true,  dataKey: '_lat' },
                 { key: 'long',      label: 'Long',           w: 90,  num: true,  dataKey: '_lng' },
@@ -8447,18 +8520,32 @@
                             };
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
                         }
-                    } else if (col.key === 'equipment' || col.key === 'gmGroup') {
-                        // Plain text (asset equipment / GM group). Blank for
-                        // rows the field doesn't apply to. Right-click copies.
+                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName') {
+                        // Plain text (asset equipment / GM group / base drone).
+                        // Blank for rows it doesn't apply to. Right-click copies.
                         const v = r[col.dataKey] || '';
-                        const color = col.key === 'gmGroup' ? '#c4a8f0' : '#cdd6e0';
+                        const color = col.key === 'gmGroup' ? '#c4a8f0' : (col.key === 'droneName' ? '#ffd54f' : '#cdd6e0');
                         td.style.cssText = `padding:5px 8px;color:${v ? color : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
                         td.textContent = v || '—';
                         if (v) {
                             td.title = `${v} — Right-click: copy`;
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(v, `Copied "${v}"`); };
                         } else {
-                            td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only' : 'Equipment is parsed from asset subtype (before " - ")';
+                            td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only'
+                                : col.key === 'droneName' ? 'Drone applies to Base Stations only'
+                                : 'Equipment is parsed from asset subtype (before " - ")';
+                        }
+                    } else if (col.key === 'entId' || col.key === 'droneId') {
+                        // Entity ID / allocated drone ID — right-aligned, copyable.
+                        const v = r[col.dataKey];
+                        const show = (v != null && v !== '') ? String(v) : '—';
+                        td.style.cssText = `padding:5px 8px;color:${show === '—' ? '#555' : '#9aa7b0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        td.textContent = show;
+                        if (show !== '—') {
+                            td.title = (col.key === 'entId' ? 'Entity ID' : 'Allocated drone ID') + ' — Right-click: copy';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(show, `Copied ${show}`); };
+                        } else {
+                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : '';
                         }
                     } else if (col.key === 'state') {
                         // Asset state, colored by severity (Normal muted, any
@@ -8472,16 +8559,22 @@
                         } else {
                             td.title = 'State applies to assets only';
                         }
-                    } else if (col.key === 'emergAlt' || col.key === 'segLen') {
-                        // FP-segment-only numerics. fmt/raw convert m→ft per
-                        // the unit toggle, same as the other altitude columns.
+                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt') {
+                        // Numerics converted m→ft per the unit toggle. emergAlt/
+                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only.
                         const m = r[col.dataKey];
                         td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         td.textContent = col.fmt(m);
+                        const naLbl = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only'
+                            : col.key === 'segLen' ? 'Segment length — FP segments only'
+                            : 'Altitude — Base Stations / Safe Zones only';
                         if (m == null) {
-                            td.title = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only' : 'Segment length — FP segments only';
+                            td.title = naLbl;
                         } else {
-                            td.title = (col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). ' : 'Segment length (arc.distance). ') + 'Right-click: copy raw';
+                            const desc = col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). '
+                                : col.key === 'segLen' ? 'Segment length (arc.distance). '
+                                : 'Base relative_alt / Safe Zone altitude. ';
+                            td.title = desc + 'Right-click: copy raw';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
                     } else if (col.key === 'route') {
@@ -8585,13 +8678,17 @@
                     if (col.key === 'typeShort') return r.typeShort;
                     if (col.key === 'name') return r.name || '';
                     if (col.key === 'segId') return r._segId != null ? String(r._segId) : '';
+                    if (col.key === 'entId') return r.entId != null ? String(r.entId) : '';
                     if (col.key === 'subtype') return r.subtype || '';
                     if (col.key === 'equipment') return r.equipment || '';
                     if (col.key === 'state') return r.state || '';
                     if (col.key === 'gmGroup') return r.gmGroup || '';
+                    if (col.key === 'droneName') return r.droneName || '';
+                    if (col.key === 'droneId') return (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '';
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
                         || col.key === 'elevation' || col.key === 'agl'
-                        || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route') {
+                        || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route'
+                        || col.key === 'ptAlt') {
                         return num(r[col.dataKey]);
                     }
                     if (col.key === 'validated') {
