@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @description  Edit Percepto flight paths from the map while natively editing one: (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). No button, no mode. SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -519,7 +519,18 @@
             const hit = nearestVertexToLatLng({ lat: ll.lat, lng: ll.lng });
             if (!hit) return;
             if (!findCloserAt(hit.wc.state.arcs, hit.V)) return; // only when there's a loop to open here
-            injectOpenPathItem(el, hit.wc.id, hit.V, popup);
+            const tryInject = () => injectOpenPathItem(el, hit.wc.id, hit.V, popup);
+            tryInject();
+            // Percepto renders the menu via React and may render AFTER popupopen (or
+            // re-render and drop our item) — re-inject for the popup's lifetime so
+            // OPEN PATH is reliably there on the FIRST open.
+            let obs = null;
+            try { obs = new MutationObserver(tryInject); obs.observe(el, { childList: true, subtree: true }); } catch (e2) {}
+            const map = getLeafletMap();
+            if (map && map.on) {
+                const onClose = (ev2) => { if (ev2.popup === popup) { try { if (obs) obs.disconnect(); } catch (e3) {} try { map.off('popupclose', onClose); } catch (e3) {} } };
+                map.on('popupclose', onClose);
+            }
         } catch (err) { warn('handlePopupOpen threw', err); }
     }
     let popupHooked = false;
@@ -568,5 +579,5 @@
     installBadgeListeners();
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log('v0.16 ready (iframe) — click a segment number to split it · OPEN PATH item in the vertex popup un-closes a loop · writes the FP editor working copy (coexists with native drags) · validation gate on every edit · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
+    log('v0.17 ready (iframe) — click a segment number to split it · OPEN PATH item in the vertex popup un-closes a loop (now re-injected via observer so it shows on first open) · writes the FP editor working copy · validation gate on every edit · auto-blocks the native phantom-vertex-on-drop bug · no refresh');
 })();

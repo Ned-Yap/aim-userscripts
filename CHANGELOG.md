@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — AIM Flight Path Editor v0.17 (latest, dev-only) — OPEN PATH shows on first open
+
+v0.16's "OPEN PATH" item sometimes only appeared after closing and reopening the vertex popup — Percepto renders the menu via React *after* `popupopen` fired, wiping our one-shot injection. v0.17 re-injects the item under a MutationObserver for the popup's lifetime (disconnected on `popupclose`), so it's reliably present on the first open.
+
+---
+
 ## 2026-06-11 — AIM Flight Path Editor v0.16 (latest, dev-only) — OPEN PATH (un-close a snapped loop)
 
 New companion to the splitter: reverse Percepto's native **CLOSE PATH**. Native "close" snaps a loose end onto an existing vertex (byte-identical coords) so two vertices merge and the loop closes — and there's no native way to undo it, so a segment trapped inside a closed loop can't be cleaned up if it goes unshielded. v0.16 adds an **"OPEN PATH"** item to Percepto's own double-click vertex popup (`flight-path-vertex-popup__menu`), shown only when the clicked vertex sits on a loop. Clicking it detaches the **loop-closing arc** to a fresh coordinate ~50 px off the junction (a draggable loose end), re-opening the loop.
