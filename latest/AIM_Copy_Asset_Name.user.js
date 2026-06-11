@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      3.87
+// @version      3.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '3.87';
+    const SCRIPT_VERSION = '3.88';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -237,6 +237,7 @@
     const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
+    const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
@@ -908,6 +909,79 @@
         t = Math.max(0, Math.min(1, t));
         const cx = ax + t * dx, cy = ay + t * dy;
         return approxMeters(lat, lng, cy, cx);
+    }
+
+    // ============================================================
+    // SPATIAL CORE (v3.88) — flight-path graph + shortest path.
+    // Shared by the route/battery feature (Phase 3) and, later, the
+    // SOP proximity/overlap validators (Phase 4). Connectivity uses the
+    // established 6-decimal shared-vertex model: two arcs are adjacent
+    // iff they share a waypoint rounded to 6 dp (~0.1 m). Edge weight is
+    // the server's arc.distance (meters), falling back to approxMeters.
+    // ============================================================
+    function vkey(p) {
+        return `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+    }
+    // Build the undirected flight-path graph for a site's entities.
+    // Returns { adj: Map<vkey,[{to,w}]>, verts: Map<vkey,{lat,lng}> }.
+    function buildFlightPathGraph(entities) {
+        const adj = new Map();
+        const verts = new Map();
+        const addVert = (p) => {
+            const k = vkey(p);
+            if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng });
+            if (!adj.has(k)) adj.set(k, []);
+            return k;
+        };
+        (entities || []).forEach(e => {
+            if (e.type !== 15 || !Array.isArray(e.arcs)) return;
+            e.arcs.forEach(arc => {
+                if (!arc.point_a || !arc.point_b) return;
+                if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return;
+                const ka = addVert(arc.point_a), kb = addVert(arc.point_b);
+                if (ka === kb) return; // degenerate zero-length arc
+                const w = (typeof arc.distance === 'number' && arc.distance > 0)
+                    ? arc.distance
+                    : approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng);
+                adj.get(ka).push({ to: kb, w });
+                adj.get(kb).push({ to: ka, w });
+            });
+        });
+        return { adj, verts };
+    }
+    // Single-source Dijkstra from a start vertex key. Returns Map<vkey,
+    // distMeters>. Linear extract-min — graphs here are a few hundred
+    // vertices at most, so O(V²) is negligible and avoids a heap dep.
+    function dijkstraFrom(graph, startKey) {
+        const dist = new Map();
+        if (!graph.adj.has(startKey)) return dist;
+        dist.set(startKey, 0);
+        const visited = new Set();
+        const pq = [{ k: startKey, d: 0 }];
+        while (pq.length) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const { k, d } = pq.splice(mi, 1)[0];
+            if (visited.has(k)) continue;
+            visited.add(k);
+            (graph.adj.get(k) || []).forEach(({ to, w }) => {
+                const nd = d + w;
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) {
+                    dist.set(to, nd);
+                    pq.push({ k: to, d: nd });
+                }
+            });
+        }
+        return dist;
+    }
+    // Nearest graph vertex to a lat/lng. Returns {key, dist(m), vert}|null.
+    function nearestGraphVertex(graph, lat, lng) {
+        let best = null;
+        graph.verts.forEach((v, k) => {
+            const d = approxMeters(lat, lng, v.lat, v.lng);
+            if (!best || d < best.dist) best = { key: k, dist: d, vert: v };
+        });
+        return best;
     }
     function findEntityAtLatLng(lat, lng, siteID) {
         const bucket = mapObjectsBySite[siteID];
@@ -1869,7 +1943,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'validated', 'unshielded', 'notes', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'validated', 'unshielded', 'notes', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -1983,6 +2057,12 @@
             typeFilter: ['16', '3'], sortKey: 'typePrio', sortDir: 1, unitsFt: true,
         },
         {
+            name: 'Route from Base',
+            desc: 'Assets by flight-path distance from the basestation (set the base via 📍 Base), nearest first.',
+            columnOrder: ['name', 'subtype', 'equipment', 'route'],
+            typeFilter: ['3'], sortKey: 'routeM', sortDir: 1, unitsFt: true,
+        },
+        {
             name: 'GMs · Name/Lat/Long',
             desc: 'General markers with coordinates — for Copy → Sheets.',
             columnOrder: ['name', 'lat', 'long'],
@@ -2032,6 +2112,7 @@
             elevation: { label: `Elevation (${u})`, val: r => num(r.elevationM) },
             agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
             segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
+            route: { label: `Route (${u})`, val: r => num(r.routeM) },
             validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
             unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
             notes: { label: 'Notes', val: r => r.notesText || '' },
@@ -4622,6 +4703,71 @@
         return out;
     }
 
+    // ---- Route from basestation (Phase 3, v3.88) ----
+    // Per-site chosen base GM: a stored override wins; otherwise auto-detect a
+    // General Marker whose name contains "base" (e.g. "Requested Base Location").
+    function loadBaseGmMap() {
+        const m = elevGmGet(CACHE_KEY_BASE_GM, {});
+        return (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+    }
+    function setBaseGmId(siteID, gmId) {
+        const m = loadBaseGmMap();
+        if (gmId == null) delete m[String(siteID)];
+        else m[String(siteID)] = gmId;
+        elevGmSet(CACHE_KEY_BASE_GM, m);
+    }
+    function autoDetectBaseGm(entities) {
+        const gms = (entities || []).filter(e => e.type === 19 && e.name && /base/i.test(e.name));
+        return gms.length ? gms[0] : null;
+    }
+    // Resolve the base GM for a site: stored override (if it still exists) else
+    // auto-detected. Returns {entity, auto:boolean}|null.
+    function resolveBaseGm(siteID, entities) {
+        const stored = loadBaseGmMap()[String(siteID)];
+        if (stored != null) {
+            const e = (entities || []).find(x => x.type === 19 && x.id === stored);
+            if (e) return { entity: e, auto: false };
+        }
+        const auto = autoDetectBaseGm(entities);
+        return auto ? { entity: auto, auto: true } : null;
+    }
+    function gmPoint(e) {
+        return (e && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number')
+            ? { lat: e.coords[0].lat, lng: e.coords[0].lng } : null;
+    }
+    // Annotate ASSET rows in-place with routeM (base→asset, meters, following
+    // connected flight paths) + a breakdown for the tooltip. Distance =
+    // in-connector (base→entry vertex, straight line) + on-network (Dijkstra)
+    // + out-connector (exit vertex→asset, straight line) — the conservative
+    // model the user chose. Returns a summary for the base-picker UI.
+    function annotateRoutes(siteID, rows) {
+        const bucket = mapObjectsBySite[siteID];
+        const entities = bucket ? (bucket.entities || []) : [];
+        const summary = { baseEntity: null, baseAuto: false, graphVerts: 0, reachable: 0, unreachable: 0, reason: '' };
+        const base = resolveBaseGm(siteID, entities);
+        if (!base) { summary.reason = 'no-base'; return summary; }
+        summary.baseEntity = base.entity; summary.baseAuto = base.auto;
+        const basePt = gmPoint(base.entity);
+        if (!basePt) { summary.reason = 'base-no-coord'; return summary; }
+        const graph = buildFlightPathGraph(entities);
+        summary.graphVerts = graph.verts.size;
+        if (graph.verts.size === 0) { summary.reason = 'no-flight-paths'; return summary; }
+        const baseV = nearestGraphVertex(graph, basePt.lat, basePt.lng);
+        const inConn = baseV.dist; // base → entry vertex (off-network hop)
+        const dist = dijkstraFrom(graph, baseV.key);
+        rows.forEach(r => {
+            if (r.type !== 3 || r._isSegment || typeof r._lat !== 'number') return; // assets w/ coords only
+            const av = nearestGraphVertex(graph, r._lat, r._lng);
+            const net = (av && dist.has(av.key)) ? dist.get(av.key) : null;
+            if (net == null) { r.routeM = null; r._routeReason = 'unreachable'; summary.unreachable++; return; }
+            r.routeM = inConn + net + av.dist;
+            r._routeBreak = { inM: inConn, netM: net, outM: av.dist };
+            r._routeReason = '';
+            summary.reachable++;
+        });
+        return summary;
+    }
+
     // v3.84: numeric range filters. Each meter-valued column can be range-
     // filtered. Values are stored in METERS in sumPanelState.numericFilters[key]
     // = {min, max}; the menu shows/accepts them in the current display unit.
@@ -4633,6 +4779,7 @@
         { key: 'elevation', label: 'Elevation', dataKey: 'elevationM' },
         { key: 'agl',       label: 'AGL',       dataKey: 'aglM' },
         { key: 'segLen',    label: 'Seg Len',   dataKey: 'segLenM' },
+        { key: 'route',     label: 'Route',     dataKey: 'routeM' },
     ];
     const NUMERIC_FILTER_DATAKEY = Object.fromEntries(NUMERIC_FILTER_COLS.map(c => [c.key, c.dataKey]));
     // How many range filters are actually active (have a min and/or max).
@@ -5603,6 +5750,9 @@
         ensurePendingForSite(siteID);
         ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
+        // v3.88: annotate asset rows with route-from-base distance (one graph
+        // build + one Dijkstra). routeSummary feeds the 📍 Base picker below.
+        const routeSummary = annotateRoutes(siteID, allRows);
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
@@ -5869,6 +6019,86 @@
         };
         optsRow.appendChild(analyzerBtn);
 
+        // v3.88: 📍 Base picker — choose the basestation GM used by the Route
+        // column. Auto-detected (name contains "base") unless overridden per site.
+        const baseBtn = document.createElement('button');
+        baseBtn.type = 'button';
+        baseBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        const baseLabelText = () => {
+            const be = routeSummary && routeSummary.baseEntity;
+            if (!be) return '📍 Base: (none) ▾';
+            const raw = be.name || `#${be.id}`;
+            const nm = raw.length > 22 ? raw.slice(0, 21) + '…' : raw;
+            return `📍 Base: ${nm}${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
+        };
+        baseBtn.textContent = baseLabelText();
+        baseBtn.title = (routeSummary && routeSummary.baseEntity)
+            ? `Routing from "${routeSummary.baseEntity.name}" — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
+            : (routeSummary && routeSummary.reason === 'no-flight-paths'
+                ? 'No flight paths on this site — routing unavailable.'
+                : 'No basestation found (no GM named "…base…"). Click to pick one.');
+        if (routeSummary && routeSummary.baseEntity) { baseBtn.style.borderColor = 'rgba(20,210,220,0.55)'; baseBtn.style.color = '#7adfe6'; }
+        let baseMenuEl = null;
+        const closeBaseMenu = () => { if (baseMenuEl) { baseMenuEl.remove(); baseMenuEl = null; } };
+        baseBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            if (baseMenuEl) { closeBaseMenu(); return; }
+            baseMenuEl = document.createElement('div');
+            baseMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:240px;max-height:60vh;overflow:auto';
+            const bhead = document.createElement('div');
+            bhead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 2px;font-weight:700';
+            bhead.textContent = 'Basestation (for Route column)';
+            baseMenuEl.appendChild(bhead);
+            const bucket = mapObjectsBySite[siteID];
+            const gms = bucket ? (bucket.entities || []).filter(e => e.type === 19 && gmPoint(e)) : [];
+            const curId = (routeSummary && routeSummary.baseEntity) ? routeSummary.baseEntity.id : null;
+            const mkBaseRow = (label, onPick, opts) => {
+                opts = opts || {};
+                const row = document.createElement('div');
+                row.style.cssText = `display:flex;align-items:center;padding:3px 12px;cursor:pointer;${opts.accent ? 'color:' + opts.accent : ''}`;
+                row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
+                row.onmouseleave = () => { row.style.background = 'transparent'; };
+                const lbl = document.createElement('span');
+                lbl.textContent = (opts.check ? '✓ ' : '') + label;
+                lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                row.appendChild(lbl);
+                row.onclick = onPick;
+                return row;
+            };
+            baseMenuEl.appendChild(mkBaseRow('Auto-detect (name contains "base")', () => {
+                closeBaseMenu(); setBaseGmId(siteID, null); renderSummaryPanel(siteID);
+            }, { check: routeSummary && routeSummary.baseAuto, accent: '#cfe8ec' }));
+            const bhr = document.createElement('div');
+            bhr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:5px 0';
+            baseMenuEl.appendChild(bhr);
+            if (!gms.length) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'padding:3px 12px;color:#888';
+                empty.textContent = 'No General Markers on this site.';
+                baseMenuEl.appendChild(empty);
+            }
+            gms.forEach(g => {
+                baseMenuEl.appendChild(mkBaseRow(g.name || `#${g.id}`, () => {
+                    closeBaseMenu(); setBaseGmId(siteID, g.id); renderSummaryPanel(siteID);
+                }, { check: curId === g.id && !(routeSummary && routeSummary.baseAuto) }));
+            });
+            const br = baseBtn.getBoundingClientRect();
+            baseMenuEl.style.left = br.left + 'px';
+            baseMenuEl.style.top = (br.bottom + 4) + 'px';
+            document.body.appendChild(baseMenuEl);
+            const bmr = baseMenuEl.getBoundingClientRect();
+            if (bmr.right > window.innerWidth - 8) baseMenuEl.style.left = Math.max(8, window.innerWidth - bmr.width - 8) + 'px';
+            if (bmr.bottom > window.innerHeight - 8) baseMenuEl.style.top = Math.max(8, br.top - bmr.height - 4) + 'px';
+            const onDocClick = (e) => {
+                if (baseMenuEl && !baseMenuEl.contains(e.target) && e.target !== baseBtn) {
+                    closeBaseMenu();
+                    document.removeEventListener('mousedown', onDocClick, true);
+                }
+            };
+            setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
+        };
+        optsRow.appendChild(baseBtn);
+
         // v3.84: Ranges menu — numeric range filters (min/max) per meter-valued
         // column. Values entered in the current display unit, stored in meters.
         const rangesBtn = document.createElement('button');
@@ -6005,6 +6235,7 @@
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
+                route:     'Route from base (asset)',
                 validated: 'Valid',
                 unshielded:'Unshielded',
                 notes:     'Notes',
@@ -7452,6 +7683,7 @@
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
                 { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
                 { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
@@ -8104,6 +8336,28 @@
                             td.title = (col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). ' : 'Segment length (arc.distance). ') + 'Right-click: copy raw';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
+                    } else if (col.key === 'route') {
+                        // Route from basestation along connected flight paths
+                        // (asset rows only). Hover = in/network/out breakdown.
+                        // — when not an asset / no base; ⚠ when unreachable.
+                        const m = r.routeM;
+                        const isAsset = r.type === 3 && !r._isSegment;
+                        td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
+                        if (m == null) {
+                            td.textContent = (isAsset && r._routeReason === 'unreachable') ? '⚠' : '—';
+                            td.title = !isAsset ? 'Route is computed for assets only'
+                                : (r._routeReason === 'unreachable'
+                                    ? 'No flight-path route from the basestation reaches this asset (different/disconnected FP network)'
+                                    : 'No route — set a basestation via 📍 Base, and ensure flight paths exist on this site');
+                        } else {
+                            td.textContent = col.fmt(m);
+                            const bk = r._routeBreak;
+                            const u = sumPanelState.unitsFt ? 'ft' : 'm';
+                            td.title = bk
+                                ? `Route from base ≈ ${col.fmt(m)} ${u} (one-way, along flight paths).\nBase→network ${col.fmt(bk.inM)} + on-network ${col.fmt(bk.netM)} + network→asset ${col.fmt(bk.outM)}.\nRight-click: copy raw.`
+                                : 'Route from base. Right-click: copy raw.';
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
+                        }
                     } else if (col.key === 'unshielded') {
                         // ✓ = unshielded (a drone-safety concern), ✗ = shielded,
                         // — = N/A. The flag is meaningful for FFZ + Assets.
@@ -8185,7 +8439,7 @@
                     if (col.key === 'gmGroup') return r.gmGroup || '';
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
                         || col.key === 'elevation' || col.key === 'agl'
-                        || col.key === 'emergAlt' || col.key === 'segLen') {
+                        || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route') {
                         return num(r[col.dataKey]);
                     }
                     if (col.key === 'validated') {
