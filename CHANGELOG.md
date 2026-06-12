@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.2
+
+First slice of the **Site Setup Generator** — a new **⊕ Generate** button on the SUM toolbar (next to 🗺️ Analyzer) that auto-builds the *foundation* of a site setup for a CSM to finetune (the inverse of the Analyzer, which exports a finished one). Phase A1 generates the **inspection-FFZ frame** around every asset and **previews it on the map** — nothing is written yet.
+
+- Per asset: a min-area oriented bounding box → a **frame of 4 corner-connected side boxes**, each inner edge **15 ft off the asset border** (the standoff), flyable depth ≥ the minimum (default 30 ft), and the long dimension extending with the asset face. The four boxes overlap at the corners so the union is one continuous, traversable ring. Tunable in the modal: standoff / box depth / minimum size / altitude floor + band.
+- **👁 Preview on map** draws the proposed FFZs as green **DRAFT** polygons (tooltip: "preview only, not saved"); Clear-preview + re-preview while you tune. **Commit is the next slice** — it will write through the existing Apply-queue rails (FFZ-first, dry-run, rollback, verify).
+- Validated offline against site 1583 (163 assets): standoff exactly 15.00 ft on every box, zero boxes overlapping their asset, all four corners continuous (900 ft² overlap each).
+
+Coworkers (prod) are unaffected — they run Asset Inspector v4.0. Design + full roadmap (Tool A generator + Tool B ortho-CV shielding extractor, two parallel tracks): `ShortKeys/AIM_Site_Setup_Generator_Design.md`.
+
+---
+
 ## 2026-06-11 — AIM Flight Path Editor v0.19 (latest, dev-only) — OPEN PATH "save + refresh" reminder
 
 The v0.18 positional-coords change did NOT fix the post-open live-drag jank, which confirms the cause is Percepto's editor not re-binding the vertex marker after a junction is restructured (the saved data is correct — verified clean on a 65-arc production path: 1 component, 0 orphans). Decision: leave it. OPEN PATH's success toast now reminds you to **SAVE then REFRESH before editing that path again**, since the freed vertex only drags cleanly after a refresh re-seeds the markers. Also added `ShortKeys/AIM_FP_Check.js` — a standalone console integrity checker for the live server copy of every flight path on a site.
@@ -34,7 +46,7 @@ Picking the right arc is provably safe: among the arcs meeting at that vertex it
 
 ---
 
-## 2026-06-11 — SOP Validators (Phase 4a) — Asset Inspector v4.1 + AIM Issues v1.02 (latest, dev-only)
+## 2026-06-11 — SOP Validators (Phase 4a) — Asset Inspector v4.2 + AIM Issues v1.02 (latest, dev-only)
 
 First slice of the Site-Setup SOP validators. Geometric proximity checks run off the same entity data the SUM already loads and flag each violation on the map as an issue.
 
@@ -46,7 +58,7 @@ First slice of the Site-Setup SOP validators. Geometric proximity checks run off
 - Validator issues are **ephemeral** — never saved, never synced to GitHub; re-running replaces them. (Needs AIM Issues enabled for the on-map drawing; the section + thresholds work regardless.)
 - Validated offline against site 1583 (163 assets / 42 FFZs / 4 FPs): 10 FFZ→Asset and 1 FP→Asset near-misses surfaced; FFZ↔FFZ correctly clean (closest pair 62 ft).
 
-Coworkers (prod) are unaffected — they run Asset Inspector v4.0 (no validators) and AIM Issues v1.01; the v1.02 bridge is dormant until a v4.1 Asset Inspector sends it findings.
+Coworkers (prod) are unaffected — they run Asset Inspector v4.0 (no validators) and AIM Issues v1.01; the v1.02 bridge is dormant until a v4.2 Asset Inspector sends it findings.
 
 ## 2026-06-11 — AIM Map Styler v34.72 (latest, dev-only) — refresh stale asset data
 
