@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-12 — AIM Mission Log CT v1.0 (new script)
+
+New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** page it rewrites the TIME column from the site's fixed **GMT-5** stamps into real local **Central Time** — `Jun 11, 2026 13:28` → `06/11/2026 - 1:28pm CT` — and relabels the header site clock to CT. Each GMT-5 stamp is read as an absolute instant and re-rendered through `America/Chicago`, so summer missions read identically (GMT-5 = CDT) while winter missions correctly drop an hour. Layout survives Percepto's React re-renders via a MutationObserver. No hotkeys; brand-new install (not auto-distributed). *(Follow-up in progress: a richer Mission Log SUM folded into Mission Bank Tools.)*
+
+---
+
 ## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.3
 
 First slice of the **Site Setup Generator** — a new **⊕ Generate** button on the SUM toolbar (next to 🗺️ Analyzer) that auto-builds the *foundation* of a site setup for a CSM to finetune (the inverse of the Analyzer, which exports a finished one). Phase A1 generates **one inspection FFZ per qualifying asset** and **previews it on the map** — nothing is written yet.
