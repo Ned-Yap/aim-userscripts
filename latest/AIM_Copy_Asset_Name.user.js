@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.3';
+    const SCRIPT_VERSION = '4.4';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6073,11 +6073,13 @@
     // inspection FFZ per qualifying asset: a single OPEN edge box
     // (never closed/looped) on the asset face nearest the power
     // lines (the shielded side), inner edge 15 ft off the face,
-    // ≥30 ft deep. Only assets whose state is Normal AND within
-    // ~400 ft of a power line qualify. Altitudes are DEM-checked
-    // per FFZ (floor = ground + AGL, ceiling = floor + delta, MSL).
-    // PREVIEWS on the map; Commit (A1.5) + corridor FP routing (A2)
-    // follow. Log tag [AIM GEN]. Design:
+    // ≥30 ft deep. Skips Unreachable/Unshielded/Empty assets and
+    // any farther than ~400 ft from a power line. Flags (color) FFZs
+    // that run parallel-over a line or sit on a pad that already has
+    // an FFZ. Altitudes are DEM-checked per FFZ (floor = ground +
+    // AGL, ceiling = floor + delta, MSL). PREVIEWS on the map;
+    // Commit (A1.5) + corridor FP routing (A2) follow.
+    // Log tag [AIM GEN]. Design:
     // ShortKeys/AIM_Site_Setup_Generator_Design.md.
     // ============================================================
     const GEN_TAG = `[AIM GEN ${CONTEXT}]`;
@@ -6089,8 +6091,13 @@
         aglFt: 100,        // FFZ floor above DEM ground (checked per FFZ)
         deltaFt: 30,       // FFZ ceiling = floor + delta
         proximityFt: 400,  // asset must be within this of a power line (200 PL + 200 asset)
-        normalOnly: true,  // only assets whose state is Normal (no poi_type_str suffix)
+        lineClearFt: 10,   // flag FFZ if it runs parallel within this of a power line
+        skipBadStates: true,  // skip Unreachable / Unshielded / Empty
+        skipExisting: false,  // skip assets that already have an FFZ (else just flag)
     };
+    // Only these asset states are excluded; everything else (Normal, Inactive,
+    // HY, …) gets an FFZ.
+    const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
     let genPreviewLayers = [];
 
     // Local east/north meters projection around an origin, and its
@@ -6187,14 +6194,15 @@
         if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
         return segs;
     }
-    // "Normal" = poi_type_str carries no " - <state>" suffix (plain
-    // "battery"/"v-well"/"h-well"/…) and the asset isn't flagged unshielded.
-    function assetIsNormal(asset) {
-        if (asset.is_unshielded) return false;
+    // Returns the skip-state name (unreachable/unshielded/empty) for an asset
+    // if it should be skipped, else null. Reads the poi_type_str suffix +
+    // is_unshielded; every other state (Normal/Inactive/HY/…) qualifies.
+    function assetSkipReason(asset) {
+        if (asset.is_unshielded) return 'unshielded';
         const p = (asset.custom && asset.custom.poi_type_str) || '';
         const i = p.indexOf(' - ');
-        const suffix = i >= 0 ? p.slice(i + 3).trim() : '';
-        return suffix === '';
+        const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
+        return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
     }
     // Min distance (m) from a ring of {lat,lng} points to any PL segment.
     function minRingToSegsM(ring, segs) {
@@ -6211,6 +6219,49 @@
         let lat = 0, lng = 0;
         for (const p of ring) { lat += p.lat; lng += p.lng; }
         return { lat: lat / ring.length, lng: lng / ring.length };
+    }
+    // Bearing (rad) of a segment in a locally-isotropic frame (lng scaled by
+    // cos lat) so angle comparisons are meaningful.
+    function segAngleRad(a, b) {
+        return Math.atan2(b.lat - a.lat, (b.lng - a.lng) * Math.cos(a.lat * Math.PI / 180));
+    }
+    // True if the FFZ box runs PARALLEL over/along a power line (a SOP no-no).
+    // Crossing a line is fine; lying parallel within `clearFt` is not. We flag
+    // when a line interacts with the box (endpoint inside / box edge crosses it
+    // / within clearFt) AND is near-parallel to the box's long axis (<25°).
+    function ffzOverPowerLine(ring, segs, clearFt) {
+        if (!segs || !segs.length || ring.length < 3) return false;
+        const clearM = clearFt * GEN_FT_TO_M;
+        const e0 = approxMeters(ring[0].lat, ring[0].lng, ring[1].lat, ring[1].lng);
+        const e1 = approxMeters(ring[1].lat, ring[1].lng, ring[2].lat, ring[2].lng);
+        const la = e0 >= e1 ? [ring[0], ring[1]] : [ring[1], ring[2]];
+        const boxAng = segAngleRad(la[0], la[1]);
+        for (const sg of segs) {
+            let touches = pointInPolygon(sg[0].lat, sg[0].lng, ring) || pointInPolygon(sg[1].lat, sg[1].lng, ring);
+            if (!touches) {
+                for (let i = 0; i < ring.length && !touches; i++) {
+                    if (segmentsCross(ring[i], ring[(i + 1) % ring.length], sg[0], sg[1])) touches = true;
+                }
+            }
+            if (!touches && minRingToSegsM(ring, [sg]) < clearM) touches = true;
+            if (!touches) continue;
+            let da = Math.abs(boxAng - segAngleRad(sg[0], sg[1])) % Math.PI;
+            if (da > Math.PI / 2) da = Math.PI - da;
+            if (da < (25 * Math.PI / 180)) return true; // near-parallel & interacting
+        }
+        return false;
+    }
+    // True if the asset already has an FFZ near it (overlaps, or any asset
+    // vertex within 60 ft of an existing FFZ). Lets us flag duplicates.
+    function assetHasExistingFfz(assetRing, ffzRings) {
+        const nearM = 60 * GEN_FT_TO_M;
+        for (const fr of ffzRings) {
+            if (polygonsIntersect(assetRing, fr)) return true;
+            for (const v of assetRing) {
+                if (pointToPolygonMeters(v.lat, v.lng, fr) < nearM) return true;
+            }
+        }
+        return false;
     }
 
     // Build ONE inspection FFZ for an asset: a single OPEN edge box on the
@@ -6264,16 +6315,25 @@
         if (!hasPowerLinesFor(siteID)) return { error: 'no-powerlines' };
         const segs = powerLineSegments(siteID);
         const assets = ents.filter(e => e.type === 3 && entityCoords(e));
-        let skippedState = 0, skippedFar = 0;
+        const ffzRings = ents.filter(e => e.type === 16 && entityCoords(e)).map(e => entityCoords(e));
+        let skippedState = 0, skippedFar = 0, skippedExisting = 0, overLine = 0, hasExisting = 0;
         const ffzs = [];
         assets.forEach(a => {
             try {
-                if (params.normalOnly && !assetIsNormal(a)) { skippedState++; return; }
+                if (params.skipBadStates && assetSkipReason(a)) { skippedState++; return; }
                 const assetRing = entityCoords(a);
                 const dFt = (segs.length ? minRingToSegsM(assetRing, segs) : Infinity) / GEN_FT_TO_M;
                 if (dFt > params.proximityFt) { skippedFar++; return; }
+                const existing = assetHasExistingFfz(assetRing, ffzRings);
+                if (existing && params.skipExisting) { skippedExisting++; return; }
                 const f = generateEdgeFfz(a, params, segs);
-                if (f) { f._assetDistFt = dFt; ffzs.push(f); }
+                if (!f) return;
+                f._assetDistFt = dFt;
+                f._hasExistingFfz = existing;
+                if (existing) hasExisting++;
+                f._overPowerLine = ffzOverPowerLine(f.points, segs, params.lineClearFt);
+                if (f._overPowerLine) overLine++;
+                ffzs.push(f);
             } catch (e) {
                 console.warn(`${GEN_TAG} FFZ gen failed for asset ${a && a.id}:`, e);
             }
@@ -6297,7 +6357,7 @@
                 f._groundM = null; demMiss++;
             }
         });
-        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, demOk, demMiss, ffzs };
+        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, skippedExisting, overLine, hasExisting, demOk, demMiss, ffzs };
     }
 
     function clearGenPreview() {
@@ -6324,9 +6384,12 @@
             try {
                 const latlngs = (f.points || []).map(p => [p.lat, p.lng]);
                 if (latlngs.length < 3) return;
+                // Color by flag: red = parallel-over a power line (fix it);
+                // blue = pad already has an FFZ (info); green = clean.
+                const col = f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
                 const opts = {
-                    color: '#5fff5f', weight: 1.5, opacity: 0.95,
-                    fillColor: '#5fff5f', fillOpacity: 0.18,
+                    color: col, weight: 1.5, opacity: 0.95,
+                    fillColor: col, fillOpacity: 0.18,
                     interactive: true, bubblingMouseEvents: false,
                 };
                 if (renderer) opts.renderer = renderer;
@@ -6335,7 +6398,9 @@
                 const altTip = (typeof r.minAlt === 'number')
                     ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
                     : '<span style="color:#ffb347">alt: DEM unavailable</span>';
-                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved`, { sticky: true, opacity: 0.95 });
+                const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ parallel over a power line — reposition</span>'
+                    : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
+                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved${flagTip}`, { sticky: true, opacity: 0.95 });
                 poly.addTo(map);
                 genPreviewLayers.push(poly);
             } catch (e) { /* one bad polygon shouldn't kill the rest */ }
@@ -6364,7 +6429,7 @@
         }
         genState.siteID = siteID;
         const assets = bucket.entities.filter(e => e.type === 3 && entityCoords(e));
-        const normalCount = assets.filter(assetIsNormal).length;
+        const eligibleCount = assets.filter(a => !assetSkipReason(a)).length;
         const siteName = getCurrentSiteName() || `Site ${siteID}`;
         const d = GEN_DEFAULTS;
         const m = document.createElement('div');
@@ -6379,7 +6444,7 @@
             </label>`;
         box.innerHTML = `
             <div style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px">⊕ Site Setup Generator</div>
-            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${normalCount} Normal) · Phase A1 — inspection FFZs</div>
+            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
             <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
                 Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
             </div>
@@ -6390,7 +6455,8 @@
             <div style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-normalonly" ${d.normalOnly ? 'checked' : ''} style="accent-color:#7adfe6"> Normal assets only <span style="color:#888;font-size:10px">(skip empty/inactive/unshielded/unreachable/hy)</span></label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipbad" ${d.skipBadStates ? 'checked' : ''} style="accent-color:#7adfe6"> Skip unreachable / unshielded / empty <span style="color:#888;font-size:10px">(keeps Normal/Inactive/HY)</span></label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipexisting" ${d.skipExisting ? 'checked' : ''} style="accent-color:#7adfe6"> Skip pads that already have an FFZ <span style="color:#888;font-size:10px">(else flagged blue)</span></label>
                     ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
                 </div>
             </div>
@@ -6444,7 +6510,8 @@
                 const v = el ? parseFloat(el.value) : NaN;
                 out[key] = isFinite(v) && v >= 0 ? v : d[key];
             });
-            out.normalOnly = !!box.querySelector('#aim-gen-normalonly').checked;
+            out.skipBadStates = !!box.querySelector('#aim-gen-skipbad').checked;
+            out.skipExisting = !!box.querySelector('#aim-gen-skipexisting').checked;
             return out;
         };
         const statsEl = box.querySelector('#aim-gen-stats');
@@ -6475,7 +6542,12 @@
                 genState.lastResult = res;
                 const drawn = renderGenPreview(res.ffzs);
                 const demNote = res.demMiss ? ` · <span style="color:#ffb347">${res.demMiss} missing DEM</span>` : '';
-                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} non-Normal + ${res.skippedFar} farther than ${params.proximityFt} ft from a line. Green = DRAFT, not saved — tune + re-Preview.</span>`;
+                const skipExNote = res.skippedExisting ? ` + ${res.skippedExisting} already-FFZ` : '';
+                const flagParts = [];
+                if (res.overLine) flagParts.push(`<span style="color:#ff8a80">⚠ ${res.overLine} over a power line</span>`);
+                if (res.hasExisting) flagParts.push(`<span style="color:#8ab4ff">ℹ ${res.hasExisting} on a pad with an existing FFZ</span>`);
+                const flagLine = flagParts.length ? `<br>${flagParts.join(' · ')}` : '';
+                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} (unreachable/unshielded/empty) + ${res.skippedFar} farther than ${params.proximityFt} ft${skipExNote}. Red/blue = flagged; green = clean. DRAFT — not saved.</span>${flagLine}`;
             } catch (e) {
                 console.error(`${GEN_TAG} preview failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Preview failed: ${String(e.message || e)}</span>`;
@@ -6484,7 +6556,7 @@
                 previewBtn.textContent = restore;
             }
         };
-        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${normalCount} Normal)`);
+        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${eligibleCount} eligible)`);
     }
 
     const ANALYZER_MODAL_ID = 'aim-ai-analyzer-modal';

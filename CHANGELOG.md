@@ -12,6 +12,13 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator (Phase A1 dial-in, dev-only) — Asset Inspector v4.4
+
+Tuning from the first on-map test:
+- **Skip only Unreachable / Unshielded / Empty** assets (now keeps Normal + Inactive + HY) — broader than the old "Normal only" (56 vs 44 eligible on site 1583). Toggleable.
+- **Flag FFZs that run parallel over a power line** (drawn red) — crossing a line is fine, lying parallel along it isn't. Detected by box↔line interaction + near-parallel angle (<25°). Left for you to reposition (the drag/rotate tool, next slice) rather than auto-moved.
+- **Flag pads that already have an FFZ** (drawn blue) — overlaps or within 60 ft of an existing FFZ; optional "skip" toggle. The preview summary now reports both flag counts plus skip reasons.
+
 ## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.3
 
 First slice of the **Site Setup Generator** — a new **⊕ Generate** button on the SUM toolbar (next to 🗺️ Analyzer) that auto-builds the *foundation* of a site setup for a CSM to finetune (the inverse of the Analyzer, which exports a finished one). Phase A1 generates **one inspection FFZ per qualifying asset** and **previews it on the map** — nothing is written yet.
