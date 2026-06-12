@@ -6,13 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.2
+## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.3
 
-First slice of the **Site Setup Generator** — a new **⊕ Generate** button on the SUM toolbar (next to 🗺️ Analyzer) that auto-builds the *foundation* of a site setup for a CSM to finetune (the inverse of the Analyzer, which exports a finished one). Phase A1 generates the **inspection-FFZ frame** around every asset and **previews it on the map** — nothing is written yet.
+First slice of the **Site Setup Generator** — a new **⊕ Generate** button on the SUM toolbar (next to 🗺️ Analyzer) that auto-builds the *foundation* of a site setup for a CSM to finetune (the inverse of the Analyzer, which exports a finished one). Phase A1 generates **one inspection FFZ per qualifying asset** and **previews it on the map** — nothing is written yet.
 
-- Per asset: a min-area oriented bounding box → a **frame of 4 corner-connected side boxes**, each inner edge **15 ft off the asset border** (the standoff), flyable depth ≥ the minimum (default 30 ft), and the long dimension extending with the asset face. The four boxes overlap at the corners so the union is one continuous, traversable ring. Tunable in the modal: standoff / box depth / minimum size / altitude floor + band.
-- **👁 Preview on map** draws the proposed FFZs as green **DRAFT** polygons (tooltip: "preview only, not saved"); Clear-preview + re-preview while you tune. **Commit is the next slice** — it will write through the existing Apply-queue rails (FFZ-first, dry-run, rollback, verify).
-- Validated offline against site 1583 (163 assets): standoff exactly 15.00 ft on every box, zero boxes overlapping their asset, all four corners continuous (900 ft² overlap each).
+- **One open edge box per asset** (not a full outline): a min-area oriented bounding box → a single thin rectangle on the asset face **nearest a power line** (the shielded side), inner edge **15 ft off the asset** (standoff), ≥30 ft deep. FFZs are stored **open** (4 distinct corners — never closed or looped), matching how Percepto stores them.
+- **Filters:** only **Normal** assets (no `poi_type_str` state suffix — skips empty/inactive/unshielded/unreachable/hy) that are **within ~400 ft of a power line** (200 ft line + 200 ft asset reach). Both tunable.
+- **Altitudes are DEM-checked per FFZ:** floor = ground + **100 ft AGL**, ceiling = floor + **30 ft** delta, stored absolute MSL. Pulls ground via Percepto's `/location_altitude/`.
+- Needs the site's **power-line KML** (auto-requested from Map Styler; the modal shows load status + a ↻ Refresh). **👁 Preview** draws green **DRAFT** polygons (tooltip shows shielded side, distance to line, MSL band) and reports how many assets were skipped and why. **Commit is the next slice** — through the existing Apply-queue rails (dry-run, rollback, verify); generated FFZ names carry a `[DRAFT] ` prefix for bulk-undo.
+- Geometry validated offline against site 1583 (44 Normal assets): single-edge depth exactly 30 ft, standoff 15 ft, edge-pick correctly chooses the face toward the line.
 
 Coworkers (prod) are unaffected — they run Asset Inspector v4.0. Design + full roadmap (Tool A generator + Tool B ortho-CV shielding extractor, two parallel tracks): `ShortKeys/AIM_Site_Setup_Generator_Design.md`.
 

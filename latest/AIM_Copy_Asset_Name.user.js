@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.2';
+    const SCRIPT_VERSION = '4.3';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6067,26 +6067,29 @@
     // checkboxes + download/copy buttons. Floating draggable like
     // the Stats popup; closes on Cancel or outside-click.
     // ============================================================
-    // SITE SETUP GENERATOR (v4.2 · Phase A1) — auto-build the
+    // SITE SETUP GENERATOR (v4.3 · Phase A1) — auto-build the
     // FOUNDATION of a site setup for a CSM to finetune. Inverse of
-    // the Analyzer (which exports a finished setup). A1 builds
-    // per-asset inspection FFZs (frame of 4 corner-connected side
-    // boxes, inner edge 15 ft off the asset face, ≥30×30×30 ft,
-    // X/Y extend along the asset's long axis = 4 type-16 FFZ
-    // entities/asset) and PREVIEWS them on the map. Commit (A1.5),
-    // corridor FP routing (A2) + DEM altitudes (A3) follow.
-    // Log tag [AIM GEN]. Design:
+    // the Analyzer (which exports a finished setup). A1 builds ONE
+    // inspection FFZ per qualifying asset: a single OPEN edge box
+    // (never closed/looped) on the asset face nearest the power
+    // lines (the shielded side), inner edge 15 ft off the face,
+    // ≥30 ft deep. Only assets whose state is Normal AND within
+    // ~400 ft of a power line qualify. Altitudes are DEM-checked
+    // per FFZ (floor = ground + AGL, ceiling = floor + delta, MSL).
+    // PREVIEWS on the map; Commit (A1.5) + corridor FP routing (A2)
+    // follow. Log tag [AIM GEN]. Design:
     // ShortKeys/AIM_Site_Setup_Generator_Design.md.
     // ============================================================
     const GEN_TAG = `[AIM GEN ${CONTEXT}]`;
     const GEN_FT_TO_M = 0.3048;
     const GEN_MODAL_ID = 'aim-ai-generator-modal';
     const GEN_DEFAULTS = {
-        standoffFt: 15,   // inner edge of each box sits this far off the asset face
-        depthFt: 30,      // flyable thickness (perpendicular) of each box
-        minSizeFt: 30,    // floor on the box's short dimension (SOP minimum)
-        minAltFt: 50,     // FFZ floor — placeholder AGL; A3 refines via DEM
-        bandFt: 30,       // FFZ vertical band (maxAlt = minAlt + band)
+        standoffFt: 15,    // inner edge of the box sits this far off the asset face
+        depthFt: 30,       // perpendicular flyable depth of the single edge box (≥30)
+        aglFt: 100,        // FFZ floor above DEM ground (checked per FFZ)
+        deltaFt: 30,       // FFZ ceiling = floor + delta
+        proximityFt: 400,  // asset must be within this of a power line (200 PL + 200 asset)
+        normalOnly: true,  // only assets whose state is Normal (no poi_type_str suffix)
     };
     let genPreviewLayers = [];
 
@@ -6169,54 +6172,132 @@
     // the same outer reach so they OVERLAP at the corners → the union
     // is a continuous, traversable ring with no diagonal gap. Returns
     // up to 4 write-shape FFZ (type 16) payloads.
-    function generateFfzsForAsset(asset, params) {
-        const coords = entityCoords(asset);
-        if (!coords || coords.length < 3) return [];
-        const obb = orientedBBox(coords);
-        if (!obb) return [];
-        const s = params.standoffFt * GEN_FT_TO_M;
-        const d = Math.max(params.depthFt, params.minSizeFt) * GEN_FT_TO_M;
-        const { hu, hv } = obb;
-        const eU = hu + s + d; // outer reach along u (for N/S corner overlap)
-        const eV = hv + s + d; // outer reach along v (for E/W corner overlap)
-        const sides = [
-            { side: 'E', uLo: hu + s,        uHi: hu + s + d,  vLo: -eV,         vHi: eV },
-            { side: 'W', uLo: -(hu + s + d), uHi: -(hu + s),   vLo: -eV,         vHi: eV },
-            { side: 'N', uLo: -eU,           uHi: eU,          vLo: hv + s,      vHi: hv + s + d },
-            { side: 'S', uLo: -eU,           uHi: eU,          vLo: -(hv + s + d), vHi: -(hv + s) },
-        ];
-        const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
-        const minAltM = params.minAltFt * GEN_FT_TO_M;
-        const maxAltM = (params.minAltFt + params.bandFt) * GEN_FT_TO_M;
-        return sides.map(sd => ({
-            type: 16,
-            name: `${nm} FFZ-${sd.side}`,
-            site_id: asset.site != null ? asset.site : genState.siteID,
-            points: genBoxRing(obb, sd.uLo, sd.uHi, sd.vLo, sd.vHi),
-            restrictions: { minAlt: minAltM, maxAlt: maxAltM },
-            // generator metadata (not persisted; stripped before any POST)
-            _gen: true, _assetId: asset.id, _assetName: nm, _side: sd.side,
-        }));
+    // Flatten the site's power-line KML (distro + trans) into [a,b] segments.
+    function powerLineSegments(siteID) {
+        const segs = [];
+        const add = (feats) => (feats || []).forEach(f => {
+            const c = f && f.coords;
+            if (!Array.isArray(c)) return;
+            for (let i = 0; i < c.length - 1; i++) {
+                if (c[i] && c[i + 1] && typeof c[i].lat === 'number' && typeof c[i + 1].lat === 'number') {
+                    segs.push([c[i], c[i + 1]]);
+                }
+            }
+        });
+        if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
+        return segs;
+    }
+    // "Normal" = poi_type_str carries no " - <state>" suffix (plain
+    // "battery"/"v-well"/"h-well"/…) and the asset isn't flagged unshielded.
+    function assetIsNormal(asset) {
+        if (asset.is_unshielded) return false;
+        const p = (asset.custom && asset.custom.poi_type_str) || '';
+        const i = p.indexOf(' - ');
+        const suffix = i >= 0 ? p.slice(i + 3).trim() : '';
+        return suffix === '';
+    }
+    // Min distance (m) from a ring of {lat,lng} points to any PL segment.
+    function minRingToSegsM(ring, segs) {
+        let best = Infinity;
+        for (const v of ring) {
+            for (const sg of segs) {
+                const d = pointToSegMeters(v.lat, v.lng, sg[0], sg[1]);
+                if (d < best) best = d;
+            }
+        }
+        return best;
+    }
+    function ringCentroid(ring) {
+        let lat = 0, lng = 0;
+        for (const p of ring) { lat += p.lat; lng += p.lng; }
+        return { lat: lat / ring.length, lng: lng / ring.length };
     }
 
-    // Generate the full FFZ set for every asset on the site.
-    function generateAllFfzs(siteID, params) {
+    // Build ONE inspection FFZ for an asset: a single OPEN edge box on the
+    // face nearest the power lines (the shielded side). Inner edge sits
+    // `standoff` off the asset face; perpendicular depth ≥30 ft; the box
+    // spans the face (≥30 ft). Points are 4 distinct corners — never closed
+    // or looped. Restrictions (altitudes) are filled in by the DEM pass in
+    // generateAllFfzs. Returns null on bad geometry.
+    function generateEdgeFfz(asset, params, segs) {
+        const coords = entityCoords(asset);
+        if (!coords || coords.length < 3) return null;
+        const obb = orientedBBox(coords);
+        if (!obb) return null;
+        const s = params.standoffFt * GEN_FT_TO_M;
+        const d = Math.max(params.depthFt, 30) * GEN_FT_TO_M;
+        const { hu, hv } = obb;
+        const hL = Math.max(hv, 15 * GEN_FT_TO_M); // half-length ≥15 ft → span ≥30 ft
+        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
+        const cands = [
+            { side: 'E', uLo: hu + s,        uHi: hu + s + d,    vLo: -hL,          vHi: hL },
+            { side: 'W', uLo: -(hu + s + d), uHi: -(hu + s),     vLo: -hL,          vHi: hL },
+            { side: 'N', uLo: -vL,           uHi: vL,            vLo: hv + s,       vHi: hv + s + d },
+            { side: 'S', uLo: -vL,           uHi: vL,            vLo: -(hv + s + d), vHi: -(hv + s) },
+        ];
+        // Pick the face whose box is closest to a power line (the shield).
+        let best = null;
+        cands.forEach(c => {
+            const ring = genBoxRing(obb, c.uLo, c.uHi, c.vLo, c.vHi);
+            const distM = segs.length ? minRingToSegsM(ring, segs) : 0;
+            if (!best || distM < best.distM) best = { c, ring, distM };
+        });
+        const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
+        return {
+            type: 16,
+            name: `[DRAFT] ${nm} FFZ`,
+            site_id: asset.site != null ? asset.site : genState.siteID,
+            points: best.ring,                            // OPEN — 4 distinct corners
+            restrictions: { minAlt: null, maxAlt: null }, // set by the DEM pass
+            _gen: true, _assetId: asset.id, _assetName: nm, _side: best.c.side,
+            _centroid: ringCentroid(best.ring), _plDistFt: best.distM / GEN_FT_TO_M,
+        };
+    }
+
+    // Generate the inspection-FFZ set for a site: filter to Normal assets
+    // within `proximityFt` of a power line, build one shielded-edge FFZ each,
+    // then DEM-check each centroid to set the MSL altitude band (floor =
+    // ground + AGL, ceiling = floor + delta). Async (DEM fetch).
+    async function generateAllFfzs(siteID, params, onProgress) {
         const bucket = mapObjectsBySite[siteID];
         const ents = (bucket && bucket.entities) || [];
+        if (!hasPowerLinesFor(siteID)) return { error: 'no-powerlines' };
+        const segs = powerLineSegments(siteID);
         const assets = ents.filter(e => e.type === 3 && entityCoords(e));
+        let skippedState = 0, skippedFar = 0;
         const ffzs = [];
-        let failed = 0;
         assets.forEach(a => {
             try {
-                const boxes = generateFfzsForAsset(a, params);
-                if (boxes.length) ffzs.push(...boxes);
-                else failed++;
+                if (params.normalOnly && !assetIsNormal(a)) { skippedState++; return; }
+                const assetRing = entityCoords(a);
+                const dFt = (segs.length ? minRingToSegsM(assetRing, segs) : Infinity) / GEN_FT_TO_M;
+                if (dFt > params.proximityFt) { skippedFar++; return; }
+                const f = generateEdgeFfz(a, params, segs);
+                if (f) { f._assetDistFt = dFt; ffzs.push(f); }
             } catch (e) {
-                failed++;
                 console.warn(`${GEN_TAG} FFZ gen failed for asset ${a && a.id}:`, e);
             }
         });
-        return { assetCount: assets.length, ffzs, failed };
+        // DEM altitude pass — fetch ground at each FFZ centroid, set MSL band.
+        const centroids = ffzs.map(f => f._centroid);
+        let demOk = 0, demMiss = 0;
+        if (centroids.length) {
+            try { await bulkFetchElevations(centroids, onProgress); }
+            catch (e) { console.warn(`${GEN_TAG} DEM fetch failed:`, e); }
+        }
+        const floorM = params.aglFt * GEN_FT_TO_M;
+        const bandM = params.deltaFt * GEN_FT_TO_M;
+        ffzs.forEach(f => {
+            const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
+            if (typeof g === 'number') {
+                f.restrictions = { minAlt: g + floorM, maxAlt: g + floorM + bandM };
+                f._groundM = g; demOk++;
+            } else {
+                f.restrictions = { minAlt: null, maxAlt: null };
+                f._groundM = null; demMiss++;
+            }
+        });
+        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, demOk, demMiss, ffzs };
     }
 
     function clearGenPreview() {
@@ -6250,7 +6331,11 @@
                 };
                 if (renderer) opts.renderer = renderer;
                 const poly = L.polygon(latlngs, opts);
-                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> — preview only, not saved`, { sticky: true, opacity: 0.95 });
+                const r = f.restrictions || {};
+                const altTip = (typeof r.minAlt === 'number')
+                    ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
+                    : '<span style="color:#ffb347">alt: DEM unavailable</span>';
+                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved`, { sticky: true, opacity: 0.95 });
                 poly.addTo(map);
                 genPreviewLayers.push(poly);
             } catch (e) { /* one bad polygon shouldn't kill the rest */ }
@@ -6261,7 +6346,7 @@
 
     const GEN_MODAL_PARAM_IDS = {
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
-        minSizeFt: 'aim-gen-minsize', minAltFt: 'aim-gen-minalt', bandFt: 'aim-gen-band',
+        aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
     };
     let genState = { siteID: null, lastResult: null };
 
@@ -6278,14 +6363,15 @@
             return;
         }
         genState.siteID = siteID;
-        const assetCount = bucket.entities.filter(e => e.type === 3 && entityCoords(e)).length;
+        const assets = bucket.entities.filter(e => e.type === 3 && entityCoords(e));
+        const normalCount = assets.filter(assetIsNormal).length;
         const siteName = getCurrentSiteName() || `Site ${siteID}`;
         const d = GEN_DEFAULTS;
         const m = document.createElement('div');
         m.id = GEN_MODAL_ID;
         m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
         const box = document.createElement('div');
-        box.style.cssText = 'background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:20px 24px;min-width:460px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        box.style.cssText = 'background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:20px 24px;min-width:480px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
         const numField = (key, label, hint, step) => `
             <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
                 <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
@@ -6293,23 +6379,33 @@
             </label>`;
         box.innerHTML = `
             <div style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px">⊕ Site Setup Generator</div>
-            <div style="color:#888;font-size:11px;margin-bottom:14px">${xmlEscape(siteName)} · ${assetCount} asset${assetCount === 1 ? '' : 's'} · Phase A1 — inspection FFZs</div>
+            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${normalCount} Normal) · Phase A1 — inspection FFZs</div>
             <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
-                Builds a <b>4-box inspection-FFZ frame</b> around every asset: each box's inner edge sits the standoff distance off the asset border, with a flyable depth ≥ the minimum. Output is a <b>DRAFT</b> a CSM finetunes — <b>preview first, nothing is written</b> until you Commit (coming next).
+                Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
+            </div>
+            <div id="aim-gen-pl-row" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <span><b style="color:#ffd54f">Power lines:</b> <span id="aim-gen-pl-status">checking…</span></span>
+                <button id="aim-gen-pl-refresh" style="background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">↻ Refresh</button>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-normalonly" ${d.normalOnly ? 'checked' : ''} style="accent-color:#7adfe6"> Normal assets only <span style="color:#888;font-size:10px">(skip empty/inactive/unshielded/unreachable/hy)</span></label>
+                    ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
+                </div>
             </div>
             <div style="margin-bottom:14px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
-                    ${numField('depthFt', 'Box depth', '(flyable thickness)', 1)}
-                    ${numField('minSizeFt', 'Minimum size', '(SOP floor)', 1)}
+                    ${numField('depthFt', 'Edge depth', '(flyable thickness, ≥30)', 1)}
                 </div>
             </div>
             <div style="margin-bottom:14px">
-                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude band <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— placeholder; A3 will set from DEM</span></div>
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— floor = DEM ground + AGL, per FFZ</span></div>
                 <div style="display:flex;flex-direction:column;gap:8px">
-                    ${numField('minAltFt', 'Floor (min alt)', '(AGL placeholder)', 5)}
-                    ${numField('bandFt', 'Band height', '(max = floor + band)', 5)}
+                    ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
+                    ${numField('deltaFt', 'Min/Max delta', '(ceiling = floor + delta)', 5)}
                 </div>
             </div>
             <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
@@ -6323,6 +6419,24 @@
         document.body.appendChild(m);
         m.onclick = (ev) => { if (ev.target === m) closeSiteGenerator(); };
 
+        // Power-line availability — request from Map Styler + poll for arrival.
+        const plStatusEl = box.querySelector('#aim-gen-pl-status');
+        const refreshPl = () => {
+            if (hasPowerLinesFor(siteID)) {
+                const n = powerLinesKml.distro.length + powerLinesKml.trans.length;
+                plStatusEl.innerHTML = `<span style="color:#5fff5f">✓ ${n} line${n === 1 ? '' : 's'} loaded</span>`;
+            } else {
+                plStatusEl.innerHTML = `<span style="color:#ffb347">⚠ not loaded — open the Map Styler tab once to fetch, then ↻ Refresh</span>`;
+            }
+        };
+        try { requestPowerLinesKml(siteID); } catch (e) {}
+        refreshPl();
+        const plPoll = setInterval(() => {
+            if (document.getElementById(GEN_MODAL_ID)) refreshPl();
+            else clearInterval(plPoll);
+        }, 1500);
+        box.querySelector('#aim-gen-pl-refresh').onclick = () => { try { requestPowerLinesKml(siteID); } catch (e) {} refreshPl(); };
+
         const readParams = () => {
             const out = {};
             Object.keys(GEN_MODAL_PARAM_IDS).forEach(key => {
@@ -6330,6 +6444,7 @@
                 const v = el ? parseFloat(el.value) : NaN;
                 out[key] = isFinite(v) && v >= 0 ? v : d[key];
             });
+            out.normalOnly = !!box.querySelector('#aim-gen-normalonly').checked;
             return out;
         };
         const statsEl = box.querySelector('#aim-gen-stats');
@@ -6338,20 +6453,38 @@
             clearGenPreview();
             statsEl.textContent = 'Preview cleared.';
         };
-        box.querySelector('#aim-gen-preview').onclick = () => {
+        const previewBtn = box.querySelector('#aim-gen-preview');
+        previewBtn.onclick = async () => {
+            if (!hasPowerLinesFor(siteID)) {
+                statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded yet — they're needed to pick the shielded edge and filter by proximity. Open the Map Styler tab once, then ↻ Refresh.</span>`;
+                return;
+            }
+            previewBtn.disabled = true;
+            const restore = previewBtn.textContent;
+            previewBtn.textContent = 'Working…';
             try {
                 const params = readParams();
-                const res = generateAllFfzs(siteID, params);
+                statsEl.textContent = 'Generating + checking elevations…';
+                const res = await generateAllFfzs(siteID, params, (done, total) => {
+                    statsEl.textContent = `Checking DEM elevations ${done}/${total}…`;
+                });
+                if (res.error === 'no-powerlines') {
+                    statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`;
+                    return;
+                }
                 genState.lastResult = res;
                 const drawn = renderGenPreview(res.ffzs);
-                const failNote = res.failed ? ` · ${res.failed} asset${res.failed === 1 ? '' : 's'} skipped (bad geometry)` : '';
-                statsEl.innerHTML = `Generated <b style="color:#5fff5f">${res.ffzs.length}</b> draft FFZs across <b>${res.assetCount}</b> asset${res.assetCount === 1 ? '' : 's'} · drew <b>${drawn}</b> on map${failNote}.<br><span style="color:#888">Green frames are DRAFT — not saved. Tune + re-Preview, or close.</span>`;
+                const demNote = res.demMiss ? ` · <span style="color:#ffb347">${res.demMiss} missing DEM</span>` : '';
+                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} non-Normal + ${res.skippedFar} farther than ${params.proximityFt} ft from a line. Green = DRAFT, not saved — tune + re-Preview.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} preview failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Preview failed: ${String(e.message || e)}</span>`;
+            } finally {
+                previewBtn.disabled = false;
+                previewBtn.textContent = restore;
             }
         };
-        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assetCount} assets`);
+        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${normalCount} Normal)`);
     }
 
     const ANALYZER_MODAL_ID = 'aim-ai-analyzer-modal';
