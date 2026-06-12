@@ -12,12 +12,12 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
-## 2026-06-12 — Site Setup Generator (Phase A1 dial-in, dev-only) — Asset Inspector v4.4
+## 2026-06-12 — Site Setup Generator (Phase A1 dial-in, dev-only) — Asset Inspector v4.5
 
 Tuning from the first on-map test:
 - **Skip only Unreachable / Unshielded / Empty** assets (now keeps Normal + Inactive + HY) — broader than the old "Normal only" (56 vs 44 eligible on site 1583). Toggleable.
-- **Flag FFZs that run parallel over a power line** (drawn red) — crossing a line is fine, lying parallel along it isn't. Detected by box↔line interaction + near-parallel angle (<25°). Left for you to reposition (the drag/rotate tool, next slice) rather than auto-moved.
-- **Flag pads that already have an FFZ** (drawn blue) — overlaps or within 60 ft of an existing FFZ; optional "skip" toggle. The preview summary now reports both flag counts plus skip reasons.
+- **Auto-avoid power lines instead of flagging them red.** A side that would lie *parallel over* a line is now resolved automatically — the box is either nudged **off the line** (stepping the standoff outward, up to ~80 ft, beyond the 15 ft buffer) or the FFZ is placed on the **next-closest clean side**. Each of the 4 faces is scored by closeness to a line (best shielding) minus an offset penalty; the best clean placement wins. *Crossing* a line stays fine. Red is now reserved for the rare case no side can clear — those still want a manual reposition (drag/rotate tool, next slice). Validated offline: a line laid along a face yields a clean +10 ft-off placement, not a red flag.
+- **Flag pads that already have an FFZ** (drawn blue) — overlaps or within 60 ft of an existing FFZ; optional "skip" toggle. The preview summary reports flag counts + skip reasons; FFZ tooltips show the chosen side, any off-line offset, and distance to the nearest line.
 
 ## 2026-06-11 — Site Setup Generator (Phase A1, dev-only) — Asset Inspector v4.3
 

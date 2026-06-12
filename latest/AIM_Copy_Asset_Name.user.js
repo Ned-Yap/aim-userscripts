@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.4';
+    const SCRIPT_VERSION = '4.5';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6073,9 +6073,10 @@
     // inspection FFZ per qualifying asset: a single OPEN edge box
     // (never closed/looped) on the asset face nearest the power
     // lines (the shielded side), inner edge 15 ft off the face,
-    // ≥30 ft deep. Skips Unreachable/Unshielded/Empty assets and
-    // any farther than ~400 ft from a power line. Flags (color) FFZs
-    // that run parallel-over a line or sit on a pad that already has
+    // ≥30 ft deep. If a side would lie parallel over a power line it
+    // is nudged OFF the line / moved to the next-closest clean side.
+    // Skips Unreachable/Unshielded/Empty assets and any farther than
+    // ~400 ft from a power line. Flags (blue) pads that already have
     // an FFZ. Altitudes are DEM-checked per FFZ (floor = ground +
     // AGL, ceiling = floor + delta, MSL). PREVIEWS on the map;
     // Commit (A1.5) + corridor FP routing (A2) follow.
@@ -6264,44 +6265,84 @@
         return false;
     }
 
-    // Build ONE inspection FFZ for an asset: a single OPEN edge box on the
-    // face nearest the power lines (the shielded side). Inner edge sits
-    // `standoff` off the asset face; perpendicular depth ≥30 ft; the box
-    // spans the face (≥30 ft). Points are 4 distinct corners — never closed
-    // or looped. Restrictions (altitudes) are filled in by the DEM pass in
-    // generateAllFfzs. Returns null on bad geometry.
+    // Subset of segments with any vertex of `ring` within `ft` of them — keeps
+    // the per-asset placement search fast (vs scanning the whole site's lines).
+    function segsNearRing(ring, segs, ft) {
+        const m = ft * GEN_FT_TO_M;
+        return segs.filter(sg => {
+            for (const v of ring) if (pointToSegMeters(v.lat, v.lng, sg[0], sg[1]) < m) return true;
+            return false;
+        });
+    }
+    // Choose where to put the single edge box. For each of the 4 faces we take
+    // the SMALLEST standoff (≥ base, stepping outward up to a cap) at which the
+    // box does NOT run parallel-over a power line — i.e. we either keep the
+    // face and nudge it OFF the line, or, via scoring, fall back to the next
+    // closest side. Score favors boxes closest to a line (best shielding) and
+    // penalizes extra offset; an unresolved face (can't clear) is deprioritized
+    // and marked dirty. Returns the winning {ring, side, standoff, offsetFt,
+    // dist(m), dirty}.
+    function bestEdgePlacement(obb, params, segs, clearFt) {
+        const s0 = params.standoffFt * GEN_FT_TO_M;
+        const d = Math.max(params.depthFt, 30) * GEN_FT_TO_M;
+        const { hu, hv } = obb;
+        const hL = Math.max(hv, 15 * GEN_FT_TO_M); // along-face half-length ≥15 ft (span ≥30)
+        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
+        const faces = [
+            { side: 'E', build: s => [hu + s, hu + s + d, -hL, hL] },
+            { side: 'W', build: s => [-(hu + s + d), -(hu + s), -hL, hL] },
+            { side: 'N', build: s => [-vL, vL, hv + s, hv + s + d] },
+            { side: 'S', build: s => [-vL, vL, -(hv + s + d), -(hv + s)] },
+        ];
+        const capM = 80 * GEN_FT_TO_M;   // don't push standoff past ~80 ft to clear a line
+        const stepM = 5 * GEN_FT_TO_M;
+        let best = null;
+        faces.forEach(f => {
+            let pick = null;
+            for (let s = s0; s <= s0 + capM + 1e-9; s += stepM) {
+                const [uLo, uHi, vLo, vHi] = f.build(s);
+                const ring = genBoxRing(obb, uLo, uHi, vLo, vHi);
+                if (!ffzOverPowerLine(ring, segs, clearFt)) {
+                    pick = { ring, standoff: s, dist: minRingToSegsM(ring, segs), offsetFt: (s - s0) / GEN_FT_TO_M, dirty: false };
+                    break;
+                }
+            }
+            if (!pick) {
+                const [uLo, uHi, vLo, vHi] = f.build(s0);
+                const ring = genBoxRing(obb, uLo, uHi, vLo, vHi);
+                pick = { ring, standoff: s0, dist: minRingToSegsM(ring, segs), offsetFt: 0, dirty: true };
+            }
+            const distFt = isFinite(pick.dist) ? pick.dist / GEN_FT_TO_M : 1e5;
+            pick.score = distFt + pick.offsetFt * 0.5 + (pick.dirty ? 1e6 : 0);
+            pick.side = f.side;
+            if (!best || pick.score < best.score) best = pick;
+        });
+        return best;
+    }
+
+    // Build ONE inspection FFZ for an asset: a single OPEN edge box placed on
+    // the best shielded side (closest to a power line, nudged off it / moved to
+    // the next side if it would lie parallel over one). Points are 4 distinct
+    // corners — never closed or looped. Restrictions (altitudes) are filled in
+    // by the DEM pass in generateAllFfzs. Returns null on bad geometry.
     function generateEdgeFfz(asset, params, segs) {
         const coords = entityCoords(asset);
         if (!coords || coords.length < 3) return null;
         const obb = orientedBBox(coords);
         if (!obb) return null;
-        const s = params.standoffFt * GEN_FT_TO_M;
-        const d = Math.max(params.depthFt, 30) * GEN_FT_TO_M;
-        const { hu, hv } = obb;
-        const hL = Math.max(hv, 15 * GEN_FT_TO_M); // half-length ≥15 ft → span ≥30 ft
-        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
-        const cands = [
-            { side: 'E', uLo: hu + s,        uHi: hu + s + d,    vLo: -hL,          vHi: hL },
-            { side: 'W', uLo: -(hu + s + d), uHi: -(hu + s),     vLo: -hL,          vHi: hL },
-            { side: 'N', uLo: -vL,           uHi: vL,            vLo: hv + s,       vHi: hv + s + d },
-            { side: 'S', uLo: -vL,           uHi: vL,            vLo: -(hv + s + d), vHi: -(hv + s) },
-        ];
-        // Pick the face whose box is closest to a power line (the shield).
-        let best = null;
-        cands.forEach(c => {
-            const ring = genBoxRing(obb, c.uLo, c.uHi, c.vLo, c.vHi);
-            const distM = segs.length ? minRingToSegsM(ring, segs) : 0;
-            if (!best || distM < best.distM) best = { c, ring, distM };
-        });
+        const p = bestEdgePlacement(obb, params, segs, params.lineClearFt);
+        if (!p) return null;
         const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
         return {
             type: 16,
             name: `[DRAFT] ${nm} FFZ`,
             site_id: asset.site != null ? asset.site : genState.siteID,
-            points: best.ring,                            // OPEN — 4 distinct corners
+            points: p.ring,                               // OPEN — 4 distinct corners
             restrictions: { minAlt: null, maxAlt: null }, // set by the DEM pass
-            _gen: true, _assetId: asset.id, _assetName: nm, _side: best.c.side,
-            _centroid: ringCentroid(best.ring), _plDistFt: best.distM / GEN_FT_TO_M,
+            _gen: true, _assetId: asset.id, _assetName: nm, _side: p.side,
+            _centroid: ringCentroid(p.ring), _plDistFt: p.dist / GEN_FT_TO_M,
+            _standoffFt: p.standoff / GEN_FT_TO_M, _offsetFt: p.offsetFt,
+            _overPowerLine: p.dirty,   // true only if no side could clear a line
         };
     }
 
@@ -6326,13 +6367,14 @@
                 if (dFt > params.proximityFt) { skippedFar++; return; }
                 const existing = assetHasExistingFfz(assetRing, ffzRings);
                 if (existing && params.skipExisting) { skippedExisting++; return; }
-                const f = generateEdgeFfz(a, params, segs);
+                // Only consider lines near this asset (placement search + flag).
+                const localSegs = segsNearRing(assetRing, segs, params.proximityFt + 150);
+                const f = generateEdgeFfz(a, params, localSegs);
                 if (!f) return;
                 f._assetDistFt = dFt;
                 f._hasExistingFfz = existing;
                 if (existing) hasExisting++;
-                f._overPowerLine = ffzOverPowerLine(f.points, segs, params.lineClearFt);
-                if (f._overPowerLine) overLine++;
+                if (f._overPowerLine) overLine++; // set by placement (no side could clear)
                 ffzs.push(f);
             } catch (e) {
                 console.warn(`${GEN_TAG} FFZ gen failed for asset ${a && a.id}:`, e);
@@ -6398,9 +6440,10 @@
                 const altTip = (typeof r.minAlt === 'number')
                     ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
                     : '<span style="color:#ffb347">alt: DEM unavailable</span>';
-                const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ parallel over a power line — reposition</span>'
+                const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line on any side — reposition</span>'
                     : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
-                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved${flagTip}`, { sticky: true, opacity: 0.95 });
+                const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
+                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved${flagTip}`, { sticky: true, opacity: 0.95 });
                 poly.addTo(map);
                 genPreviewLayers.push(poly);
             } catch (e) { /* one bad polygon shouldn't kill the rest */ }
@@ -6544,7 +6587,7 @@
                 const demNote = res.demMiss ? ` · <span style="color:#ffb347">${res.demMiss} missing DEM</span>` : '';
                 const skipExNote = res.skippedExisting ? ` + ${res.skippedExisting} already-FFZ` : '';
                 const flagParts = [];
-                if (res.overLine) flagParts.push(`<span style="color:#ff8a80">⚠ ${res.overLine} over a power line</span>`);
+                if (res.overLine) flagParts.push(`<span style="color:#ff8a80">⚠ ${res.overLine} couldn't clear a power line</span>`);
                 if (res.hasExisting) flagParts.push(`<span style="color:#8ab4ff">ℹ ${res.hasExisting} on a pad with an existing FFZ</span>`);
                 const flagLine = flagParts.length ? `<br>${flagParts.join(' · ')}` : '';
                 statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} (unreachable/unshielded/empty) + ${res.skippedFar} farther than ${params.proximityFt} ft${skipExNote}. Red/blue = flagged; green = clean. DRAFT — not saved.</span>${flagLine}`;
