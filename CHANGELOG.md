@@ -12,6 +12,16 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — hand-edit FFZs on the preview (dev-only) — Asset Inspector v4.6
+
+The draft FFZ previews are now **hand-editable on the map** before commit:
+- **Drag** any FFZ to move it (the map stays put while you drag).
+- **Scroll** over an FFZ to **rotate it 10°** per notch around its center — orient the edge to the side you want.
+- **Hold Alt while dragging** to **snap** the FFZ onto the nearest face of whatever pad is closest, at the 15 ft standoff (re-homes it to that pad — drop it near a better side and tap Alt to clean it up).
+- On drop, the FFZ's **DEM altitude and power-line flag recompute** for the new position (color updates: green clean / blue existing-FFZ / red couldn't-clear). Rotating recomputes the line flag live.
+
+Previews now render as SVG so each is individually grabbable. Edits carry straight into the commit step (coming next). Validated offline: rotate preserves shape + center, snap picks the correct side.
+
 ## 2026-06-12 — Site Setup Generator (Phase A1 dial-in, dev-only) — Asset Inspector v4.5
 
 Tuning from the first on-map test:

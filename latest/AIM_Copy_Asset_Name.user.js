@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.5';
+    const SCRIPT_VERSION = '4.6';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6403,14 +6403,189 @@
     }
 
     function clearGenPreview() {
+        unwireGenEditing();
         const map = getLeafletMap();
         genPreviewLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         genPreviewLayers = [];
     }
 
-    // Draw proposed FFZ frames as green polygons on the Leaflet map —
-    // PREVIEW ONLY, nothing is written. Mirrors showSampleMarkersFor's
-    // canvas-renderer pattern. Returns the number drawn.
+    // ---- shared FFZ preview styling ----
+    function ffzColor(f) {
+        return f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
+    }
+    function ffzTooltipHtml(f) {
+        const r = f.restrictions || {};
+        const altTip = (typeof r.minAlt === 'number')
+            ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
+            : '<span style="color:#ffb347">alt: DEM unavailable</span>';
+        const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
+            : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
+        const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · scroll = rotate 10° · hold Alt = snap to a pad</span>${flagTip}`;
+    }
+    function restyleFfzPoly(f) {
+        const poly = f && f._poly;
+        if (!poly) return;
+        try {
+            const col = ffzColor(f);
+            poly.setStyle({ color: col, fillColor: col });
+            poly.setLatLngs((f.points || []).map(p => [p.lat, p.lng]));
+            if (poly.getTooltip && poly.getTooltip()) poly.setTooltipContent(ffzTooltipHtml(f));
+        } catch (e) {}
+    }
+    function setActivePolyStyle(poly, on) {
+        try { poly.setStyle({ weight: on ? 3 : 1.5, dashArray: on ? '4 3' : '', fillOpacity: on ? 0.30 : 0.18 }); } catch (e) {}
+    }
+
+    // ---- FFZ geometry edits (in-place mutate f.points + f._centroid) ----
+    function translateFfz(f, dLat, dLng) {
+        f.points = f.points.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng }));
+        f._centroid = { lat: f._centroid.lat + dLat, lng: f._centroid.lng + dLng };
+    }
+    function rotateFfz(f, deg) {
+        const proj = genProjector(f._centroid.lat, f._centroid.lng);
+        const a = deg * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+        f.points = f.points.map(p => {
+            const m = proj.fwd(p);
+            return proj.inv({ x: m.x * ca - m.y * sa, y: m.x * sa + m.y * ca });
+        });
+        // centroid is the rotation pivot → unchanged
+    }
+    function buildFaceBox(obb, side, s, d) {
+        const { hu, hv } = obb;
+        const hL = Math.max(hv, 15 * GEN_FT_TO_M);
+        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
+        let r;
+        if (side === 'E') r = [hu + s, hu + s + d, -hL, hL];
+        else if (side === 'W') r = [-(hu + s + d), -(hu + s), -hL, hL];
+        else if (side === 'N') r = [-vL, vL, hv + s, hv + s + d];
+        else r = [-vL, vL, -(hv + s + d), -(hv + s)];
+        return genBoxRing(obb, r[0], r[1], r[2], r[3]);
+    }
+    // Snap the FFZ to the nearest face of whatever pad is closest to its
+    // current centroid (re-homes _assetId). Returns true if it snapped.
+    function snapFfzToNearestPad(f) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let bestA = null, bestD = Infinity;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 3) continue;
+            const d = pointToPolygonMeters(f._centroid.lat, f._centroid.lng, ring);
+            if (d < bestD) { bestD = d; bestA = a; }
+        }
+        if (!bestA) return false;
+        const obb = orientedBBox(entityCoords(bestA));
+        if (!obb) return false;
+        // centroid in the pad's asset-centered (u,v) frame → pick the side
+        const m = obb.proj.fwd(f._centroid);
+        const ca = Math.cos(obb.a), sa = Math.sin(obb.a);
+        const ru = (m.x - obb.cx) * ca + (m.y - obb.cy) * sa;
+        const rv = -(m.x - obb.cx) * sa + (m.y - obb.cy) * ca;
+        const side = (Math.abs(ru) - obb.hu >= Math.abs(rv) - obb.hv) ? (ru > 0 ? 'E' : 'W') : (rv > 0 ? 'N' : 'S');
+        const p = genState.lastParams || GEN_DEFAULTS;
+        f.points = buildFaceBox(obb, side, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+        f._centroid = ringCentroid(f.points);
+        f._assetId = bestA.id; f._assetName = bestA.name || `#${bestA.id}`;
+        f._side = side; f._offsetFt = 0;
+        return true;
+    }
+    // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
+    function refreshFfzLineFlag(f) {
+        const p = genState.lastParams || GEN_DEFAULTS;
+        const local = segsNearRing(f.points, powerLineSegments(genState.siteID), (p.proximityFt || 400) + 150);
+        f._overPowerLine = ffzOverPowerLine(f.points, local, p.lineClearFt || 10);
+        f._plDistFt = (local.length ? minRingToSegsM(f.points, local) : Infinity) / GEN_FT_TO_M;
+    }
+    // Full recompute incl. DEM — on drop (centroid moved).
+    async function finalizeFfzEdit(f) {
+        refreshFfzLineFlag(f);
+        const p = genState.lastParams || GEN_DEFAULTS;
+        try { await bulkFetchElevations([f._centroid]); } catch (e) {}
+        const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
+        if (typeof g === 'number') {
+            f.restrictions = { minAlt: g + p.aglFt * GEN_FT_TO_M, maxAlt: g + (p.aglFt + p.deltaFt) * GEN_FT_TO_M };
+            f._groundM = g;
+        }
+        restyleFfzPoly(f);
+    }
+
+    // ---- map-level wiring for drag/rotate/snap (A1.6) ----
+    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null };
+    function wireGenEditing(map) {
+        if (genEdit.wired) return;
+        genEdit.map = map;
+        genEdit.container = map.getContainer();
+        genEdit.domMove = (ev) => {
+            if (!genEdit.dragging || !genEdit.activePoly) return;
+            const f = genEdit.activePoly._ffz;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (ev.altKey) {
+                snapFfzToNearestPad(f);
+            } else if (genEdit.lastLatLng) {
+                translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
+            }
+            genEdit.lastLatLng = ll;
+            try { genEdit.activePoly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {}
+        };
+        genEdit.domUp = () => {
+            if (!genEdit.dragging) return;
+            genEdit.dragging = false;
+            document.removeEventListener('mousemove', genEdit.domMove, true);
+            document.removeEventListener('mouseup', genEdit.domUp, true);
+            const poly = genEdit.activePoly;
+            try { map.dragging.enable(); } catch (e) {}
+            if (poly) { setActivePolyStyle(poly, false); finalizeFfzEdit(poly._ffz); }
+            genEdit.activePoly = null;
+            if (!genEdit.hovered) { try { map.scrollWheelZoom.enable(); } catch (e) {} }
+        };
+        genEdit.onWheel = (ev) => {
+            const poly = genEdit.activePoly || genEdit.hovered;
+            if (!poly || !poly._ffz) return; // not over an FFZ → let the map zoom
+            ev.preventDefault(); ev.stopPropagation();
+            const f = poly._ffz;
+            rotateFfz(f, ev.deltaY < 0 ? 10 : -10);
+            try { poly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {}
+            refreshFfzLineFlag(f);
+            restyleFfzPoly(f);
+        };
+        genEdit.container.addEventListener('wheel', genEdit.onWheel, { passive: false, capture: true });
+        genEdit.wired = true;
+    }
+    function unwireGenEditing() {
+        if (genEdit.domMove) { try { document.removeEventListener('mousemove', genEdit.domMove, true); } catch (e) {} }
+        if (genEdit.domUp) { try { document.removeEventListener('mouseup', genEdit.domUp, true); } catch (e) {} }
+        if (genEdit.container && genEdit.onWheel) { try { genEdit.container.removeEventListener('wheel', genEdit.onWheel, { capture: true }); } catch (e) {} }
+        const map = genEdit.map;
+        if (map) { try { map.dragging.enable(); map.scrollWheelZoom.enable(); } catch (e) {} }
+        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null };
+    }
+    function attachFfzEditHandlers(poly, map) {
+        poly.on('mouseover', () => {
+            genEdit.hovered = poly;
+            try { map.scrollWheelZoom.disable(); } catch (e) {}
+            try { if (poly._path) poly._path.style.cursor = 'move'; } catch (e) {}
+        });
+        poly.on('mouseout', () => {
+            if (genEdit.hovered === poly) genEdit.hovered = null;
+            if (!genEdit.dragging) { try { map.scrollWheelZoom.enable(); } catch (e) {} }
+        });
+        poly.on('mousedown', (e) => {
+            genEdit.dragging = true;
+            genEdit.activePoly = poly;
+            try { genEdit.lastLatLng = e.latlng; } catch (err) { genEdit.lastLatLng = null; }
+            try { map.dragging.disable(); } catch (err) {}
+            setActivePolyStyle(poly, true);
+            document.addEventListener('mousemove', genEdit.domMove, true);
+            document.addEventListener('mouseup', genEdit.domUp, true);
+            try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (err) {}
+        });
+    }
+
+    // Draw proposed FFZs as polygons on the Leaflet map (SVG so each is a
+    // hit-testable path) — PREVIEW ONLY, nothing is written. The polygons are
+    // hand-editable: drag to move, scroll to rotate 10°, hold Alt to snap to a
+    // pad face; DEM + flags recompute on drop. Returns the number drawn.
     function renderGenPreview(ffzs) {
         clearGenPreview();
         const L = getLeafletL();
@@ -6420,15 +6595,14 @@
             showToast('Map not reachable — open the map tab to preview', 'rgba(255,82,82,0.6)');
             return 0;
         }
+        wireGenEditing(map);
         let renderer = null;
-        try { renderer = L.canvas({ padding: 0.5 }); } catch (e) { renderer = null; }
+        try { renderer = L.svg({ padding: 0.5 }); } catch (e) { renderer = null; }
         ffzs.forEach(f => {
             try {
                 const latlngs = (f.points || []).map(p => [p.lat, p.lng]);
                 if (latlngs.length < 3) return;
-                // Color by flag: red = parallel-over a power line (fix it);
-                // blue = pad already has an FFZ (info); green = clean.
-                const col = f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
+                const col = ffzColor(f);
                 const opts = {
                     color: col, weight: 1.5, opacity: 0.95,
                     fillColor: col, fillOpacity: 0.18,
@@ -6436,19 +6610,14 @@
                 };
                 if (renderer) opts.renderer = renderer;
                 const poly = L.polygon(latlngs, opts);
-                const r = f.restrictions || {};
-                const altTip = (typeof r.minAlt === 'number')
-                    ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
-                    : '<span style="color:#ffb347">alt: DEM unavailable</span>';
-                const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line on any side — reposition</span>'
-                    : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
-                const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-                poly.bindTooltip(`${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip} — preview only, not saved${flagTip}`, { sticky: true, opacity: 0.95 });
+                poly._ffz = f; f._poly = poly;
+                poly.bindTooltip(ffzTooltipHtml(f), { sticky: true, opacity: 0.95 });
                 poly.addTo(map);
+                attachFfzEditHandlers(poly, map);
                 genPreviewLayers.push(poly);
             } catch (e) { /* one bad polygon shouldn't kill the rest */ }
         });
-        console.log(`${GEN_TAG} preview rendered ${genPreviewLayers.length} FFZ polygons`);
+        console.log(`${GEN_TAG} preview rendered ${genPreviewLayers.length} editable FFZ polygons`);
         return genPreviewLayers.length;
     }
 
@@ -6456,7 +6625,7 @@
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
     };
-    let genState = { siteID: null, lastResult: null };
+    let genState = { siteID: null, lastResult: null, lastParams: null };
 
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
@@ -6574,6 +6743,7 @@
             previewBtn.textContent = 'Working…';
             try {
                 const params = readParams();
+                genState.lastParams = params;
                 statsEl.textContent = 'Generating + checking elevations…';
                 const res = await generateAllFfzs(siteID, params, (done, total) => {
                     statsEl.textContent = `Checking DEM elevations ${done}/${total}…`;
