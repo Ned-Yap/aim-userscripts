@@ -12,6 +12,15 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — snake FFZs around corners (dev-only) — Asset Inspector v4.8
+
+FFZs can now follow a pad **around its corners** into L / C / U shapes:
+- **Hold Alt and drag along the pad outline** — the FFZ anchors where you press Alt and **auto-extends edge by edge** to the cursor, wrapping around each corner it passes. Let go to set the length; release Alt to free-move again.
+- **Corners are mitered to a single right-angle vertex** (not rounded/beveled) — so each turn is one inside corner the drone stops at and resumes from, instead of multiple stops. (Extreme-angle spikes bevel as a safety cap.)
+- Keeps the 15 ft standoff on every edge; the ribbon is the offset band [15 ft … 15 ft + depth] around the chosen run of the boundary. Short Alt taps still snap a single edge.
+
+Validated offline: a corner run produces a clean L with one mitered inner corner, 15 ft off each edge, simple (non-self-intersecting) polygon.
+
 ## 2026-06-12 — Site Setup Generator — edit ergonomics (dev-only) — Asset Inspector v4.7 + Map Nav v0.9
 
 Refinements to the hand-edit tool from testing:

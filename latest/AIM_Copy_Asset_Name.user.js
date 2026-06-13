@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.7
+// @version      4.8
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.7';
+    const SCRIPT_VERSION = '4.8';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6421,7 +6421,7 @@
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E (or scroll) = rotate 10° · hold Alt = snap to nearest edge · Del = delete</span>${flagTip}`;
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E (or scroll) = rotate 10° · hold Alt + drag along the pad = snap & snake around corners · Del = delete</span>${flagTip}`;
     }
     function restyleFfzPoly(f) {
         const poly = f && f._poly;
@@ -6520,6 +6520,130 @@
         f._side = compassFromNormal(e.nx, e.ny); f._offsetFt = 0;
         return true;
     }
+
+    // ===== A1.7 — ribbon FFZs that snake around pad corners (L/C/U) =====
+    // Project `at` onto a specific ring → { i (edge), t (0..1) } or null.
+    function projectOntoRing(at, ring) {
+        const proj = genProjector(at.lat, at.lng);
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0;
+            t = Math.max(0, Math.min(1, t));
+            const dist = Math.hypot(A.x + t * dx, A.y + t * dy);
+            if (!best || dist < best.dist) best = { dist, i, t };
+        }
+        return best ? { i: best.i, t: best.t } : null;
+    }
+    // Find the pad whose boundary is nearest `at`, and the projection of `at`
+    // onto it as {i (edge), t (0..1)}. Returns { asset, ring, pos } or null.
+    function nearestPadProjection(at) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 3) continue;
+            const proj = genProjector(at.lat, at.lng);
+            const P = { x: 0, y: 0 }; // 'at' is the projection origin
+            for (let i = 0; i < ring.length; i++) {
+                const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2 : 0;
+                t = Math.max(0, Math.min(1, t));
+                const fx = A.x + t * dx, fy = A.y + t * dy;
+                const dist = Math.hypot(P.x - fx, P.y - fy);
+                if (!best || dist < best.dist) best = { dist, asset: a, ring, pos: { i, t } };
+            }
+        }
+        return best;
+    }
+    function ringMeters(ring, proj) { return ring.map(p => proj.fwd(p)); }
+    function dM(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+    function outwardEdgeNormals(m) {
+        // m centered on its own centroid → centroid ≈ origin
+        const n = m.length, out = [];
+        for (let i = 0; i < n; i++) {
+            const A = m[i], B = m[(i + 1) % n];
+            let ex = B.x - A.x, ey = B.y - A.y; const L = Math.hypot(ex, ey) || 1;
+            let nx = -ey / L, ny = ex / L;
+            const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+            if (nx * (0 - mx) + ny * (0 - my) > 0) { nx = -nx; ny = -ny; }
+            out.push({ nx, ny });
+        }
+        return out;
+    }
+    function lineX(p1, d1, p2, d2) {
+        const den = d1.x * d2.y - d1.y * d2.x;
+        if (Math.abs(den) < 1e-9) return null;
+        const s = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / den;
+        return { x: p1.x + s * d1.x, y: p1.y + s * d1.y };
+    }
+    // Offset a meters polyline `path` (with per-segment outward normals `segN`,
+    // length path.length-1) by `off`, mitering at interior vertices (single
+    // corner vertex per turn; bevels only on extreme spikes).
+    function offsetPolylineMiter(path, segN, off) {
+        const N = path.length, out = [];
+        for (let i = 0; i < N; i++) {
+            if (i === 0) { out.push({ x: path[0].x + segN[0].nx * off, y: path[0].y + segN[0].ny * off }); continue; }
+            if (i === N - 1) { const k = segN.length - 1; out.push({ x: path[i].x + segN[k].nx * off, y: path[i].y + segN[k].ny * off }); continue; }
+            const n0 = segN[i - 1], n1 = segN[i];
+            const a0 = { x: path[i].x + n0.nx * off, y: path[i].y + n0.ny * off };
+            const a1 = { x: path[i].x + n1.nx * off, y: path[i].y + n1.ny * off };
+            const d0 = { x: path[i].x - path[i - 1].x, y: path[i].y - path[i - 1].y };
+            const d1 = { x: path[i + 1].x - path[i].x, y: path[i + 1].y - path[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            if (X && Math.hypot(X.x - path[i].x, X.y - path[i].y) <= off * 4) out.push(X);
+            else { out.push(a0); out.push(a1); } // spike → bevel
+        }
+        return out;
+    }
+    // Build a ribbon FFZ outline along the pad boundary from `startPos` to
+    // `endPos` (shorter perimeter arc), offset [s, s+d] outward, mitered.
+    // Returns {lat,lng}[] (open) or null.
+    function buildRibbon(ring, startPos, endPos, s, d) {
+        const cen = ringCentroid(ring);
+        const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj);
+        const n = m.length;
+        const segN = outwardEdgeNormals(m);
+        const foot = (pos) => { const A = m[pos.i], B = m[(pos.i + 1) % n]; return { x: A.x + (B.x - A.x) * pos.t, y: A.y + (B.y - A.y) * pos.t }; };
+        // perimeter position (distance from vertex 0) for each pos
+        const segLen = []; let per = 0; const cum = [0];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
+        let ps = perOf(startPos), pe = perOf(endPos);
+        // choose direction (forward = increasing perimeter) that's the shorter arc
+        let fwdLen = (pe - ps + per) % per;
+        const forward = fwdLen <= per - fwdLen;
+        if (!forward) { const tmp = startPos; startPos = endPos; endPos = tmp; ps = perOf(startPos); pe = perOf(endPos); fwdLen = (pe - ps + per) % per; }
+        if (fwdLen < 1.5) return null; // too short to be a ribbon → caller falls back
+        // collect boundary path: start foot, intermediate vertices (forward), end foot
+        const path = [foot(startPos)];
+        const usedSeg = [startPos.i]; // segment index each path-segment belongs to
+        let i = startPos.i;
+        // walk forward adding vertex (i+1) until we pass endPos
+        let guard = 0;
+        while (guard++ < n + 2) {
+            const nextV = (i + 1) % n;
+            // perimeter distance of vertex nextV from start (forward)
+            const vPer = (cum[i + 1] - ps + per) % per;
+            if (vPer >= fwdLen - 1e-6) break; // endPos is on segment i
+            path.push(m[nextV]);
+            i = nextV;
+            usedSeg.push(i);
+        }
+        path.push(foot(endPos));
+        // per-path-segment outward normals = the ring segment they came from
+        const pathSegN = usedSeg.map(si => segN[si]);
+        const inner = offsetPolylineMiter(path, pathSegN, s);
+        const outer = offsetPolylineMiter(path, pathSegN, s + d);
+        const ll = [];
+        inner.forEach(q => ll.push(proj.inv(q)));
+        for (let k = outer.length - 1; k >= 0; k--) ll.push(proj.inv(outer[k]));
+        return ll;
+    }
     // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
     function refreshFfzLineFlag(f) {
         const p = genState.lastParams || GEN_DEFAULTS;
@@ -6558,7 +6682,7 @@
         try { if (map) { map.dragging.enable(); map.scrollWheelZoom.enable(); } } catch (e) {}
         showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
     }
-    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null };
+    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
     function wireGenEditing(map) {
         if (genEdit.wired) return;
         genEdit.map = map;
@@ -6568,9 +6692,28 @@
             const f = genEdit.activePoly._ffz;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (ev.altKey) {
-                snapFfzToNearestEdge(f, ll);
-            } else if (genEdit.lastLatLng) {
-                translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
+                // Auto-extend ribbon: anchor on first Alt move, then grow along
+                // the pad boundary to the cursor (snakes + miters around corners).
+                if (!genEdit.ribbon) {
+                    const np = nearestPadProjection(ll);
+                    if (np) genEdit.ribbon = { asset: np.asset, ring: np.ring, start: np.pos };
+                }
+                let done = false;
+                if (genEdit.ribbon) {
+                    const end = projectOntoRing(ll, genEdit.ribbon.ring);
+                    const p = genState.lastParams || GEN_DEFAULTS;
+                    const pts = end && buildRibbon(genEdit.ribbon.ring, genEdit.ribbon.start, end, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+                    if (pts && pts.length >= 4) {
+                        f.points = pts; f._centroid = ringCentroid(pts);
+                        f._assetId = genEdit.ribbon.asset.id; f._assetName = genEdit.ribbon.asset.name || `#${genEdit.ribbon.asset.id}`;
+                        f._side = 'ribbon'; f._offsetFt = 0;
+                        done = true;
+                    }
+                }
+                if (!done) snapFfzToNearestEdge(f, ll); // span too short → single edge
+            } else {
+                genEdit.ribbon = null; // Alt released → next Alt re-anchors
+                if (genEdit.lastLatLng) translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
             }
             genEdit.lastLatLng = ll;
             try { genEdit.activePoly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {}
@@ -6578,6 +6721,7 @@
         genEdit.domUp = () => {
             if (!genEdit.dragging) return;
             genEdit.dragging = false;
+            genEdit.ribbon = null;
             try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
             document.removeEventListener('mousemove', genEdit.domMove, true);
             document.removeEventListener('mouseup', genEdit.domUp, true);
@@ -6631,7 +6775,7 @@
         try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
         const map = genEdit.map;
         if (map) { try { map.dragging.enable(); map.scrollWheelZoom.enable(); } catch (e) {} }
-        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null };
+        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
     }
     function attachFfzEditHandlers(poly, map) {
         poly.on('mouseover', () => {
