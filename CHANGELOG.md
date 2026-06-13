@@ -12,6 +12,12 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — two-pad snake now actually works (dev-only) — Asset Inspector v4.17–v4.19
+
+Got the cross-pad snake working after live debugging:
+- **v4.17/v4.18** — the bridge wasn't firing because it required the neighbor pad to be *strictly nearest*, which never happens next to a big pad. Now it bridges on **proximity** (cursor within 90 ft of any pad ≤320 ft away), and the active pad stops extending past 90 ft so it doesn't keep wrapping the first pad.
+- **v4.19** — fixed the two real bugs the console revealed: (1) the combined ribbon **self-intersected at the L corner** where the two pads' edges meet — rebuilt it to offset **one combined path on a single consistent side** (no more bowtie), and (2) on very close pads (12 ft apart) it **flickered between bridging and un-bridging** — added hysteresis so it only switches when the cursor is genuinely closer to the other pad. Validated offline: an L across two pads is now one clean, simple polygon.
+
 ## 2026-06-12 — Site Setup Generator — snake one FFZ across two pads (dev-only) — Asset Inspector v4.16
 
 **Snake a single FFZ across two (or more) adjacent pads.** When you Ctrl-snake and the cursor reaches a nearby neighbor pad (within ~160 ft), the ribbon **auto-bridges the gap** and keeps going on that pad — one FFZ covering both assets. Each pad's portion still holds the **15 ft standoff on the side you're snaking** (your "whichever side I'm snaking" choice); only the straight bridge across the gap crosses open ground (the intended "other than connecting two pads" exception). Reverse back over the bridge and it un-bridges. Multi-pad FFZs commit like any other; resize end-handles stay on single-pad ribbons (re-snake to reshape a multi-pad one). Validated offline: two adjacent pads → one simple polygon spanning both with a clean standoff band + gap bridge.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.18
+// @version      4.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.18';
+    const SCRIPT_VERSION = '4.19';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6657,15 +6657,57 @@
     // pad's outward side, joined by straight bridges across the gaps. The
     // "other than connecting two pads" exception — each pad portion still keeps
     // the 15 ft standoff; only the bridge crosses open ground.
+    // Ordered boundary points (foot start → vertices → foot end) of a pad
+    // sub-path, in lat/lng. Returns null if the span is too short / a full loop.
+    function segBoundaryPoints(seg) {
+        const ring = seg.ring;
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        const foot = (pos) => { const A = m[pos.i], B = m[(pos.i + 1) % n]; return { x: A.x + (B.x - A.x) * pos.t, y: A.y + (B.y - A.y) * pos.t }; };
+        const segLen = []; let per = 0; const cum = [0];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
+        const ps = perOf(seg.startPos), pe = perOf(seg.endPos);
+        const fwd = (pe - ps + per) % per;
+        if (fwd < 1.5 || fwd > per - 0.5) return null;
+        const path = [foot(seg.startPos)]; let i = seg.startPos.i, g = 0;
+        while (g++ < n + 2) { const nv = (i + 1) % n; const vP = (cum[i + 1] - ps + per) % per; if (vP >= fwd - 1e-6) break; path.push(m[nv]); i = nv; }
+        path.push(foot(seg.endPos));
+        return path.map(q => proj.inv(q));
+    }
+    // Multi-pad ribbon: build ONE combined boundary path across all pads
+    // (the gaps become straight bridge segments), then offset it on a SINGLE
+    // consistent side. This avoids the bowtie that per-pad-outward offsets make
+    // where two pads' edges meet at an L corner. The side is the first pad's
+    // outward side (so the multi-ribbon's start matches the single-pad ribbon).
     function buildMultiRibbon(segs, s, d) {
-        const innerAll = [], outerAll = [];
+        const pathLL = []; let first = null;
         for (const sg of segs) {
-            const h = buildRibbonHalves(sg.ring, sg.startPos, sg.endPos, s, d);
-            if (!h || !h.inner.length) continue;
-            innerAll.push(...h.inner); outerAll.push(...h.outer);
+            const pts = segBoundaryPoints(sg);
+            if (!pts || pts.length < 2) continue;
+            if (!first) first = { seg: sg, p0: pts[0], p1: pts[1] };
+            for (const q of pts) {
+                const last = pathLL[pathLL.length - 1];
+                if (last && approxMeters(last.lat, last.lng, q.lat, q.lng) < 0.5) continue;
+                pathLL.push(q);
+            }
         }
-        if (innerAll.length < 2) return null;
-        const ll = innerAll.concat(outerAll.slice().reverse());
+        if (pathLL.length < 2 || !first) return null;
+        const cen = ringCentroid(pathLL); const proj = genProjector(cen.lat, cen.lng);
+        const m = pathLL.map(p => proj.fwd(p));
+        // consistent hand = perpendicular side of the first edge that points away
+        // from the first pad's centroid (matches single-pad outward at the start)
+        const a0 = proj.fwd(first.p0), b0 = proj.fwd(first.p1), rc = proj.fwd(ringCentroid(first.seg.ring));
+        const dx0 = b0.x - a0.x, dy0 = b0.y - a0.y, mx0 = (a0.x + b0.x) / 2, my0 = (a0.y + b0.y) / 2;
+        const hand = ((-dy0) * (mx0 - rc.x) + (dx0) * (my0 - rc.y)) >= 0 ? 1 : -1;
+        const segNorm = [];
+        for (let i = 0; i < m.length - 1; i++) {
+            const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1;
+            segNorm.push({ nx: hand * (-dy / L), ny: hand * (dx / L) });
+        }
+        const inner = offsetPolylineMiter(m, segNorm, s);
+        const outer = offsetPolylineMiter(m, segNorm, s + d);
+        const ll = inner.map(q => proj.inv(q)).concat(outer.map(q => proj.inv(q)).reverse());
         if (ringSelfIntersects(ll)) return null;
         return ll;
     }
@@ -6929,7 +6971,11 @@
                         const d = ringNearestDistM(ll, ring);
                         if (d < otherD) { otherD = d; other = a; otherRing = ring; }
                     }
-                    if (other && otherD < EXTEND_M) {
+                    // hysteresis: only switch pads when the cursor is genuinely
+                    // closer to the other pad than the active one (no flicker on
+                    // close pads where it's within range of both at once).
+                    const dActive = ringNearestDistM(ll, rb.active.ring);
+                    if (other && otherD < EXTEND_M && otherD < dActive) {
                         const prev = rb.segs[rb.segs.length - 1];
                         if (prev && prev.asset.id === other.id) {
                             rb.segs.pop(); rb.active = reviveActiveSeg(prev); // reversed back onto the previous pad
