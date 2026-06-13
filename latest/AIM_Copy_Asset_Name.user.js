@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.21
+// @version      4.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.21';
+    const SCRIPT_VERSION = '4.22';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6919,6 +6919,61 @@
     }
 
     // ===== freehand "draw a corridor" FFZ (press + drag) =====
+    // Outward offset of a closed pad ring by offM, mitered → sharp corners.
+    function assetOffsetRing(ring, offM) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        const segN = outwardEdgeNormals(m);
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const nPrev = segN[(i - 1 + n) % n], nCur = segN[i];
+            const a0 = { x: m[i].x + nPrev.nx * offM, y: m[i].y + nPrev.ny * offM };
+            const a1 = { x: m[i].x + nCur.nx * offM, y: m[i].y + nCur.ny * offM };
+            const d0 = { x: m[i].x - m[(i - 1 + n) % n].x, y: m[i].y - m[(i - 1 + n) % n].y };
+            const d1 = { x: m[(i + 1) % n].x - m[i].x, y: m[(i + 1) % n].y - m[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            out.push((X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= offM * 4) ? X : a1);
+        }
+        return out.map(q => proj.inv(q));
+    }
+    function getAssetOffsetRing(asset, offM) {
+        if (!genDraw._offCache) genDraw._offCache = {};
+        if (genDraw._offCache[asset.id]) return genDraw._offCache[asset.id];
+        const ring = entityCoords(asset);
+        if (!ring || ring.length < 3) return null;
+        const r = assetOffsetRing(ring, offM);
+        genDraw._offCache[asset.id] = r;
+        return r;
+    }
+    // Intersection point of lines through p1-p2 and p3-p4 (lng=x, lat=y).
+    function segIntersectPoint(p1, p2, p3, p4) {
+        const x1 = p1.lng, y1 = p1.lat, x2 = p2.lng, y2 = p2.lat, x3 = p3.lng, y3 = p3.lat, x4 = p4.lng, y4 = p4.lat;
+        const den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+        if (Math.abs(den) < 1e-15) return { lat: p2.lat, lng: p2.lng };
+        const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den;
+        return { lng: x1 + t * (x2 - x1), lat: y1 + t * (y2 - y1) };
+    }
+    // Snip out self-intersection loops → a simple polygon (kills the inner-corner twist).
+    function cleanSelfIntersections(pts) {
+        let ring = pts.slice();
+        for (let pass = 0; pass < 30; pass++) {
+            let found = false;
+            for (let i = 0; i < ring.length && !found; i++) {
+                const a1 = ring[i], a2 = ring[(i + 1) % ring.length];
+                for (let j = i + 2; j < ring.length; j++) {
+                    if (i === 0 && j === ring.length - 1) continue;
+                    const b1 = ring[j], b2 = ring[(j + 1) % ring.length];
+                    if (segmentsCross(a1, a2, b1, b2)) {
+                        const X = segIntersectPoint(a1, a2, b1, b2);
+                        ring = ring.slice(0, i + 1).concat([X], ring.slice(j + 1)); // drop the loop i+1..j
+                        found = true; break;
+                    }
+                }
+            }
+            if (!found) break;
+        }
+        return ring;
+    }
     // Nearest point on a ring to `at` (lat/lng) + its distance (m).
     function nearestPointOnRing(at, ring) {
         const proj = genProjector(at.lat, at.lng);
@@ -6945,14 +7000,13 @@
         for (const a of ents) {
             if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
             const np = nearestPointOnRing(cursorLL, ring);
-            if (np && (!best || np.d < best.d)) best = { d: np.d, pt: np.pt, ring };
+            if (np && (!best || np.d < best.d)) best = { d: np.d, asset: a };
         }
         if (best && best.d < SNAP_M) {
-            const proj = genProjector(best.pt.lat, best.pt.lng);
-            const c = proj.fwd(cursorLL); // cursor relative to the asset point (origin)
-            let ux = c.x, uy = c.y; const L = Math.hypot(ux, uy) || 1; ux /= L; uy /= L;
-            if (pointInPolygon(cursorLL.lat, cursorLL.lng, best.ring)) { ux = -ux; uy = -uy; }
-            return proj.inv({ x: ux * offM, y: uy * offM });
+            // Snap to the asset's mitered OFFSET outline → sharp right-angle corners.
+            const off = getAssetOffsetRing(best.asset, offM);
+            const np = off && nearestPointOnRing(cursorLL, off);
+            if (np) return np.pt;
         }
         return { lat: cursorLL.lat, lng: cursorLL.lng };
     }
@@ -6968,7 +7022,8 @@
         for (let i = 0; i < m.length - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; leftN.push({ nx: -dy / L, ny: dx / L }); }
         const left = offsetPolylineMiter(m, leftN, halfW);
         const right = offsetPolylineMiter(m, leftN, -halfW);
-        return left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
+        const ll = left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
+        return cleanSelfIntersections(ll); // snip the inner-corner twist
     }
     let genDraw = { active: false, drawing: false, pts: [], lastLL: null, poly: null, onDown: null, onMove: null, onUp: null };
     function renderDrawPreview(p) {
@@ -7168,7 +7223,7 @@
             if (!genDraw.active) return;
             ev.preventDefault(); ev.stopPropagation();
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            genDraw.drawing = true; genDraw.pts = []; genDraw.lastLL = ll;
+            genDraw.drawing = true; genDraw.pts = []; genDraw.lastLL = ll; genDraw._offCache = {};
             try { map.dragging.disable(); } catch (e) {}
             const p = genState.lastParams || GEN_DEFAULTS;
             genDraw.pts.push(snapDrawPoint(ll, p));

@@ -12,6 +12,12 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — Draw mode: sharp corners + no twist (dev-only) — Asset Inspector v4.22
+
+Two fixes to the freehand Draw corridor:
+- **Right-angle corners.** It now snaps to the asset's **mitered 15-ft-offset outline** (sharp corners) instead of the nearest border point (which arced around corners), so the strip follows the pad's actual right angles.
+- **No more inner-corner twist.** The finished strip is run through a self-intersection cleanup that snips out any loops, so it's always a valid simple polygon — fixes the knot where the corridor turned back on itself at concave joins.
+
 ## 2026-06-12 — Site Setup Generator — ✏️ freehand Draw mode (dev-only) — Asset Inspector v4.21
 
 A new way to make FFZs that sidesteps the multi-pad snake's geometry problems entirely. Click **✏️ Draw**, then **press and drag** to paint a corridor: it lays down a **30 ft-wide strip** along your cursor path. Whenever the path passes near an **asset it snaps to 15 ft off that asset's border** (so the strip hugs it), and **away from assets it follows your cursor freely** — so you can draw across gaps to connect pads, then snap onto the next one. Release to drop the FFZ (DEM-altitude'd, named after the nearest asset, fully editable like any other preview, commits the same way). Because it's a symmetric stroke of a centerline (and snapping to the nearest asset *point* rounds corners), it stays a clean simple polygon — no bowtie, no spikes. This is the robust answer to "one FFZ across an L / multiple pads." (v4.20: the old multi-pad snake now fails gracefully to single-pad on concave joins.)
