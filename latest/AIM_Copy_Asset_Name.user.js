@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.20
+// @version      4.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.20';
+    const SCRIPT_VERSION = '4.21';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6918,6 +6918,91 @@
         try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (err) {}
     }
 
+    // ===== freehand "draw a corridor" FFZ (press + drag) =====
+    // Nearest point on a ring to `at` (lat/lng) + its distance (m).
+    function nearestPointOnRing(at, ring) {
+        const proj = genProjector(at.lat, at.lng);
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const fx = A.x + t * dx, fy = A.y + t * dy, d = Math.hypot(fx, fy);
+            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }) };
+        }
+        return best;
+    }
+    // Snap a cursor point: near an asset → a point `offM` outward from its
+    // border (so the stroked strip's inner edge sits the standoff off it);
+    // otherwise the cursor unchanged (free-draw). Snapping to the nearest
+    // border POINT naturally rounds convex corners (the centerline arcs around
+    // them) so the stroke stays clean.
+    function snapDrawPoint(cursorLL, params) {
+        const SNAP_M = 70 * GEN_FT_TO_M;
+        const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            const np = nearestPointOnRing(cursorLL, ring);
+            if (np && (!best || np.d < best.d)) best = { d: np.d, pt: np.pt, ring };
+        }
+        if (best && best.d < SNAP_M) {
+            const proj = genProjector(best.pt.lat, best.pt.lng);
+            const c = proj.fwd(cursorLL); // cursor relative to the asset point (origin)
+            let ux = c.x, uy = c.y; const L = Math.hypot(ux, uy) || 1; ux /= L; uy /= L;
+            if (pointInPolygon(cursorLL.lat, cursorLL.lng, best.ring)) { ux = -ux; uy = -uy; }
+            return proj.inv({ x: ux * offM, y: uy * offM });
+        }
+        return { lat: cursorLL.lat, lng: cursorLL.lng };
+    }
+    // Stroke a centerline polyline into a strip outline (lat/lng), width 2*halfW.
+    function strokePolyline(pts, halfW) {
+        if (!pts || pts.length < 2) return null;
+        const cen = ringCentroid(pts); const proj = genProjector(cen.lat, cen.lng);
+        const m0 = pts.map(p => proj.fwd(p));
+        const m = [m0[0]];
+        for (let i = 1; i < m0.length; i++) { if (Math.hypot(m0[i].x - m[m.length - 1].x, m0[i].y - m[m.length - 1].y) > 1) m.push(m0[i]); }
+        if (m.length < 2) return null;
+        const leftN = [];
+        for (let i = 0; i < m.length - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; leftN.push({ nx: -dy / L, ny: dx / L }); }
+        const left = offsetPolylineMiter(m, leftN, halfW);
+        const right = offsetPolylineMiter(m, leftN, -halfW);
+        return left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
+    }
+    let genDraw = { active: false, drawing: false, pts: [], lastLL: null, poly: null, onDown: null, onMove: null, onUp: null };
+    function renderDrawPreview(p) {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
+        const outline = strokePolyline(genDraw.pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        if (!outline || outline.length < 4) return;
+        try {
+            genDraw.poly = L.polygon(outline.map(q => [q.lat, q.lng]), { color: '#ffe14d', weight: 1.5, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.18, interactive: false });
+            genDraw.poly.addTo(map);
+        } catch (e) {}
+    }
+    async function finalizeDraw() {
+        const map = getLeafletMap();
+        if (genDraw.poly) { try { if (map) map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
+        const p = genState.lastParams || GEN_DEFAULTS;
+        const outline = strokePolyline(genDraw.pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        genDraw.pts = []; genDraw.lastLL = null;
+        if (!outline || outline.length < 4) return;
+        const cen = ringCentroid(outline);
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let nm = 'corridor', bestD = Infinity;
+        for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _side: 'drawn', _offsetFt: 0, _centroid: cen };
+        try { await bulkFetchElevations([cen]); } catch (e) {}
+        const g = getElevationFromCache(cen.lat, cen.lng);
+        if (typeof g === 'number') f.restrictions = { minAlt: g + p.aglFt * GEN_FT_TO_M, maxAlt: g + (p.aglFt + p.deltaFt) * GEN_FT_TO_M };
+        if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+        genState.lastResult.ffzs.push(f);
+        renderGenPreview(genState.lastResult.ffzs);
+        showToast('Drew FFZ corridor', 'rgba(255,225,77,0.55)');
+    }
+
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
     function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
     function deleteFfzPoly(poly) {
@@ -7077,9 +7162,42 @@
         };
         genEdit.keyWin = uwin();
         try { genEdit.keyWin.addEventListener('keydown', genEdit.onKey, true); } catch (e) {}
+        // Freehand draw: capture-phase mousedown on the map container so it
+        // works in Draw mode over empty map AND over existing FFZs.
+        genDraw.onDown = (ev) => {
+            if (!genDraw.active) return;
+            ev.preventDefault(); ev.stopPropagation();
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            genDraw.drawing = true; genDraw.pts = []; genDraw.lastLL = ll;
+            try { map.dragging.disable(); } catch (e) {}
+            const p = genState.lastParams || GEN_DEFAULTS;
+            genDraw.pts.push(snapDrawPoint(ll, p));
+            document.addEventListener('mousemove', genDraw.onMove, true);
+            document.addEventListener('mouseup', genDraw.onUp, true);
+        };
+        genDraw.onMove = (ev) => {
+            if (!genDraw.drawing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (genDraw.lastLL && approxMeters(genDraw.lastLL.lat, genDraw.lastLL.lng, ll.lat, ll.lng) < 8 * GEN_FT_TO_M) return;
+            const p = genState.lastParams || GEN_DEFAULTS;
+            genDraw.pts.push(snapDrawPoint(ll, p)); genDraw.lastLL = ll;
+            renderDrawPreview(p);
+        };
+        genDraw.onUp = () => {
+            if (!genDraw.drawing) return;
+            genDraw.drawing = false;
+            document.removeEventListener('mousemove', genDraw.onMove, true);
+            document.removeEventListener('mouseup', genDraw.onUp, true);
+            try { map.dragging.enable(); } catch (e) {}
+            finalizeDraw();
+        };
+        genEdit.container.addEventListener('mousedown', genDraw.onDown, true);
         genEdit.wired = true;
     }
     function unwireGenEditing() {
+        if (genDraw.onDown && genEdit.container) { try { genEdit.container.removeEventListener('mousedown', genDraw.onDown, true); } catch (e) {} }
+        if (genDraw.onMove) { try { document.removeEventListener('mousemove', genDraw.onMove, true); } catch (e) {} }
+        if (genDraw.onUp) { try { document.removeEventListener('mouseup', genDraw.onUp, true); } catch (e) {} }
         if (genEdit.domMove) { try { document.removeEventListener('mousemove', genEdit.domMove, true); } catch (e) {} }
         if (genEdit.domUp) { try { document.removeEventListener('mouseup', genEdit.domUp, true); } catch (e) {} }
         if (genEdit.container && genEdit.onWheel) { try { genEdit.container.removeEventListener('wheel', genEdit.onWheel, { capture: true }); } catch (e) {} }
@@ -7108,6 +7226,7 @@
             } catch (err) {}
         });
         poly.on('mousedown', (e) => {
+            if (genDraw.active) return; // Draw mode owns the mouse
             if (poly._ffz && poly._ffz._committed) { try { showCommittedPopup(e.latlng); } catch (er) {} return; }
             clearResizeHandles(); // hide handles while moving/snaking (stops flicker)
             genEdit.dragging = true;
@@ -7260,6 +7379,8 @@
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
+        genDraw.active = false; genDraw.drawing = false;
+        try { const mp = getLeafletMap(); if (mp) mp.getContainer().style.cursor = ''; } catch (e) {}
     }
 
     function openSiteGenerator(siteID) {
@@ -7322,6 +7443,7 @@
             <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
+                <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
@@ -7419,6 +7541,15 @@
                 previewBtn.disabled = false;
                 previewBtn.textContent = restore;
             }
+        };
+
+        const drawBtn = box.querySelector('#aim-gen-draw');
+        drawBtn.onclick = () => {
+            genDraw.active = !genDraw.active;
+            drawBtn.style.background = genDraw.active ? 'rgba(255,225,77,0.32)' : 'rgba(255,225,77,0.12)';
+            drawBtn.textContent = genDraw.active ? '✏️ Drawing (press+drag) — click to stop' : '✏️ Draw';
+            const map = getLeafletMap();
+            try { if (map) { wireGenEditing(map); map.getContainer().style.cursor = genDraw.active ? 'crosshair' : ''; } } catch (e) {}
         };
 
         const dryEl = box.querySelector('#aim-gen-dryrun');
