@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.22
+// @version      4.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.22';
+    const SCRIPT_VERSION = '4.23';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6983,15 +6983,23 @@
             const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
             let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
             const fx = A.x + t * dx, fy = A.y + t * dy, d = Math.hypot(fx, fy);
-            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }) };
+            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }), i };
         }
         return best;
     }
-    // Snap a cursor point: near an asset → a point `offM` outward from its
-    // border (so the stroked strip's inner edge sits the standoff off it);
-    // otherwise the cursor unchanged (free-draw). Snapping to the nearest
-    // border POINT naturally rounds convex corners (the centerline arcs around
-    // them) so the stroke stays clean.
+    // Offset-ring vertices the path crossed going from edge iPrev to edge iCur
+    // (shorter arc, capped) — inserting these makes the centerline turn the
+    // actual right-angle corners instead of cutting across them.
+    function ringVerticesBetween(ring, iPrev, iCur) {
+        const n = ring.length, fwd = (iCur - iPrev + n) % n, back = n - fwd, out = [];
+        if (fwd === 0) return out;
+        if (fwd <= back) { if (fwd > 6) return out; for (let k = 1; k <= fwd; k++) out.push(ring[(iPrev + k) % n]); }
+        else { if (back > 6) return out; for (let k = 0; k < back; k++) out.push(ring[(iPrev - k + n) % n]); }
+        return out;
+    }
+    // Snap a cursor point to the asset's mitered OFFSET outline (sharp corners)
+    // if near one, else the cursor unchanged (free-draw). Returns { pt, assetId,
+    // off, i } so the caller can insert corner vertices when crossing edges.
     function snapDrawPoint(cursorLL, params) {
         const SNAP_M = 70 * GEN_FT_TO_M;
         const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
@@ -7003,12 +7011,11 @@
             if (np && (!best || np.d < best.d)) best = { d: np.d, asset: a };
         }
         if (best && best.d < SNAP_M) {
-            // Snap to the asset's mitered OFFSET outline → sharp right-angle corners.
             const off = getAssetOffsetRing(best.asset, offM);
             const np = off && nearestPointOnRing(cursorLL, off);
-            if (np) return np.pt;
+            if (np) return { pt: np.pt, assetId: best.asset.id, off, i: np.i };
         }
-        return { lat: cursorLL.lat, lng: cursorLL.lng };
+        return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1 };
     }
     // Stroke a centerline polyline into a strip outline (lat/lng), width 2*halfW.
     function strokePolyline(pts, halfW) {
@@ -7226,7 +7233,8 @@
             genDraw.drawing = true; genDraw.pts = []; genDraw.lastLL = ll; genDraw._offCache = {};
             try { map.dragging.disable(); } catch (e) {}
             const p = genState.lastParams || GEN_DEFAULTS;
-            genDraw.pts.push(snapDrawPoint(ll, p));
+            const snap0 = snapDrawPoint(ll, p);
+            genDraw.pts.push(snap0.pt); genDraw._lastSnap = snap0;
             document.addEventListener('mousemove', genDraw.onMove, true);
             document.addEventListener('mouseup', genDraw.onUp, true);
         };
@@ -7235,7 +7243,13 @@
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (genDraw.lastLL && approxMeters(genDraw.lastLL.lat, genDraw.lastLL.lng, ll.lat, ll.lng) < 8 * GEN_FT_TO_M) return;
             const p = genState.lastParams || GEN_DEFAULTS;
-            genDraw.pts.push(snapDrawPoint(ll, p)); genDraw.lastLL = ll;
+            const snap = snapDrawPoint(ll, p);
+            const prev = genDraw._lastSnap;
+            // crossed onto another edge of the same pad → trace the corner vertices
+            if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
+                for (const v of ringVerticesBetween(snap.off, prev.i, snap.i)) genDraw.pts.push(v);
+            }
+            genDraw.pts.push(snap.pt); genDraw._lastSnap = snap; genDraw.lastLL = ll;
             renderDrawPreview(p);
         };
         genDraw.onUp = () => {

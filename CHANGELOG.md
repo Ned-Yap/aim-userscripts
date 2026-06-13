@@ -12,6 +12,10 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — Draw mode turns real right angles (dev-only) — Asset Inspector v4.23
+
+The corners were still cutting at 45° because the drawn centerline *skipped* the corner between samples. Now, when the draw crosses from one edge of an asset's offset outline to the next, it **inserts the actual corner vertex** into the path — so the corridor turns the pad's true right angle instead of beveling across it. (Builds on v4.22's offset-outline snap + self-intersection cleanup.)
+
 ## 2026-06-12 — Site Setup Generator — Draw mode: sharp corners + no twist (dev-only) — Asset Inspector v4.22
 
 Two fixes to the freehand Draw corridor:
