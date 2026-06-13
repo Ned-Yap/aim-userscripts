@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.11
+// @version      4.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.11';
+    const SCRIPT_VERSION = '4.12';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6099,6 +6099,14 @@
     // Only these asset states are excluded; everything else (Normal, Inactive,
     // HY, …) gets an FFZ.
     const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
+    // Percepto rejects entity names/descriptions with anything but letters,
+    // numbers, spaces, "_" and "-" (server 400). Strip everything else.
+    function genCleanName(s) {
+        return String(s == null ? '' : s).replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function genDraftName(assetName) {
+        return genCleanName(`DRAFT ${assetName} FFZ`);
+    }
     let genPreviewLayers = [];
 
     // Local east/north meters projection around an origin, and its
@@ -6335,7 +6343,7 @@
         const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
         return {
             type: 16,
-            name: `[DRAFT] ${nm} FFZ`,
+            name: genDraftName(nm),
             site_id: asset.site != null ? asset.site : genState.siteID,
             points: p.ring,                               // OPEN — 4 distinct corners
             restrictions: { minAlt: null, maxAlt: null }, // set by the DEM pass
@@ -6515,6 +6523,7 @@
         f.points = edgeOffsetBox(best.A, best.B, best.cen, s, d);
         f._centroid = ringCentroid(f.points);
         f._assetId = best.asset.id; f._assetName = best.asset.name || `#${best.asset.id}`;
+        f.name = genDraftName(f._assetName);
         const e = edgeOutwardNormal(best.A, best.B, best.cen);
         f._side = compassFromNormal(e.nx, e.ny); f._offsetFt = 0;
         return true;
@@ -6772,6 +6781,7 @@
                             if (pts && pts.length >= 4) {
                                 f.points = pts; f._centroid = ringCentroid(pts);
                                 f._assetId = rb.asset.id; f._assetName = rb.asset.name || `#${rb.asset.id}`;
+                                f.name = genDraftName(f._assetName);
                                 f._side = 'ribbon'; f._offsetFt = 0;
                             }
                         }
@@ -6916,7 +6926,8 @@
         else b = { type: 16, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false };
         delete b.id;
         b.type = 16;
-        b.name = f.name;
+        b.name = genCleanName(f.name);   // server: letters/numbers/space/_/- only
+        b.description = '';
         b.site_id = siteID;
         b.points = f.points;
         b.restrictions = { minAlt: f.restrictions.minAlt, maxAlt: f.restrictions.maxAlt, minEmergencyAlt: null };
@@ -6956,7 +6967,7 @@
         }
         return res;
     }
-    // Bulk-undo: delete every FFZ on the site still named "[DRAFT] …" (the
+    // Bulk-undo: delete every FFZ on the site still named "DRAFT …" (the
     // prefix is stripped when a CSM accepts a zone, so accepted ones are safe).
     async function removeGeneratedFfzs(opts) {
         const dryRun = !!(opts && opts.dryRun);
@@ -6964,7 +6975,7 @@
         const res = { deleted: 0, failed: 0, found: 0, errors: [], dryRun };
         try { await fetchMapObjects(siteID, true); } catch (e) {}
         const bucket = mapObjectsBySite[siteID];
-        const drafts = ((bucket && bucket.entities) || []).filter(e => e.type === 16 && typeof e.name === 'string' && e.name.indexOf('[DRAFT] ') === 0);
+        const drafts = ((bucket && bucket.entities) || []).filter(e => e.type === 16 && typeof e.name === 'string' && e.name.indexOf('DRAFT ') === 0);
         res.found = drafts.length;
         if (!drafts.length) return res;
         const csrf = getCsrfToken();
@@ -7056,9 +7067,9 @@
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
-                    <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove [DRAFT] FFZs</button>
+                    <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove DRAFT FFZs</button>
                 </div>
-                <div id="aim-gen-commit-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Writes the previewed FFZs (named <b>[DRAFT] …</b>) via the Site Setup save. Dry-run first.</div>
+                <div id="aim-gen-commit-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Writes the previewed FFZs (named <b>DRAFT …</b>) via the Site Setup save. Dry-run first.</div>
             </div>
         `;
         m.appendChild(box);
@@ -7145,7 +7156,7 @@
             const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
             if (!ffzs.length) { commitResult.innerHTML = '<span style="color:#ffb347">Nothing to commit — run Preview first.</span>'; return; }
             const dry = !!dryEl.checked;
-            if (!dry && !confirm(`Create ${ffzs.length} FFZ${ffzs.length === 1 ? '' : 's'} on this site? They'll be named with a [DRAFT] prefix (removable via "Remove [DRAFT] FFZs").`)) return;
+            if (!dry && !confirm(`Create ${ffzs.length} FFZ${ffzs.length === 1 ? '' : 's'} on this site? They'll be named with a DRAFT prefix (removable via "Remove DRAFT FFZs").`)) return;
             commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
             try {
                 const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
@@ -7168,12 +7179,12 @@
         const removeBtn = box.querySelector('#aim-gen-remove');
         removeBtn.onclick = async () => {
             const dry = !!dryEl.checked;
-            if (!dry && !confirm('Delete ALL [DRAFT]-named FFZs on this site? (Zones a CSM accepted — prefix stripped — are left alone.)')) return;
+            if (!dry && !confirm('Delete ALL DRAFT-named FFZs on this site? (Zones a CSM accepted — prefix stripped — are left alone.)')) return;
             removeBtn.disabled = true; const t0 = removeBtn.textContent; removeBtn.textContent = 'Working…';
             try {
                 const r = await removeGeneratedFfzs({ dryRun: dry });
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}</span>` : '';
-                if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> [DRAFT] FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
+                if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> DRAFT FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
                 else {
                     commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}`;
                     try { renderSummaryPanel(genState.siteID); } catch (e) {}

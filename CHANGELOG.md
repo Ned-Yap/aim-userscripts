@@ -12,6 +12,10 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — legal FFZ names (dev-only) — Asset Inspector v4.12
+
+Commit was 400ing because Percepto only allows **letters, numbers, spaces, `_` and `-`** in entity names/descriptions — the `[DRAFT]` brackets were illegal. The draft prefix is now **`DRAFT `** (no brackets), every generated name is **sanitized** to the legal character set (e.g. `well#7 (north)` → `DRAFT well 7 north FFZ`), the description is forced empty, and the re-home (Alt-snap / Ctrl-snake) updates the name to the new pad. Bulk-undo now matches the `DRAFT ` prefix.
+
 ## 2026-06-12 — Site Setup Generator — COMMIT the draft FFZs (dev-only) — Asset Inspector v4.11
 
 Closes the generate → tune → **commit** loop. A new **Commit** section in the ⊕ Generate modal:
