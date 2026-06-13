@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.19
+// @version      4.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.19';
+    const SCRIPT_VERSION = '4.20';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7006,16 +7006,28 @@
                     }
                     // build from finalized segments + the active one
                     const allSegs = rb.segs.concat(Math.abs(act.offset) >= 1.5 ? [activeSegSpan(act)] : []);
-                    let pts = null;
+                    let pts = null, multiOK = false;
                     if (allSegs.length === 1) pts = buildRibbon(allSegs[0].ring, allSegs[0].startPos, allSegs[0].endPos, sM, dM2);
-                    else if (allSegs.length >= 2) { pts = buildMultiRibbon(allSegs, sM, dM2); if (!pts) console.log(`${GEN_TAG} snake: ${allSegs.length}-pad ribbon would self-intersect — kept last shape`); }
+                    else if (allSegs.length >= 2) {
+                        pts = buildMultiRibbon(allSegs, sM, dM2);
+                        if (pts) multiOK = true;
+                        else {
+                            // The join is concave (e.g. an L between perpendicular
+                            // edges) — a hand-rolled offset can't do that cleanly.
+                            // Fall back to just the active pad so the shape stays valid.
+                            const a = activeSegSpan(act);
+                            pts = buildRibbon(a.ring, a.startPos, a.endPos, sM, dM2);
+                            if (genEdit._multiFailLogged !== allSegs.length) { genEdit._multiFailLogged = allSegs.length; console.log(`${GEN_TAG} multi-pad ribbon needs a concave join — showing the active pad only (see chat)`); }
+                        }
+                    }
                     if (pts && pts.length >= 4) {
+                        const aspan = activeSegSpan(act);
                         f.points = pts; f._centroid = ringCentroid(pts);
                         f._assetId = act.asset.id; f._assetName = act.asset.name || `#${act.asset.id}`;
                         f.name = genDraftName(f._assetName);
-                        f._side = allSegs.length > 1 ? `${allSegs.length}-pad` : 'ribbon'; f._offsetFt = 0;
-                        // single-pad ribbon → resize handles; multi-pad → no handles (re-snake)
-                        f._param = allSegs.length === 1 ? { ring: allSegs[0].ring, assetId: act.asset.id, startPer: allSegs[0].startPer, endPer: allSegs[0].endPer } : null;
+                        f._side = (multiOK && allSegs.length > 1) ? `${allSegs.length}-pad` : 'ribbon'; f._offsetFt = 0;
+                        // showing a single pad → resize handles; clean multi → no handles
+                        f._param = (!multiOK || allSegs.length === 1) ? { ring: act.ring, assetId: act.asset.id, startPer: aspan.startPer, endPer: aspan.endPer } : null;
                     }
                 }
                 // not updated (cursor off-pad / too short / would twist) → keep last good.
