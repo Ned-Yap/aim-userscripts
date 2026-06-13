@@ -12,6 +12,10 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — snake one FFZ across two pads (dev-only) — Asset Inspector v4.16
+
+**Snake a single FFZ across two (or more) adjacent pads.** When you Ctrl-snake and the cursor reaches a nearby neighbor pad (within ~160 ft), the ribbon **auto-bridges the gap** and keeps going on that pad — one FFZ covering both assets. Each pad's portion still holds the **15 ft standoff on the side you're snaking** (your "whichever side I'm snaking" choice); only the straight bridge across the gap crosses open ground (the intended "other than connecting two pads" exception). Reverse back over the bridge and it un-bridges. Multi-pad FFZs commit like any other; resize end-handles stay on single-pad ribbons (re-snake to reshape a multi-pad one). Validated offline: two adjacent pads → one simple polygon spanning both with a clean standoff band + gap bridge.
+
 ## 2026-06-12 — Site Setup Generator — committed-FFZ popup + handle de-flicker (dev-only) — Asset Inspector v4.15
 
 - **Clicking a committed (locked, green) FFZ now pops up a short note** explaining it's saved and needs a page reload to be natively selectable in Percepto — with a 🔄 Reload button right there. (Stops the "it's there but I can't use it" confusion.)

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.15
+// @version      4.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.15';
+    const SCRIPT_VERSION = '4.16';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6430,7 +6430,7 @@
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag = snake corners · drag yellow ends = resize · Del = delete</span>${flagTip}`;
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag = snake corners (across adjacent pads) · drag yellow ends = resize · Del = delete</span>${flagTip}`;
     }
     function restyleFfzPoly(f) {
         const poly = f && f._poly;
@@ -6613,14 +6613,16 @@
     // Build a ribbon FFZ outline along the pad boundary from `startPos` to
     // `endPos` (shorter perimeter arc), offset [s, s+d] outward, mitered.
     // Returns {lat,lng}[] (open) or null.
-    function buildRibbon(ring, startPos, endPos, s, d) {
+    // Inner + outer offset point lists (both lat/lng, forward start→end) of a
+    // pad's boundary sub-path. The building block for single- and multi-pad
+    // ribbons. Returns { inner, outer } or null (span too short / full loop).
+    function buildRibbonHalves(ring, startPos, endPos, s, d) {
         const cen = ringCentroid(ring);
         const proj = genProjector(cen.lat, cen.lng);
         const m = ringMeters(ring, proj);
         const n = m.length;
         const segN = outwardEdgeNormals(m);
         const foot = (pos) => { const A = m[pos.i], B = m[(pos.i + 1) % n]; return { x: A.x + (B.x - A.x) * pos.t, y: A.y + (B.y - A.y) * pos.t }; };
-        // perimeter position (distance from vertex 0) for each pos
         const segLen = []; let per = 0; const cum = [0];
         for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
         const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
@@ -6628,34 +6630,68 @@
         // Always walk FORWARD start→end; the caller orders start/end to pick the
         // drag direction (so it doesn't flip to the shorter arc mid-snake).
         const fwdLen = (pe - ps + per) % per;
-        if (fwdLen < 1.5 || fwdLen > per - 0.5) return null; // too short / nearly a full loop
-        // collect boundary path: start foot, intermediate vertices (forward), end foot
+        if (fwdLen < 1.5 || fwdLen > per - 0.5) return null;
         const path = [foot(startPos)];
-        const usedSeg = [startPos.i]; // segment index each path-segment belongs to
-        let i = startPos.i;
-        // walk forward adding vertex (i+1) until we pass endPos
-        let guard = 0;
+        const usedSeg = [startPos.i];
+        let i = startPos.i, guard = 0;
         while (guard++ < n + 2) {
             const nextV = (i + 1) % n;
-            // perimeter distance of vertex nextV from start (forward)
             const vPer = (cum[i + 1] - ps + per) % per;
-            if (vPer >= fwdLen - 1e-6) break; // endPos is on segment i
-            path.push(m[nextV]);
-            i = nextV;
-            usedSeg.push(i);
+            if (vPer >= fwdLen - 1e-6) break;
+            path.push(m[nextV]); i = nextV; usedSeg.push(i);
         }
         path.push(foot(endPos));
-        // per-path-segment outward normals = the ring segment they came from
         const pathSegN = usedSeg.map(si => segN[si]);
-        const inner = offsetPolylineMiter(path, pathSegN, s);
-        const outer = offsetPolylineMiter(path, pathSegN, s + d);
-        const ll = [];
-        inner.forEach(q => ll.push(proj.inv(q)));
-        for (let k = outer.length - 1; k >= 0; k--) ll.push(proj.inv(outer[k]));
-        // Reject a self-intersecting ribbon (snaking across a concave notch or
-        // a far-drifted cursor twists the offset) — caller keeps the last good one.
+        const innerM = offsetPolylineMiter(path, pathSegN, s);
+        const outerM = offsetPolylineMiter(path, pathSegN, s + d);
+        return { inner: innerM.map(q => proj.inv(q)), outer: outerM.map(q => proj.inv(q)) };
+    }
+    function buildRibbon(ring, startPos, endPos, s, d) {
+        const h = buildRibbonHalves(ring, startPos, endPos, s, d);
+        if (!h) return null;
+        const ll = h.inner.concat(h.outer.slice().reverse());
+        if (ringSelfIntersects(ll)) return null; // twist (concave notch / far cursor)
+        return ll;
+    }
+    // Multi-pad ribbon: each segment {ring,startPos,endPos} offset on its own
+    // pad's outward side, joined by straight bridges across the gaps. The
+    // "other than connecting two pads" exception — each pad portion still keeps
+    // the 15 ft standoff; only the bridge crosses open ground.
+    function buildMultiRibbon(segs, s, d) {
+        const innerAll = [], outerAll = [];
+        for (const sg of segs) {
+            const h = buildRibbonHalves(sg.ring, sg.startPos, sg.endPos, s, d);
+            if (!h || !h.inner.length) continue;
+            innerAll.push(...h.inner); outerAll.push(...h.outer);
+        }
+        if (innerAll.length < 2) return null;
+        const ll = innerAll.concat(outerAll.slice().reverse());
         if (ringSelfIntersects(ll)) return null;
         return ll;
+    }
+    // --- multi-pad snake bookkeeping ---
+    function mkActiveSeg(asset, ring, pos) {
+        const per = ringTotalPerimeterM(ring), ps = ringPerimeterOfM(ring, pos);
+        return { asset, ring, per, anchorPer: ps, lastPer: ps, offset: 0 };
+    }
+    function activeSegSpan(a) {
+        const startPer = a.offset >= 0 ? a.anchorPer : ((a.anchorPer + a.offset) % a.per + a.per) % a.per;
+        const endPer = a.offset >= 0 ? ((a.anchorPer + a.offset) % a.per + a.per) % a.per : a.anchorPer;
+        return { ring: a.ring, asset: a.asset, startPer, endPer, startPos: perToPos(a.ring, startPer), endPos: perToPos(a.ring, endPer) };
+    }
+    function ringFootLatLng(ring, pos) {
+        const A = ring[pos.i], B = ring[(pos.i + 1) % ring.length];
+        return { lat: A.lat + (B.lat - A.lat) * pos.t, lng: A.lng + (B.lng - A.lng) * pos.t };
+    }
+    function activeTipLatLng(a) {
+        const endPer = ((a.anchorPer + a.offset) % a.per + a.per) % a.per;
+        return ringFootLatLng(a.ring, perToPos(a.ring, endPer));
+    }
+    function reviveActiveSeg(seg) {
+        const per = ringTotalPerimeterM(seg.ring);
+        const sp = seg.startPer != null ? seg.startPer : ringPerimeterOfM(seg.ring, seg.startPos);
+        const ep = seg.endPer != null ? seg.endPer : ringPerimeterOfM(seg.ring, seg.endPos);
+        return { asset: seg.asset, ring: seg.ring, per, anchorPer: sp, lastPer: ep, offset: ((ep - sp) % per + per) % per };
     }
     function ringSelfIntersects(pts) {
         const n = pts.length;
@@ -6865,38 +6901,52 @@
                 // along the pad. We track a SIGNED offset (accumulated shortest
                 // perimeter steps) from the anchor, so you can grow either way
                 // and well past halfway without flipping to the short arc.
+                const p = genState.lastParams || GEN_DEFAULTS;
+                const sM = p.standoffFt * GEN_FT_TO_M, dM2 = Math.max(p.depthFt, 30) * GEN_FT_TO_M;
+                const BRIDGE_M = 160 * GEN_FT_TO_M; // max gap to auto-bridge to a neighbor pad
                 if (!genEdit.ribbon) {
-                    const np = nearestPadProjection(ll);
-                    if (np) {
-                        const per = ringTotalPerimeterM(np.ring);
-                        const ps = ringPerimeterOfM(np.ring, np.pos);
-                        genEdit.ribbon = { asset: np.asset, ring: np.ring, anchorPos: np.pos, per, ps, lastPer: ps, offset: 0 };
-                    }
+                    const np0 = nearestPadProjection(ll);
+                    if (np0) genEdit.ribbon = { segs: [], active: mkActiveSeg(np0.asset, np0.ring, np0.pos) };
                 }
                 const rb = genEdit.ribbon;
-                if (rb && ringNearestDistM(ll, rb.ring) < 120 * GEN_FT_TO_M) {
-                    const end = projectOntoRing(ll, rb.ring);
-                    if (end) {
-                        const pc = ringPerimeterOfM(rb.ring, end);
-                        rb.offset += signedPerDelta(rb.lastPer, pc, rb.per);
-                        rb.lastPer = pc;
-                        let off = rb.offset;
-                        if (Math.abs(off) > rb.per - 1) off = Math.sign(off) * (rb.per - 1); // can't fully close
-                        if (Math.abs(off) >= 1.5) {
-                            const p = genState.lastParams || GEN_DEFAULTS;
-                            const a = off >= 0 ? rb.anchorPos : perToPos(rb.ring, rb.ps + off);
-                            const b = off >= 0 ? perToPos(rb.ring, rb.ps + off) : rb.anchorPos;
-                            const pts = buildRibbon(rb.ring, a, b, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
-                            if (pts && pts.length >= 4) {
-                                f.points = pts; f._centroid = ringCentroid(pts);
-                                f._assetId = rb.asset.id; f._assetName = rb.asset.name || `#${rb.asset.id}`;
-                                f.name = genDraftName(f._assetName);
-                                f._side = 'ribbon'; f._offsetFt = 0;
-                                const aPer = ((rb.ps + (off >= 0 ? 0 : off)) % rb.per + rb.per) % rb.per;
-                                const bPer = ((rb.ps + (off >= 0 ? off : 0)) % rb.per + rb.per) % rb.per;
-                                f._param = { ring: rb.ring, assetId: rb.asset.id, startPer: aPer, endPer: bPer };
+                if (rb && rb.active) {
+                    // bridge to / un-bridge from a neighbor pad when the cursor's nearest pad changes
+                    const np = nearestPadProjection(ll);
+                    if (np && np.asset && np.asset.id !== rb.active.asset.id) {
+                        const prev = rb.segs[rb.segs.length - 1];
+                        if (prev && prev.asset.id === np.asset.id) {
+                            rb.segs.pop(); rb.active = reviveActiveSeg(prev); // reversed back onto the previous pad
+                        } else {
+                            const tip = activeTipLatLng(rb.active);
+                            if (tip && ringNearestDistM(tip, np.ring) < BRIDGE_M) {
+                                rb.segs.push(activeSegSpan(rb.active));
+                                rb.active = mkActiveSeg(np.asset, np.ring, projectOntoRing(tip, np.ring) || np.pos);
                             }
                         }
+                    }
+                    // extend the active pad toward the cursor
+                    const act = rb.active;
+                    if (ringNearestDistM(ll, act.ring) < BRIDGE_M) {
+                        const end = projectOntoRing(ll, act.ring);
+                        if (end) {
+                            const pc = ringPerimeterOfM(act.ring, end);
+                            act.offset += signedPerDelta(act.lastPer, pc, act.per);
+                            act.lastPer = pc;
+                            if (Math.abs(act.offset) > act.per - 1) act.offset = Math.sign(act.offset) * (act.per - 1);
+                        }
+                    }
+                    // build from finalized segments + the active one
+                    const allSegs = rb.segs.concat(Math.abs(act.offset) >= 1.5 ? [activeSegSpan(act)] : []);
+                    let pts = null;
+                    if (allSegs.length === 1) pts = buildRibbon(allSegs[0].ring, allSegs[0].startPos, allSegs[0].endPos, sM, dM2);
+                    else if (allSegs.length >= 2) pts = buildMultiRibbon(allSegs, sM, dM2);
+                    if (pts && pts.length >= 4) {
+                        f.points = pts; f._centroid = ringCentroid(pts);
+                        f._assetId = act.asset.id; f._assetName = act.asset.name || `#${act.asset.id}`;
+                        f.name = genDraftName(f._assetName);
+                        f._side = allSegs.length > 1 ? `${allSegs.length}-pad` : 'ribbon'; f._offsetFt = 0;
+                        // single-pad ribbon → resize handles; multi-pad → no handles (re-snake)
+                        f._param = allSegs.length === 1 ? { ring: allSegs[0].ring, assetId: act.asset.id, startPer: allSegs[0].startPer, endPer: allSegs[0].endPer } : null;
                     }
                 }
                 // not updated (cursor off-pad / too short / would twist) → keep last good.
