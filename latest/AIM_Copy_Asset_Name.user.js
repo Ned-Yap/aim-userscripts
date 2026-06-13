@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.9
+// @version      4.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.9';
+    const SCRIPT_VERSION = '4.10';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6430,7 +6430,6 @@
             const col = ffzColor(f);
             poly.setStyle({ color: col, fillColor: col });
             poly.setLatLngs((f.points || []).map(p => [p.lat, p.lng]));
-            if (poly.getTooltip && poly.getTooltip()) poly.setTooltipContent(ffzTooltipHtml(f));
         } catch (e) {}
     }
     function setActivePolyStyle(poly, on) {
@@ -6677,6 +6676,25 @@
         }
         return best;
     }
+    // Perimeter distance → boundary position {i, t}.
+    function perToPos(ring, targetPer) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        let per = 0; const cum = [0], segLen = [];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        let tp = ((targetPer % per) + per) % per;
+        for (let i = 0; i < n; i++) {
+            if (tp <= cum[i + 1] + 1e-9) { const t = segLen[i] ? (tp - cum[i]) / segLen[i] : 0; return { i, t: Math.max(0, Math.min(1, t)) }; }
+        }
+        return { i: n - 1, t: 1 };
+    }
+    // Shortest signed step from fromPer to toPer (in (-per/2, per/2]).
+    function signedPerDelta(fromPer, toPer, per) {
+        let d = (toPer - fromPer) % per;
+        if (d > per / 2) d -= per;
+        if (d < -per / 2) d += per;
+        return d;
+    }
     // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
     function refreshFfzLineFlag(f) {
         const p = genState.lastParams || GEN_DEFAULTS;
@@ -6726,24 +6744,30 @@
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (ev.ctrlKey || ev.metaKey) {
                 // CTRL = snake: anchor on first Ctrl move, then grow the ribbon
-                // along the pad to the cursor, mitering corners. Direction is
-                // locked from the initial drag so it doesn't flip to the short arc.
+                // along the pad. We track a SIGNED offset (accumulated shortest
+                // perimeter steps) from the anchor, so you can grow either way
+                // and well past halfway without flipping to the short arc.
                 if (!genEdit.ribbon) {
                     const np = nearestPadProjection(ll);
-                    if (np) genEdit.ribbon = { asset: np.asset, ring: np.ring, start: np.pos, dir: 0, per: ringTotalPerimeterM(np.ring), ps: ringPerimeterOfM(np.ring, np.pos) };
+                    if (np) {
+                        const per = ringTotalPerimeterM(np.ring);
+                        const ps = ringPerimeterOfM(np.ring, np.pos);
+                        genEdit.ribbon = { asset: np.asset, ring: np.ring, anchorPos: np.pos, per, ps, lastPer: ps, offset: 0 };
+                    }
                 }
                 const rb = genEdit.ribbon;
                 if (rb && ringNearestDistM(ll, rb.ring) < 120 * GEN_FT_TO_M) {
                     const end = projectOntoRing(ll, rb.ring);
                     if (end) {
                         const pc = ringPerimeterOfM(rb.ring, end);
-                        if (!rb.dir) {
-                            const fwd = ((pc - rb.ps) % rb.per + rb.per) % rb.per;
-                            if (fwd > 0.3 && fwd < rb.per - 0.3) rb.dir = (fwd <= rb.per - fwd) ? 1 : -1;
-                        }
-                        if (rb.dir) {
+                        rb.offset += signedPerDelta(rb.lastPer, pc, rb.per);
+                        rb.lastPer = pc;
+                        let off = rb.offset;
+                        if (Math.abs(off) > rb.per - 1) off = Math.sign(off) * (rb.per - 1); // can't fully close
+                        if (Math.abs(off) >= 1.5) {
                             const p = genState.lastParams || GEN_DEFAULTS;
-                            const a = rb.dir > 0 ? rb.start : end, b = rb.dir > 0 ? end : rb.start;
+                            const a = off >= 0 ? rb.anchorPos : perToPos(rb.ring, rb.ps + off);
+                            const b = off >= 0 ? perToPos(rb.ring, rb.ps + off) : rb.anchorPos;
                             const pts = buildRibbon(rb.ring, a, b, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
                             if (pts && pts.length >= 4) {
                                 f.points = pts; f._centroid = ringCentroid(pts);
@@ -6753,8 +6777,7 @@
                         }
                     }
                 }
-                // not updated this move (cursor off-pad / no dir yet / would twist)
-                // → keep the last good ribbon, don't translate.
+                // not updated (cursor off-pad / too short / would twist) → keep last good.
             } else if (ev.altKey) {
                 genEdit.ribbon = null;
                 snapFfzToNearestEdge(f, ll); // snap to the single edge under the cursor
@@ -6821,6 +6844,14 @@
         poly.on('mouseout', () => {
             if (genEdit.hovered === poly) genEdit.hovered = null;
         });
+        // Right-click (M2) → show the FFZ info popup (built fresh, current state).
+        poly.on('contextmenu', (e) => {
+            try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
+            try {
+                const L2 = getLeafletL();
+                if (L2 && map) L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
+            } catch (err) {}
+        });
         poly.on('mousedown', (e) => {
             genEdit.dragging = true;
             genEdit.activePoly = poly;
@@ -6864,7 +6895,8 @@
                 if (renderer) opts.renderer = renderer;
                 const poly = L.polygon(latlngs, opts);
                 poly._ffz = f; f._poly = poly;
-                poly.bindTooltip(ffzTooltipHtml(f), { sticky: true, opacity: 0.95 });
+                // Info shows on RIGHT-click only (a hover tooltip blocks the view
+                // while snaking) — see the contextmenu handler in attachFfzEditHandlers.
                 poly.addTo(map);
                 attachFfzEditHandlers(poly, map);
                 genPreviewLayers.push(poly);

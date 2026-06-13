@@ -12,6 +12,11 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — snake both ways + right-click info (dev-only) — Asset Inspector v4.10
+
+- **The FFZ info popup now shows on right-click (M2) only**, not on hover — the hover tooltip was covering the pad while you were trying to snake/move. Right-click any draft FFZ to see its name, side, altitude band, and the control hints.
+- **Snake now grows both directions and past halfway.** The previous version locked the direction from your first drag (so the other way just shrank to nothing, and it stalled around the halfway mark). It now tracks a continuous **signed** perimeter offset from the anchor, so dragging one way grows that way, dragging back shrinks and then grows the other way, and you can wrap most of the pad (up to nearly a full loop — it won't close into a ring). Validated offline: clean L / U / near-C in either direction, all simple polygons.
+
 ## 2026-06-12 — Site Setup Generator — snake fixes + edit controls (dev-only) — Asset Inspector v4.9
 
 From testing the snake:
