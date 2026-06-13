@@ -12,6 +12,16 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — snake fixes + edit controls (dev-only) — Asset Inspector v4.9
+
+From testing the snake:
+- **Split the modifiers** so you're not overloading one key: **Alt + drag = snap to a single edge**, **Ctrl + drag (along the pad) = snake** around corners. Plain drag still moves.
+- **Snake direction is locked from your drag** — it no longer flips to the other side of the pad when you pass the halfway point (was taking the shortest arc; now it follows the way you're dragging).
+- **Snake no longer twists near power lines.** Two guards: it only extends while the cursor is **within ~120 ft of the pad** (dragging off toward a line stops growing it instead of swinging the end around the pad), and any ribbon that **would self-intersect is rejected** (keeps the last good shape).
+- **Scroll no longer rotates** the hovered FFZ — the wheel just zooms the map again. Rotation is **Q / E only** (while dragging).
+
+Validated offline: direction follows the drag (short vs long arc by gesture), convex snakes stay simple, twisting ribbons are rejected.
+
 ## 2026-06-12 — Site Setup Generator — snake FFZs around corners (dev-only) — Asset Inspector v4.8
 
 FFZs can now follow a pad **around its corners** into L / C / U shapes:

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.8
+// @version      4.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.8';
+    const SCRIPT_VERSION = '4.9';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6421,7 +6421,7 @@
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E (or scroll) = rotate 10° · hold Alt + drag along the pad = snap & snake around corners · Del = delete</span>${flagTip}`;
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag along the pad = snake corners · Del = delete</span>${flagTip}`;
     }
     function restyleFfzPoly(f) {
         const poly = f && f._poly;
@@ -6613,12 +6613,11 @@
         const segLen = []; let per = 0; const cum = [0];
         for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
         const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
-        let ps = perOf(startPos), pe = perOf(endPos);
-        // choose direction (forward = increasing perimeter) that's the shorter arc
-        let fwdLen = (pe - ps + per) % per;
-        const forward = fwdLen <= per - fwdLen;
-        if (!forward) { const tmp = startPos; startPos = endPos; endPos = tmp; ps = perOf(startPos); pe = perOf(endPos); fwdLen = (pe - ps + per) % per; }
-        if (fwdLen < 1.5) return null; // too short to be a ribbon → caller falls back
+        const ps = perOf(startPos), pe = perOf(endPos);
+        // Always walk FORWARD start→end; the caller orders start/end to pick the
+        // drag direction (so it doesn't flip to the shorter arc mid-snake).
+        const fwdLen = (pe - ps + per) % per;
+        if (fwdLen < 1.5 || fwdLen > per - 0.5) return null; // too short / nearly a full loop
         // collect boundary path: start foot, intermediate vertices (forward), end foot
         const path = [foot(startPos)];
         const usedSeg = [startPos.i]; // segment index each path-segment belongs to
@@ -6642,7 +6641,41 @@
         const ll = [];
         inner.forEach(q => ll.push(proj.inv(q)));
         for (let k = outer.length - 1; k >= 0; k--) ll.push(proj.inv(outer[k]));
+        // Reject a self-intersecting ribbon (snaking across a concave notch or
+        // a far-drifted cursor twists the offset) — caller keeps the last good one.
+        if (ringSelfIntersects(ll)) return null;
         return ll;
+    }
+    function ringSelfIntersects(pts) {
+        const n = pts.length;
+        for (let i = 0; i < n; i++) {
+            const a1 = pts[i], a2 = pts[(i + 1) % n];
+            for (let j = i + 2; j < n; j++) {
+                if (i === 0 && j === n - 1) continue; // wrap-adjacent
+                if (segmentsCross(a1, a2, pts[j], pts[(j + 1) % n])) return true;
+            }
+        }
+        return false;
+    }
+    function ringTotalPerimeterM(ring) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); let per = 0;
+        for (let i = 0; i < m.length; i++) per += dM(m[i], m[(i + 1) % m.length]);
+        return per;
+    }
+    function ringPerimeterOfM(ring, pos) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); let cum = 0;
+        for (let i = 0; i < pos.i; i++) cum += dM(m[i], m[(i + 1) % m.length]);
+        return cum + pos.t * dM(m[pos.i], m[(pos.i + 1) % m.length]);
+    }
+    function ringNearestDistM(at, ring) {
+        let best = Infinity;
+        for (let i = 0; i < ring.length; i++) {
+            const d = pointToSegMeters(at.lat, at.lng, ring[i], ring[(i + 1) % ring.length]);
+            if (d < best) best = d;
+        }
+        return best;
     }
     // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
     function refreshFfzLineFlag(f) {
@@ -6691,28 +6724,42 @@
             if (!genEdit.dragging || !genEdit.activePoly) return;
             const f = genEdit.activePoly._ffz;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            if (ev.altKey) {
-                // Auto-extend ribbon: anchor on first Alt move, then grow along
-                // the pad boundary to the cursor (snakes + miters around corners).
+            if (ev.ctrlKey || ev.metaKey) {
+                // CTRL = snake: anchor on first Ctrl move, then grow the ribbon
+                // along the pad to the cursor, mitering corners. Direction is
+                // locked from the initial drag so it doesn't flip to the short arc.
                 if (!genEdit.ribbon) {
                     const np = nearestPadProjection(ll);
-                    if (np) genEdit.ribbon = { asset: np.asset, ring: np.ring, start: np.pos };
+                    if (np) genEdit.ribbon = { asset: np.asset, ring: np.ring, start: np.pos, dir: 0, per: ringTotalPerimeterM(np.ring), ps: ringPerimeterOfM(np.ring, np.pos) };
                 }
-                let done = false;
-                if (genEdit.ribbon) {
-                    const end = projectOntoRing(ll, genEdit.ribbon.ring);
-                    const p = genState.lastParams || GEN_DEFAULTS;
-                    const pts = end && buildRibbon(genEdit.ribbon.ring, genEdit.ribbon.start, end, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
-                    if (pts && pts.length >= 4) {
-                        f.points = pts; f._centroid = ringCentroid(pts);
-                        f._assetId = genEdit.ribbon.asset.id; f._assetName = genEdit.ribbon.asset.name || `#${genEdit.ribbon.asset.id}`;
-                        f._side = 'ribbon'; f._offsetFt = 0;
-                        done = true;
+                const rb = genEdit.ribbon;
+                if (rb && ringNearestDistM(ll, rb.ring) < 120 * GEN_FT_TO_M) {
+                    const end = projectOntoRing(ll, rb.ring);
+                    if (end) {
+                        const pc = ringPerimeterOfM(rb.ring, end);
+                        if (!rb.dir) {
+                            const fwd = ((pc - rb.ps) % rb.per + rb.per) % rb.per;
+                            if (fwd > 0.3 && fwd < rb.per - 0.3) rb.dir = (fwd <= rb.per - fwd) ? 1 : -1;
+                        }
+                        if (rb.dir) {
+                            const p = genState.lastParams || GEN_DEFAULTS;
+                            const a = rb.dir > 0 ? rb.start : end, b = rb.dir > 0 ? end : rb.start;
+                            const pts = buildRibbon(rb.ring, a, b, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+                            if (pts && pts.length >= 4) {
+                                f.points = pts; f._centroid = ringCentroid(pts);
+                                f._assetId = rb.asset.id; f._assetName = rb.asset.name || `#${rb.asset.id}`;
+                                f._side = 'ribbon'; f._offsetFt = 0;
+                            }
+                        }
                     }
                 }
-                if (!done) snapFfzToNearestEdge(f, ll); // span too short → single edge
+                // not updated this move (cursor off-pad / no dir yet / would twist)
+                // → keep the last good ribbon, don't translate.
+            } else if (ev.altKey) {
+                genEdit.ribbon = null;
+                snapFfzToNearestEdge(f, ll); // snap to the single edge under the cursor
             } else {
-                genEdit.ribbon = null; // Alt released → next Alt re-anchors
+                genEdit.ribbon = null;
                 if (genEdit.lastLatLng) translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
             }
             genEdit.lastLatLng = ll;
@@ -6729,19 +6776,8 @@
             try { map.dragging.enable(); } catch (e) {}
             if (poly) { setActivePolyStyle(poly, false); finalizeFfzEdit(poly._ffz); }
             genEdit.activePoly = null;
-            if (!genEdit.hovered) { try { map.scrollWheelZoom.enable(); } catch (e) {} }
+            try { map.scrollWheelZoom.enable(); } catch (e) {}
         };
-        genEdit.onWheel = (ev) => {
-            const poly = genEdit.activePoly || genEdit.hovered;
-            if (!poly || !poly._ffz) return; // not over an FFZ → let the map zoom
-            ev.preventDefault(); ev.stopPropagation();
-            const f = poly._ffz;
-            rotateFfz(f, ev.deltaY < 0 ? 10 : -10);
-            try { poly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {}
-            refreshFfzLineFlag(f);
-            restyleFfzPoly(f);
-        };
-        genEdit.container.addEventListener('wheel', genEdit.onWheel, { passive: false, capture: true });
         // Keyboard: Q/E rotate the FFZ while dragging it (easier than scrolling
         // with the mouse button held); Delete removes the hovered/active FFZ.
         // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
@@ -6780,12 +6816,10 @@
     function attachFfzEditHandlers(poly, map) {
         poly.on('mouseover', () => {
             genEdit.hovered = poly;
-            try { map.scrollWheelZoom.disable(); } catch (e) {}
             try { if (poly._path) poly._path.style.cursor = 'move'; } catch (e) {}
         });
         poly.on('mouseout', () => {
             if (genEdit.hovered === poly) genEdit.hovered = null;
-            if (!genEdit.dragging) { try { map.scrollWheelZoom.enable(); } catch (e) {} }
         });
         poly.on('mousedown', (e) => {
             genEdit.dragging = true;
