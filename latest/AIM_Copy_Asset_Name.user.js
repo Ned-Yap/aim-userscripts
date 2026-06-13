@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.12
+// @version      4.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.12';
+    const SCRIPT_VERSION = '4.13';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6991,6 +6991,19 @@
         return res;
     }
 
+    // Direct-API writes don't refresh Percepto's live map (it renders from its
+    // own React state) — a reload pulls them in. Offer a one-click reload.
+    function appendReloadBtn(el) {
+        try {
+            const b = document.createElement('button');
+            b.textContent = '🔄 Reload page';
+            b.style.cssText = 'margin-top:6px;background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px';
+            b.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
+            el.appendChild(document.createElement('br'));
+            el.appendChild(b);
+        } catch (e) {}
+    }
+
     const GEN_MODAL_PARAM_IDS = {
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
@@ -7014,18 +7027,20 @@
         const eligibleCount = assets.filter(a => !assetSkipReason(a)).length;
         const siteName = getCurrentSiteName() || `Site ${siteID}`;
         const d = GEN_DEFAULTS;
+        // Floating panel (no dimming backdrop) so the map stays visible +
+        // editable while it's open. m is a zero-size, click-through holder.
         const m = document.createElement('div');
         m.id = GEN_MODAL_ID;
-        m.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;background:rgba(0,0,0,0.7);z-index:100000;display:flex;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        m.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:100000;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
         const box = document.createElement('div');
-        box.style.cssText = 'background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:20px 24px;min-width:480px;max-width:90vw;max-height:90vh;overflow-y:auto;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:12px 16px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
         const numField = (key, label, hint, step) => `
             <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
                 <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
                 <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
             </label>`;
         box.innerHTML = `
-            <div style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px">⊕ Site Setup Generator</div>
+            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
             <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
             <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
                 Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
@@ -7074,7 +7089,17 @@
         `;
         m.appendChild(box);
         document.body.appendChild(m);
-        m.onclick = (ev) => { if (ev.target === m) closeSiteGenerator(); };
+        // Drag by the title (resize via the box's native ↘ handle).
+        const titleEl = box.querySelector('#aim-gen-title');
+        if (titleEl) titleEl.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const r = box.getBoundingClientRect();
+            const ox = r.left, oy = r.top, sx = e.clientX, sy = e.clientY;
+            const mv = (ev) => { box.style.left = (ox + ev.clientX - sx) + 'px'; box.style.top = Math.max(0, oy + ev.clientY - sy) + 'px'; box.style.right = 'auto'; };
+            const up = () => { document.removeEventListener('mousemove', mv, true); document.removeEventListener('mouseup', up, true); };
+            document.addEventListener('mousemove', mv, true);
+            document.addEventListener('mouseup', up, true);
+        });
 
         // Power-line availability — request from Map Styler + poll for arrival.
         const plStatusEl = box.querySelector('#aim-gen-pl-status');
@@ -7165,11 +7190,12 @@
                     commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
                 } else {
                     if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
-                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded · preview cleared.</span>' : ''}`;
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded. Percepto\'s map won\'t show them until the page reloads.</span>' : ''}`;
                     if (r.created) {
                         clearGenPreview();
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
-                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'}`, 'rgba(95,255,95,0.5)');
+                        appendReloadBtn(commitResult);
+                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'} — reload to see on map`, 'rgba(95,255,95,0.5)');
                     }
                 }
             } catch (e) {
@@ -7186,9 +7212,10 @@
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}</span>` : '';
                 if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> DRAFT FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
                 else {
-                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}`;
+                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}<br><span style="color:#888">Reload to update the map.</span>`;
                     try { renderSummaryPanel(genState.siteID); } catch (e) {}
-                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'}`, 'rgba(255,90,90,0.5)');
+                    if (r.deleted) appendReloadBtn(commitResult);
+                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'} — reload to update map`, 'rgba(255,90,90,0.5)');
                 }
             } catch (e) {
                 commitResult.innerHTML = `<span style="color:#ff8a80">Remove failed: ${xmlEscape(String(e && e.message || e))}</span>`;

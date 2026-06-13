@@ -12,6 +12,11 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — movable panel + reload prompt (dev-only) — Asset Inspector v4.13
+
+- **The Generate panel is now a floating, draggable, resizable window** instead of a full-screen dimming dialog. Drag it by the title, resize from the ↘ corner, and — because there's no backdrop anymore — the **map stays visible and editable** while it's open (so you can preview, then snake/move FFZs without closing it).
+- **Commit and Remove now offer a one-click 🔄 Reload** — direct-API writes don't refresh Percepto's live map (it renders from its own React state), so committed/deleted FFZs only appear on the map after a reload (they show in the native sidebar immediately). The button saves the manual F5.
+
 ## 2026-06-12 — Site Setup Generator — legal FFZ names (dev-only) — Asset Inspector v4.12
 
 Commit was 400ing because Percepto only allows **letters, numbers, spaces, `_` and `-`** in entity names/descriptions — the `[DRAFT]` brackets were illegal. The draft prefix is now **`DRAFT `** (no brackets), every generated name is **sanitized** to the legal character set (e.g. `well#7 (north)` → `DRAFT well 7 north FFZ`), the description is forced empty, and the re-home (Alt-snap / Ctrl-snake) updates the name to the new pad. Bulk-undo now matches the `DRAFT ` prefix.
