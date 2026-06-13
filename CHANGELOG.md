@@ -12,6 +12,11 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — no-reload commit + end-resize handles (dev-only) — Asset Inspector v4.14
+
+- **Committed FFZs now show on the map immediately — no reload needed.** After Commit, the FFZs stay drawn as a solid-green, locked overlay (Percepto's own map still needs a reload to make them *natively* editable, but you can see them right away; our tools also re-fetch so they're real for routing/validators). Remove drops those overlays too. (The reload button stays on Remove for any FFZs Percepto rendered in an earlier session.)
+- **Resize an FFZ from either end.** Hover a snapped/snaked FFZ and two yellow **end-handles** appear; drag one to shorten or lengthen *that* end along the pad — the rest of the shape stays put, and dragging an end past a corner snakes it around (and back). No more redrawing the whole thing just to trim one side.
+
 ## 2026-06-12 — Site Setup Generator — movable panel + reload prompt (dev-only) — Asset Inspector v4.13
 
 - **The Generate panel is now a floating, draggable, resizable window** instead of a full-screen dimming dialog. Drag it by the title, resize from the ↘ corner, and — because there's no backdrop anymore — the **map stays visible and editable** while it's open (so you can preview, then snake/move FFZs without closing it).

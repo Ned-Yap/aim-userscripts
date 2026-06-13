@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.13
+// @version      4.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.13';
+    const SCRIPT_VERSION = '4.14';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6412,6 +6412,7 @@
 
     function clearGenPreview() {
         unwireGenEditing();
+        clearResizeHandles();
         const map = getLeafletMap();
         genPreviewLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         genPreviewLayers = [];
@@ -6429,7 +6430,7 @@
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag along the pad = snake corners · Del = delete</span>${flagTip}`;
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag = snake corners · drag yellow ends = resize · Del = delete</span>${flagTip}`;
     }
     function restyleFfzPoly(f) {
         const poly = f && f._poly;
@@ -6514,7 +6515,7 @@
             for (let i = 0; i < ring.length; i++) {
                 const A = ring[i], B = ring[(i + 1) % ring.length];
                 const d = pointToSegMeters(at.lat, at.lng, A, B);
-                if (!best || d < best.d) best = { d, A, B, asset: a, cen };
+                if (!best || d < best.d) best = { d, A, B, asset: a, cen, i };
             }
         }
         if (!best) return false;
@@ -6526,6 +6527,8 @@
         f.name = genDraftName(f._assetName);
         const e = edgeOutwardNormal(best.A, best.B, best.cen);
         f._side = compassFromNormal(e.nx, e.ny); f._offsetFt = 0;
+        const ring = entityCoords(best.asset);
+        f._param = { ring, assetId: best.asset.id, startPer: ringPerimeterOfM(ring, { i: best.i, t: 0 }), endPer: ringPerimeterOfM(ring, { i: best.i, t: 1 }) };
         return true;
     }
 
@@ -6724,6 +6727,95 @@
         restyleFfzPoly(f);
     }
 
+    // Mark a committed FFZ: keep it drawn (visible without a page reload) but
+    // stop editing it; distinct solid-green style.
+    function markFfzCommitted(f) {
+        f._committed = true;
+        const poly = f && f._poly;
+        if (!poly) return;
+        try {
+            poly.setStyle({ color: '#22e36b', fillColor: '#22e36b', weight: 2, dashArray: '', fillOpacity: 0.12, opacity: 1 });
+            if (poly._path) poly._path.style.cursor = 'default';
+        } catch (e) {}
+    }
+
+    // ---- end-resize handles (shorten/lengthen an FFZ's ends) ----
+    // Midpoints of the two end caps (points = inner half ++ reversed outer half).
+    function ffzEndCaps(pts) {
+        const n = pts.length; if (n < 4 || n % 2 !== 0) return null;
+        const h = n / 2;
+        const mid = (a, b) => ({ lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
+        return { start: mid(pts[0], pts[n - 1]), end: mid(pts[h - 1], pts[h]) };
+    }
+    let genHandles = { f: null, markers: [], hideTimer: null };
+    function clearResizeHandles() {
+        const map = getLeafletMap();
+        genHandles.markers.forEach(mk => { try { if (map) map.removeLayer(mk); } catch (e) {} });
+        genHandles.markers = []; genHandles.f = null;
+        if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; }
+    }
+    function scheduleHideHandles() {
+        if (genHandles.hideTimer) clearTimeout(genHandles.hideTimer);
+        genHandles.hideTimer = setTimeout(clearResizeHandles, 400);
+    }
+    // Show two draggable end-handles on a snapped/snaked FFZ (those carry
+    // _param = the pad ring + the two perimeter endpoints). Dragging a handle
+    // moves that end along the pad and rebuilds the ribbon, keeping the rest.
+    function showResizeHandles(f) {
+        if (!f || !f._param || f._committed) return;
+        if (genHandles.f === f) { if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; } return; }
+        clearResizeHandles();
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const caps = ffzEndCaps(f.points);
+        if (!caps) return;
+        genHandles.f = f;
+        ['start', 'end'].forEach(which => {
+            const c = caps[which];
+            const mk = L.circleMarker([c.lat, c.lng], { radius: 6, color: '#000000', weight: 1.5, fillColor: '#ffe14d', fillOpacity: 1, interactive: true, bubblingMouseEvents: false });
+            mk._which = which;
+            mk.addTo(map);
+            mk.on('mouseover', () => { if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; } try { if (mk._path) mk._path.style.cursor = 'pointer'; } catch (e) {} });
+            mk.on('mouseout', scheduleHideHandles);
+            mk.on('mousedown', (e) => startHandleDrag(e, f, which, map));
+            genHandles.markers.push(mk);
+        });
+    }
+    function startHandleDrag(e, f, which, map) {
+        if (f._committed || !f._param) return;
+        try { map.dragging.disable(); } catch (err) {}
+        try { map.scrollWheelZoom.disable(); } catch (err) {}
+        try { uwin().__AIM_FFZ_DRAG = true; } catch (err) {}
+        const onMove = (ev) => {
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (er) { return; }
+            const pos = projectOntoRing(ll, f._param.ring);
+            if (!pos) return;
+            const newPer = ringPerimeterOfM(f._param.ring, pos);
+            const startPer = which === 'start' ? newPer : f._param.startPer;
+            const endPer = which === 'end' ? newPer : f._param.endPer;
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const pts = buildRibbon(f._param.ring, perToPos(f._param.ring, startPer), perToPos(f._param.ring, endPer), p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+            if (pts && pts.length >= 4) {
+                f._param.startPer = startPer; f._param.endPer = endPer;
+                f.points = pts; f._centroid = ringCentroid(pts);
+                try { f._poly.setLatLngs(pts.map(q => [q.lat, q.lng])); } catch (er) {}
+                const caps = ffzEndCaps(pts);
+                if (caps) genHandles.markers.forEach(mk => { try { mk.setLatLng([caps[mk._which].lat, caps[mk._which].lng]); } catch (er) {} });
+            }
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove, true);
+            document.removeEventListener('mouseup', onUp, true);
+            try { map.dragging.enable(); } catch (err) {}
+            try { map.scrollWheelZoom.enable(); } catch (err) {}
+            try { uwin().__AIM_FFZ_DRAG = false; } catch (err) {}
+            finalizeFfzEdit(f);
+        };
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+        try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (err) {}
+    }
+
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
     function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
     function deleteFfzPoly(poly) {
@@ -6783,6 +6875,9 @@
                                 f._assetId = rb.asset.id; f._assetName = rb.asset.name || `#${rb.asset.id}`;
                                 f.name = genDraftName(f._assetName);
                                 f._side = 'ribbon'; f._offsetFt = 0;
+                                const aPer = ((rb.ps + (off >= 0 ? 0 : off)) % rb.per + rb.per) % rb.per;
+                                const bPer = ((rb.ps + (off >= 0 ? off : 0)) % rb.per + rb.per) % rb.per;
+                                f._param = { ring: rb.ring, assetId: rb.asset.id, startPer: aPer, endPer: bPer };
                             }
                         }
                     }
@@ -6816,7 +6911,7 @@
         // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
         genEdit.onKey = (ev) => {
             const poly = genEdit.activePoly || genEdit.hovered;
-            if (!poly || !poly._ffz) return;
+            if (!poly || !poly._ffz || poly._ffz._committed) return;
             const k = (ev.key || '').toLowerCase();
             if (k === 'delete') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
@@ -6849,10 +6944,12 @@
     function attachFfzEditHandlers(poly, map) {
         poly.on('mouseover', () => {
             genEdit.hovered = poly;
-            try { if (poly._path) poly._path.style.cursor = 'move'; } catch (e) {}
+            try { if (poly._path) poly._path.style.cursor = (poly._ffz && poly._ffz._committed) ? 'default' : 'move'; } catch (e) {}
+            if (poly._ffz && poly._ffz._param && !poly._ffz._committed) showResizeHandles(poly._ffz);
         });
         poly.on('mouseout', () => {
             if (genEdit.hovered === poly) genEdit.hovered = null;
+            scheduleHideHandles();
         });
         // Right-click (M2) → show the FFZ info popup (built fresh, current state).
         poly.on('contextmenu', (e) => {
@@ -6863,6 +6960,7 @@
             } catch (err) {}
         });
         poly.on('mousedown', (e) => {
+            if (poly._ffz && poly._ffz._committed) return; // committed = locked
             genEdit.dragging = true;
             genEdit.activePoly = poly;
             try { genEdit.lastLatLng = e.latlng; } catch (err) { genEdit.lastLatLng = null; }
@@ -7190,12 +7288,13 @@
                     commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
                 } else {
                     if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
-                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded. Percepto\'s map won\'t show them until the page reloads.</span>' : ''}`;
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
                     if (r.created) {
-                        clearGenPreview();
+                        // Keep committed FFZs drawn (no reload needed to see them) + lock them.
+                        clearResizeHandles();
+                        (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
-                        appendReloadBtn(commitResult);
-                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'} — reload to see on map`, 'rgba(95,255,95,0.5)');
+                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'}`, 'rgba(95,255,95,0.5)');
                     }
                 }
             } catch (e) {
@@ -7212,10 +7311,15 @@
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}</span>` : '';
                 if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> DRAFT FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
                 else {
-                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}<br><span style="color:#888">Reload to update the map.</span>`;
+                    // Drop our committed overlays (session-created); any FFZs Percepto
+                    // already rendered (earlier sessions) still need a reload to vanish.
+                    const map = getLeafletMap();
+                    genPreviewLayers.filter(pl => pl._ffz && pl._ffz._committed).forEach(pl => { try { if (map) map.removeLayer(pl); } catch (e) {} });
+                    genPreviewLayers = genPreviewLayers.filter(pl => !(pl._ffz && pl._ffz._committed));
+                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}<br><span style="color:#888">If any linger on the map, reload to clear them.</span>`;
                     try { renderSummaryPanel(genState.siteID); } catch (e) {}
                     if (r.deleted) appendReloadBtn(commitResult);
-                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'} — reload to update map`, 'rgba(255,90,90,0.5)');
+                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'}`, 'rgba(255,90,90,0.5)');
                 }
             } catch (e) {
                 commitResult.innerHTML = `<span style="color:#ff8a80">Remove failed: ${xmlEscape(String(e && e.message || e))}</span>`;
