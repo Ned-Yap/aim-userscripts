@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.10
+// @version      4.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.10';
+    const SCRIPT_VERSION = '4.11';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6906,6 +6906,80 @@
         return genPreviewLayers.length;
     }
 
+    // ===== A1.5 — commit the draft FFZs as new entities =====
+    // Build the create body for one generated FFZ. Prefer cloning an existing
+    // FFZ's write-body as a template (guarantees every field the server wants);
+    // fall back to a minimal body. No id ⇒ the upsert creates a new entity.
+    function genCreateBody(f, siteID, siteCfg, tmplBody) {
+        let b;
+        if (tmplBody) b = JSON.parse(JSON.stringify(tmplBody));
+        else b = { type: 16, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false };
+        delete b.id;
+        b.type = 16;
+        b.name = f.name;
+        b.site_id = siteID;
+        b.points = f.points;
+        b.restrictions = { minAlt: f.restrictions.minAlt, maxAlt: f.restrictions.maxAlt, minEmergencyAlt: null };
+        b.validated = false;
+        b.arcs = [];
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        return b;
+    }
+    // POST each draft FFZ to /map_objects/ (cookie + CSRF). dryRun builds +
+    // counts without writing. Returns { created, failed, skipped, ids, errors }.
+    async function commitGeneratedFfzs(ffzs, opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { created: 0, failed: 0, skipped: 0, ids: [], errors: [], dryRun };
+        if (!ffzs || !ffzs.length) return res;
+        const csrf = getCsrfToken();
+        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
+        const bucket = mapObjectsBySite[siteID];
+        const tmplEnt = bucket && bucket.entities && bucket.entities.find(e => e.type === 16 && entityCoords(e));
+        let tmplBody = null;
+        if (tmplEnt) { try { tmplBody = buildWriteBody(tmplEnt, siteCfg); } catch (e) {} }
+        for (const f of ffzs) {
+            if (!f.restrictions || typeof f.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${f.name}: no DEM altitude — skipped`); continue; }
+            const body = genCreateBody(f, siteID, siteCfg, tmplBody);
+            if (dryRun) { res.created++; continue; }
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    res.created++;
+                    if (saved.id != null) { res.ids.push({ id: saved.id, name: f.name }); f._committedId = saved.id; }
+                } else { res.failed++; res.errors.push(`${f.name}: server ${r.status} ${(txt || '').slice(0, 140)}`); }
+            } catch (e) { res.failed++; res.errors.push(`${f.name}: POST threw ${e && e.message || e}`); }
+        }
+        return res;
+    }
+    // Bulk-undo: delete every FFZ on the site still named "[DRAFT] …" (the
+    // prefix is stripped when a CSM accepts a zone, so accepted ones are safe).
+    async function removeGeneratedFfzs(opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { deleted: 0, failed: 0, found: 0, errors: [], dryRun };
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        const bucket = mapObjectsBySite[siteID];
+        const drafts = ((bucket && bucket.entities) || []).filter(e => e.type === 16 && typeof e.name === 'string' && e.name.indexOf('[DRAFT] ') === 0);
+        res.found = drafts.length;
+        if (!drafts.length) return res;
+        const csrf = getCsrfToken();
+        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie'); return res; }
+        for (const e of drafts) {
+            if (dryRun) { res.deleted++; continue; }
+            try {
+                const r = await fetch(`https://percepto.app/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) res.deleted++;
+                else { res.failed++; res.errors.push(`${e.name} (#${e.id}): server ${r.status}`); }
+            } catch (err) { res.failed++; res.errors.push(`${e.name}: ${err && err.message || err}`); }
+        }
+        return res;
+    }
+
     const GEN_MODAL_PARAM_IDS = {
         standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
@@ -6972,10 +7046,19 @@
                 </div>
             </div>
             <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
-            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            </div>
+            <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
+                    <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove [DRAFT] FFZs</button>
+                </div>
+                <div id="aim-gen-commit-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Writes the previewed FFZs (named <b>[DRAFT] …</b>) via the Site Setup save. Dry-run first.</div>
             </div>
         `;
         m.appendChild(box);
@@ -7053,6 +7136,52 @@
                 previewBtn.disabled = false;
                 previewBtn.textContent = restore;
             }
+        };
+
+        const dryEl = box.querySelector('#aim-gen-dryrun');
+        const commitResult = box.querySelector('#aim-gen-commit-result');
+        const commitBtn = box.querySelector('#aim-gen-commit');
+        commitBtn.onclick = async () => {
+            const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+            if (!ffzs.length) { commitResult.innerHTML = '<span style="color:#ffb347">Nothing to commit — run Preview first.</span>'; return; }
+            const dry = !!dryEl.checked;
+            if (!dry && !confirm(`Create ${ffzs.length} FFZ${ffzs.length === 1 ? '' : 's'} on this site? They'll be named with a [DRAFT] prefix (removable via "Remove [DRAFT] FFZs").`)) return;
+            commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
+            try {
+                const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
+                if (dry) {
+                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                } else {
+                    if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded · preview cleared.</span>' : ''}`;
+                    if (r.created) {
+                        clearGenPreview();
+                        try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
+                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'}`, 'rgba(95,255,95,0.5)');
+                    }
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Commit failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { commitBtn.disabled = false; commitBtn.textContent = t0; }
+        };
+        const removeBtn = box.querySelector('#aim-gen-remove');
+        removeBtn.onclick = async () => {
+            const dry = !!dryEl.checked;
+            if (!dry && !confirm('Delete ALL [DRAFT]-named FFZs on this site? (Zones a CSM accepted — prefix stripped — are left alone.)')) return;
+            removeBtn.disabled = true; const t0 = removeBtn.textContent; removeBtn.textContent = 'Working…';
+            try {
+                const r = await removeGeneratedFfzs({ dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}</span>` : '';
+                if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> [DRAFT] FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
+                else {
+                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}`;
+                    try { renderSummaryPanel(genState.siteID); } catch (e) {}
+                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'}`, 'rgba(255,90,90,0.5)');
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Remove failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { removeBtn.disabled = false; removeBtn.textContent = t0; }
         };
         console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${eligibleCount} eligible)`);
     }

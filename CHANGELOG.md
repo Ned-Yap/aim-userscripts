@@ -12,6 +12,16 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — COMMIT the draft FFZs (dev-only) — Asset Inspector v4.11
+
+Closes the generate → tune → **commit** loop. A new **Commit** section in the ⊕ Generate modal:
+- **✓ Commit draft FFZs** writes every previewed (and hand-edited) FFZ to the site as a new entity via the Site Setup save (`POST /map_objects/`, cookie + CSRF). Each is created with its `[DRAFT] ` name, `validated:false`, the DEM-derived MSL altitude band, and all the fields a real freezone carries (cloned from an existing FFZ as a template). FFZs still missing a DEM altitude are skipped + reported.
+- **Dry run** (on by default) builds + counts everything without writing — run it first.
+- On a real commit it **downloads a manifest** of the created IDs, clears the preview, and refreshes the SUM panel.
+- **🗑 Remove [DRAFT] FFZs** is the bulk-undo — deletes every FFZ on the site still named `[DRAFT] …` (zones a CSM has accepted, with the prefix stripped, are left alone). Also has a dry-run that just counts.
+
+Per-FFZ success/failure is reported in the modal. Validated offline: the create body carries the full FFZ field set with no id (so the upsert creates), correct type/name/points/restrictions.
+
 ## 2026-06-12 — Site Setup Generator — snake both ways + right-click info (dev-only) — Asset Inspector v4.10
 
 - **The FFZ info popup now shows on right-click (M2) only**, not on hover — the hover tooltip was covering the pad while you were trying to snake/move. Right-click any draft FFZ to see its name, side, altitude band, and the control hints.
