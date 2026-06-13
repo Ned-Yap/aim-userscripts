@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.6
+// @version      4.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.6';
+    const SCRIPT_VERSION = '4.7';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6421,7 +6421,7 @@
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
-        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · scroll = rotate 10° · hold Alt = snap to a pad</span>${flagTip}`;
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E (or scroll) = rotate 10° · hold Alt = snap to nearest edge · Del = delete</span>${flagTip}`;
     }
     function restyleFfzPoly(f) {
         const poly = f && f._poly;
@@ -6462,32 +6462,62 @@
         else r = [-vL, vL, -(hv + s + d), -(hv + s)];
         return genBoxRing(obb, r[0], r[1], r[2], r[3]);
     }
-    // Snap the FFZ to the nearest face of whatever pad is closest to its
-    // current centroid (re-homes _assetId). Returns true if it snapped.
-    function snapFfzToNearestPad(f) {
+    // Outward unit normal of edge A→B (pointing away from the polygon
+    // centroid), in a local meters frame, plus the projector + endpoints.
+    function edgeOutwardNormal(A, B, polyCen) {
+        const proj = genProjector(A.lat, A.lng);
+        const a = proj.fwd(A), b = proj.fwd(B), c = proj.fwd(polyCen);
+        let ex = b.x - a.x, ey = b.y - a.y;
+        const len = Math.hypot(ex, ey) || 1;
+        let nx = -ey / len, ny = ex / len;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        if (nx * (c.x - mx) + ny * (c.y - my) > 0) { nx = -nx; ny = -ny; }
+        return { proj, a, b, nx, ny };
+    }
+    // Box offset off ONE polygon edge A→B: length = the edge, depth `d`,
+    // sitting `s` outward. 4 open corners (matches a single real edge, not
+    // the whole bounding side).
+    function edgeOffsetBox(A, B, polyCen, s, d) {
+        const e = edgeOutwardNormal(A, B, polyCen);
+        const P = (px, py) => e.proj.inv({ x: px, y: py });
+        return [
+            P(e.a.x + e.nx * s, e.a.y + e.ny * s),
+            P(e.b.x + e.nx * s, e.b.y + e.ny * s),
+            P(e.b.x + e.nx * (s + d), e.b.y + e.ny * (s + d)),
+            P(e.a.x + e.nx * (s + d), e.a.y + e.ny * (s + d)),
+        ];
+    }
+    function compassFromNormal(nx, ny) {
+        let deg = Math.atan2(nx, ny) * 180 / Math.PI; // bearing from north, CW
+        if (deg < 0) deg += 360;
+        return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8];
+    }
+    // Snap the FFZ to the single polygon EDGE nearest `at` (the cursor), across
+    // all pads — re-homes _assetId, matches one real edge. Returns true if it
+    // snapped.
+    function snapFfzToNearestEdge(f, at) {
+        if (!at) at = f._centroid;
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
-        let bestA = null, bestD = Infinity;
+        let best = null;
         for (const a of ents) {
             if (a.type !== 3) continue;
             const ring = entityCoords(a);
-            if (!ring || ring.length < 3) continue;
-            const d = pointToPolygonMeters(f._centroid.lat, f._centroid.lng, ring);
-            if (d < bestD) { bestD = d; bestA = a; }
+            if (!ring || ring.length < 2) continue;
+            const cen = ringCentroid(ring);
+            for (let i = 0; i < ring.length; i++) {
+                const A = ring[i], B = ring[(i + 1) % ring.length];
+                const d = pointToSegMeters(at.lat, at.lng, A, B);
+                if (!best || d < best.d) best = { d, A, B, asset: a, cen };
+            }
         }
-        if (!bestA) return false;
-        const obb = orientedBBox(entityCoords(bestA));
-        if (!obb) return false;
-        // centroid in the pad's asset-centered (u,v) frame → pick the side
-        const m = obb.proj.fwd(f._centroid);
-        const ca = Math.cos(obb.a), sa = Math.sin(obb.a);
-        const ru = (m.x - obb.cx) * ca + (m.y - obb.cy) * sa;
-        const rv = -(m.x - obb.cx) * sa + (m.y - obb.cy) * ca;
-        const side = (Math.abs(ru) - obb.hu >= Math.abs(rv) - obb.hv) ? (ru > 0 ? 'E' : 'W') : (rv > 0 ? 'N' : 'S');
+        if (!best) return false;
         const p = genState.lastParams || GEN_DEFAULTS;
-        f.points = buildFaceBox(obb, side, p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+        const s = p.standoffFt * GEN_FT_TO_M, d = Math.max(p.depthFt, 30) * GEN_FT_TO_M;
+        f.points = edgeOffsetBox(best.A, best.B, best.cen, s, d);
         f._centroid = ringCentroid(f.points);
-        f._assetId = bestA.id; f._assetName = bestA.name || `#${bestA.id}`;
-        f._side = side; f._offsetFt = 0;
+        f._assetId = best.asset.id; f._assetName = best.asset.name || `#${best.asset.id}`;
+        const e = edgeOutwardNormal(best.A, best.B, best.cen);
+        f._side = compassFromNormal(e.nx, e.ny); f._offsetFt = 0;
         return true;
     }
     // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
@@ -6511,7 +6541,24 @@
     }
 
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
-    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null };
+    function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
+    function deleteFfzPoly(poly) {
+        if (!poly) return;
+        const map = getLeafletMap();
+        try { if (map) map.removeLayer(poly); } catch (e) {}
+        const i = genPreviewLayers.indexOf(poly);
+        if (i >= 0) genPreviewLayers.splice(i, 1);
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) {
+            const j = genState.lastResult.ffzs.indexOf(poly._ffz);
+            if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+        }
+        if (genEdit.hovered === poly) genEdit.hovered = null;
+        if (genEdit.activePoly === poly) { genEdit.activePoly = null; genEdit.dragging = false; }
+        try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
+        try { if (map) { map.dragging.enable(); map.scrollWheelZoom.enable(); } } catch (e) {}
+        showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
+    }
+    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null };
     function wireGenEditing(map) {
         if (genEdit.wired) return;
         genEdit.map = map;
@@ -6521,7 +6568,7 @@
             const f = genEdit.activePoly._ffz;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             if (ev.altKey) {
-                snapFfzToNearestPad(f);
+                snapFfzToNearestEdge(f, ll);
             } else if (genEdit.lastLatLng) {
                 translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
             }
@@ -6531,6 +6578,7 @@
         genEdit.domUp = () => {
             if (!genEdit.dragging) return;
             genEdit.dragging = false;
+            try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
             document.removeEventListener('mousemove', genEdit.domMove, true);
             document.removeEventListener('mouseup', genEdit.domUp, true);
             const poly = genEdit.activePoly;
@@ -6550,15 +6598,40 @@
             restyleFfzPoly(f);
         };
         genEdit.container.addEventListener('wheel', genEdit.onWheel, { passive: false, capture: true });
+        // Keyboard: Q/E rotate the FFZ while dragging it (easier than scrolling
+        // with the mouse button held); Delete removes the hovered/active FFZ.
+        // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
+        genEdit.onKey = (ev) => {
+            const poly = genEdit.activePoly || genEdit.hovered;
+            if (!poly || !poly._ffz) return;
+            const k = (ev.key || '').toLowerCase();
+            if (k === 'delete') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                deleteFfzPoly(poly);
+                return;
+            }
+            if (!genEdit.dragging || poly !== genEdit.activePoly) return; // Q/E only mid-drag
+            if (k === 'q' || k === 'e') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                rotateFfz(poly._ffz, k === 'q' ? 10 : -10);
+                try { poly.setLatLngs(poly._ffz.points.map(p => [p.lat, p.lng])); } catch (err) {}
+                refreshFfzLineFlag(poly._ffz);
+                restyleFfzPoly(poly._ffz);
+            }
+        };
+        genEdit.keyWin = uwin();
+        try { genEdit.keyWin.addEventListener('keydown', genEdit.onKey, true); } catch (e) {}
         genEdit.wired = true;
     }
     function unwireGenEditing() {
         if (genEdit.domMove) { try { document.removeEventListener('mousemove', genEdit.domMove, true); } catch (e) {} }
         if (genEdit.domUp) { try { document.removeEventListener('mouseup', genEdit.domUp, true); } catch (e) {} }
         if (genEdit.container && genEdit.onWheel) { try { genEdit.container.removeEventListener('wheel', genEdit.onWheel, { capture: true }); } catch (e) {} }
+        if (genEdit.keyWin && genEdit.onKey) { try { genEdit.keyWin.removeEventListener('keydown', genEdit.onKey, true); } catch (e) {} }
+        try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
         const map = genEdit.map;
         if (map) { try { map.dragging.enable(); map.scrollWheelZoom.enable(); } catch (e) {} }
-        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null };
+        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null };
     }
     function attachFfzEditHandlers(poly, map) {
         poly.on('mouseover', () => {
@@ -6575,6 +6648,8 @@
             genEdit.activePoly = poly;
             try { genEdit.lastLatLng = e.latlng; } catch (err) { genEdit.lastLatLng = null; }
             try { map.dragging.disable(); } catch (err) {}
+            try { map.scrollWheelZoom.disable(); } catch (err) {}
+            try { uwin().__AIM_FFZ_DRAG = true; } catch (err) {} // tell Map Nav to release Q/E
             setActivePolyStyle(poly, true);
             document.addEventListener('mousemove', genEdit.domMove, true);
             document.addEventListener('mouseup', genEdit.domUp, true);

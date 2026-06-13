@@ -12,6 +12,15 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — edit ergonomics (dev-only) — Asset Inspector v4.7 + Map Nav v0.9
+
+Refinements to the hand-edit tool from testing:
+- **Q / E rotate the FFZ while dragging** (10° per press) — easier than scrolling with the mouse button held. Scroll-rotate still works on hover. During a drag the map's zoom is suspended, and **Map Nav v0.9** releases its Q/E zoom (coordinated via a shared `__AIM_FFZ_DRAG` flag) so the keys rotate instead of zooming.
+- **Snap now follows the cursor and matches a single real edge.** Alt-snap targets the polygon edge nearest the *cursor* (not the FFZ's old center, which made it snap back where you started), and it sizes to **that one edge** — so an irregular/notched pad no longer gets one FFZ spanning the whole bounding side; you get the actual edge you're pointing at.
+- **Delete** removes the hovered/active FFZ from the preview (Del key).
+
+Validated offline: edge-snap sits 15 ft off the chosen edge, length = that edge, outward.
+
 ## 2026-06-12 — Site Setup Generator — hand-edit FFZs on the preview (dev-only) — Asset Inspector v4.6
 
 The draft FFZ previews are now **hand-editable on the map** before commit:
