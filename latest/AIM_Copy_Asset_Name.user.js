@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.17
+// @version      4.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.17';
+    const SCRIPT_VERSION = '4.18';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6918,22 +6918,32 @@
                 }
                 const rb = genEdit.ribbon;
                 if (rb && rb.active) {
-                    // bridge to / un-bridge from a neighbor pad when the cursor's nearest pad changes
-                    const np = nearestPadProjection(ll);
-                    if (np && np.asset && np.asset.id !== rb.active.asset.id) {
+                    // Bridge when the cursor comes near ANY other adjacent pad
+                    // (proximity, not "strictly nearest" — a big active pad can
+                    // stay nearest even when the cursor is over the neighbor).
+                    const ents2 = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                    let other = null, otherD = Infinity, otherRing = null;
+                    for (const a of ents2) {
+                        if (a.type !== 3 || a.id === rb.active.asset.id) continue;
+                        const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+                        const d = ringNearestDistM(ll, ring);
+                        if (d < otherD) { otherD = d; other = a; otherRing = ring; }
+                    }
+                    if (other && otherD < EXTEND_M) {
                         const prev = rb.segs[rb.segs.length - 1];
-                        if (prev && prev.asset.id === np.asset.id) {
+                        if (prev && prev.asset.id === other.id) {
                             rb.segs.pop(); rb.active = reviveActiveSeg(prev); // reversed back onto the previous pad
-                            console.log(`${GEN_TAG} snake un-bridged back to pad ${np.asset.id}`);
+                            console.log(`${GEN_TAG} snake un-bridged back to pad ${other.id}`);
                         } else {
-                            const gap = ringsNearestDistM(rb.active.ring, np.ring);
+                            const gap = ringsNearestDistM(rb.active.ring, otherRing);
                             if (gap < ADJ_M) {
                                 rb.segs.push(activeSegSpan(rb.active));
                                 const tip = activeTipLatLng(rb.active);
-                                rb.active = mkActiveSeg(np.asset, np.ring, (tip && projectOntoRing(tip, np.ring)) || np.pos);
-                                console.log(`${GEN_TAG} snake BRIDGED to pad ${np.asset.id} (gap ${Math.round(gap / GEN_FT_TO_M)} ft, ${rb.segs.length} seg(s) now)`);
-                            } else {
-                                console.log(`${GEN_TAG} snake: nearest pad ${np.asset.id} but gap ${Math.round(gap / GEN_FT_TO_M)} ft > ${Math.round(ADJ_M / GEN_FT_TO_M)} ft — no bridge`);
+                                rb.active = mkActiveSeg(other, otherRing, (tip && projectOntoRing(tip, otherRing)) || projectOntoRing(ll, otherRing));
+                                console.log(`${GEN_TAG} snake BRIDGED to pad ${other.id} (cursor ${Math.round(otherD / GEN_FT_TO_M)} ft from it, pads ${Math.round(gap / GEN_FT_TO_M)} ft apart, ${rb.segs.length} seg(s))`);
+                            } else if (genEdit._noBridgeWarn !== other.id) {
+                                genEdit._noBridgeWarn = other.id;
+                                console.log(`${GEN_TAG} snake: at pad ${other.id} but pads ${Math.round(gap / GEN_FT_TO_M)} ft apart > ${Math.round(ADJ_M / GEN_FT_TO_M)} ft limit — no bridge`);
                             }
                         }
                     }
