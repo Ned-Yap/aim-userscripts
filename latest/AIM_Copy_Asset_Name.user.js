@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.16
+// @version      4.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.16';
+    const SCRIPT_VERSION = '4.17';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6724,6 +6724,13 @@
         }
         return best;
     }
+    // Min distance (m) between two polygon rings (for pad adjacency).
+    function ringsNearestDistM(ringA, ringB) {
+        let best = Infinity;
+        for (const v of ringA) { const d = ringNearestDistM(v, ringB); if (d < best) best = d; }
+        for (const v of ringB) { const d = ringNearestDistM(v, ringA); if (d < best) best = d; }
+        return best;
+    }
     // Perimeter distance → boundary position {i, t}.
     function perToPos(ring, targetPer) {
         const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
@@ -6903,7 +6910,8 @@
                 // and well past halfway without flipping to the short arc.
                 const p = genState.lastParams || GEN_DEFAULTS;
                 const sM = p.standoffFt * GEN_FT_TO_M, dM2 = Math.max(p.depthFt, 30) * GEN_FT_TO_M;
-                const BRIDGE_M = 160 * GEN_FT_TO_M; // max gap to auto-bridge to a neighbor pad
+                const EXTEND_M = 90 * GEN_FT_TO_M;   // active pad keeps extending only this close to the cursor
+                const ADJ_M = 320 * GEN_FT_TO_M;     // bridge only between pads at most this far apart
                 if (!genEdit.ribbon) {
                     const np0 = nearestPadProjection(ll);
                     if (np0) genEdit.ribbon = { segs: [], active: mkActiveSeg(np0.asset, np0.ring, np0.pos) };
@@ -6916,17 +6924,22 @@
                         const prev = rb.segs[rb.segs.length - 1];
                         if (prev && prev.asset.id === np.asset.id) {
                             rb.segs.pop(); rb.active = reviveActiveSeg(prev); // reversed back onto the previous pad
+                            console.log(`${GEN_TAG} snake un-bridged back to pad ${np.asset.id}`);
                         } else {
-                            const tip = activeTipLatLng(rb.active);
-                            if (tip && ringNearestDistM(tip, np.ring) < BRIDGE_M) {
+                            const gap = ringsNearestDistM(rb.active.ring, np.ring);
+                            if (gap < ADJ_M) {
                                 rb.segs.push(activeSegSpan(rb.active));
-                                rb.active = mkActiveSeg(np.asset, np.ring, projectOntoRing(tip, np.ring) || np.pos);
+                                const tip = activeTipLatLng(rb.active);
+                                rb.active = mkActiveSeg(np.asset, np.ring, (tip && projectOntoRing(tip, np.ring)) || np.pos);
+                                console.log(`${GEN_TAG} snake BRIDGED to pad ${np.asset.id} (gap ${Math.round(gap / GEN_FT_TO_M)} ft, ${rb.segs.length} seg(s) now)`);
+                            } else {
+                                console.log(`${GEN_TAG} snake: nearest pad ${np.asset.id} but gap ${Math.round(gap / GEN_FT_TO_M)} ft > ${Math.round(ADJ_M / GEN_FT_TO_M)} ft — no bridge`);
                             }
                         }
                     }
-                    // extend the active pad toward the cursor
+                    // extend the active pad toward the cursor (only while close to it)
                     const act = rb.active;
-                    if (ringNearestDistM(ll, act.ring) < BRIDGE_M) {
+                    if (ringNearestDistM(ll, act.ring) < EXTEND_M) {
                         const end = projectOntoRing(ll, act.ring);
                         if (end) {
                             const pc = ringPerimeterOfM(act.ring, end);
@@ -6939,7 +6952,7 @@
                     const allSegs = rb.segs.concat(Math.abs(act.offset) >= 1.5 ? [activeSegSpan(act)] : []);
                     let pts = null;
                     if (allSegs.length === 1) pts = buildRibbon(allSegs[0].ring, allSegs[0].startPos, allSegs[0].endPos, sM, dM2);
-                    else if (allSegs.length >= 2) pts = buildMultiRibbon(allSegs, sM, dM2);
+                    else if (allSegs.length >= 2) { pts = buildMultiRibbon(allSegs, sM, dM2); if (!pts) console.log(`${GEN_TAG} snake: ${allSegs.length}-pad ribbon would self-intersect — kept last shape`); }
                     if (pts && pts.length >= 4) {
                         f.points = pts; f._centroid = ringCentroid(pts);
                         f._assetId = act.asset.id; f._assetName = act.asset.name || `#${act.asset.id}`;
