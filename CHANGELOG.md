@@ -12,6 +12,11 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — committed-FFZ popup + handle de-flicker (dev-only) — Asset Inspector v4.15
+
+- **Clicking a committed (locked, green) FFZ now pops up a short note** explaining it's saved and needs a page reload to be natively selectable in Percepto — with a 🔄 Reload button right there. (Stops the "it's there but I can't use it" confusion.)
+- **End-resize handles no longer flicker** while you move or snake an FFZ — they hide during any drag/snake and come back on hover when you're done.
+
 ## 2026-06-12 — Site Setup Generator — no-reload commit + end-resize handles (dev-only) — Asset Inspector v4.14
 
 - **Committed FFZs now show on the map immediately — no reload needed.** After Commit, the FFZs stay drawn as a solid-green, locked overlay (Percepto's own map still needs a reload to make them *natively* editable, but you can see them right away; our tools also re-fetch so they're real for routing/validators). Remove drops those overlays too. (The reload button stays on Remove for any FFZs Percepto rendered in an earlier session.)

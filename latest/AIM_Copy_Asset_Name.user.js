@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.14
+// @version      4.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.14';
+    const SCRIPT_VERSION = '4.15';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6727,6 +6727,23 @@
         restyleFfzPoly(f);
     }
 
+    // Clicking a committed (locked) FFZ explains why it isn't editable yet and
+    // offers a one-click reload (Percepto needs it to make the write native).
+    function showCommittedPopup(latlng) {
+        try {
+            const L = getLeafletL(), map = getLeafletMap();
+            if (!L || !map) return;
+            const div = document.createElement('div');
+            div.style.cssText = 'font:inherit;font-size:12px;color:#222;max-width:230px;line-height:1.45';
+            div.innerHTML = "<b>Committed FFZ</b><br>It's saved. Percepto needs a page reload before you can select / edit it natively on the map.";
+            const b = document.createElement('button');
+            b.textContent = '🔄 Reload page';
+            b.style.cssText = 'display:block;margin-top:8px;background:#1f8f4d;color:#fff;border:none;border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:600';
+            b.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
+            div.appendChild(b);
+            L.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(latlng).setContent(div).openOn(map);
+        } catch (e) {}
+    }
     // Mark a committed FFZ: keep it drawn (visible without a page reload) but
     // stop editing it; distinct solid-green style.
     function markFfzCommitted(f) {
@@ -6762,7 +6779,7 @@
     // _param = the pad ring + the two perimeter endpoints). Dragging a handle
     // moves that end along the pad and rebuilds the ribbon, keeping the rest.
     function showResizeHandles(f) {
-        if (!f || !f._param || f._committed) return;
+        if (!f || !f._param || f._committed || genEdit.dragging) return; // not mid-drag/snake
         if (genHandles.f === f) { if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; } return; }
         clearResizeHandles();
         const L = getLeafletL(), map = getLeafletMap();
@@ -6960,7 +6977,8 @@
             } catch (err) {}
         });
         poly.on('mousedown', (e) => {
-            if (poly._ffz && poly._ffz._committed) return; // committed = locked
+            if (poly._ffz && poly._ffz._committed) { try { showCommittedPopup(e.latlng); } catch (er) {} return; }
+            clearResizeHandles(); // hide handles while moving/snaking (stops flicker)
             genEdit.dragging = true;
             genEdit.activePoly = poly;
             try { genEdit.lastLatLng = e.latlng; } catch (err) { genEdit.lastLatLng = null; }
