@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.23
+// @version      4.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.23';
+    const SCRIPT_VERSION = '4.24';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7017,6 +7017,23 @@
         }
         return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1 };
     }
+    // Douglas-Peucker — drop near-collinear samples, keep the corners. Far
+    // fewer vertices → cleaner strip, easier to hand-edit.
+    function simplifyPath(pts, tolM) {
+        if (!pts || pts.length < 3) return pts || [];
+        const proj = genProjector(pts[0].lat, pts[0].lng);
+        const m = pts.map(p => proj.fwd(p));
+        const keep = new Array(m.length).fill(false);
+        keep[0] = keep[m.length - 1] = true;
+        const stack = [[0, m.length - 1]];
+        const pd = (p, a, b) => { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; if (!l2) return Math.hypot(p.x - a.x, p.y - a.y); let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2; t = Math.max(0, Math.min(1, t)); return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)); };
+        while (stack.length) {
+            const [a, b] = stack.pop(); let maxD = 0, idx = -1;
+            for (let i = a + 1; i < b; i++) { const d = pd(m[i], m[a], m[b]); if (d > maxD) { maxD = d; idx = i; } }
+            if (maxD > tolM && idx > 0) { keep[idx] = true; stack.push([a, idx], [idx, b]); }
+        }
+        return pts.filter((_, i) => keep[i]);
+    }
     // Stroke a centerline polyline into a strip outline (lat/lng), width 2*halfW.
     function strokePolyline(pts, halfW) {
         if (!pts || pts.length < 2) return null;
@@ -7037,7 +7054,7 @@
         const L = getLeafletL(), map = getLeafletMap();
         if (!L || !map) return;
         if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
-        const outline = strokePolyline(genDraw.pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        const outline = strokePolyline(simplifyPath(genDraw.pts, 10 * GEN_FT_TO_M), Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
         if (!outline || outline.length < 4) return;
         try {
             genDraw.poly = L.polygon(outline.map(q => [q.lat, q.lng]), { color: '#ffe14d', weight: 1.5, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.18, interactive: false });
@@ -7048,7 +7065,8 @@
         const map = getLeafletMap();
         if (genDraw.poly) { try { if (map) map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
         const p = genState.lastParams || GEN_DEFAULTS;
-        const outline = strokePolyline(genDraw.pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        const center = simplifyPath(genDraw.pts, 10 * GEN_FT_TO_M); // few clean vertices
+        const outline = strokePolyline(center, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
         genDraw.pts = []; genDraw.lastLL = null;
         if (!outline || outline.length < 4) return;
         const cen = ringCentroid(outline);
@@ -7245,9 +7263,13 @@
             const p = genState.lastParams || GEN_DEFAULTS;
             const snap = snapDrawPoint(ll, p);
             const prev = genDraw._lastSnap;
-            // crossed onto another edge of the same pad → trace the corner vertices
+            // crossed onto an ADJACENT edge of the same pad → trace the corner.
+            // Guard: only 1–2 edge steps (a real corner). A bigger jump means the
+            // snap flickered across the pad — inserting that arc wraps the pad and
+            // blobs the strip, so skip it.
             if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
-                for (const v of ringVerticesBetween(snap.off, prev.i, snap.i)) genDraw.pts.push(v);
+                const verts = ringVerticesBetween(snap.off, prev.i, snap.i);
+                if (verts.length && verts.length <= 2) for (const v of verts) genDraw.pts.push(v);
             }
             genDraw.pts.push(snap.pt); genDraw._lastSnap = snap; genDraw.lastLL = ll;
             renderDrawPreview(p);
