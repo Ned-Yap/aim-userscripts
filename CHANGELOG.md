@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — A2.1 shielded flight-path routing (preview) (dev-only) — Asset Inspector v4.34
+
+First slice of **A2: base→asset shielded flight-path generation**. New **🛩 Routes** button in the Generator builds a branching tree from the base station that snakes along power-line corridors to every near-line asset. Builds a routing graph from the power-line KML (densified vertices + corridor-hop connectors within 130 ft), connects the base + each asset (launch + approach legs), runs Dijkstra, and previews the result: **cyan = shielded corridor tree**, **dashed green/red = final approach** (reachable vs out-of-shield), **yellow ring = base**. Reports reachable/out-of-shield counts + launch distance. PREVIEW ONLY — no 40–65 ft offset, no altitudes, no commit yet (those are A2.2/A2.3). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — draw: junctions at any zoom + two-asset corners (dev-only) — Asset Inspector v4.33
 
 Fixes the corridor corner made of **two different assets** that wouldn't lock. Two causes: (1) snap-targets skipped any pad whose **centroid** was off-screen, so zooming into a corner dropped both pads and their junction — now all pads are considered, and the view only decides which dots to *draw*. (2) Junctions required a strict offset-ring crossing; a corner where the two pads' offset edges merely *touch* found nothing — now a near-perpendicular pair whose intersection lands on **both** edges (within ~12 ft) counts, so the two-asset corner gets a magenta lock dot. Added a `[AIM GEN] snap targets: N corner + M junction` console line. *(Dev/latest only.)*

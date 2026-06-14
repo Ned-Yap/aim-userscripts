@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.33
+// @version      4.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.33';
+    const SCRIPT_VERSION = '4.34';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1031,6 +1031,39 @@
             });
         }
         return dist;
+    }
+    // Dijkstra returning predecessors too, so we can RECONSTRUCT the path (the
+    // dist-only variant above is enough for reachability/length but A2 needs the
+    // actual waypoint chain). Returns { dist: Map<k,m>, prev: Map<k,k> }.
+    function dijkstraPath(graph, startKey) {
+        const dist = new Map(), prev = new Map();
+        if (!graph.adj.has(startKey)) return { dist, prev };
+        dist.set(startKey, 0);
+        const visited = new Set();
+        const pq = [{ k: startKey, d: 0 }];
+        while (pq.length) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const { k, d } = pq.splice(mi, 1)[0];
+            if (visited.has(k)) continue;
+            visited.add(k);
+            (graph.adj.get(k) || []).forEach(({ to, w }) => {
+                const nd = d + w;
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) {
+                    dist.set(to, nd); prev.set(to, k);
+                    pq.push({ k: to, d: nd });
+                }
+            });
+        }
+        return { dist, prev };
+    }
+    // Reconstruct the key-path startKey…endKey from a prev-map (inclusive).
+    function reconstructPath(prev, startKey, endKey) {
+        const path = [endKey];
+        let cur = endKey, guard = 0;
+        while (cur !== startKey && prev.has(cur) && guard++ < 100000) { cur = prev.get(cur); path.push(cur); }
+        if (cur !== startKey) return null; // unreachable
+        return path.reverse();
     }
     // Nearest graph vertex to a lat/lng. Returns {key, dist(m), vert}|null.
     function nearestGraphVertex(graph, lat, lng) {
@@ -6108,6 +6141,8 @@
         return genCleanName(`DRAFT ${assetName} FFZ`);
     }
     let genPreviewLayers = [];
+    let genRouteLayers = [];   // A2 flight-path route preview (polylines + markers)
+    let genRouteResult = null;  // last routeFlightPaths() result
 
     // Local east/north meters projection around an origin, and its
     // inverse — equirectangular, consistent with approxMeters. Good
@@ -6202,6 +6237,118 @@
         });
         if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
         return segs;
+    }
+
+    // ============================================================
+    // A2 — SHIELDED FLIGHT-PATH ROUTING (base → assets along power lines)
+    // ============================================================
+    // Tunables (feet). The drone travels ALONG power-line corridors; it may hop
+    // between corridors that pass within CONNECT_FT, and breaks shielding only for
+    // the base launch leg and the final asset approach.
+    const A2 = {
+        densifyFt: 40,      // node spacing along a power line (finer = more branch points, bigger graph)
+        connectFt: 130,     // two corridors within this can be hopped between (2×65 ft shield reach)
+        approachMaxFt: 220, // asset/base further than this from any line = out-of-shield (flag)
+        bufferFt: 15,       // never enter a pad+this buffer
+    };
+    function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
+    // Build a routing graph from the site's power lines: densified vertices along
+    // each segment (shielded travel edges) + connector edges between any two
+    // vertices within connectFt (lets the drone cross between nearby corridors).
+    // Returns { adj, verts } — same shape as buildFlightPathGraph, so dijkstra*/
+    // nearestGraphVertex work unchanged. Every edge carries { shielded:true }.
+    function buildPowerLineGraph(siteID) {
+        const segs = powerLineSegments(siteID);
+        const adj = new Map(), verts = new Map();
+        const addVert = (p) => { const k = vkey(p); if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng }); if (!adj.has(k)) adj.set(k, []); return k; };
+        const addEdge = (ka, kb, shielded) => { if (ka === kb) return; const w = approxMeters(verts.get(ka).lat, verts.get(ka).lng, verts.get(kb).lat, verts.get(kb).lng); adj.get(ka).push({ to: kb, w, shielded }); adj.get(kb).push({ to: ka, w, shielded }); };
+        const stepM = A2.densifyFt * GEN_FT_TO_M;
+        // 1) densify each PL segment into a node chain (shielded travel along line)
+        for (const [a, b] of segs) {
+            const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
+            const n = Math.max(1, Math.round(len / stepM));
+            let prevK = addVert(a);
+            for (let i = 1; i <= n; i++) { const k = addVert(a2Interp(a, b, i / n)); addEdge(prevK, k, true); prevK = k; }
+        }
+        // 2) connector edges between corridors that pass within connectFt. O(V²) —
+        //    a few hundred densified nodes per site, negligible. Skip pairs already
+        //    chain-adjacent (same line) — only NEW bridges matter.
+        const connM = A2.connectFt * GEN_FT_TO_M;
+        const keys = [...verts.keys()];
+        for (let i = 0; i < keys.length; i++) {
+            const vi = verts.get(keys[i]);
+            const adjSet = new Set((adj.get(keys[i]) || []).map(e => e.to));
+            for (let j = i + 1; j < keys.length; j++) {
+                if (adjSet.has(keys[j])) continue;
+                const vj = verts.get(keys[j]);
+                const d = approxMeters(vi.lat, vi.lng, vj.lat, vj.lng);
+                if (d > 0 && d <= connM) addEdge(keys[i], keys[j], d <= connM); // a hop within 2×65 ft stays shielded
+            }
+        }
+        return { adj, verts };
+    }
+    // Route a branching tree from the base to every eligible asset, snaking along
+    // power lines. Returns { ok, reason?, edges:[[p,p]…] (the union tree), assets:
+    // [{asset, reachable, path:[{lat,lng}…], approachFt, baseLaunchFt}], stats }.
+    // PREVIEW-ONLY (no offset, no altitude, no commit yet — that's A2.2/A2.3).
+    function routeFlightPaths(siteID, params) {
+        const bucket = mapObjectsBySite[siteID];
+        const entities = bucket ? (bucket.entities || []) : [];
+        const segs = powerLineSegments(siteID);
+        if (!segs.length) return { ok: false, reason: 'no-powerlines' };
+        const resolved = resolveBases(siteID, entities);
+        if (!resolved.bases.length) return { ok: false, reason: 'no-base' };
+        const basePt = gmPoint(resolved.bases[0]);
+        if (!basePt) return { ok: false, reason: 'base-no-coord' };
+        const graph = buildPowerLineGraph(siteID);
+        if (graph.verts.size === 0) return { ok: false, reason: 'no-graph' };
+        // connect the base to the nearest corridor node (unshielded launch leg)
+        const baseV = nearestGraphVertex(graph, basePt.lat, basePt.lng);
+        const baseKey = vkey(basePt);
+        graph.verts.set(baseKey, { lat: basePt.lat, lng: basePt.lng });
+        if (!graph.adj.has(baseKey)) graph.adj.set(baseKey, []);
+        graph.adj.get(baseKey).push({ to: baseV.key, w: baseV.dist, shielded: false });
+        graph.adj.get(baseV.key).push({ to: baseKey, w: baseV.dist, shielded: false });
+        const { dist, prev } = dijkstraPath(graph, baseKey);
+        // candidate assets: same skip rules + proximity gate as the FFZ generator
+        const proxM = params.proximityFt * GEN_FT_TO_M;
+        const approachMaxM = A2.approachMaxFt * GEN_FT_TO_M;
+        const baseLaunchFt = baseV.dist / GEN_FT_TO_M;
+        const out = [];
+        let reachable = 0, unreachable = 0;
+        for (const a of entities) {
+            if (a.type !== 3) continue;
+            if (params.skipBadStates && assetSkipReason(a)) continue;
+            const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            if (minRingToSegsM(ring, segs) > proxM) continue; // not near any power line
+            const cen = ringCentroid(ring);
+            // approach point: just outside the pad+buffer toward the nearest corridor node
+            const av = nearestGraphVertex(graph, cen.lat, cen.lng);
+            const approachFt = av.dist / GEN_FT_TO_M;
+            const net = dist.has(av.key) ? dist.get(av.key) : null;
+            if (net == null) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt }); unreachable++; continue; }
+            const keyPath = reconstructPath(prev, baseKey, av.key);
+            if (!keyPath) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt }); unreachable++; continue; }
+            const path = keyPath.map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
+            path.push({ lat: cen.lat, lng: cen.lng }); // branch tip = the asset (A2.2 will pull it back to the FFZ edge + buffer)
+            const inBand = approachFt <= A2.approachMaxFt;
+            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key });
+            if (inBand) reachable++; else unreachable++;
+        }
+        // union the per-asset key-paths into one branching tree (dedupe edges)
+        const edgeSet = new Set(), edges = [];
+        for (const r of out) {
+            if (!r.path || !r.reachable) continue;
+            const kp = reconstructPath(prev, baseKey, r._avKey);
+            if (!kp) continue;
+            for (let i = 0; i < kp.length - 1; i++) {
+                const e = kp[i] < kp[i + 1] ? kp[i] + '|' + kp[i + 1] : kp[i + 1] + '|' + kp[i];
+                if (edgeSet.has(e)) continue; edgeSet.add(e);
+                const va = graph.verts.get(kp[i]), vb = graph.verts.get(kp[i + 1]);
+                edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
+            }
+        }
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt } };
     }
     // Returns the skip-state name (unreachable/unshielded/empty) for an asset
     // if it should be skipped, else null. Reads the poi_type_str suffix +
@@ -6416,6 +6563,34 @@
         const map = getLeafletMap();
         genPreviewLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         genPreviewLayers = [];
+    }
+    // ---- A2 route preview (polylines + base/branch markers) ----
+    function clearRoutePreview() {
+        const map = getLeafletMap();
+        genRouteLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        genRouteLayers = [];
+    }
+    function renderRoutePreview(result) {
+        clearRoutePreview();
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map || !result || !result.ok) return 0;
+        // 1) the branching tree (shielded corridors) — cyan
+        for (const [a, b] of result.edges) {
+            try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#00e5ff', weight: 3, opacity: 0.9, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
+        }
+        // 2) per-asset branch tips + their final approach leg (dashed)
+        for (const r of result.assets) {
+            if (!r.path || r.path.length < 2) continue;
+            const tip = r.path[r.path.length - 1], pen = r.path[r.path.length - 2];
+            const col = r.reachable ? '#5fff5f' : '#ff8a80';
+            try { const ap = L.polyline([[pen.lat, pen.lng], [tip.lat, tip.lng]], { color: col, weight: 2, opacity: 0.85, dashArray: '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
+            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: col, weight: 2, fillColor: r.reachable ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
+        }
+        // 3) base marker — yellow diamond-ish ring
+        if (result.base) {
+            try { const b = L.circleMarker([result.base.lat, result.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {}
+        }
+        return genRouteLayers.length;
     }
 
     // ---- shared FFZ preview styling ----
@@ -7669,6 +7844,7 @@
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
+        try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -7734,6 +7910,7 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
@@ -7793,7 +7970,35 @@
         box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
         box.querySelector('#aim-gen-clear').onclick = () => {
             clearGenPreview();
+            clearRoutePreview(); genRouteResult = null;
             statsEl.textContent = 'Preview cleared.';
+        };
+        const routesBtn = box.querySelector('#aim-gen-routes');
+        routesBtn.onclick = () => {
+            if (!hasPowerLinesFor(siteID)) {
+                statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`;
+                return;
+            }
+            routesBtn.disabled = true; const restore = routesBtn.textContent; routesBtn.textContent = 'Routing…';
+            try {
+                const params = readParams(); genState.lastParams = params;
+                const res = routeFlightPaths(siteID, params);
+                genRouteResult = res;
+                if (!res.ok) {
+                    const why = { 'no-powerlines': 'no power lines loaded', 'no-base': 'no base station found (set one in the SUM 📍 Base picker)', 'base-no-coord': 'base has no coordinate', 'no-graph': 'power-line graph empty' }[res.reason] || res.reason;
+                    statsEl.innerHTML = `<span style="color:#ff8a80">Routing failed — ${why}.</span>`;
+                    return;
+                }
+                const drawn = renderRoutePreview(res);
+                const s = res.stats;
+                const baseNm = res.baseEntity && res.baseEntity.name ? genCleanName(res.baseEntity.name) : 'base';
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${s.plSegs} PL segs → ${s.graphVerts} graph nodes · drew ${drawn} layers. Cyan = shielded corridor tree; dashed = final approach (green reachable / red out-of-shield). PREVIEW — A2.1, no offset/altitude/commit yet.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} routing failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;
+            } finally {
+                routesBtn.disabled = false; routesBtn.textContent = restore;
+            }
         };
         const previewBtn = box.querySelector('#aim-gen-preview');
         previewBtn.onclick = async () => {
