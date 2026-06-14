@@ -54,6 +54,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 stable corridor (no sawtooth) + clipboard export (dev-only) — Asset Inspector v4.46
+
+Replaced the per-node corridor offset (which sawtoothed — adjacent nodes flipping the perpendicular sign) with the **ordered feature-offset** that worked in offline testing: each power line is offset as a single ordered walk, so the perpendicular orientation is stable along the whole line. One majority asset-side per line; pad-clear search; base launch leg drawn from the base to the nearest corridor point. Also: **⧉ Copy JSON** now copies the route export straight to the clipboard (no download/open/copy dance). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 fix junction zigzags (dev-only) — Asset Inspector v4.45
 
 Fixed the corridor zigzagging at power-line junctions (live result diverged from the offline model). Two causes: (1) the routed tree includes **connector hops** (cross-line jumps) and the base launch leg — offsetting their interior perpendicular threw it into open space; now any edge longer than ~1.8× the node spacing draws **direct** between its offset endpoints. (2) a node's line-direction was taken from its first two neighbours, which could be a far connector → wrong perpendicular; now it uses the **two nearest** neighbours (the real same-line direction). *(Dev/latest only.)*

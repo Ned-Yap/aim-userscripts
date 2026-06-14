@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.45
+// @version      4.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.45';
+    const SCRIPT_VERSION = '4.46';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6303,71 +6303,40 @@
     // offset position, so the offset network is connected by construction (no gaps).
     // The offset side is chosen per node toward the nearest asset, then MAJORITY-
     // smoothed across neighbours so it never flips on an isolated ~50 ft segment.
-    // The base node is NOT offset (it's a point, not on a line). Each edge is then
-    // resampled between its two cached node positions; each sample offsets to the
-    // nearest PAD-clear position (a2OffsetClear), and is flagged where the shield
-    // distance leaves 40–65 ft OR it sits inside an FFZ. padObs = hard avoid;
-    // ffzObs = flag-only. Returns an array of point arrays: [{lat,lng,flag}…].
-    function a2BuildCorridor(edges, segs, padObs, ffzObs, assetCens, basePt) {
+    // Offset each power-line FEATURE (an ordered polyline) ~50 ft to the asset side,
+    // as an ORDERED walk so the perpendicular orientation is stable along the whole
+    // line (the node-graph version flipped sign between equidistant neighbours →
+    // sawtooth). One majority asset-side per feature. Each point offsets to the
+    // nearest PAD-clear position (a2OffsetClear); flagged where the shield distance
+    // leaves 40–65 ft OR it sits inside an FFZ. Returns offset polylines
+    // [{lat,lng,flag}…] (validated offline vs the real 1502 FP: median ~50 ft).
+    function a2BuildCorridor(features, segs, padObs, ffzObs, assetCens) {
         const sampleM = A2.sampleFt * GEN_FT_TO_M;
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
         const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, ffzObs); };
-        const baseKey = basePt ? vkey(basePt) : null;
-        // node set + adjacency
-        const nodes = new Map(), adj = new Map();
-        const addN = (p) => { const k = vkey(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, []); } return k; };
-        for (const [a, b] of edges) { const ka = addN(a), kb = addN(b); if (ka !== kb) { adj.get(ka).push(kb); adj.get(kb).push(ka); } }
-        // local line direction at a node + a projector at it. Use the TWO NEAREST
-        // neighbours (the same-line densified nodes ~40 ft away) — NOT a far
-        // connector/branch neighbour, which would give a perpendicular pointing the
-        // wrong way and offset the corridor toward another line.
-        const lineInfo = (k) => {
-            const p = nodes.get(k), proj = genProjector(p.lat, p.lng);
-            const ns = adj.get(k).map(nk => proj.fwd(nodes.get(nk))).sort((u, v) => (u.x * u.x + u.y * u.y) - (v.x * v.x + v.y * v.y));
-            let d;
-            if (ns.length >= 2) d = { x: ns[1].x - ns[0].x, y: ns[1].y - ns[0].y };
-            else if (ns.length === 1) d = ns[0];
-            else d = { x: 1, y: 0 };
-            const L = Math.hypot(d.x, d.y) || 1;
-            return { proj, px: -d.y / L, py: d.x / L };
-        };
-        // raw side: sign toward the nearest asset centroid
-        const rawSide = (k) => { const li = lineInfo(k); let best = Infinity, s = 1; for (const c of assetCens) { const cf = li.proj.fwd(c); const dd = Math.hypot(cf.x, cf.y); if (dd < best) { best = dd; s = (cf.x * li.px + cf.y * li.py) >= 0 ? 1 : -1; } } return s; };
-        let sideMap = new Map(); for (const k of nodes.keys()) sideMap.set(k, rawSide(k));
-        // majority-smooth (self + neighbours) a few passes → kills isolated flips
-        for (let iter = 0; iter < 3; iter++) { const next = new Map(); for (const k of nodes.keys()) { let sum = sideMap.get(k); for (const nk of adj.get(k)) sum += sideMap.get(nk); next.set(k, sum >= 0 ? 1 : -1); } sideMap = next; }
-        // one cached offset position per node (base stays put), pushed out of obstacles
-        const nodeOff = new Map();
-        for (const [k, p] of nodes) {
-            if (k === baseKey) { nodeOff.set(k, { lat: p.lat, lng: p.lng }); continue; }
-            const li = lineInfo(k), s = sideMap.get(k);
-            nodeOff.set(k, a2OffsetClear(li.proj, { x: 0, y: 0 }, li.px, li.py, s, padObs));
-        }
-        // A graph edge longer than ~1.8× the densify spacing is NOT a power-line
-        // segment — it's a CONNECTOR (cross-line hop) or the base launch leg. Those
-        // run ACROSS open space, so offsetting their interior perpendicular throws
-        // it off into nowhere (the junction zigzags). Draw them DIRECT between the
-        // two already-offset endpoints; only true line segments get interior offset.
-        const connectorM = A2.densifyFt * 1.8 * GEN_FT_TO_M;
         const out = [];
-        for (const [a, b] of edges) {
-            const ka = vkey(a), kb = vkey(b);
-            const s = sideMap.get(ka) || 1;
-            const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
-            const ea = nodeOff.get(ka), eb = nodeOff.get(kb);
-            if (len > connectorM) { out.push([{ lat: ea.lat, lng: ea.lng, flag: flagOf(ea) }, { lat: eb.lat, lng: eb.lng, flag: flagOf(eb) }]); continue; }
-            const proj = genProjector((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
-            const A = proj.fwd(a), B = proj.fwd(b);
-            let nx = -(B.y - A.y), ny = (B.x - A.x); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
-            const n = Math.max(1, Math.round(len / sampleM));
-            const pts = [];
-            for (let i = 0; i <= n; i++) {
-                let p;
-                if (i === 0) p = ea;                         // shared endpoint → connected
-                else if (i === n) p = eb;
-                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2OffsetClear(proj, bf, nx, ny, s, padObs); }
-                pts.push({ lat: p.lat, lng: p.lng, flag: flagOf(p) });
+        for (const coords of features) {
+            if (!coords || coords.length < 2) continue;
+            // densify the feature into one ordered point list
+            const dense = [];
+            for (let i = 0; i < coords.length - 1; i++) {
+                const a = coords[i], b = coords[i + 1];
+                const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / sampleM));
+                for (let k = (i === 0 ? 0 : 1); k <= n; k++) dense.push(a2Interp(a, b, k / n));
             }
+            if (dense.length < 2) continue;
+            // per-point projector + perpendicular (prev→next, consistent along the
+            // ordered walk) + the asset-side sign; then ONE majority side per feature.
+            const info = dense.map((p, j) => {
+                const q0 = dense[Math.max(0, j - 1)], q1 = dense[Math.min(dense.length - 1, j + 1)];
+                const proj = genProjector(p.lat, p.lng); const A = proj.fwd(q0), B = proj.fwd(q1);
+                const dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1, px = -dy / L, py = dx / L;
+                let best = Infinity, s = 1;
+                for (const c of assetCens) { const cf = proj.fwd(c); const dd = Math.hypot(cf.x, cf.y); if (dd < best) { best = dd; s = (cf.x * px + cf.y * py) >= 0 ? 1 : -1; } }
+                return { proj, px, py, s };
+            });
+            const smaj = info.reduce((a, i) => a + i.s, 0) >= 0 ? 1 : -1;
+            const pts = info.map(i => { const p = a2OffsetClear(i.proj, { x: 0, y: 0 }, i.px, i.py, smaj, padObs); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
             out.push(pts);
         }
         return out;
@@ -6592,7 +6561,11 @@
         const ffzObstacles = ffzRings.map(f => f.ring);
         const assetCens = ffzRings.map(f => f.cen);
         if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }
-        const corridorRaw = a2BuildCorridor(edges, segs, padObstacles, ffzObstacles, assetCens, basePt);
+        // corridor geometry = offset of the power-line FEATURES (ordered, stable),
+        // not the routed tree (the tree had connector hops that sawtoothed). The
+        // tree still drives reachability + per-asset branches below.
+        const corridorFeatures = dedupeParallelFeatures(powerLineFeatures(siteID), A2.mergeFt * GEN_FT_TO_M);
+        const corridorRaw = a2BuildCorridor(corridorFeatures, segs, padObstacles, ffzObstacles, assetCens);
         const corridor = a2SimplifyCorridor(corridorRaw, A2.simplifyFt * GEN_FT_TO_M, segs, ffzObstacles); // few clean verts → [{a,b,flag}]
         const corridorEdges = corridor.map(s => [s.a, s.b]); // for the branch foot
         let flaggedFt = 0;
@@ -6609,8 +6582,12 @@
             r.foot = foot.pt;
             if (r._ffzRing) { const e = a2NearestEdgeMidpoint(r._ffzRing, foot.pt); if (e) r.entry = e.pt; }
         }
+        // base launch leg: base → nearest point on the offset corridor (unshielded)
+        let baseLaunch = null;
+        const bl = corridorEdges.length ? a2NearestOnEdges(basePt, corridorEdges) : null;
+        if (bl) baseLaunch = { from: { lat: basePt.lat, lng: basePt.lng }, to: bl.pt };
         const corrVerts = new Set(); for (const s of corridor) { corrVerts.add(`${s.a.lat.toFixed(7)},${s.a.lng.toFixed(7)}`); corrVerts.add(`${s.b.lat.toFixed(7)},${s.b.lng.toFixed(7)}`); }
-        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, baseLaunch, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
     }
     // Returns the skip-state name (unreachable/unshielded/empty) for an asset
     // if it should be skipped, else null. Reads the poi_type_str suffix +
@@ -6860,7 +6837,10 @@
             try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
             try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: flagged ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: flagged ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
         }
-        // 3) base marker — yellow diamond-ish ring
+        // 3) base launch leg (base → corridor) then the base marker
+        if (result.baseLaunch) {
+            try { const bl = L.polyline([[result.baseLaunch.from.lat, result.baseLaunch.from.lng], [result.baseLaunch.to.lat, result.baseLaunch.to.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); bl.addTo(map); genRouteLayers.push(bl); } catch (e) {}
+        }
         if (result.base) {
             try { const b = L.circleMarker([result.base.lat, result.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {}
         }
@@ -8186,7 +8166,7 @@
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
-                <button id="aim-gen-routes-json" title="Download the last route result as JSON to share for debugging" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⤓ JSON</button>
+                <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
@@ -8280,7 +8260,7 @@
                 routesBtn.disabled = false; routesBtn.textContent = restore;
             }
         };
-        box.querySelector('#aim-gen-routes-json').onclick = () => {
+        box.querySelector('#aim-gen-routes-json').onclick = async () => {
             if (!genRouteResult || !genRouteResult.ok) { statsEl.innerHTML = `<span style="color:#ffb347">Run 🛩 Routes first, then export.</span>`; return; }
             const r = genRouteResult;
             const round = (p) => p ? { lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7) } : null;
@@ -8288,6 +8268,7 @@
                 site: siteID,
                 base: round(r.base),
                 baseName: r.baseEntity && r.baseEntity.name ? r.baseEntity.name : null,
+                baseLaunch: r.baseLaunch ? { from: round(r.baseLaunch.from), to: round(r.baseLaunch.to) } : null,
                 stats: r.stats,
                 tunables: A2,
                 corridor: r.corridor.map(s => ({ a: round(s.a), b: round(s.b), flag: !!s.flag })),
@@ -8300,11 +8281,15 @@
             };
             const json = JSON.stringify(dump, null, 2);
             try { uwin().__aimRoute = dump; } catch (e) {}
-            try { uwin().console.log(`${GEN_TAG} route result (also at window.__aimRoute):`, dump); } catch (e) {}
-            const ok = downloadJSONFile(`aim-route-site${siteID}.json`, json);
-            statsEl.innerHTML = ok
-                ? `<span style="color:#5fff5f">Downloaded aim-route-site${siteID}.json</span> <span style="color:#888">(also window.__aimRoute in console)</span>`
-                : `<span style="color:#ffb347">Download blocked — copy it from console: window.__aimRoute</span>`;
+            // copy to clipboard (preferred — easier to paste); fall back to a textarea exec, then download
+            let copied = false;
+            try { await (uwin().navigator.clipboard || navigator.clipboard).writeText(json); copied = true; } catch (e) {}
+            if (!copied) { try { const ta = document.createElement('textarea'); ta.value = json; ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px'; document.body.appendChild(ta); ta.select(); copied = document.execCommand('copy'); ta.remove(); } catch (e) {} }
+            statsEl.innerHTML = copied
+                ? `<span style="color:#5fff5f">✓ Route JSON copied to clipboard</span> <span style="color:#888">(${r.corridor.length} segs · paste it to me · also window.__aimRoute)</span>`
+                : (downloadJSONFile(`aim-route-site${siteID}.json`, json)
+                    ? `<span style="color:#5fff5f">Downloaded aim-route-site${siteID}.json</span> <span style="color:#888">(clipboard blocked)</span>`
+                    : `<span style="color:#ffb347">Copy from console: window.__aimRoute</span>`);
         };
         const previewBtn = box.querySelector('#aim-gen-preview');
         previewBtn.onclick = async () => {
