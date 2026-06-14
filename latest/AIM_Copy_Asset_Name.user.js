@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.42
+// @version      4.43
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.42';
+    const SCRIPT_VERSION = '4.43';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6297,6 +6297,19 @@
         }
         return { pt: p, pushed };
     }
+    function a2InObstacle(p, obstacles) { for (const ob of obstacles) if (pointInPolygon(p.lat, p.lng, ob)) return true; return false; }
+    // Offset a line point toward the asset side, but CLAMP the offset DOWN toward
+    // the line so it never lands inside a pad/FFZ (keeps the trunk line-side of
+    // obstacles at the largest shielded offset that's clear — no swings out to the
+    // far edge). bf = on-line point in proj coords; (dx,dy) = unit dir × side.
+    function a2ClampOffset(proj, bf, dx, dy, maxOffM, obstacles) {
+        const step = maxOffM / 12;
+        for (let off = maxOffM; off > 1e-6; off -= step) {
+            const p = proj.inv({ x: bf.x + dx * off, y: bf.y + dy * off });
+            if (!a2InObstacle(p, obstacles)) return p;
+        }
+        return proj.inv({ x: bf.x, y: bf.y }); // even the line is blocked → sit on it (flagged)
+    }
     // A2.2 corridor geometry. CONNECTIVITY-FIRST: every shared graph node gets ONE
     // offset position, so the offset network is connected by construction (no gaps).
     // The offset side is chosen per node toward the nearest asset, then MAJORITY-
@@ -6325,8 +6338,7 @@
         for (const [k, p] of nodes) {
             if (k === baseKey) { nodeOff.set(k, { lat: p.lat, lng: p.lng }); continue; }
             const li = lineInfo(k), s = sideMap.get(k);
-            const offPt = li.proj.inv({ x: li.px * offM * s, y: li.py * offM * s });
-            nodeOff.set(k, a2PushOut(offPt, obstacles).pt);
+            nodeOff.set(k, a2ClampOffset(li.proj, { x: 0, y: 0 }, li.px * s, li.py * s, offM, obstacles));
         }
         const out = [];
         for (const [a, b] of edges) {
@@ -6342,7 +6354,7 @@
                 let p;
                 if (i === 0) p = nodeOff.get(ka);            // shared endpoint → connected
                 else if (i === n) p = nodeOff.get(kb);
-                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2PushOut(proj.inv({ x: bf.x + nx * offM * s, y: bf.y + ny * offM * s }), obstacles).pt; }
+                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2ClampOffset(proj, bf, nx * s, ny * s, offM, obstacles); }
                 const dLine = a2PointToSegs(p, segs);
                 pts.push({ lat: p.lat, lng: p.lng, flag: (dLine < minM || dLine > maxM) });
             }
@@ -6539,9 +6551,11 @@
             if (!keyPath) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt, hasFfz }); unreachable++; continue; }
             const path = keyPath.map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
             path.push({ lat: target.lat, lng: target.lng }); // branch tip = FFZ (or pad edge); A2.2 refines entry
-            const inBand = approachFt <= A2.approachMaxFt;
-            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz, _ffzRing: hasFfz ? ffz.ring : null });
-            if (inBand) { reachable++; if (hasFfz) usedFfz++; } else unreachable++;
+            // EVERY asset with a path connects (the drone must reach all of them).
+            // A long approach (> approachMaxFt) isn't excluded — it's just flagged.
+            const longApproach = approachFt > A2.approachMaxFt;
+            out.push({ asset: a, reachable: true, longApproach, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz, _ffzRing: hasFfz ? ffz.ring : null });
+            reachable++; if (hasFfz) usedFfz++; if (longApproach) unreachable++;
         }
         // union the per-asset key-paths into ONE connected branching tree (dedupe
         // edges). Include EVERY asset with a path — out-of-shield ones still must
@@ -6829,10 +6843,10 @@
             if (!r.path || r.path.length < 2) continue;
             const tip = r.entry || r.path[r.path.length - 1];   // always an EDGE, never the centre
             const from = r.foot || r.path[r.path.length - 2];
-            const reach = r.reachable;
-            const col = reach ? '#00e5ff' : '#ff8a80';            // solid; red = out-of-shield approach
+            const flagged = r.longApproach;                       // red = long unshielded approach
+            const col = flagged ? '#ff8a80' : '#00e5ff';
             try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
-            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: reach ? '#5fff5f' : '#ff8a80', weight: 2, fillColor: reach ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
+            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: flagged ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: flagged ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
         }
         // 3) base marker — yellow diamond-ish ring
         if (result.base) {
@@ -8246,7 +8260,7 @@
                 const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
                 const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft out of 40–65 shield</span>` : '';
                 const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
-                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} routing failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;

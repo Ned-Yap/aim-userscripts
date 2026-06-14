@@ -12,6 +12,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 trunk+branches, no swings, reach all (dev-only) — Asset Inspector v4.43
+
+Rebuilt to match the real flight path (diagnosed by comparing the route export against the actual site-1502 FP). (1) The trunk now **clamps its offset toward the line** instead of pushing to an obstacle's far edge — so it stays line-side of pads/FFZs at the largest shielded offset that's clear, killing the 200 ft swings near big pads. (2) **Every asset now connects** — dropped the hard "unreachable beyond 220 ft" cutoff; a long approach is drawn and flagged (red), never excluded. Trunk hugs the lines, branches hug the FFZ edges. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 route JSON export (dev-only) — Asset Inspector v4.42
 
 Added a **⤓ JSON** button next to 🛩 Routes that downloads the last route result (base, corridor segments, per-asset connections, stats, tunables) as `aim-route-site<id>.json` — and stashes it at `window.__aimRoute` — so the exact routing output can be shared for debugging instead of guessing from screenshots. *(Dev/latest only.)*
