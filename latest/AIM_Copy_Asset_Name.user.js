@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.46
+// @version      4.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.46';
+    const SCRIPT_VERSION = '4.47';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6286,34 +6286,35 @@
         for (let o = A2.shieldMinFt - 2; o >= 12; o -= 3) out.push(o);
         return out;
     })();
-    // Offset a line point toward the asset side to the nearest offset (per the order
-    // above) that's clear of all PAD buffers — pads are the hard "never enter" set.
-    // Stays line-side ~50 ft where clear; detours outward to skirt a pad. FFZs are
-    // NOT avoided here (the path connects into them) — they're flagged instead.
+    // Offset a line point to the nearest offset (per the order above) clear of all
+    // obstacles (pad buffers + FFZ interiors — the trunk avoids BOTH; it only
+    // connects into an FFZ at a branch tip). Prefers the asset `side`; if that whole
+    // side is blocked, crosses to the OTHER side (a deliberate perpendicular crossing
+    // to skirt the pad/FFZ). Gives up at 50 ft inside (flagged) if both sides blocked.
     // bf = on-line point in proj coords; (px,py) = unit perpendicular; side = ±1.
-    function a2OffsetClear(proj, bf, px, py, side, padObstacles) {
+    function a2OffsetClear(proj, bf, px, py, side, avoidObs) {
+        let fallback = null;
         for (const offFt of A2_OFFSET_ORDER) {
             const off = offFt * GEN_FT_TO_M;
-            const cand = proj.inv({ x: bf.x + px * off * side, y: bf.y + py * off * side });
-            if (!a2InObstacle(cand, padObstacles)) return cand;
+            const c1 = proj.inv({ x: bf.x + px * off * side, y: bf.y + py * off * side });
+            if (!a2InObstacle(c1, avoidObs)) return c1;
+            if (!fallback) { const c2 = proj.inv({ x: bf.x - px * off * side, y: bf.y - py * off * side }); if (!a2InObstacle(c2, avoidObs)) fallback = c2; }
         }
-        return proj.inv({ x: bf.x + px * A2.offsetFt * GEN_FT_TO_M * side, y: bf.y + py * A2.offsetFt * GEN_FT_TO_M * side }); // give up → 50 ft (flagged)
+        return fallback || proj.inv({ x: bf.x + px * A2.offsetFt * GEN_FT_TO_M * side, y: bf.y + py * A2.offsetFt * GEN_FT_TO_M * side });
     }
-    // A2.2 corridor geometry. CONNECTIVITY-FIRST: every shared graph node gets ONE
-    // offset position, so the offset network is connected by construction (no gaps).
-    // The offset side is chosen per node toward the nearest asset, then MAJORITY-
-    // smoothed across neighbours so it never flips on an isolated ~50 ft segment.
     // Offset each power-line FEATURE (an ordered polyline) ~50 ft to the asset side,
     // as an ORDERED walk so the perpendicular orientation is stable along the whole
     // line (the node-graph version flipped sign between equidistant neighbours →
     // sawtooth). One majority asset-side per feature. Each point offsets to the
-    // nearest PAD-clear position (a2OffsetClear); flagged where the shield distance
-    // leaves 40–65 ft OR it sits inside an FFZ. Returns offset polylines
-    // [{lat,lng,flag}…] (validated offline vs the real 1502 FP: median ~50 ft).
+    // nearest position clear of pads + FFZs (a2OffsetClear, crossing sides if a side
+    // is blocked); flagged where the shield distance leaves 40–65 ft OR it had to
+    // sit inside an obstacle. Returns offset polylines [{lat,lng,flag}…] (validated
+    // offline vs the real 1502 FP: median ~50 ft, ~76% in-band, pads+FFZs cleared).
     function a2BuildCorridor(features, segs, padObs, ffzObs, assetCens) {
         const sampleM = A2.sampleFt * GEN_FT_TO_M;
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
-        const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, ffzObs); };
+        const avoidObs = padObs.concat(ffzObs);
+        const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, avoidObs); };
         const out = [];
         for (const coords of features) {
             if (!coords || coords.length < 2) continue;
@@ -6336,7 +6337,7 @@
                 return { proj, px, py, s };
             });
             const smaj = info.reduce((a, i) => a + i.s, 0) >= 0 ? 1 : -1;
-            const pts = info.map(i => { const p = a2OffsetClear(i.proj, { x: 0, y: 0 }, i.px, i.py, smaj, padObs); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
+            const pts = info.map(i => { const p = a2OffsetClear(i.proj, { x: 0, y: 0 }, i.px, i.py, smaj, avoidObs); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
             out.push(pts);
         }
         return out;
@@ -6552,12 +6553,13 @@
                 edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
             }
         }
-        // A2.2: obstacle-aware corridor. Offset the trunk ~50 ft to the asset side;
-        // PAD buffers are hard-avoided (offset detours to the nearest clear), FFZ
-        // interiors are flag-only (the path connects into them). Validated offline
-        // against the real 1502 FP: median ~50 ft, ~85% in 40–65 ft band.
+        // A2.2: obstacle-aware corridor. The trunk avoids PAD buffers (15 ft) + FFZ
+        // interiors; it only connects into an FFZ at a branch tip. Validated offline
+        // against the real 1502 FP: median ~50 ft, ~76% in 40–65 ft band.
+        // NB: type-3 pad rings are stored in a BOWTIE order — simplifyPolygon FIRST,
+        // else the offset buffer is malformed and blocks the whole band.
         const padObstacles = [];
-        for (const a of entities) { if (a.type !== 3) continue; const r = entityCoords(a); if (r && r.length >= 3) { const buf = getAssetOffsetRing(a, A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObstacles.push(buf); } }
+        for (const a of entities) { if (a.type !== 3) continue; const r = entityCoords(a); if (r && r.length >= 3) { const buf = assetOffsetRing(simplifyPolygon(r), A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObstacles.push(buf); } }
         const ffzObstacles = ffzRings.map(f => f.ring);
         const assetCens = ffzRings.map(f => f.cen);
         if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }

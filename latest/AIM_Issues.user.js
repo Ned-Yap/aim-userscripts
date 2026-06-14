@@ -696,9 +696,14 @@
             return id ? `<@${id}>` : m;
         });
     }
-    // All mapped approvers as a mention string (for review pings).
-    function slackMentionApprovers() {
-        const mentions = (approversList || []).map(slackMention).filter(Boolean);
+    // All mapped approvers as a mention string (for review pings). v1.13:
+    // excludes `exceptLogin` so we never ping the person who just acted —
+    // an approver proposing their own find pings the OTHER approvers, not
+    // themselves.
+    function slackMentionApprovers(exceptLogin) {
+        const mentions = (approversList || [])
+            .filter(l => l && l !== exceptLogin)
+            .map(slackMention).filter(Boolean);
         return mentions.length ? mentions.join(' ') : '';
     }
     // POST a message (optionally threaded). Resolves to the message ts on
@@ -818,15 +823,15 @@
 
     // New issue → parent message. Stores the returned ts on the issue so
     // every browser can thread replies under it, then re-commits to sync
-    // the ts. `notifyLogins` = GitHub logins the creator chose to @-mention;
-    // empty defaults to the creator (so it's "theirs" by default).
+    // the ts. `notifyLogins` = GitHub logins the creator chose to @-mention.
+    // v1.13: no self-ping — we drop the creator from the cc list (they filed
+    // it, they don't need a notification for their own issue), so the picker
+    // only ever pings OTHER people. No more default-tag-the-creator (that was
+    // always a self-ping).
     async function postSlackNewIssue(issue, notifyLogins) {
         if (!slackPostable(issue)) return;
         try {
-            let mentionLogins = (notifyLogins || []).slice();
-            if (!mentionLogins.length && issue.createdBy && issue.createdBy !== 'local-only') {
-                mentionLogins = [issue.createdBy];   // default: tag the creator
-            }
+            const mentionLogins = (notifyLogins || []).filter(l => l && l !== issue.createdBy);
             // Stamp the notify list on the live issue first so the parent text
             // (and any later chat.update) reproduces the same cc line.
             const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
@@ -899,19 +904,22 @@
         try {
             const actor = slackMention(by) || ('@' + slackEsc(by));
             const toLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
+            // v1.13: never ping the actor for their own action (exceptLogin=by).
+            const prop = proposerOf(issue);
+            const proposerMention = (prop && prop !== by) ? slackMention(prop) : '';
             let head, mention = '';
             if (transition.to === 'pending_fix') {
                 head = `🟡 ${actor} proposed *FIX* — needs review`;
-                mention = slackMentionApprovers();
+                mention = slackMentionApprovers(by);
             } else if (transition.to === 'pending_ignore') {
                 head = `🟣 ${actor} proposed *IGNORE* — needs review`;
-                mention = slackMentionApprovers();
+                mention = slackMentionApprovers(by);
             } else if (transition.approvalCheck && transition.to === 'open') {
                 head = `❌ ${actor} *rejected* → back to OPEN`;
-                mention = slackMention(proposerOf(issue));
+                mention = proposerMention;
             } else if (transition.approvalCheck) {
                 head = `✅ ${actor} *approved* → ${toLabel}`;
-                mention = slackMention(proposerOf(issue));
+                mention = proposerMention;
             } else if (transition.to === 'open') {
                 head = `↺ ${actor} re-opened → OPEN`;
             } else {
@@ -974,7 +982,8 @@
         try {
             const actor = slackMention(by) || ('@' + slackEsc(by));
             const body = slackifyMentions(slackEsc(note));
-            const cc = (notifyLogins || []).map(slackMention).filter(Boolean).join(' ');
+            // v1.13: don't ping yourself in your own comment.
+            const cc = (notifyLogins || []).filter(l => l && l !== by).map(slackMention).filter(Boolean).join(' ');
             let head = `💬 ${actor}: ${body}`;
             if (cc) head += `\ncc ${cc}`;
             const text = issue.slackThreadTs ? head
@@ -3813,13 +3822,16 @@
             let slackBadge = '';
             if (slackEnabled() && liveIssue.slackThreadTs) {
                 const permalink = `https://percepto.slack.com/archives/${slackConfig.channelId}/p${String(liveIssue.slackThreadTs).replace('.', '')}`;
-                slackBadge = `<a href="${permalink}" target="_blank" rel="noopener"
+                // v1.13: open via window.top.open in a click handler — the
+                // map iframe's sandbox blocks <a target="_blank">, so a plain
+                // link did nothing.
+                slackBadge = `<span class="aim-issues-slack-link" data-href="${permalink}"
                         title="Reported to Slack — click to open the thread"
                         style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
                                background:#10331f;color:#5fff5f;font-size:9px;font-weight:700;
-                               border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px;text-decoration:none">
+                               border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px;cursor:pointer">
                        ✓ SLACK
-                   </a>`;
+                   </span>`;
             } else if (slackEnabled()) {
                 slackBadge = `<span title="Not yet posted to Slack"
                         style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
@@ -3917,6 +3929,18 @@
             if (closeBtn) closeBtn.onclick = closeStatusModal;
             const headerCloseBtn = card.querySelector('#aim-issues-modal-headerclose');
             if (headerCloseBtn) headerCloseBtn.onclick = closeStatusModal;
+            // v1.13: ✓ SLACK badge → open the thread in a new tab via the top
+            // window (iframe sandbox blocks <a target=_blank>).
+            const slackLink = card.querySelector('.aim-issues-slack-link');
+            if (slackLink) {
+                slackLink.onclick = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const href = slackLink.dataset.href;
+                    if (!href) return;
+                    try { (window.top || window).open(href, '_blank', 'noopener'); }
+                    catch (e2) { try { window.open(href, '_blank'); } catch (e3) {} }
+                };
+            }
 
             // v0.30: history sort toggle
             const histHeader = card.querySelector('#aim-issues-modal-historyheader');

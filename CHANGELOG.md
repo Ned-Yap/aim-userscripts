@@ -60,6 +60,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 avoid FFZs+pads, both-side, bowtie fix (dev-only) — Asset Inspector v4.47
+
+Three corridor fixes (calibrated offline with proper buffers vs the real FP). (1) The trunk now **avoids FFZ interiors too**, not just pads (the real FP never traverses an FFZ — it only connects in at a branch tip). (2) When the asset side of a line is fully blocked, the offset **crosses to the other side** (a deliberate perpendicular crossing) instead of plowing through. (3) Fixed a real bug: type-3 pad rings are stored **bowtie**-ordered, so the 15-ft pad buffer was being built from a malformed ring and blocking the whole band — now `simplifyPolygon`'d first. Offline result: pad overlaps 43→10, FFZ overlaps 82→1, median 50 ft. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 stable corridor (no sawtooth) + clipboard export (dev-only) — Asset Inspector v4.46
 
 Replaced the per-node corridor offset (which sawtoothed — adjacent nodes flipping the perpendicular sign) with the **ordered feature-offset** that worked in offline testing: each power line is offset as a single ordered walk, so the perpendicular orientation is stable along the whole line. One majority asset-side per line; pad-clear search; base launch leg drawn from the base to the nearest corridor point. Also: **⧉ Copy JSON** now copies the route export straight to the clipboard (no download/open/copy dance). *(Dev/latest only.)*
