@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — sticky Confirm/Cancel footer (dev-only) — AIM Issues v1.07
+
+Fixed a confusing flow in the issue popup: when you armed a transition (e.g. Propose Fix), the **Confirm/Cancel** buttons were buried at the bottom of the scrollable body while a "Close" button sat pinned below — so it was easy to hit Close and silently lose your status change. Now **Confirm/Cancel are pinned in the footer** (always visible, no scrolling), the note field auto-scrolls into view + focuses when armed, and the **redundant bottom "Close" is gone** (the top-right ✕ is the single close). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — deep-link focus + approver-propose (dev-only) — AIM Issues v1.06
 
 More from the feedback round: **(1) Deep-link focus** — clicking an issue's Slack link now lands you on the site *and* AIM Issues pans/zooms to that issue and opens its box automatically (the link carries `?aim_issue=<id>`; the param is stripped after focusing). **(2) Delete** now also strikes + badges the **original** Slack message (`🗑 DELETED`), matching resolve/ignore. **(3) Approvers can now Propose** (Fix/Ignore), not just direct-resolve — so an approver can route their own find through another approver instead of self-approving. **(4)** Fixed the **Notify chip needing 2-3 taps** (Leaflet was swallowing the first clicks; now pointerdown+click with a debounce). *(Dev/latest only.)*

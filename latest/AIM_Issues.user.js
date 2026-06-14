@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.06
+// @version      1.07
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.06';
+    const SCRIPT_VERSION = '1.07';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3490,16 +3490,6 @@
                             placeholder="Add a comment without changing status"
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:#a8c4ff;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm comment
-                            </button>
-                        </div>
                     </div>
                 `;
             } else if (armed && armed.kind === 'priority') {
@@ -3514,16 +3504,6 @@
                             placeholder="Why are you changing the priority? (optional)"
                             style="width:100%;min-height:60px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:${tgt.color};color:${tgt.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm priority → ${tgt.text}
-                            </button>
-                        </div>
                     </div>
                 `;
             } else if (armed) {
@@ -3539,16 +3519,6 @@
                             placeholder="${escHtml(armed.notePrompt || (armed.noteRequired ? 'Required note' : 'Optional note'))}"
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:${armed.color};color:${armed.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm → ${tgtLabel}
-                            </button>
-                        </div>
                     </div>
                 `;
             } else {
@@ -3662,6 +3632,37 @@
                          title="You're a CSM — propose changes for approver review.">
                        CSM
                    </span>`;
+            // v1.06: pinned footer. When a transition/comment/priority is
+            // armed, Cancel + Confirm live here (always visible, no scrolling
+            // past them) instead of buried in the body. Unarmed, the footer
+            // holds only Delete (the header ✕ is the single close — no
+            // redundant bottom Close button). Empty unarmed footer is hidden.
+            const footerBase = `padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);display:flex;gap:8px;align-items:center;flex-shrink:0`;
+            let footerHtml = '';
+            if (armed) {
+                let confLabel, confBg, confColor;
+                if (armed.kind === 'comment') {
+                    confLabel = 'Confirm comment'; confBg = '#a8c4ff'; confColor = '#000';
+                } else if (armed.kind === 'priority') {
+                    const t = armed.to ? priorityMeta(armed.to) : { text: 'NONE', color: '#555', textColor: '#fff' };
+                    confLabel = `Confirm priority → ${t.text}`; confBg = t.color; confColor = t.textColor;
+                } else {
+                    const tl = (STATUS_LABEL[armed.to] || { text: armed.to.toUpperCase() }).text;
+                    confLabel = `Confirm → ${tl}`; confBg = armed.color; confColor = armed.textColor;
+                }
+                footerHtml = `<div style="${footerBase};justify-content:flex-end">
+                    <button id="aim-issues-modal-cancel-transition"
+                        style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
+                        Cancel
+                    </button>
+                    <button id="aim-issues-modal-confirm-transition"
+                        style="padding:7px 14px;background:${confBg};color:${confColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                        ${confLabel}
+                    </button>
+                </div>`;
+            } else if (canDelete) {
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}</div>`;
+            }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
                      style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
@@ -3693,14 +3694,7 @@
                     <div style="border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
                     ${actionSectionHtml}
                 </div>
-                <div style="padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
-                            display:flex;gap:8px;align-items:center;flex-shrink:0">
-                    ${deleteBtnHtml}
-                    <button id="aim-issues-modal-close"
-                        style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
-                        Close
-                    </button>
-                </div>
+                ${footerHtml}
                 <div id="aim-issues-modal-resize"
                      title="Drag to resize"
                      style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
@@ -3708,10 +3702,21 @@
                 </div>
             `;
             wireHandlers(liveIssue, transitions);
+            // v1.06: when armed, bring the note into view + focus it so the
+            // user sees the input (the Confirm/Cancel are pinned in the footer).
+            if (armed) {
+                const noteEl = card.querySelector('#aim-issues-modal-note');
+                if (noteEl) {
+                    try { noteEl.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+                    try { noteEl.focus(); } catch (e) {}
+                }
+            }
         }
 
         function wireHandlers(liveIssue, transitions) {
-            card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+            // v1.06: bottom "Close" removed — header ✕ is the single close.
+            const closeBtn = card.querySelector('#aim-issues-modal-close');
+            if (closeBtn) closeBtn.onclick = closeStatusModal;
             const headerCloseBtn = card.querySelector('#aim-issues-modal-headerclose');
             if (headerCloseBtn) headerCloseBtn.onclick = closeStatusModal;
 
