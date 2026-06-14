@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.30
+// @version      4.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.30';
+    const SCRIPT_VERSION = '4.31';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6605,7 +6605,10 @@
             const d0 = { x: path[i].x - path[i - 1].x, y: path[i].y - path[i - 1].y };
             const d1 = { x: path[i + 1].x - path[i].x, y: path[i + 1].y - path[i].y };
             const X = lineX(a0, d0, a1, d1);
-            if (X && Math.hypot(X.x - path[i].x, X.y - path[i].y) <= off * 4) out.push(X);
+            // miter-limit must use |off| — for the right-hand (negative off) side
+            // `off*4` is negative and the check always failed → every corner on
+            // that side beveled into 2 verts. abs() makes both sides miter to 1.
+            if (X && Math.hypot(X.x - path[i].x, X.y - path[i].y) <= Math.abs(off) * 4) out.push(X);
             else { out.push(a0); out.push(a1); } // spike → bevel
         }
         return out;
@@ -7006,6 +7009,13 @@
         const SNAP_M = 70 * GEN_FT_TO_M;
         const VSNAP_M = 22 * GEN_FT_TO_M; // corner-magnet radius (generous — aim at the dot)
         const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
+        // junction lock points (between back-to-back pads) take priority — they are
+        // the 15-ft-from-both corner where no pad has its own vertex.
+        if (genDraw.junctions && genDraw.junctions.length) {
+            let jb = null, jd = Infinity;
+            for (const q of genDraw.junctions) { const d = approxMeters(cursorLL.lat, cursorLL.lng, q.lat, q.lng); if (d < jd) { jd = d; jb = q; } }
+            if (jb && jd < VSNAP_M) return { pt: { lat: jb.lat, lng: jb.lng }, assetId: null, off: null, i: -1, vertex: true, junction: true };
+        }
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let best = null;
         for (const a of ents) {
@@ -7112,7 +7122,7 @@
     // Click-to-place draw: pts[] are the user's clicked (snapped) corners; tentative
     // is the live rubber-band point at the cursor; dots[] are the on-map corner
     // markers so the user can see what they're building.
-    let genDraw = { active: false, drawing: false, pts: [], tentative: null, tentVertex: false, lastSnap: null, poly: null, dots: [], targets: [], ghost: null, onDown: null, onMove: null, onDbl: null, onMapMove: null };
+    let genDraw = { active: false, drawing: false, pts: [], tentative: null, tentVertex: false, lastSnap: null, poly: null, dots: [], targets: [], junctions: [], ghost: null, onDown: null, onMove: null, onDbl: null, onMapMove: null };
     function clearDrawDots(map) {
         for (const d of genDraw.dots) { try { map.removeLayer(d); } catch (e) {} }
         genDraw.dots = [];
@@ -7125,20 +7135,50 @@
     // Persistent snap-target dots at every nearby pad's offset-ring CORNERS — the
     // exact points a click locks the centerline to. Aim at a dot instead of hunting
     // pixels. Filtered to the current view so big sites don't flood with markers.
+    // Also computes JUNCTION dots (magenta) where two close pads' offset rings
+    // cross — the 15-ft-from-both corner for a corridor between back-to-back pads
+    // (no pad has a corner there, so without this you'd lock to nothing).
     function buildSnapTargets(map, p) {
         clearSnapTargets(map);
+        genDraw.junctions = [];
         const L = getLeafletL(); if (!L) return;
         const offM = (p.standoffFt + Math.max(p.depthFt, 30) / 2) * GEN_FT_TO_M;
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let bounds = null; try { bounds = map.getBounds().pad(0.15); } catch (e) {}
+        const pads = [];
         for (const a of ents) {
             if (a.type !== 3) continue;
             const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
             const off = getAssetOffsetRing(a, offM); if (!off) continue;
+            const cen = ringCentroid(ring);
+            if (bounds && !bounds.contains([cen.lat, cen.lng])) continue;
+            pads.push({ ring, off, cen });
             for (const v of off) {
                 if (bounds && !bounds.contains([v.lat, v.lng])) continue;
                 try { const d = L.circleMarker([v.lat, v.lng], { radius: 3.5, color: '#00e5ff', weight: 1.5, opacity: 0.65, fillColor: '#08323b', fillOpacity: 0.55, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
             }
+        }
+        // junctions: offset-ring crossings between nearby pad pairs, outside both pads
+        const NEAR = 260 * GEN_FT_TO_M;
+        for (let i = 0; i < pads.length; i++) {
+            for (let j = i + 1; j < pads.length; j++) {
+                if (approxMeters(pads[i].cen.lat, pads[i].cen.lng, pads[j].cen.lat, pads[j].cen.lng) > NEAR) continue;
+                const A = pads[i].off, B = pads[j].off;
+                for (let x = 0; x < A.length; x++) {
+                    const a1 = A[x], a2 = A[(x + 1) % A.length];
+                    for (let y = 0; y < B.length; y++) {
+                        const b1 = B[y], b2 = B[(y + 1) % B.length];
+                        if (!segmentsCross(a1, a2, b1, b2)) continue;
+                        const X = segIntersectPoint(a1, a2, b1, b2);
+                        if (pointInPolygon(X.lat, X.lng, pads[i].ring) || pointInPolygon(X.lat, X.lng, pads[j].ring)) continue;
+                        if (genDraw.junctions.some(q => approxMeters(q.lat, q.lng, X.lat, X.lng) < 8 * GEN_FT_TO_M)) continue;
+                        genDraw.junctions.push({ lat: X.lat, lng: X.lng });
+                    }
+                }
+            }
+        }
+        for (const q of genDraw.junctions) {
+            try { const d = L.circleMarker([q.lat, q.lng], { radius: 4.5, color: '#ff5fff', weight: 2, opacity: 0.85, fillColor: '#3a0a3a', fillOpacity: 0.7, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
         }
     }
     function renderDrawPreview(p) {

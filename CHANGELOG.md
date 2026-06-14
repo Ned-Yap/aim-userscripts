@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — draw: 1-vert corners + back-to-back junction dots (dev-only) — Asset Inspector v4.31
+
+Two draw fixes. (1) **Outer corners are now a single vertex** — a miter-limit bug (`off*4` is negative for the right-hand offset, so that side always beveled into 2 verts) is fixed with `Math.abs`. Every corner now strokes to one clean point. (2) **Back-to-back pads now get a magenta junction dot** to lock the corridor's between-pads corner — it sits where the two pads' 15-ft offset rings cross (15 ft from *both* pads), so you no longer have to free-aim at a spot with no target and end up closer than 15 ft. Junction snap takes priority over edge snap. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — draw: visible corner snap-targets (dev-only) — Asset Inspector v4.30
 
 Drawing a corridor is now aim-at-the-dot instead of hunting pixels. While Draw is on, every nearby pad's offset-ring **corners show as cyan target dots** (the exact points a click locks to), and a live **ghost marker** tracks the cursor — it turns **big green when you're magnetised to a corner**, small yellow on an edge. The corner magnet was widened to 22 ft so locking is forgiving. Target dots re-sync as you pan/zoom. This stops the "clicked slightly off → strip starts inside the asset" problem. *(Dev/latest only.)*
