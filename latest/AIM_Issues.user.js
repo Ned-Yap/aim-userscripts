@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.08
+// @version      1.09
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.08';
+    const SCRIPT_VERSION = '1.09';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1967,6 +1967,13 @@
         overlay.appendChild(card);
         document.body.appendChild(overlay);
         noteModalEl = overlay;
+        // v1.09: stop map/Leaflet from processing pointer/mouse/wheel events
+        // that bubble out of the modal — the status modal already does this;
+        // the note modal didn't, which let every click leak to Percepto's
+        // global handlers and stalled chip feedback by seconds.
+        ['mousedown', 'pointerdown', 'pointerup', 'mouseup', 'wheel', 'click', 'dblclick', 'contextmenu', 'touchstart'].forEach(evt => {
+            card.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
         const input = card.querySelector('#aim-issues-note-input');
         const err = card.querySelector('#aim-issues-note-err');
         const cancel = card.querySelector('#aim-issues-note-cancel');
@@ -1989,12 +1996,20 @@
                 }
             });
         };
+        // v1.09: pointerdown (with click fallback + debounce) so priority
+        // selection feels instant, matching the notify chips.
+        let lastPriFire = 0;
+        const selectPri = (c) => {
+            const now = Date.now();
+            if (now - lastPriFire < 250) return;   // ignore the paired event
+            lastPriFire = now;
+            selectedPriority = c.dataset.priority || null;
+            paintChips();
+        };
         chips.forEach(c => {
-            c.onclick = () => {
-                const p = c.dataset.priority || null;
-                selectedPriority = p || null;
-                paintChips();
-            };
+            const h = (e) => { e.preventDefault(); e.stopPropagation(); selectPri(c); };
+            c.addEventListener('pointerdown', h, true);
+            c.addEventListener('click', h, true);
         });
         // v1.03: notify chips — independent multi-select toggle. Filled = on.
         // v1.06: Leaflet intermittently swallows `click` on elements inside

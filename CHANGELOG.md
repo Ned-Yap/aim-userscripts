@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — snappier issue-modal chips (dev-only) — AIM Issues v1.09
+
+Chased the laggy chip feedback in the New-issue modal. The modal now **stops its pointer/click events from leaking to Percepto's global map handlers** (the status modal already did this; the note modal didn't — every click was being processed by the map too), and the **priority chips now respond on pointerdown** like the notify chips. Selecting a priority then a name should feel immediate. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — parent = live status board, thread = full history (dev-only) — AIM Issues v1.08
 
 Reworked the Slack message model. The **parent message is now a live status board**: it's edited on *every* transition so the channel shows current state at a glance — 🚩 OPEN → 🟡 PENDING FIX / 🟣 PENDING IGNORE → ✅ RESOLVED / ⊘ IGNORED / 🗑 DELETED (terminal states strike the description). Because the parent now changes, the **thread carries the full immutable history**: reply 1 is the **original report** (preserved verbatim), reply 2 is the **affected entities**, and every status change appends after. So you can read state from the parent without opening the thread, and never lose the original request. *(Dev/latest only.)*
