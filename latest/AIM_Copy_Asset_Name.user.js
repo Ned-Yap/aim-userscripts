@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.39
+// @version      4.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.39';
+    const SCRIPT_VERSION = '4.40';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6283,30 +6283,52 @@
         }
         return { pt: p, pushed };
     }
-    // A2.2 corridor geometry: offset each trunk edge toward the asset side, then
-    // push out of FFZ/pad obstacles (hug near edges), resample, and flag samples
-    // whose shield distance falls outside [shieldMin, shieldMax]. Returns an array
-    // of point arrays (one per edge): [{lat,lng,flag}…].
-    function a2BuildCorridor(edges, segs, obstacles, assetCens) {
+    // A2.2 corridor geometry. CONNECTIVITY-FIRST: every shared graph node gets ONE
+    // offset position, so the offset network is connected by construction (no gaps).
+    // The offset side is chosen per node toward the nearest asset, then MAJORITY-
+    // smoothed across neighbours so it never flips on an isolated ~50 ft segment.
+    // The base node is NOT offset (it's a point, not on a line). Each edge is then
+    // resampled between its two cached node positions, interior samples pushed out
+    // of FFZ/pad obstacles, and flagged where the shield distance leaves 40–65 ft.
+    // Returns an array of point arrays (one per edge): [{lat,lng,flag}…].
+    function a2BuildCorridor(edges, segs, obstacles, assetCens, basePt) {
         const offM = A2.offsetFt * GEN_FT_TO_M, sampleM = A2.sampleFt * GEN_FT_TO_M;
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        const baseKey = basePt ? vkey(basePt) : null;
+        // node set + adjacency
+        const nodes = new Map(), adj = new Map();
+        const addN = (p) => { const k = vkey(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, []); } return k; };
+        for (const [a, b] of edges) { const ka = addN(a), kb = addN(b); if (ka !== kb) { adj.get(ka).push(kb); adj.get(kb).push(ka); } }
+        // local line direction at a node (through it, undirected) + a projector at it
+        const lineInfo = (k) => { const p = nodes.get(k), proj = genProjector(p.lat, p.lng), ns = adj.get(k); let d; if (ns.length >= 2) { const A = proj.fwd(nodes.get(ns[0])), B = proj.fwd(nodes.get(ns[1])); d = { x: B.x - A.x, y: B.y - A.y }; } else if (ns.length === 1) { d = proj.fwd(nodes.get(ns[0])); } else d = { x: 1, y: 0 }; const L = Math.hypot(d.x, d.y) || 1; return { proj, px: -d.y / L, py: d.x / L }; };
+        // raw side: sign toward the nearest asset centroid
+        const rawSide = (k) => { const li = lineInfo(k); let best = Infinity, s = 1; for (const c of assetCens) { const cf = li.proj.fwd(c); const dd = Math.hypot(cf.x, cf.y); if (dd < best) { best = dd; s = (cf.x * li.px + cf.y * li.py) >= 0 ? 1 : -1; } } return s; };
+        let sideMap = new Map(); for (const k of nodes.keys()) sideMap.set(k, rawSide(k));
+        // majority-smooth (self + neighbours) a few passes → kills isolated flips
+        for (let iter = 0; iter < 3; iter++) { const next = new Map(); for (const k of nodes.keys()) { let sum = sideMap.get(k); for (const nk of adj.get(k)) sum += sideMap.get(nk); next.set(k, sum >= 0 ? 1 : -1); } sideMap = next; }
+        // one cached offset position per node (base stays put), pushed out of obstacles
+        const nodeOff = new Map();
+        for (const [k, p] of nodes) {
+            if (k === baseKey) { nodeOff.set(k, { lat: p.lat, lng: p.lng }); continue; }
+            const li = lineInfo(k), s = sideMap.get(k);
+            const offPt = li.proj.inv({ x: li.px * offM * s, y: li.py * offM * s });
+            nodeOff.set(k, a2PushOut(offPt, obstacles).pt);
+        }
         const out = [];
         for (const [a, b] of edges) {
+            const ka = vkey(a), kb = vkey(b);
+            const s = sideMap.get(ka) || 1;
             const proj = genProjector((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
             const A = proj.fwd(a), B = proj.fwd(b);
             let nx = -(B.y - A.y), ny = (B.x - A.x); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
-            const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-            // offset toward the side of the nearest asset/FFZ centroid
-            let side = 1, bestD = Infinity;
-            for (const c of assetCens) { const cf = proj.fwd(c); const d = Math.hypot(cf.x - mid.x, cf.y - mid.y); if (d < bestD) { bestD = d; side = ((cf.x - mid.x) * nx + (cf.y - mid.y) * ny) >= 0 ? 1 : -1; } }
             const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
             const n = Math.max(1, Math.round(len / sampleM));
             const pts = [];
             for (let i = 0; i <= n; i++) {
-                const base = a2Interp(a, b, i / n);
-                const bf = proj.fwd(base);
-                let p = proj.inv({ x: bf.x + nx * offM * side, y: bf.y + ny * offM * side });
-                p = a2PushOut(p, obstacles).pt;
+                let p;
+                if (i === 0) p = nodeOff.get(ka);            // shared endpoint → connected
+                else if (i === n) p = nodeOff.get(kb);
+                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2PushOut(proj.inv({ x: bf.x + nx * offM * s, y: bf.y + ny * offM * s }), obstacles).pt; }
                 const dLine = a2PointToSegs(p, segs);
                 pts.push({ lat: p.lat, lng: p.lng, flag: (dLine < minM || dLine > maxM) });
             }
@@ -6470,10 +6492,12 @@
             out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz, _ffzRing: hasFfz ? ffz.ring : null });
             if (inBand) { reachable++; if (hasFfz) usedFfz++; } else unreachable++;
         }
-        // union the per-asset key-paths into one branching tree (dedupe edges)
+        // union the per-asset key-paths into ONE connected branching tree (dedupe
+        // edges). Include EVERY asset with a path — out-of-shield ones still must
+        // connect to the base (they just fly a longer unshielded approach).
         const edgeSet = new Set(), edges = [];
         for (const r of out) {
-            if (!r.path || !r.reachable) continue;
+            if (!r.path || !r._avKey) continue;
             const kp = reconstructPath(prev, baseKey, r._avKey);
             if (!kp) continue;
             for (let i = 0; i < kp.length - 1; i++) {
@@ -6491,19 +6515,21 @@
         for (const f of ffzRings) obstacles.push(f.ring);
         const assetCens = ffzRings.map(f => f.cen);
         if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }
-        const corridor = a2BuildCorridor(edges, segs, obstacles, assetCens);
+        const corridor = a2BuildCorridor(edges, segs, obstacles, assetCens, basePt);
         const corridorEdges = []; // pushed corridor as [a,b] segments, for the branch foot
         for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) corridorEdges.push([pts[i], pts[i + 1]]);
         let flaggedFt = 0;
         for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) if (pts[i].flag || pts[i + 1].flag) flaggedFt += approxMeters(pts[i].lat, pts[i].lng, pts[i + 1].lat, pts[i + 1].lng) / GEN_FT_TO_M;
-        // clean T-branch off the PUSHED corridor → middle of the FFZ near edge.
+        // Branch from the PUSHED corridor to the MIDDLE of the FFZ near edge — for
+        // EVERY asset that has a path (reachable AND out-of-shield), so nothing ever
+        // draws a line to the FFZ centre.
         const footEdges = corridorEdges.length ? corridorEdges : edges;
         for (const r of out) {
-            if (!r.reachable || !r.path || r.path.length < 2) continue;
+            if (!r.path || r.path.length < 2) continue;
             const ref = r._ffzRing ? ringCentroid(r._ffzRing) : r.path[r.path.length - 1];
             const foot = a2NearestOnEdges(ref, footEdges);
             if (!foot) continue;
-            r.foot = foot.pt; r.approachFt = foot.d / GEN_FT_TO_M;
+            r.foot = foot.pt;
             if (r._ffzRing) { const e = a2NearestEdgeMidpoint(r._ffzRing, foot.pt); if (e) r.entry = e.pt; }
         }
         return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt) } };
@@ -6752,11 +6778,11 @@
         //    interior. Marker sits on the edge. Cyan = reachable, red = out-of-shield.
         for (const r of result.assets) {
             if (!r.path || r.path.length < 2) continue;
-            const tip = r.entry || r.path[r.path.length - 1];
+            const tip = r.entry || r.path[r.path.length - 1];   // always an EDGE, never the centre
             const from = r.foot || r.path[r.path.length - 2];
             const reach = r.reachable;
-            const col = reach ? '#00e5ff' : '#ff8a80';
-            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: reach ? 3 : 2, opacity: 0.9, dashArray: reach ? null : '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
+            const col = reach ? '#00e5ff' : '#ff8a80';            // solid; red = out-of-shield approach
+            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
             try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: reach ? '#5fff5f' : '#ff8a80', weight: 2, fillColor: reach ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
         }
         // 3) base marker — yellow diamond-ish ring

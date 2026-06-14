@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 connected corridor + consistent side (dev-only) — Asset Inspector v4.40
+
+Rebuilt the corridor geometry to fix the disconnections. It now offsets at **shared nodes** (one position per node) so the network is **connected by construction** — no gaps; every FFZ links back to the base (out-of-shield assets included, they just fly a longer flagged approach). The offset **side is majority-smoothed** across neighbours so it no longer jumps across the line on isolated ~50 ft segments. And every FFZ connection goes to an **edge** (never the centre, no dashed) — including out-of-shield ones. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 obstacle-aware shielded corridor (dev-only) — Asset Inspector v4.39
 
 First A2.2 slice: the corridor is no longer the bare centerline on the power line. It now **offsets ~50 ft toward the asset side**, then **pushes out of every pad buffer (15 ft) and FFZ interior** — NEVER entering them, hugging their near edges instead — and **flags** any stretch where the resulting shield distance falls outside **40–65 ft** (drawn orange; the stat line shows total flagged feet). Resolves the "flight path runs through an FFZ" problem. Still preview-only (no altitudes/commit). *(Dev/latest only.)*
