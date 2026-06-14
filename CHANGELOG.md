@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — filer no longer pinged on the parent (dev-only) — AIM Issues v1.17
+
+The "filed by @you" on the **parent** message was still a real @-mention (v1.14's plain-text change only landed on the thread reply, not the parent) — so filing an issue pinged you *and* made you follow the thread, which is why you kept getting notified of every later reply. Now the filer is plain text on the parent too. New issues won't ping or auto-follow you; existing issues created before this still will until muted/deleted. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — Slack badge click (real fix) (dev-only) — AIM Issues v1.16
 
 The ✓ SLACK badge was being grabbed by the header's drag handler (dragging it moved the popup; clicking did nothing). The drag handler skipped `button/input/textarea` but the badge was a `<span>`. Now the badge is a real `<button>` and the drag handler explicitly skips it — so clicking opens the thread. *(Dev/latest only.)*

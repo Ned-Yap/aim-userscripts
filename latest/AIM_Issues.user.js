@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.16';
+    const SCRIPT_VERSION = '1.17';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -785,7 +785,11 @@
         const status = statusOverride || issue.status || 'open';
         const b = slackStatusBadge(status);
         const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
-        const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
+        // v1.17: PLAIN @text for the filer (no real <@id> mention) — a real
+        // mention here pinged the creator and made them follow the thread,
+        // so they got notified of every later reply. Real pings are reserved
+        // for the cc list + transition/comment recipients.
+        const creator = slackPlain(issue.createdBy);
         const link = siteLabelForSlack(issue.id);
         let note = slackEsc(issue.note || '(no description)');
         if (b.strike) note = `~${note}~`;
