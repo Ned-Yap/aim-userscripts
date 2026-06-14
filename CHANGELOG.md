@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — real self-ping fix + ping rules + Slack badge (dev-only) — AIM Issues v1.14
+
+The actual self-ping cause: every message header @-mentioned the actor (a real `<@id>`), so you pinged yourself on every action (assign, comment, etc.). Now the "who did it" text is plain `@name` (no ping) and real mentions are reserved for intended recipients. **Ping rules now:** propose → the *other* approvers; **approve/reject → the assigned CSM** (falls back to the proposer); comment → only the people you tag (multiple supported). Also: the **✓ SLACK badge** now opens via `GM_openInTab` (the previous fix still didn't work — the iframe sandbox blocked it; falls back to clipboard-copy). **Note: this adds a `GM_openInTab` grant, so Tampermonkey will prompt to re-approve on update.** *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — no self-pings + clickable Slack badge (dev-only) — AIM Issues v1.13
 
 Two fixes: **(1)** the **✓ SLACK badge** in the issue header now actually **opens the thread** (it was a dead link — the map iframe's sandbox blocks `target="_blank"`; now it opens via the top window). **(2) No more self-pings** — you no longer get @-mentioned for your own actions (filing, proposing, commenting). An approver proposing their own find now pings the *other* approvers, not themselves; the create-issue cc no longer defaults to (or includes) you. Cuts the notification noise a lot. *(Dev/latest only.)*

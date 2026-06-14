@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -12,6 +12,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_openInTab
 // @connect      api.github.com
 // @connect      slack.com
 // @run-at       document-end
@@ -56,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.13';
+    const SCRIPT_VERSION = '1.14';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -686,6 +687,12 @@
         const id = slackConfig && slackConfig.users ? slackConfig.users[login] : null;
         return id ? `<@${id}>` : `@${slackEsc(login)}`;
     }
+    // v1.14: plain @login DISPLAY text — never a real <@id> mention, so it
+    // never pings. Use for the "who did it" actor/creator in message heads;
+    // real slackMention() is reserved for people we actually want to notify.
+    function slackPlain(login) {
+        return login && login !== 'local-only' ? `@${slackEsc(login)}` : '@?';
+    }
     // v1.10: convert inline @login tokens in free text to real Slack pings
     // for any mapped user (so typing "@ChristopherD-AIM" in a comment pings
     // them). Run AFTER slackEsc — the <@id> we insert must not be escaped.
@@ -857,7 +864,7 @@
     async function postSlackOriginalRequest(issue, threadTs) {
         if (!slackEnabled() || !threadTs) return;
         try {
-            const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
+            const creator = slackPlain(issue.createdBy);
             const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
             await slackPost(`📝 *Reported* by ${creator}${pri}\n>${slackEsc(issue.note || '(no description)')}`, threadTs);
         } catch (e) {
@@ -887,7 +894,7 @@
     async function postSlackDelete(issue, by) {
         if (!slackPostable(issue) || !issue.slackThreadTs) return;
         try {
-            const actor = slackMention(by) || ('@' + slackEsc(by));
+            const actor = slackPlain(by);
             await slackPost(`🗑 ${actor} *deleted* this issue`, issue.slackThreadTs);
             await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'deleted'));
         } catch (e) {
@@ -902,11 +909,14 @@
     async function postSlackTransition(issue, fromStatus, transition, note, by) {
         if (!slackPostable(issue)) return;
         try {
-            const actor = slackMention(by) || ('@' + slackEsc(by));
+            const actor = slackPlain(by);
             const toLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
-            // v1.13: never ping the actor for their own action (exceptLogin=by).
-            const prop = proposerOf(issue);
-            const proposerMention = (prop && prop !== by) ? slackMention(prop) : '';
+            // v1.13/v1.14: never ping the actor for their own action.
+            //  • propose → ping the OTHER approvers (review needed)
+            //  • approve/reject → ping the ASSIGNED CSM (falls back to the
+            //    proposer if nobody's assigned) so they know the outcome
+            const reviewTarget = issue.assignee || proposerOf(issue);
+            const reviewMention = (reviewTarget && reviewTarget !== by) ? slackMention(reviewTarget) : '';
             let head, mention = '';
             if (transition.to === 'pending_fix') {
                 head = `🟡 ${actor} proposed *FIX* — needs review`;
@@ -916,10 +926,10 @@
                 mention = slackMentionApprovers(by);
             } else if (transition.approvalCheck && transition.to === 'open') {
                 head = `❌ ${actor} *rejected* → back to OPEN`;
-                mention = proposerMention;
+                mention = reviewMention;
             } else if (transition.approvalCheck) {
                 head = `✅ ${actor} *approved* → ${toLabel}`;
-                mention = proposerMention;
+                mention = reviewMention;
             } else if (transition.to === 'open') {
                 head = `↺ ${actor} re-opened → OPEN`;
             } else {
@@ -947,7 +957,7 @@
     async function postSlackAssignment(issue, from, to, by) {
         if (!slackPostable(issue)) return;
         try {
-            const actor = slackMention(by) || ('@' + slackEsc(by));
+            const actor = slackPlain(by);
             let head;
             if (!to) {
                 head = `👤 ${actor} *unassigned* this issue`;
@@ -980,7 +990,7 @@
     async function postSlackComment(issue, note, by, notifyLogins) {
         if (!slackPostable(issue)) return;
         try {
-            const actor = slackMention(by) || ('@' + slackEsc(by));
+            const actor = slackPlain(by);
             const body = slackifyMentions(slackEsc(note));
             // v1.13: don't ping yourself in your own comment.
             const cc = (notifyLogins || []).filter(l => l && l !== by).map(slackMention).filter(Boolean).join(' ');
@@ -3937,8 +3947,17 @@
                     e.preventDefault(); e.stopPropagation();
                     const href = slackLink.dataset.href;
                     if (!href) return;
-                    try { (window.top || window).open(href, '_blank', 'noopener'); }
-                    catch (e2) { try { window.open(href, '_blank'); } catch (e3) {} }
+                    // v1.14: GM_openInTab bypasses the map iframe's sandbox +
+                    // popup blockers (window.top.open silently did nothing).
+                    // Fall back to window.open, then clipboard-copy.
+                    if (typeof GM_openInTab === 'function') {
+                        try { GM_openInTab(href, { active: true, insert: true, setParent: true }); return; }
+                        catch (e2) {}
+                    }
+                    try { const w = (window.top || window).open(href, '_blank'); if (w) return; } catch (e3) {}
+                    copyTextToClipboard(href)
+                        .then(() => showToast('Slack link copied — paste to open.', 3000))
+                        .catch(() => {});
                 };
             }
 
