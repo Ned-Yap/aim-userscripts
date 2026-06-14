@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.09
+// @version      1.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.09';
+    const SCRIPT_VERSION = '1.10';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -685,6 +685,16 @@
         const id = slackConfig && slackConfig.users ? slackConfig.users[login] : null;
         return id ? `<@${id}>` : `@${slackEsc(login)}`;
     }
+    // v1.10: convert inline @login tokens in free text to real Slack pings
+    // for any mapped user (so typing "@ChristopherD-AIM" in a comment pings
+    // them). Run AFTER slackEsc — the <@id> we insert must not be escaped.
+    function slackifyMentions(text) {
+        if (!slackConfig || !slackConfig.users) return text;
+        return (text || '').replace(/@([A-Za-z0-9._-]+)/g, (m, name) => {
+            const id = slackConfig.users[name];
+            return id ? `<@${id}>` : m;
+        });
+    }
     // All mapped approvers as a mention string (for review pings).
     function slackMentionApprovers() {
         const mentions = (approversList || []).map(slackMention).filter(Boolean);
@@ -929,12 +939,16 @@
         return null;
     }
 
-    // Comment → threaded reply.
-    async function postSlackComment(issue, note, by) {
+    // Comment → threaded reply. v1.10: inline @login in the text auto-pings
+    // mapped users, and `notifyLogins` (from the chip picker) are cc'd.
+    async function postSlackComment(issue, note, by, notifyLogins) {
         if (!slackPostable(issue)) return;
         try {
             const actor = slackMention(by) || ('@' + slackEsc(by));
-            const head = `💬 ${actor}: ${slackEsc(note)}`;
+            const body = slackifyMentions(slackEsc(note));
+            const cc = (notifyLogins || []).map(slackMention).filter(Boolean).join(' ');
+            let head = `💬 ${actor}: ${body}`;
+            if (cc) head += `\ncc ${cc}`;
             const text = issue.slackThreadTs ? head
                        : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
@@ -3326,7 +3340,7 @@
     // v0.28: comments. Don't change status — just append a history entry
     // where fromStatus === toStatus. Required note. Same audit / sync
     // pipeline as transitions.
-    function applyComment(issueId, note) {
+    function applyComment(issueId, note, notifyLogins) {
         const issue = currentSiteIssues.find(i => i.id === issueId);
         if (!issue) return false;
         const trimmedNote = (note || '').trim();
@@ -3349,8 +3363,8 @@
         if (cachedToken && !wasLocalOnly) {
             showToast(`Comment added — pushing to GitHub…`, 2500);
             commitIssuesToGitHub(`@${by}: comment`);
-            // v1.03: threaded Slack reply.
-            postSlackComment(issue, trimmedNote, by);
+            // v1.03: threaded Slack reply. v1.10: + @-mentions from picker.
+            postSlackComment(issue, trimmedNote, by, notifyLogins);
         } else {
             showToast('Comment added (local only).', 2500);
         }
@@ -3439,6 +3453,7 @@
         // non-null = note prompt for that transition).
         let armed = null;
         let pendingNote = '';     // preserved across re-renders if user typed something
+        const pendingCommentNotify = new Set();  // v1.10: logins to @-mention on a comment
         // v0.30: history sort direction. Default: oldest first (false).
         // Click "History" header to toggle.
         let historySortDesc = false;
@@ -3520,6 +3535,21 @@
             //   null — show all action buttons (transitions + comment + priority chips)
             let actionSectionHtml = '';
             if (armed && armed.kind === 'comment') {
+                // v1.10: tag teammates on a comment — chip picker (reliable)
+                // plus inline @login in the text auto-converts (see
+                // slackifyMentions). Only shown when Slack is configured.
+                const notifyUsers = slackEnabled() ? Object.keys(slackConfig.users || {}).sort() : [];
+                const notifyRow = notifyUsers.length ? `
+                    <div style="color:#aaa;font-size:11px;margin:8px 0 4px 0">Tag on Slack (optional)</div>
+                    <div id="aim-issues-comment-notify" style="display:flex;gap:5px;flex-wrap:wrap">
+                        ${notifyUsers.map(l => {
+                            const on = pendingCommentNotify.has(l);
+                            return `<button type="button" class="aim-issues-comment-notify-chip" data-login="${escHtml(l)}"
+                                style="padding:4px 10px;background:${on ? '#5fb3ff' : 'transparent'};color:${on ? '#0a1a2a' : '#5fb3ff'};border:1.5px solid #5fb3ff;border-radius:13px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                                @${escHtml(l)}
+                            </button>`;
+                        }).join('')}
+                    </div>` : '';
                 actionSectionHtml = `
                     <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid rgba(168,196,255,0.30);border-radius:6px">
                         <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
@@ -3527,9 +3557,10 @@
                         </div>
                         <div style="color:#aaa;font-size:11px;margin-bottom:4px">Comment <span style="color:#ff8585">(required)</span></div>
                         <textarea id="aim-issues-modal-note"
-                            placeholder="Add a comment without changing status"
+                            placeholder="Add a comment without changing status. Tip: @TeammateLogin pings them."
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
+                        ${notifyRow}
                     </div>
                 `;
             } else if (armed && armed.kind === 'priority') {
@@ -3823,6 +3854,29 @@
                 };
             }
 
+            // v1.10: comment notify chips — toggle in place (no re-render so
+            // the comment textarea isn't cleared). pointerdown+click+debounce
+            // for the same snappy, no-dropped-click behaviour as elsewhere.
+            const cmtChipFire = new Map();
+            card.querySelectorAll('.aim-issues-comment-notify-chip').forEach(chip => {
+                const toggle = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const login = chip.dataset.login;
+                    const now = Date.now();
+                    if (now - (cmtChipFire.get(login) || 0) < 300) return;
+                    cmtChipFire.set(login, now);
+                    if (pendingCommentNotify.has(login)) {
+                        pendingCommentNotify.delete(login);
+                        chip.style.background = 'transparent'; chip.style.color = '#5fb3ff';
+                    } else {
+                        pendingCommentNotify.add(login);
+                        chip.style.background = '#5fb3ff'; chip.style.color = '#0a1a2a';
+                    }
+                };
+                chip.addEventListener('pointerdown', toggle, true);
+                chip.addEventListener('click', toggle, true);
+            });
+
             // v0.28: Priority chips — arms a priority change (optional note)
             card.querySelectorAll('.aim-issues-modal-pribtn').forEach(btn => {
                 if (btn.disabled) return;
@@ -3866,7 +3920,7 @@
                             if (noteInput) noteInput.focus();
                             return;
                         }
-                        const ok = applyComment(liveIssue.id, note);
+                        const ok = applyComment(liveIssue.id, note, Array.from(pendingCommentNotify));
                         if (ok) closeStatusModal();
                         return;
                     }

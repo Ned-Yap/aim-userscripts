@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — tag teammates in comments (dev-only) — AIM Issues v1.10
+
+Comments can now **@-mention teammates**: the comment box has a **Tag on Slack** chip picker, and typing **`@TeammateLogin`** inline in the comment text auto-converts to a real Slack ping for any mapped user. Tagged people get pinged in the threaded comment. Also removed **Ned-Yap** from the approvers list (`approvers.json`). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — snappier issue-modal chips (dev-only) — AIM Issues v1.09
 
 Chased the laggy chip feedback in the New-issue modal. The modal now **stops its pointer/click events from leaking to Percepto's global map handlers** (the status modal already did this; the note modal didn't — every click was being processed by the map too), and the **priority chips now respond on pointerdown** like the notify chips. Selecting a priority then a name should feel immediate. *(Dev/latest only.)*
