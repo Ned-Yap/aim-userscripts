@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.47
+// @version      4.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.47';
+    const SCRIPT_VERSION = '4.48';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6274,46 +6274,21 @@
     // Distance (m) from a point to the nearest power-line segment.
     function a2PointToSegs(p, segs) { let best = Infinity; for (const s of segs) { const d = pointToSegMeters(p.lat, p.lng, s[0], s[1]); if (d < best) best = d; } return best; }
     function a2InObstacle(p, obstacles) { for (const ob of obstacles) if (pointInPolygon(p.lat, p.lng, ob)) return true; return false; }
-    // Offset-search order (ft), built once: prefer the in-band offset nearest 50 ft,
-    // then go OUTWARD (away from the line, safe, just out-of-band), then INWARD
-    // (toward the line, less safe) — last resort. (Validated offline vs the real
-    // 1502 FP: median 50 ft, 84% in-band, pads cleared, no line crossings.)
-    const A2_OFFSET_ORDER = (() => {
-        const inb = []; for (let o = A2.shieldMinFt; o <= A2.shieldMaxFt; o += 2) inb.push(o);
-        inb.sort((a, b) => Math.abs(a - A2.offsetFt) - Math.abs(b - A2.offsetFt));
-        const out = inb.slice();
-        for (let o = A2.shieldMaxFt + 1; o <= A2.offsetFt + 40; o += 3) out.push(o);
-        for (let o = A2.shieldMinFt - 2; o >= 12; o -= 3) out.push(o);
-        return out;
-    })();
-    // Offset a line point to the nearest offset (per the order above) clear of all
-    // obstacles (pad buffers + FFZ interiors — the trunk avoids BOTH; it only
-    // connects into an FFZ at a branch tip). Prefers the asset `side`; if that whole
-    // side is blocked, crosses to the OTHER side (a deliberate perpendicular crossing
-    // to skirt the pad/FFZ). Gives up at 50 ft inside (flagged) if both sides blocked.
-    // bf = on-line point in proj coords; (px,py) = unit perpendicular; side = ±1.
-    function a2OffsetClear(proj, bf, px, py, side, avoidObs) {
-        let fallback = null;
-        for (const offFt of A2_OFFSET_ORDER) {
-            const off = offFt * GEN_FT_TO_M;
-            const c1 = proj.inv({ x: bf.x + px * off * side, y: bf.y + py * off * side });
-            if (!a2InObstacle(c1, avoidObs)) return c1;
-            if (!fallback) { const c2 = proj.inv({ x: bf.x - px * off * side, y: bf.y - py * off * side }); if (!a2InObstacle(c2, avoidObs)) fallback = c2; }
-        }
-        return fallback || proj.inv({ x: bf.x + px * A2.offsetFt * GEN_FT_TO_M * side, y: bf.y + py * A2.offsetFt * GEN_FT_TO_M * side });
-    }
-    // Offset each power-line FEATURE (an ordered polyline) ~50 ft to the asset side,
-    // as an ORDERED walk so the perpendicular orientation is stable along the whole
-    // line (the node-graph version flipped sign between equidistant neighbours →
-    // sawtooth). One majority asset-side per feature. Each point offsets to the
-    // nearest position clear of pads + FFZs (a2OffsetClear, crossing sides if a side
-    // is blocked); flagged where the shield distance leaves 40–65 ft OR it had to
-    // sit inside an obstacle. Returns offset polylines [{lat,lng,flag}…] (validated
-    // offline vs the real 1502 FP: median ~50 ft, ~76% in-band, pads+FFZs cleared).
+    // Offset each power-line FEATURE (an ordered polyline) a flat ~50 ft to the
+    // asset side, as an ORDERED walk so the perpendicular orientation is stable
+    // along the whole line (the node-graph version flipped sign between equidistant
+    // neighbours → sawtooth). One majority asset-side per feature. NO obstacle
+    // dodging (that produced the zigzags) — clean lanes, FLAG where a point leaves
+    // the 40–65 ft band or crosses a pad/FFZ for the CSM to drag-fix. Returns offset
+    // polylines [{lat,lng,flag}…].
     function a2BuildCorridor(features, segs, padObs, ffzObs, assetCens) {
-        const sampleM = A2.sampleFt * GEN_FT_TO_M;
+        const sampleM = A2.sampleFt * GEN_FT_TO_M, offM = A2.offsetFt * GEN_FT_TO_M;
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
         const avoidObs = padObs.concat(ffzObs);
+        // CLEAN OFFSET + FLAG (user's chosen approach): no obstacle dodging — that
+        // produced the zigzags. Just a flat ~50 ft offset to one consistent side per
+        // line. A point is FLAGGED (orange, for the CSM to drag-fix) where it leaves
+        // the 40–65 ft shield band OR crosses a pad/FFZ.
         const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, avoidObs); };
         const out = [];
         for (const coords of features) {
@@ -6337,7 +6312,7 @@
                 return { proj, px, py, s };
             });
             const smaj = info.reduce((a, i) => a + i.s, 0) >= 0 ? 1 : -1;
-            const pts = info.map(i => { const p = a2OffsetClear(i.proj, { x: 0, y: 0 }, i.px, i.py, smaj, avoidObs); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
+            const pts = info.map(i => { const p = i.proj.inv({ x: i.px * offM * smaj, y: i.py * offM * smaj }); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
             out.push(pts);
         }
         return out;

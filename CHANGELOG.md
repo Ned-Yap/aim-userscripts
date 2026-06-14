@@ -78,6 +78,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 clean offset + flag (drop the dodging) (dev-only) — Asset Inspector v4.48
+
+Changed approach: the auto-dodging around obstacles was the source of the zigzags/crossings/extra vertices. Now the corridor is a **clean flat ~50 ft offset** of each power line to one consistent side — no dodging — and any point that **leaves the 40–65 ft band or crosses a pad/FFZ is flagged orange** for the CSM to drag-fix. Predictable, stable, far fewer vertices. The foundation-then-tune model. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 avoid FFZs+pads, both-side, bowtie fix (dev-only) — Asset Inspector v4.47
 
 Three corridor fixes (calibrated offline with proper buffers vs the real FP). (1) The trunk now **avoids FFZ interiors too**, not just pads (the real FP never traverses an FFZ — it only connects in at a branch tip). (2) When the asset side of a line is fully blocked, the offset **crosses to the other side** (a deliberate perpendicular crossing) instead of plowing through. (3) Fixed a real bug: type-3 pad rings are stored **bowtie**-ordered, so the 15-ft pad buffer was being built from a malformed ring and blocking the whole band — now `simplifyPolygon`'d first. Offline result: pad overlaps 43→10, FFZ overlaps 82→1, median 50 ft. *(Dev/latest only.)*
