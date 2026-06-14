@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — no self-pings + clickable Slack badge (dev-only) — AIM Issues v1.13
+
+Two fixes: **(1)** the **✓ SLACK badge** in the issue header now actually **opens the thread** (it was a dead link — the map iframe's sandbox blocks `target="_blank"`; now it opens via the top window). **(2) No more self-pings** — you no longer get @-mentioned for your own actions (filing, proposing, commenting). An approver proposing their own find now pings the *other* approvers, not themselves; the create-issue cc no longer defaults to (or includes) you. Cuts the notification noise a lot. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — assignees (dev-only) — AIM Issues v1.12
 
 Issues can now be **assigned**. **Anyone** can assign or reassign (or unassign) an issue to any teammate — pick from the assignee chips in the issue popup (⭐ marks you; one click). The assignee shows in the **popup header**, on every **panel row**, and as a new **Assignee column** in the Copy→Sheets export, with an **"👤 Assigned to me" filter** in the panel. Assignments post a **threaded Slack reply** that pings the new assignee, and the **parent status board shows the current assignee**. Assign events are recorded in the issue history (👤). *(Dev/latest only.)*
