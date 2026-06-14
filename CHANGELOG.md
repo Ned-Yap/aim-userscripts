@@ -36,6 +36,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 fix junction zigzags (dev-only) — Asset Inspector v4.45
+
+Fixed the corridor zigzagging at power-line junctions (live result diverged from the offline model). Two causes: (1) the routed tree includes **connector hops** (cross-line jumps) and the base launch leg — offsetting their interior perpendicular threw it into open space; now any edge longer than ~1.8× the node spacing draws **direct** between its offset endpoints. (2) a node's line-direction was taken from its first two neighbours, which could be a far connector → wrong perpendicular; now it uses the **two nearest** neighbours (the real same-line direction). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 corridor matches the real FP (dev-only) — Asset Inspector v4.44
 
 Rewrote the corridor offset, calibrated **offline against the real site-1502 flight path + power-line KML**. The trunk now offsets ~50 ft to the asset side and, where it would hit a **pad buffer** (the hard "never enter"), searches the nearest clear offset — preferring in-band, then outward (safe), then inward. **FFZs are flag-only** (the path connects into them), not avoided. Result vs the real FP in offline tests: corridor sits at **median ~50 ft from the lines (real FP: 47 ft) with ~85% in the 40–65 band** — versus the previous build's 26 ft / 6% (it was hugging the lines, dangerously close). Pads cleared, no line-crossings. *(Dev/latest only.)*

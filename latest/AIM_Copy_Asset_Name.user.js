@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.44
+// @version      4.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.44';
+    const SCRIPT_VERSION = '4.45';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6317,8 +6317,20 @@
         const nodes = new Map(), adj = new Map();
         const addN = (p) => { const k = vkey(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, []); } return k; };
         for (const [a, b] of edges) { const ka = addN(a), kb = addN(b); if (ka !== kb) { adj.get(ka).push(kb); adj.get(kb).push(ka); } }
-        // local line direction at a node (through it, undirected) + a projector at it
-        const lineInfo = (k) => { const p = nodes.get(k), proj = genProjector(p.lat, p.lng), ns = adj.get(k); let d; if (ns.length >= 2) { const A = proj.fwd(nodes.get(ns[0])), B = proj.fwd(nodes.get(ns[1])); d = { x: B.x - A.x, y: B.y - A.y }; } else if (ns.length === 1) { d = proj.fwd(nodes.get(ns[0])); } else d = { x: 1, y: 0 }; const L = Math.hypot(d.x, d.y) || 1; return { proj, px: -d.y / L, py: d.x / L }; };
+        // local line direction at a node + a projector at it. Use the TWO NEAREST
+        // neighbours (the same-line densified nodes ~40 ft away) — NOT a far
+        // connector/branch neighbour, which would give a perpendicular pointing the
+        // wrong way and offset the corridor toward another line.
+        const lineInfo = (k) => {
+            const p = nodes.get(k), proj = genProjector(p.lat, p.lng);
+            const ns = adj.get(k).map(nk => proj.fwd(nodes.get(nk))).sort((u, v) => (u.x * u.x + u.y * u.y) - (v.x * v.x + v.y * v.y));
+            let d;
+            if (ns.length >= 2) d = { x: ns[1].x - ns[0].x, y: ns[1].y - ns[0].y };
+            else if (ns.length === 1) d = ns[0];
+            else d = { x: 1, y: 0 };
+            const L = Math.hypot(d.x, d.y) || 1;
+            return { proj, px: -d.y / L, py: d.x / L };
+        };
         // raw side: sign toward the nearest asset centroid
         const rawSide = (k) => { const li = lineInfo(k); let best = Infinity, s = 1; for (const c of assetCens) { const cf = li.proj.fwd(c); const dd = Math.hypot(cf.x, cf.y); if (dd < best) { best = dd; s = (cf.x * li.px + cf.y * li.py) >= 0 ? 1 : -1; } } return s; };
         let sideMap = new Map(); for (const k of nodes.keys()) sideMap.set(k, rawSide(k));
@@ -6331,20 +6343,28 @@
             const li = lineInfo(k), s = sideMap.get(k);
             nodeOff.set(k, a2OffsetClear(li.proj, { x: 0, y: 0 }, li.px, li.py, s, padObs));
         }
+        // A graph edge longer than ~1.8× the densify spacing is NOT a power-line
+        // segment — it's a CONNECTOR (cross-line hop) or the base launch leg. Those
+        // run ACROSS open space, so offsetting their interior perpendicular throws
+        // it off into nowhere (the junction zigzags). Draw them DIRECT between the
+        // two already-offset endpoints; only true line segments get interior offset.
+        const connectorM = A2.densifyFt * 1.8 * GEN_FT_TO_M;
         const out = [];
         for (const [a, b] of edges) {
             const ka = vkey(a), kb = vkey(b);
             const s = sideMap.get(ka) || 1;
+            const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
+            const ea = nodeOff.get(ka), eb = nodeOff.get(kb);
+            if (len > connectorM) { out.push([{ lat: ea.lat, lng: ea.lng, flag: flagOf(ea) }, { lat: eb.lat, lng: eb.lng, flag: flagOf(eb) }]); continue; }
             const proj = genProjector((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
             const A = proj.fwd(a), B = proj.fwd(b);
             let nx = -(B.y - A.y), ny = (B.x - A.x); const L = Math.hypot(nx, ny) || 1; nx /= L; ny /= L;
-            const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
             const n = Math.max(1, Math.round(len / sampleM));
             const pts = [];
             for (let i = 0; i <= n; i++) {
                 let p;
-                if (i === 0) p = nodeOff.get(ka);            // shared endpoint → connected
-                else if (i === n) p = nodeOff.get(kb);
+                if (i === 0) p = ea;                         // shared endpoint → connected
+                else if (i === n) p = eb;
                 else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2OffsetClear(proj, bf, nx, ny, s, padObs); }
                 pts.push({ lat: p.lat, lng: p.lng, flag: flagOf(p) });
             }
