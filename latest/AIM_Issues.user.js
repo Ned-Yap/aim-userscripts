@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.10';
+    const SCRIPT_VERSION = '1.11';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3454,9 +3454,9 @@
         let armed = null;
         let pendingNote = '';     // preserved across re-renders if user typed something
         const pendingCommentNotify = new Set();  // v1.10: logins to @-mention on a comment
-        // v0.30: history sort direction. Default: oldest first (false).
+        // v0.30: history sort direction. v1.11: default newest first (true).
         // Click "History" header to toggle.
-        let historySortDesc = false;
+        let historySortDesc = true;
 
         function render() {
             // v0.30: skip re-renders mid-drag so stale handlers don't get
@@ -3491,6 +3491,13 @@
                 if (isNaN(bt)) return -1;
                 return historySortDesc ? bt - at : at - bt;
             });
+            // v1.11: emoji + status colors matching the Slack badges so the
+            // history reads at a glance. slackStatusBadge → icon; STATUS_LABEL
+            // → text + color.
+            const sIcon = (s) => slackStatusBadge(s).icon;
+            const sColor = (s) => (STATUS_LABEL[s] || { color: '#aaa' }).color;
+            const sText = (s) => (STATUS_LABEL[s] || { text: (s || '').toUpperCase() }).text;
+            const statusPill = (s) => `${sIcon(s)} <span style="color:${sColor(s)};font-weight:700">${sText(s)}</span>`;
             const histRows = sortedHistory.map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
@@ -3501,15 +3508,14 @@
                     const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
                     label = `🎯 priority: ${fromP} → <span style="color:${toMeta.color};font-weight:700">${toP}</span>`;
                 } else if (!h.fromStatus) {
-                    label = `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                    label = `🚩 created → ${statusPill(h.toStatus)}`;
                 } else if (h.toStatus === 'deleted') {
-                    label = `🗑 deleted`;
-                    labelColor = '#ff8585';
+                    label = `🗑 <span style="color:#ff8585;font-weight:700">DELETED</span>`;
                 } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
                     label = `💬 commented`;
                     labelColor = '#a8c4ff';
                 } else {
-                    label = `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`;
+                    label = `${statusPill(h.fromStatus)} → ${statusPill(h.toStatus)}`;
                 }
                 return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
@@ -3703,6 +3709,28 @@
                          title="You're a CSM — propose changes for approver review.">
                        CSM
                    </span>`;
+            // v1.11: Slack-reported badge. Green ✓ + link to the thread when
+            // the issue posted successfully (has a thread ts); amber ⧗ when
+            // Slack is on but it hasn't posted (e.g. created pre-Slack, or the
+            // post failed). Hidden entirely when Slack isn't configured.
+            let slackBadge = '';
+            if (slackEnabled() && liveIssue.slackThreadTs) {
+                const permalink = `https://percepto.slack.com/archives/${slackConfig.channelId}/p${String(liveIssue.slackThreadTs).replace('.', '')}`;
+                slackBadge = `<a href="${permalink}" target="_blank" rel="noopener"
+                        title="Reported to Slack — click to open the thread"
+                        style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
+                               background:#10331f;color:#5fff5f;font-size:9px;font-weight:700;
+                               border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px;text-decoration:none">
+                       ✓ SLACK
+                   </a>`;
+            } else if (slackEnabled()) {
+                slackBadge = `<span title="Not yet posted to Slack"
+                        style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
+                               background:#3a2a10;color:#ffae5f;font-size:9px;font-weight:700;
+                               border:1px solid rgba(255,174,95,0.4);letter-spacing:0.5px">
+                       ⧗ SLACK
+                   </span>`;
+            }
             // v1.06: pinned footer. When a transition/comment/priority is
             // armed, Cancel + Confirm live here (always visible, no scrolling
             // past them) instead of buried in the body. Unarmed, the footer
@@ -3743,6 +3771,7 @@
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
                     ${headerPri}
                     ${roleChip}
+                    ${slackBadge}
                     <button id="aim-issues-modal-headerclose" title="Close"
                         style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
                                border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
@@ -3753,9 +3782,10 @@
                      style="padding:14px 18px;overflow:auto;flex:1;min-height:0">
                     <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
                     ${entitiesSectionHtml}
+                    ${actionSectionHtml}
                     <div id="aim-issues-modal-historyheader"
                          title="Click to toggle sort direction"
-                         style="color:#888;font-size:11px;margin:12px 0 4px 0;cursor:pointer;user-select:none;
+                         style="color:#888;font-size:11px;margin:14px 0 4px 0;cursor:pointer;user-select:none;
                                 display:inline-flex;align-items:center;gap:5px;padding:2px 6px;
                                 border-radius:4px;border:1px solid transparent;transition:border-color 150ms">
                         History
@@ -3763,7 +3793,6 @@
                         <span style="color:#888;font-style:italic">${sortLabel}</span>
                     </div>
                     <div style="border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
-                    ${actionSectionHtml}
                 </div>
                 ${footerHtml}
                 <div id="aim-issues-modal-resize"

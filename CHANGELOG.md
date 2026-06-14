@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — issue-popup polish (dev-only) — AIM Issues v1.11
+
+Cleaned up the issue popup: **history defaults to newest-first**, the **action area (status / priority / Add comment) moved above the history** so it's the first thing you reach, and **history entries now show the same emoji + status colors as Slack** (🚩 OPEN, 🟡 PENDING FIX, 🟣 PENDING IGNORE, ✅ RESOLVED, ⊘ IGNORED, 🗑 DELETED) so transitions are readable at a glance. Added a **✓ SLACK badge in the header** that confirms the issue was reported to Slack and **links straight to its thread** (amber ⧗ if it hasn't posted yet). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — tag teammates in comments (dev-only) — AIM Issues v1.10
 
 Comments can now **@-mention teammates**: the comment box has a **Tag on Slack** chip picker, and typing **`@TeammateLogin`** inline in the comment text auto-converts to a real Slack ping for any mapped user. Tagged people get pinged in the threaded comment. Also removed **Ned-Yap** from the approvers list (`approvers.json`). *(Dev/latest only.)*
