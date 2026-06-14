@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — Slack notification polish (dev-only) — AIM Issues v1.05
+
+Round of refinements on the Slack notifications: **(1)** the site name in each post is now a **clickable link** straight to that site's Site Setup. **(2)** A new issue's first threaded reply lists the **affected entities** it overlaps. **(3) Deletes** are logged in the thread (`🗑 @user deleted this issue`) so the thread reads created → … → deleted. **(4)** The **Notify** picker now includes yourself (tag an issue for your own follow-up), and if you tag nobody it **defaults to the creator**. **(5)** When an issue is **resolved/ignored**, the bot **edits the original message** — strikes the description and prefixes ✅ RESOLVED / ⊘ IGNORED; re-opening restores it. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — Slack notifications (dev-only) — AIM Issues v1.03 → v1.04
 
 AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues` bot. **New issues** post a parent message; **comments, proposals, approvals/rejections** post as **threaded replies** under that issue, so the channel stays one line per issue. **@-mentions**: proposing a fix/ignore pings the approvers to review; approving/rejecting cc's the original proposer; the create-issue modal gains an optional **Notify** picker to @-mention specific teammates on creation. Config (bot token + channel + GitHub-login→Slack-ID map) lives in the private `aim-userscripts-data/slack-config.json`. Degrades silently to no-post when unconfigured. **v1.04:** also load the Slack config on the init path (not just the token-broadcast path) so it loads on a normal page load. *(Dev/latest only — not yet promoted to the prod build coworkers run.)*

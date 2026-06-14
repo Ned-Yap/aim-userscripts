@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.04
+// @version      1.05
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.04';
+    const SCRIPT_VERSION = '1.05';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -77,6 +77,7 @@
     // an incoming webhook can't thread.
     const SLACK_CONFIG_PATH = 'slack-config.json';
     const SLACK_POST_URL = 'https://slack.com/api/chat.postMessage';
+    const SLACK_UPDATE_URL = 'https://slack.com/api/chat.update';
     const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
     const USERNAME_KEY = 'aim-issues-github-login'; // ours
     const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
@@ -725,38 +726,115 @@
         return slackEnabled() && issue && issue.createdBy !== 'local-only' && issue.source !== 'validator';
     }
 
+    // v1.05: linked site label — clickable in Slack, jumps straight to the
+    // site's Site Setup. <url|text> is Slack's link syntax; text can't hold
+    // | or <>, which site names never do.
     function siteLabelForSlack() {
-        return siteName ? `${slackEsc(siteName)} (site ${siteID})` : `site ${siteID}`;
+        const label = siteName ? slackEsc(siteName) : `site ${siteID}`;
+        return `<https://percepto.app/#/site/${siteID}/control-panel/site-setup|${label}>`;
+    }
+
+    // Canonical parent-message text. Rebuilt identically on creation and on
+    // chat.update so a completed issue's edit matches the original. `decoration`
+    // is null (active), 'resolved', or 'ignored' — terminal states strike the
+    // note + prefix a status badge, while keeping the site title a live link.
+    function slackParentText(issue, decoration) {
+        const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
+        const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
+        let head, note = slackEsc(issue.note || '(no description)');
+        if (decoration === 'resolved') {
+            head = `✅ *RESOLVED* — 🚩 issue on ${siteLabelForSlack()}${pri}`;
+            note = `~${note}~`;
+        } else if (decoration === 'ignored') {
+            head = `⊘ *IGNORED* — 🚩 issue on ${siteLabelForSlack()}${pri}`;
+            note = `~${note}~`;
+        } else {
+            head = `🚩 *New issue* on ${siteLabelForSlack()}${pri}`;
+        }
+        const lines = [head, `>${note}`, `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}_`];
+        const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
+        if (mentions) lines.push(`cc ${mentions}`);
+        return lines.join('\n');
+    }
+
+    // Edit an existing message in place (chat.update). Works with chat:write —
+    // no extra scope. IFRAME-only, never throws.
+    async function slackUpdate(ts, text) {
+        if (IS_TOP || !slackEnabled() || !ts) return false;
+        try {
+            const resp = await ghRequest({
+                method: 'POST',
+                url: SLACK_UPDATE_URL,
+                headers: {
+                    'Authorization': `Bearer ${slackConfig.botToken}`,
+                    'Content-Type': 'application/json; charset=utf-8',
+                },
+                data: JSON.stringify({ channel: slackConfig.channelId, ts, text }),
+                timeout: 15000,
+            });
+            let p = null; try { p = JSON.parse(resp.responseText); } catch (e) {}
+            if (resp.status === 200 && p && p.ok) return true;
+            console.warn(`${TAG} chat.update failed: HTTP ${resp.status} ${p ? p.error : ''}`);
+            return false;
+        } catch (e) {
+            console.warn(`${TAG} slackUpdate threw:`, e);
+            return false;
+        }
     }
 
     // New issue → parent message. Stores the returned ts on the issue so
     // every browser can thread replies under it, then re-commits to sync
-    // the ts. `notifyLogins` = GitHub logins the creator chose to @-mention.
+    // the ts. `notifyLogins` = GitHub logins the creator chose to @-mention;
+    // empty defaults to the creator (so it's "theirs" by default).
     async function postSlackNewIssue(issue, notifyLogins) {
         if (!slackPostable(issue)) return;
         try {
-            const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
-            const creator = slackMention(issue.createdBy);
-            const mentions = (notifyLogins || []).map(slackMention).filter(Boolean).join(' ');
-            const lines = [
-                `🚩 *New issue* on ${siteLabelForSlack()}${pri}`,
-                `>${slackEsc(issue.note || '(no description)')}`,
-                `_${slackEsc(issue.shape || 'shape')} · filed by ${creator || ('@' + slackEsc(issue.createdBy))}_`,
-            ];
-            if (mentions) lines.push(`cc ${mentions}`);
-            const ts = await slackPost(lines.join('\n'), null);
+            let mentionLogins = (notifyLogins || []).slice();
+            if (!mentionLogins.length && issue.createdBy && issue.createdBy !== 'local-only') {
+                mentionLogins = [issue.createdBy];   // default: tag the creator
+            }
+            // Stamp the notify list on the live issue first so the parent text
+            // (and any later chat.update) reproduces the same cc line.
+            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            live.slackNotify = mentionLogins;
+            const ts = await slackPost(slackParentText(live, null), null);
             if (ts) {
-                // Re-find the issue (currentSiteIssues may have been merged/
-                // re-fetched while the post was in flight) and stamp the ts.
-                const live = currentSiteIssues.find(i => i.id === issue.id);
-                if (live) {
-                    live.slackThreadTs = ts;
-                    saveIssuesToStorage(siteID, currentSiteIssues);
-                    commitIssuesToGitHub(`attach slack thread to ${issue.id.slice(0, 14)}`);
-                }
+                live.slackThreadTs = ts;
+                saveIssuesToStorage(siteID, currentSiteIssues);
+                commitIssuesToGitHub(`attach slack thread to ${issue.id.slice(0, 14)}`);
+                // First threaded reply: the entities this issue overlaps.
+                postSlackAffectedEntities(live, ts);
             }
         } catch (e) {
             console.warn(`${TAG} postSlackNewIssue threw:`, e);
+        }
+    }
+
+    // Affected entities → first threaded reply under a new issue. Reuses the
+    // same overlap detection the panel uses.
+    async function postSlackAffectedEntities(issue, threadTs) {
+        if (!slackEnabled() || !threadTs) return;
+        try {
+            const affected = affectedEntitiesFor(issue);
+            if (!affected || !affected.length) return;
+            const CAP = 40;
+            const lines = affected.slice(0, CAP).map(a =>
+                `• *${slackEsc(a.typeLabel || a.typeShort || '?')}*: ${slackEsc(a.name)}${a.subtype ? ' (' + slackEsc(a.subtype) + ')' : ''}`);
+            const more = affected.length > CAP ? `\n_…and ${affected.length - CAP} more_` : '';
+            await slackPost(`📍 *Affected entities (${affected.length}):*\n${lines.join('\n')}${more}`, threadTs);
+        } catch (e) {
+            console.warn(`${TAG} postSlackAffectedEntities threw:`, e);
+        }
+    }
+
+    // Delete → threaded reply, so the thread shows created → … → deleted.
+    async function postSlackDelete(issue, by) {
+        if (!slackPostable(issue) || !issue.slackThreadTs) return;
+        try {
+            const actor = slackMention(by) || ('@' + slackEsc(by));
+            await slackPost(`🗑 ${actor} *deleted* this issue`, issue.slackThreadTs);
+        } catch (e) {
+            console.warn(`${TAG} postSlackDelete threw:`, e);
         }
     }
 
@@ -793,6 +871,13 @@
             const text = issue.slackThreadTs ? lines.join('\n')
                        : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
+            // v1.05: reflect terminal state on the ORIGINAL message. Resolved/
+            // ignored → strike + badge; any return to open → restore.
+            if (issue.slackThreadTs) {
+                if (transition.to === 'resolved')      await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'resolved'));
+                else if (transition.to === 'ignored')  await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'ignored'));
+                else if (transition.to === 'open')     await slackUpdate(issue.slackThreadTs, slackParentText(issue, null));
+            }
         } catch (e) {
             console.warn(`${TAG} postSlackTransition threw:`, e);
         }
@@ -1796,10 +1881,11 @@
             </button>`;
         }).join('');
         // v1.03: optional "Notify" multi-select — @-mention chosen teammates
-        // in the Slack post on creation. Only shown when Slack is configured
-        // and there are mapped users (excluding yourself).
+        // in the Slack post on creation. v1.05: includes yourself (tag an
+        // issue for your own follow-up). Empty selection defaults to the
+        // creator in postSlackNewIssue.
         const notifyLogins = slackEnabled()
-            ? Object.keys(slackConfig.users || {}).filter(l => l !== cachedUsername).sort()
+            ? Object.keys(slackConfig.users || {}).sort()
             : [];
         const notifyRowHtml = notifyLogins.length ? `
             <div style="font-size:12px;color:#aaa;margin-top:10px;margin-bottom:6px">
@@ -2032,6 +2118,8 @@
         if (cachedToken) {
             showToast('Issue deleted — pushing to GitHub…', 2500);
             commitIssuesToGitHub(`tombstone issue by @${by}`);
+            // v1.05: log the deletion in the issue's Slack thread.
+            postSlackDelete(issue, by);
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
         }
