@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.41
+// @version      4.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.41';
+    const SCRIPT_VERSION = '4.42';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6096,6 +6096,19 @@
         }
     }
 
+    // Download arbitrary text as a file via the top frame (same iframe-sandbox
+    // workaround as downloadKMLFile). Returns true on success.
+    function downloadJSONFile(filename, content) {
+        const tryDownload = (win, doc) => {
+            const blob = new win.Blob([content], { type: 'application/json' });
+            const url = win.URL.createObjectURL(blob);
+            const a = doc.createElement('a');
+            a.href = url; a.download = filename; doc.body.appendChild(a); a.click();
+            setTimeout(() => { try { win.URL.revokeObjectURL(url); } catch (e) {} try { a.remove(); } catch (e) {} }, 100);
+        };
+        try { const w = window.top || window; tryDownload(w, w.document); return true; }
+        catch (e) { try { tryDownload(window, document); return true; } catch (e2) { return false; } }
+    }
     // Site Setup Analyzer modal — KML format toggle + folder
     // checkboxes + download/copy buttons. Floating draggable like
     // the Stats popup; closes on Cancel or outside-click.
@@ -8147,6 +8160,7 @@
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
+                <button id="aim-gen-routes-json" title="Download the last route result as JSON to share for debugging" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⤓ JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
@@ -8239,6 +8253,32 @@
             } finally {
                 routesBtn.disabled = false; routesBtn.textContent = restore;
             }
+        };
+        box.querySelector('#aim-gen-routes-json').onclick = () => {
+            if (!genRouteResult || !genRouteResult.ok) { statsEl.innerHTML = `<span style="color:#ffb347">Run 🛩 Routes first, then export.</span>`; return; }
+            const r = genRouteResult;
+            const round = (p) => p ? { lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7) } : null;
+            const dump = {
+                site: siteID,
+                base: round(r.base),
+                baseName: r.baseEntity && r.baseEntity.name ? r.baseEntity.name : null,
+                stats: r.stats,
+                tunables: A2,
+                corridor: r.corridor.map(s => ({ a: round(s.a), b: round(s.b), flag: !!s.flag })),
+                assets: r.assets.map(a => ({
+                    name: a.asset && a.asset.name, id: a.asset && a.asset.id,
+                    reachable: a.reachable, hasFfz: a.hasFfz, approachFt: a.approachFt != null ? Math.round(a.approachFt) : null,
+                    foot: round(a.foot), entry: round(a.entry),
+                    path: a.path ? a.path.map(round) : null,
+                })),
+            };
+            const json = JSON.stringify(dump, null, 2);
+            try { uwin().__aimRoute = dump; } catch (e) {}
+            try { uwin().console.log(`${GEN_TAG} route result (also at window.__aimRoute):`, dump); } catch (e) {}
+            const ok = downloadJSONFile(`aim-route-site${siteID}.json`, json);
+            statsEl.innerHTML = ok
+                ? `<span style="color:#5fff5f">Downloaded aim-route-site${siteID}.json</span> <span style="color:#888">(also window.__aimRoute in console)</span>`
+                : `<span style="color:#ffb347">Download blocked — copy it from console: window.__aimRoute</span>`;
         };
         const previewBtn = box.querySelector('#aim-gen-preview');
         previewBtn.onclick = async () => {
