@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — parent = live status board, thread = full history (dev-only) — AIM Issues v1.08
+
+Reworked the Slack message model. The **parent message is now a live status board**: it's edited on *every* transition so the channel shows current state at a glance — 🚩 OPEN → 🟡 PENDING FIX / 🟣 PENDING IGNORE → ✅ RESOLVED / ⊘ IGNORED / 🗑 DELETED (terminal states strike the description). Because the parent now changes, the **thread carries the full immutable history**: reply 1 is the **original report** (preserved verbatim), reply 2 is the **affected entities**, and every status change appends after. So you can read state from the parent without opening the thread, and never lose the original request. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — sticky Confirm/Cancel footer (dev-only) — AIM Issues v1.07
 
 Fixed a confusing flow in the issue popup: when you armed a transition (e.g. Propose Fix), the **Confirm/Cancel** buttons were buried at the bottom of the scrollable body while a "Close" button sat pinned below — so it was easy to hit Close and silently lose your status change. Now **Confirm/Cancel are pinned in the footer** (always visible, no scrolling), the note field auto-scrolls into view + focuses when armed, and the **redundant bottom "Close" is gone** (the top-right ✕ is the single close). *(Dev/latest only.)*

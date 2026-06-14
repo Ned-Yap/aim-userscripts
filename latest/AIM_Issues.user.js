@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.07
+// @version      1.08
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.07';
+    const SCRIPT_VERSION = '1.08';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -739,28 +739,38 @@
         return `<https://percepto.app/${q}#/site/${siteID}/control-panel/site-setup|${label}>`;
     }
 
-    // Canonical parent-message text. Rebuilt identically on creation and on
-    // chat.update so a completed issue's edit matches the original. `decoration`
-    // is null (active), 'resolved', or 'ignored' — terminal states strike the
-    // note + prefix a status badge, while keeping the site title a live link.
-    function slackParentText(issue, decoration) {
+    // v1.08: status badge for the parent message — icon + label + whether to
+    // strike the note (terminal states). The parent is a LIVE status board:
+    // it's chat.update'd on every transition so the channel shows current
+    // state at a glance. The immutable history lives in the thread replies.
+    function slackStatusBadge(status) {
+        switch (status) {
+            case 'pending_fix':      return { icon: '🟡', text: 'PENDING FIX',      strike: false };
+            case 'pending_ignore':   return { icon: '🟣', text: 'PENDING IGNORE',   strike: false };
+            case 'ready-for-review': return { icon: '🟡', text: 'READY FOR REVIEW', strike: false };
+            case 'resolved':         return { icon: '✅', text: 'RESOLVED',          strike: true  };
+            case 'ignored':          return { icon: '⊘', text: 'IGNORED',           strike: true  };
+            case 'deleted':          return { icon: '🗑', text: 'DELETED',           strike: true  };
+            default:                 return { icon: '🚩', text: 'OPEN',              strike: false };
+        }
+    }
+    // Canonical parent-message text, driven by the issue's current status
+    // (or an explicit override, e.g. 'deleted' which isn't stored on .status).
+    // Rebuilt identically on creation + every chat.update so the parent always
+    // reflects live status without losing formatting.
+    function slackParentText(issue, statusOverride) {
+        const status = statusOverride || issue.status || 'open';
+        const b = slackStatusBadge(status);
         const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
         const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
         const link = siteLabelForSlack(issue.id);
-        let head, note = slackEsc(issue.note || '(no description)');
-        if (decoration === 'resolved') {
-            head = `✅ *RESOLVED* — 🚩 issue on ${link}${pri}`;
-            note = `~${note}~`;
-        } else if (decoration === 'ignored') {
-            head = `⊘ *IGNORED* — 🚩 issue on ${link}${pri}`;
-            note = `~${note}~`;
-        } else if (decoration === 'deleted') {
-            head = `🗑 *DELETED* — 🚩 ~issue on ${link}~${pri}`;
-            note = `~${note}~`;
-        } else {
-            head = `🚩 *New issue* on ${link}${pri}`;
-        }
-        const lines = [head, `>${note}`, `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}_`];
+        let note = slackEsc(issue.note || '(no description)');
+        if (b.strike) note = `~${note}~`;
+        const lines = [
+            `${b.icon} *${b.text}* — issue on ${link}${pri}`,
+            `>${note}`,
+            `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}_`,
+        ];
         const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
         if (mentions) lines.push(`cc ${mentions}`);
         return lines.join('\n');
@@ -811,11 +821,27 @@
                 live.slackThreadTs = ts;
                 saveIssuesToStorage(siteID, currentSiteIssues);
                 commitIssuesToGitHub(`attach slack thread to ${issue.id.slice(0, 14)}`);
-                // First threaded reply: the entities this issue overlaps.
-                postSlackAffectedEntities(live, ts);
+                // v1.08: thread = immutable history. Post sequentially so
+                // order is guaranteed: (1) original report, (2) affected
+                // entities, then transitions append after.
+                await postSlackOriginalRequest(live, ts);
+                await postSlackAffectedEntities(live, ts);
             }
         } catch (e) {
             console.warn(`${TAG} postSlackNewIssue threw:`, e);
+        }
+    }
+
+    // v1.08: original report → first thread reply, preserved verbatim so
+    // editing the parent (live status board) never loses what was filed.
+    async function postSlackOriginalRequest(issue, threadTs) {
+        if (!slackEnabled() || !threadTs) return;
+        try {
+            const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
+            const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
+            await slackPost(`📝 *Reported* by ${creator}${pri}\n>${slackEsc(issue.note || '(no description)')}`, threadTs);
+        } catch (e) {
+            console.warn(`${TAG} postSlackOriginalRequest threw:`, e);
         }
     }
 
@@ -882,12 +908,11 @@
             const text = issue.slackThreadTs ? lines.join('\n')
                        : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
-            // v1.05: reflect terminal state on the ORIGINAL message. Resolved/
-            // ignored → strike + badge; any return to open → restore.
+            // v1.08: parent is a live status board — reflect EVERY transition
+            // (pending/resolved/ignored/reopen). issue.status is already the
+            // new status here (applyTransition set it before calling us).
             if (issue.slackThreadTs) {
-                if (transition.to === 'resolved')      await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'resolved'));
-                else if (transition.to === 'ignored')  await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'ignored'));
-                else if (transition.to === 'open')     await slackUpdate(issue.slackThreadTs, slackParentText(issue, null));
+                await slackUpdate(issue.slackThreadTs, slackParentText(issue));
             }
         } catch (e) {
             console.warn(`${TAG} postSlackTransition threw:`, e);
