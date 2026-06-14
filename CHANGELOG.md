@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — A2.1 routes connect to FFZs, not pad centers (dev-only) — Asset Inspector v4.35
+
+Routing now targets the **asset's FFZ** (committed or in the current generator preview) instead of the pad center — a big pad's center sits 100+ ft inside, so pads were wrongly flagged out-of-shield even though their FFZ is right next to the corridor. Each asset connects to its nearest FFZ within 70 ft of the pad edge; if it has no FFZ yet, it falls back to the nearest **pad edge** vertex (never the center). Stats now show how many routed via FFZ vs pad edge. So the intended flow is FFZs first → Routes, but it works either way. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — A2.1 shielded flight-path routing (preview) (dev-only) — Asset Inspector v4.34
 
 First slice of **A2: base→asset shielded flight-path generation**. New **🛩 Routes** button in the Generator builds a branching tree from the base station that snakes along power-line corridors to every near-line asset. Builds a routing graph from the power-line KML (densified vertices + corridor-hop connectors within 130 ft), connects the base + each asset (launch + approach legs), runs Dijkstra, and previews the result: **cyan = shielded corridor tree**, **dashed green/red = final approach** (reachable vs out-of-shield), **yellow ring = base**. Reports reachable/out-of-shield counts + launch distance. PREVIEW ONLY — no 40–65 ft offset, no altitudes, no commit yet (those are A2.2/A2.3). *(Dev/latest only.)*

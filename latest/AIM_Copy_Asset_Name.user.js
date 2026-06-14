@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.34
+// @version      4.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.34';
+    const SCRIPT_VERSION = '4.35';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6310,30 +6310,44 @@
         graph.adj.get(baseKey).push({ to: baseV.key, w: baseV.dist, shielded: false });
         graph.adj.get(baseV.key).push({ to: baseKey, w: baseV.dist, shielded: false });
         const { dist, prev } = dijkstraPath(graph, baseKey);
+        // FFZ targets — the FP connects to the asset's FFZ, NOT the pad center (a
+        // big pad's center sits 100+ ft inside, wrongly reading as out-of-shield).
+        // Gather committed type-16 FFZs + any in the current generator preview
+        // (drafts), so routing snaps to FFZs you've placed even before commit.
+        const ffzRings = [];
+        for (const e of entities) { if (e.type !== 16) continue; const r = entityCoords(e); if (r && r.length >= 3) ffzRings.push({ ring: simplifyPolygon(r), cen: ringCentroid(r) }); }
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) {
+            for (const f of genState.lastResult.ffzs) { if (f.points && f.points.length >= 3) ffzRings.push({ ring: f.points, cen: f._centroid || ringCentroid(f.points) }); }
+        }
+        const reachM = REACH_FFZ_FT * GEN_FT_TO_M; // FFZ counts as the asset's if within this of the pad EDGE
         // candidate assets: same skip rules + proximity gate as the FFZ generator
         const proxM = params.proximityFt * GEN_FT_TO_M;
-        const approachMaxM = A2.approachMaxFt * GEN_FT_TO_M;
         const baseLaunchFt = baseV.dist / GEN_FT_TO_M;
         const out = [];
-        let reachable = 0, unreachable = 0;
+        let reachable = 0, unreachable = 0, usedFfz = 0;
         for (const a of entities) {
             if (a.type !== 3) continue;
             if (params.skipBadStates && assetSkipReason(a)) continue;
             const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
             if (minRingToSegsM(ring, segs) > proxM) continue; // not near any power line
-            const cen = ringCentroid(ring);
-            // approach point: just outside the pad+buffer toward the nearest corridor node
-            const av = nearestGraphVertex(graph, cen.lat, cen.lng);
+            // target = the asset's FFZ centroid if one is within reach of the pad
+            // edge, else the pad EDGE vertex nearest a corridor (never the center).
+            let ffz = null, ffzD = Infinity;
+            for (const f of ffzRings) { let d = Infinity; for (const c of ring) { const dd = pointToPolygonMeters(c.lat, c.lng, f.ring); if (dd < d) d = dd; } if (d < ffzD) { ffzD = d; ffz = f; } }
+            let target, hasFfz = false;
+            if (ffz && ffzD <= reachM) { target = ffz.cen; hasFfz = true; }
+            else { let bv = null; for (const c of ring) { const gv = nearestGraphVertex(graph, c.lat, c.lng); if (!bv || gv.dist < bv.dist) bv = { pt: c, gv }; } target = bv.pt; }
+            const av = nearestGraphVertex(graph, target.lat, target.lng);
             const approachFt = av.dist / GEN_FT_TO_M;
             const net = dist.has(av.key) ? dist.get(av.key) : null;
-            if (net == null) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt }); unreachable++; continue; }
+            if (net == null) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt, hasFfz }); unreachable++; continue; }
             const keyPath = reconstructPath(prev, baseKey, av.key);
-            if (!keyPath) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt }); unreachable++; continue; }
+            if (!keyPath) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt, hasFfz }); unreachable++; continue; }
             const path = keyPath.map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
-            path.push({ lat: cen.lat, lng: cen.lng }); // branch tip = the asset (A2.2 will pull it back to the FFZ edge + buffer)
+            path.push({ lat: target.lat, lng: target.lng }); // branch tip = FFZ (or pad edge); A2.2 refines entry
             const inBand = approachFt <= A2.approachMaxFt;
-            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key });
-            if (inBand) reachable++; else unreachable++;
+            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz });
+            if (inBand) { reachable++; if (hasFfz) usedFfz++; } else unreachable++;
         }
         // union the per-asset key-paths into one branching tree (dedupe edges)
         const edgeSet = new Set(), edges = [];
@@ -6348,7 +6362,7 @@
                 edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
             }
         }
-        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt } };
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length } };
     }
     // Returns the skip-state name (unreachable/unshielded/empty) for an asset
     // if it should be skipped, else null. Reads the poi_type_str suffix +
@@ -7992,7 +8006,8 @@
                 const drawn = renderRoutePreview(res);
                 const s = res.stats;
                 const baseNm = res.baseEntity && res.baseEntity.name ? genCleanName(res.baseEntity.name) : 'base';
-                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${s.plSegs} PL segs → ${s.graphVerts} graph nodes · drew ${drawn} layers. Cyan = shielded corridor tree; dashed = final approach (green reachable / red out-of-shield). PREVIEW — A2.1, no offset/altitude/commit yet.</span>`;
+                const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes · drew ${drawn}. Cyan = shielded corridor tree; dashed = approach (green reachable / red out-of-shield). PREVIEW — A2.1.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} routing failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;
