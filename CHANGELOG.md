@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — draw: visible corner snap-targets (dev-only) — Asset Inspector v4.30
+
+Drawing a corridor is now aim-at-the-dot instead of hunting pixels. While Draw is on, every nearby pad's offset-ring **corners show as cyan target dots** (the exact points a click locks to), and a live **ghost marker** tracks the cursor — it turns **big green when you're magnetised to a corner**, small yellow on an edge. The corner magnet was widened to 22 ft so locking is forgiving. Target dots re-sync as you pan/zoom. This stops the "clicked slightly off → strip starts inside the asset" problem. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — draw: pad-follow + corner cleanup (dev-only) — Asset Inspector v4.29
 
 Restored the pad-following corner-tracing in Draw (v4.28's pure-WYSIWYG removed it, which lost square corners and the 15-ft standoff between clicks). Two clicks on the same pad again trace its offset-ring corners so the strip hugs the pad at a constant 15 ft with true right angles. The old downside (1–2 extra facet points at a corner) is fixed by a new **clamped collinear cleanup** that collapses each corner to a single point without touching real 90° corners (offline-verified: 9-pt L-path → 3 clean corners). *(Dev/latest only.)*

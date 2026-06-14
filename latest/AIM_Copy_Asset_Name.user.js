@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.29
+// @version      4.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.29';
+    const SCRIPT_VERSION = '4.30';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7004,7 +7004,7 @@
     // vertex } so the caller can insert corner vertices when crossing edges.
     function snapDrawPoint(cursorLL, params) {
         const SNAP_M = 70 * GEN_FT_TO_M;
-        const VSNAP_M = 16 * GEN_FT_TO_M; // corner-magnet radius
+        const VSNAP_M = 22 * GEN_FT_TO_M; // corner-magnet radius (generous — aim at the dot)
         const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let best = null;
@@ -7112,10 +7112,34 @@
     // Click-to-place draw: pts[] are the user's clicked (snapped) corners; tentative
     // is the live rubber-band point at the cursor; dots[] are the on-map corner
     // markers so the user can see what they're building.
-    let genDraw = { active: false, drawing: false, pts: [], tentative: null, lastSnap: null, poly: null, dots: [], onDown: null, onMove: null, onDbl: null };
+    let genDraw = { active: false, drawing: false, pts: [], tentative: null, tentVertex: false, lastSnap: null, poly: null, dots: [], targets: [], ghost: null, onDown: null, onMove: null, onDbl: null, onMapMove: null };
     function clearDrawDots(map) {
         for (const d of genDraw.dots) { try { map.removeLayer(d); } catch (e) {} }
         genDraw.dots = [];
+    }
+    function clearGhost(map) { if (genDraw.ghost) { try { map.removeLayer(genDraw.ghost); } catch (e) {} genDraw.ghost = null; } }
+    function clearSnapTargets(map) {
+        for (const d of genDraw.targets) { try { map.removeLayer(d); } catch (e) {} }
+        genDraw.targets = [];
+    }
+    // Persistent snap-target dots at every nearby pad's offset-ring CORNERS — the
+    // exact points a click locks the centerline to. Aim at a dot instead of hunting
+    // pixels. Filtered to the current view so big sites don't flood with markers.
+    function buildSnapTargets(map, p) {
+        clearSnapTargets(map);
+        const L = getLeafletL(); if (!L) return;
+        const offM = (p.standoffFt + Math.max(p.depthFt, 30) / 2) * GEN_FT_TO_M;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let bounds = null; try { bounds = map.getBounds().pad(0.15); } catch (e) {}
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            const off = getAssetOffsetRing(a, offM); if (!off) continue;
+            for (const v of off) {
+                if (bounds && !bounds.contains([v.lat, v.lng])) continue;
+                try { const d = L.circleMarker([v.lat, v.lng], { radius: 3.5, color: '#00e5ff', weight: 1.5, opacity: 0.65, fillColor: '#08323b', fillOpacity: 0.55, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
+            }
+        }
     }
     function renderDrawPreview(p) {
         const L = getLeafletL(), map = getLeafletMap();
@@ -7127,6 +7151,18 @@
         // dot markers at each (cleaned) corner so dots match the strip's corners
         for (const q of base) {
             try { const d = L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#003844', fillOpacity: 0.9, interactive: false }); d.addTo(map); genDraw.dots.push(d); } catch (e) {}
+        }
+        // live "ghost" marker at where the cursor would lock — green+big when it's
+        // magnetised to a corner, small yellow when on an edge.
+        clearGhost(map);
+        if (genDraw.tentative) {
+            try {
+                const v = genDraw.tentVertex;
+                genDraw.ghost = L.circleMarker([genDraw.tentative.lat, genDraw.tentative.lng], v
+                    ? { radius: 7, color: '#5fff5f', weight: 3, fillColor: '#0a3d0a', fillOpacity: 0.85, interactive: false }
+                    : { radius: 4, color: '#ffe14d', weight: 2, fillColor: '#3a3400', fillOpacity: 0.8, interactive: false });
+                genDraw.ghost.addTo(map);
+            } catch (e) {}
         }
         const pts = base.concat(genDraw.tentative ? [genDraw.tentative] : []);
         if (pts.length < 2) return;
@@ -7140,8 +7176,8 @@
     async function finalizeDraw() {
         const map = getLeafletMap();
         if (genDraw.poly) { try { if (map) map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
-        if (map) clearDrawDots(map);
-        genDraw.drawing = false; genDraw.tentative = null; genDraw.lastSnap = null;
+        if (map) { clearDrawDots(map); clearGhost(map); }
+        genDraw.drawing = false; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.lastSnap = null;
         const p = genState.lastParams || GEN_DEFAULTS;
         // dedupe near-duplicate corners (a finishing double-click drops 2 near-same pts)
         const dedup = [];
@@ -7310,8 +7346,8 @@
             if (k0 === 'escape' && genDraw.active && genDraw.drawing) {
                 ev.preventDefault(); ev.stopImmediatePropagation();
                 const map = getLeafletMap();
-                if (map) { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); }
-                genDraw.pts = []; genDraw.tentative = null; genDraw.lastSnap = null; genDraw.drawing = false;
+                if (map) { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); clearGhost(map); }
+                genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.lastSnap = null; genDraw.drawing = false;
                 return;
             }
             const poly = genEdit.activePoly || genEdit.hovered;
@@ -7359,10 +7395,11 @@
             renderDrawPreview(p);
         };
         genDraw.onMove = (ev) => {
-            if (!genDraw.active || !genDraw.drawing) return;
+            if (!genDraw.active) return; // show the lock-target ghost even before the first click
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const p = genState.lastParams || GEN_DEFAULTS;
-            genDraw.tentative = snapDrawPoint(ll, p).pt;
+            const snap = snapDrawPoint(ll, p);
+            genDraw.tentative = snap.pt; genDraw.tentVertex = !!snap.vertex;
             renderDrawPreview(p);
         };
         genDraw.onDbl = (ev) => {
@@ -7562,8 +7599,8 @@
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
-        genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.lastSnap = null;
-        try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
+        genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.lastSnap = null;
+        try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
 
     function openSiteGenerator(siteID) {
@@ -7738,10 +7775,17 @@
                         wireGenEditing(map);
                         try { map.doubleClickZoom.disable(); } catch (e) {}
                         map.getContainer().style.cursor = 'crosshair';
+                        const p = genState.lastParams || GEN_DEFAULTS;
+                        buildSnapTargets(map, p);
+                        // keep target dots in sync as the user pans/zooms while drawing
+                        genDraw.onMapMove = () => { if (genDraw.active) buildSnapTargets(map, genState.lastParams || GEN_DEFAULTS); };
+                        try { map.on('moveend', genDraw.onMapMove); } catch (e) {}
                     } else {
                         // turning off mid-draw finishes the current corridor
                         if (genDraw.drawing && genDraw.pts.length >= 2) finalizeDraw();
                         else { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); genDraw.pts = []; genDraw.tentative = null; genDraw.drawing = false; }
+                        if (genDraw.onMapMove) { try { map.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; }
+                        clearSnapTargets(map); clearGhost(map);
                         try { map.doubleClickZoom.enable(); } catch (e) {}
                         map.getContainer().style.cursor = '';
                     }
