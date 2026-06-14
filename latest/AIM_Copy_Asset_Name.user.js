@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.36
+// @version      4.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.36';
+    const SCRIPT_VERSION = '4.37';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6253,22 +6253,6 @@
         mergeFt: 60,        // parallel PL segments within this = one corridor (distro+trans on same poles)
     };
     function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
-    // Drop parallel/overlapping power-line segments (distro + trans usually trace
-    // the same corridor a few ft apart) so we get ONE corridor with a clean
-    // T-branch, not two parallel FP runs. A seg is a duplicate when BOTH its
-    // endpoints lie within mergeM of an already-kept segment.
-    function dedupeParallelSegs(segs, mergeM) {
-        const kept = [];
-        for (const s of segs) {
-            let dup = false;
-            for (const k of kept) {
-                if (pointToSegMeters(s[0].lat, s[0].lng, k[0], k[1]) <= mergeM &&
-                    pointToSegMeters(s[1].lat, s[1].lng, k[0], k[1]) <= mergeM) { dup = true; break; }
-            }
-            if (!dup) kept.push(s);
-        }
-        return kept;
-    }
     // Nearest point on a set of [a,b] edges to a lat/lng point. Returns {pt, d(m)}.
     function a2NearestOnEdges(pt, edges) {
         const proj = genProjector(pt.lat, pt.lng);
@@ -6287,34 +6271,68 @@
     // vertices within connectFt (lets the drone cross between nearby corridors).
     // Returns { adj, verts } — same shape as buildFlightPathGraph, so dijkstra*/
     // nearestGraphVertex work unchanged. Every edge carries { shielded:true }.
+    // Power lines as whole POLYLINES (one per KML feature), not flat segments —
+    // we need line membership so the graph follows each line EXACTLY and never
+    // chords across its own bends.
+    function powerLineFeatures(siteID) {
+        const feats = [];
+        const add = (arr) => (arr || []).forEach(f => { if (f && Array.isArray(f.coords) && f.coords.length >= 2) feats.push(f.coords); });
+        if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
+        return feats;
+    }
+    // Drop a whole feature when EVERY vertex is within mergeM of an already-kept
+    // feature (parallel duplicate, e.g. distro+trans on the same poles).
+    function dedupeParallelFeatures(feats, mergeM) {
+        const kept = [];
+        for (const c of feats) {
+            let dup = false;
+            for (const k of kept) {
+                let allNear = true;
+                for (const p of c) { let dmin = Infinity; for (let i = 0; i < k.length - 1; i++) { const d = pointToSegMeters(p.lat, p.lng, k[i], k[i + 1]); if (d < dmin) dmin = d; } if (dmin > mergeM) { allNear = false; break; } }
+                if (allNear) { dup = true; break; }
+            }
+            if (!dup) kept.push(c);
+        }
+        return kept;
+    }
     function buildPowerLineGraph(siteID) {
-        const segs = dedupeParallelSegs(powerLineSegments(siteID), A2.mergeFt * GEN_FT_TO_M);
-        const adj = new Map(), verts = new Map();
-        const addVert = (p) => { const k = vkey(p); if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng }); if (!adj.has(k)) adj.set(k, []); return k; };
+        const feats = dedupeParallelFeatures(powerLineFeatures(siteID), A2.mergeFt * GEN_FT_TO_M);
+        const adj = new Map(), verts = new Map(), nodeLine = new Map();
+        const addVert = (p, lineId) => { const k = vkey(p); if (!verts.has(k)) { verts.set(k, { lat: p.lat, lng: p.lng }); nodeLine.set(k, lineId); } if (!adj.has(k)) adj.set(k, []); return k; };
         const addEdge = (ka, kb, shielded) => { if (ka === kb) return; const w = approxMeters(verts.get(ka).lat, verts.get(ka).lng, verts.get(kb).lat, verts.get(kb).lng); adj.get(ka).push({ to: kb, w, shielded }); adj.get(kb).push({ to: ka, w, shielded }); };
         const stepM = A2.densifyFt * GEN_FT_TO_M;
-        // 1) densify each PL segment into a node chain (shielded travel along line)
-        for (const [a, b] of segs) {
-            const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
-            const n = Math.max(1, Math.round(len / stepM));
-            let prevK = addVert(a);
-            for (let i = 1; i <= n; i++) { const k = addVert(a2Interp(a, b, i / n)); addEdge(prevK, k, true); prevK = k; }
-        }
-        // 2) connector edges between corridors that pass within connectFt. O(V²) —
-        //    a few hundred densified nodes per site, negligible. Skip pairs already
-        //    chain-adjacent (same line) — only NEW bridges matter.
+        // 1) densify each LINE (feature) into a node chain tagged with its lineId —
+        //    chain edges follow the line EXACTLY (no corner-cutting).
+        feats.forEach((coords, lineId) => {
+            let prevK = addVert(coords[0], lineId);
+            for (let s = 0; s < coords.length - 1; s++) {
+                const a = coords[s], b = coords[s + 1];
+                const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                const n = Math.max(1, Math.round(len / stepM));
+                for (let i = 1; i <= n; i++) { const k = addVert(a2Interp(a, b, i / n), lineId); addEdge(prevK, k, true); prevK = k; }
+            }
+        });
+        // 2) connectors ONLY between DIFFERENT lines within connectFt (a genuine
+        //    corridor hop) — never within one line (that was chording across bends,
+        //    cutting corners off the line + over pads). For each ordered line pair
+        //    add only the SINGLE closest bridge so the tree can't zigzag.
         const connM = A2.connectFt * GEN_FT_TO_M;
         const keys = [...verts.keys()];
+        const bestBridge = new Map(); // "li-lj" -> {ka,kb,d}
         for (let i = 0; i < keys.length; i++) {
-            const vi = verts.get(keys[i]);
-            const adjSet = new Set((adj.get(keys[i]) || []).map(e => e.to));
+            const vi = verts.get(keys[i]), li = nodeLine.get(keys[i]);
             for (let j = i + 1; j < keys.length; j++) {
-                if (adjSet.has(keys[j])) continue;
+                const lj = nodeLine.get(keys[j]);
+                if (li === lj) continue; // same line → chain only, no chord
                 const vj = verts.get(keys[j]);
                 const d = approxMeters(vi.lat, vi.lng, vj.lat, vj.lng);
-                if (d > 0 && d <= connM) addEdge(keys[i], keys[j], d <= connM); // a hop within 2×65 ft stays shielded
+                if (d <= 0 || d > connM) continue;
+                const pk = li < lj ? li + '-' + lj : lj + '-' + li;
+                const cur = bestBridge.get(pk);
+                if (!cur || d < cur.d) bestBridge.set(pk, { ka: keys[i], kb: keys[j], d });
             }
         }
+        bestBridge.forEach(b => addEdge(b.ka, b.kb, true));
         return { adj, verts };
     }
     // Route a branching tree from the base to every eligible asset, snaking along

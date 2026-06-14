@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.1 follow lines exactly (no corner-cutting) (dev-only) — Asset Inspector v4.37
+
+The real cause of the parallel "extra segment" + paths not following the power line + cutting across a pad: my **connector edges were chording across a single line's own bends** (two densified nodes either side of a bend are <130 ft apart, so a shortcut got added). Rebuilt the graph with **line membership** — each power line is densified as its own chain (followed exactly), and connectors now bridge **only between different lines** (one closest bridge per line pair, no zigzag). So routes hug the power lines and stop shortcutting over pads. Offline-verified: a bent line gets 0 cross-bend chords; two distinct lines get exactly one bridge. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — A2.1 single corridor + clean T-branches (dev-only) — Asset Inspector v4.36
 
 Two routing-quality fixes. (1) **No more parallel double-back corridors** — distro + trans power lines trace the same corridor a few ft apart, so both were being densified into parallel runs and the tree split between them. Now overlapping/parallel PL segments (within 60 ft) are deduped to one corridor before graphing, so a branch T's off cleanly instead of running parallel. (2) **Branch connects to the FFZ middle via a clean perpendicular T** off the trunk (the foot of the perpendicular from the FFZ centroid), not from the nearest discrete graph node. *(Dev/latest only.)*
