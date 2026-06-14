@@ -90,6 +90,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 EDITABLE corridor (drag to fix) (dev-only) — Asset Inspector v4.49
+
+The corridor preview is now **editable**: every waypoint has a **white dot you can drag** to move the path. Flags recompute **live** — drag an orange (out-of-band / over-a-pad/FFZ) stretch clear and it turns cyan. The asset branches + base launch re-attach to the corridor as you move it, and edits flow into the JSON export. This makes "flag the problem" actually actionable — the CSM drags the few flagged spots instead of the tool trying (and failing) to auto-perfect them. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 clean offset + flag (drop the dodging) (dev-only) — Asset Inspector v4.48
 
 Changed approach: the auto-dodging around obstacles was the source of the zigzags/crossings/extra vertices. Now the corridor is a **clean flat ~50 ft offset** of each power line to one consistent side — no dodging — and any point that **leaves the 40–65 ft band or crosses a pad/FFZ is flagged orange** for the CSM to drag-fix. Predictable, stable, far fewer vertices. The foundation-then-tune model. *(Dev/latest only.)*

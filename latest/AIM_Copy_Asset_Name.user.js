@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.48
+// @version      4.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.48';
+    const SCRIPT_VERSION = '4.49';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6156,6 +6156,36 @@
     let genPreviewLayers = [];
     let genRouteLayers = [];   // A2 flight-path route preview (polylines + markers)
     let genRouteResult = null;  // last routeFlightPaths() result
+    // editable corridor: verts[] + segs[{a,b,flag}] (indices into verts). Built from
+    // result.corridor; drag a handle to move a waypoint, flags recompute live.
+    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null };
+    function routePointFlag(p) {
+        const ctx = genRoute.ctx; if (!ctx) return false;
+        const d = a2PointToSegs(p, ctx.segs), minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        return (d < minM || d > maxM) || a2InObstacle(p, ctx.avoidObs);
+    }
+    function reflagSeg(seg) {
+        const a = genRoute.verts[seg.a], b = genRoute.verts[seg.b];
+        const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / (A2.sampleFt * GEN_FT_TO_M)));
+        let flag = false; for (let i = 0; i <= n && !flag; i++) if (routePointFlag(a2Interp(a, b, i / n))) flag = true; seg.flag = flag;
+    }
+    function routeCorridorEdges() { return genRoute.segs.map(s => [genRoute.verts[s.a], genRoute.verts[s.b]]); }
+    function buildRouteEdit(result) {
+        genRoute.ctx = result._ctx || null;
+        genRoute.assets = result.assets || [];
+        genRoute.base = result.base || null;
+        const idx = new Map(); genRoute.verts = []; genRoute.segs = [];
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = genRoute.verts.length; genRoute.verts.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        for (const s of (result.corridor || [])) { const a = vi(s.a), b = vi(s.b); if (a !== b) genRoute.segs.push({ a, b, flag: !!s.flag }); }
+    }
+    // push the edited verts/segs back into result.corridor so export + commit + the
+    // flagged-ft stat reflect the edits.
+    function syncRouteToResult() {
+        if (!genRouteResult) return;
+        genRouteResult.corridor = genRoute.segs.map(s => ({ a: { lat: genRoute.verts[s.a].lat, lng: genRoute.verts[s.a].lng }, b: { lat: genRoute.verts[s.b].lat, lng: genRoute.verts[s.b].lng }, flag: !!s.flag }));
+        let f = 0; for (const s of genRoute.segs) if (s.flag) f += approxMeters(genRoute.verts[s.a].lat, genRoute.verts[s.a].lng, genRoute.verts[s.b].lat, genRoute.verts[s.b].lng) / GEN_FT_TO_M;
+        if (genRouteResult.stats) genRouteResult.stats.flaggedFt = Math.round(f);
+    }
 
     // Local east/north meters projection around an origin, and its
     // inverse — equirectangular, consistent with approxMeters. Good
@@ -6564,7 +6594,9 @@
         const bl = corridorEdges.length ? a2NearestOnEdges(basePt, corridorEdges) : null;
         if (bl) baseLaunch = { from: { lat: basePt.lat, lng: basePt.lng }, to: bl.pt };
         const corrVerts = new Set(); for (const s of corridor) { corrVerts.add(`${s.a.lat.toFixed(7)},${s.a.lng.toFixed(7)}`); corrVerts.add(`${s.b.lat.toFixed(7)},${s.b.lng.toFixed(7)}`); }
-        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, baseLaunch, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
+        // context kept so the live editor can RE-FLAG a segment as you drag it
+        const _ctx = { segs, avoidObs: padObstacles.concat(ffzObstacles) };
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, baseLaunch, assets: out, _ctx, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
     }
     // Returns the skip-state name (unreachable/unshielded/empty) for an asset
     // if it should be skipped, else null. Reads the poi_type_str suffix +
@@ -6784,44 +6816,86 @@
     function clearRoutePreview() {
         const map = getLeafletMap();
         genRouteLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
-        genRouteLayers = [];
+        genRouteLayers = []; genRoute.handles = [];
+        unwireRouteEdit();
+        genRoute.verts = []; genRoute.segs = [];
+    }
+    // Redraw the editable corridor from genRoute state (lines + branches + base +
+    // draggable vertex handles). Called on first render and after each drag.
+    function drawGenRoute() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return 0;
+        genRouteLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} }); genRouteLayers = []; genRoute.handles = [];
+        const edges = routeCorridorEdges();
+        // 1) corridor segments — cyan shielded, ORANGE where it leaves the band / hits a pad/FFZ
+        for (const s of genRoute.segs) {
+            const a = genRoute.verts[s.a], b = genRoute.verts[s.b];
+            try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
+        }
+        // 2) per-asset branch: trunk FOOT (recomputed to the CURRENT corridor) → FFZ edge
+        for (const r of genRoute.assets) {
+            const tip = r.entry || (r.path && r.path[r.path.length - 1]); if (!tip) continue;
+            const foot = edges.length ? a2NearestOnEdges(tip, edges) : null;
+            const from = foot ? foot.pt : r.foot; if (!from) continue;
+            const col = r.longApproach ? '#ff8a80' : '#00e5ff';
+            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
+            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: r.longApproach ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: r.longApproach ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
+        }
+        // 3) base launch (base → nearest corridor pt) + base marker
+        if (genRoute.base && edges.length) { const bl = a2NearestOnEdges(genRoute.base, edges); if (bl) { try { const l = L.polyline([[genRoute.base.lat, genRoute.base.lng], [bl.pt.lat, bl.pt.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); l.addTo(map); genRouteLayers.push(l); } catch (e) {} } }
+        if (genRoute.base) { try { const b = L.circleMarker([genRoute.base.lat, genRoute.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {} }
+        // 4) draggable vertex handles (white dots) — drag to move a waypoint
+        for (let i = 0; i < genRoute.verts.length; i++) {
+            const v = genRoute.verts[i];
+            try { const h = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); h.addTo(map); genRouteLayers.push(h); genRoute.handles.push(i); } catch (e) {}
+        }
+        return genRouteLayers.length;
+    }
+    function wireRouteEdit(map) {
+        if (genRoute.wired || !map) return;
+        genRoute.map = map; genRoute.container = map.getContainer();
+        genRoute.onDown = (ev) => {
+            if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
+            let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            let best = -1, bd = 14;
+            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
+            if (best < 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            genRoute.drag = best; try { map.dragging.disable(); } catch (e) {}
+            document.addEventListener('mousemove', genRoute.onMove, true);
+            document.addEventListener('mouseup', genRoute.onUp, true);
+        };
+        genRoute.onMove = (ev) => {
+            if (genRoute.drag == null) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const v = genRoute.verts[genRoute.drag]; v.lat = ll.lat; v.lng = ll.lng;
+            for (const s of genRoute.segs) if (s.a === genRoute.drag || s.b === genRoute.drag) reflagSeg(s);
+            drawGenRoute();
+        };
+        genRoute.onUp = () => {
+            if (genRoute.drag == null) return;
+            genRoute.drag = null; try { map.dragging.enable(); } catch (e) {}
+            document.removeEventListener('mousemove', genRoute.onMove, true);
+            document.removeEventListener('mouseup', genRoute.onUp, true);
+            syncRouteToResult();
+        };
+        genRoute.container.addEventListener('mousedown', genRoute.onDown, true);
+        genRoute.wired = true;
+    }
+    function unwireRouteEdit() {
+        if (genRoute.container && genRoute.onDown) { try { genRoute.container.removeEventListener('mousedown', genRoute.onDown, true); } catch (e) {} }
+        if (genRoute.onMove) { try { document.removeEventListener('mousemove', genRoute.onMove, true); } catch (e) {} }
+        if (genRoute.onUp) { try { document.removeEventListener('mouseup', genRoute.onUp, true); } catch (e) {} }
+        const map = genRoute.map; if (map && genRoute.drag != null) { try { map.dragging.enable(); } catch (e) {} }
+        genRoute.wired = false; genRoute.drag = null;
     }
     function renderRoutePreview(result) {
         clearRoutePreview();
-        const L = getLeafletL(), map = getLeafletMap();
-        if (!L || !map || !result || !result.ok) return 0;
-        // 1) the obstacle-aware corridor (offset off the line, hugging FFZ/pad near
-        //    edges). Cyan where shielded (40–65 ft from a line), ORANGE where the
-        //    shield distance is out of band. Falls back to the raw tree if no corridor.
-        if (result.corridor && result.corridor.length) {
-            for (const s of result.corridor) {
-                try { const pl = L.polyline([[s.a.lat, s.a.lng], [s.b.lat, s.b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
-            }
-        } else {
-            for (const [a, b] of result.edges) {
-                try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#00e5ff', weight: 3, opacity: 0.9, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
-            }
-        }
-        // 2) per-asset branch: a solid leg from the trunk FOOT to the FFZ near-edge
-        //    ENTRY (the connection point) — it stops AT the edge, no line into the
-        //    interior. Marker sits on the edge. Cyan = reachable, red = out-of-shield.
-        for (const r of result.assets) {
-            if (!r.path || r.path.length < 2) continue;
-            const tip = r.entry || r.path[r.path.length - 1];   // always an EDGE, never the centre
-            const from = r.foot || r.path[r.path.length - 2];
-            const flagged = r.longApproach;                       // red = long unshielded approach
-            const col = flagged ? '#ff8a80' : '#00e5ff';
-            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
-            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: flagged ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: flagged ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
-        }
-        // 3) base launch leg (base → corridor) then the base marker
-        if (result.baseLaunch) {
-            try { const bl = L.polyline([[result.baseLaunch.from.lat, result.baseLaunch.from.lng], [result.baseLaunch.to.lat, result.baseLaunch.to.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); bl.addTo(map); genRouteLayers.push(bl); } catch (e) {}
-        }
-        if (result.base) {
-            try { const b = L.circleMarker([result.base.lat, result.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {}
-        }
-        return genRouteLayers.length;
+        const map = getLeafletMap();
+        if (!getLeafletL() || !map || !result || !result.ok) return 0;
+        buildRouteEdit(result);
+        const n = drawGenRoute();
+        wireRouteEdit(map);
+        return n;
     }
 
     // ---- shared FFZ preview styling ----
@@ -8229,7 +8303,7 @@
                 const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
                 const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft flagged (out-of-band / FFZ overlap)</span>` : '';
                 const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
-                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}.<br><b style="color:#fff">Drag the white dots</b> to move the path — <span style="color:#ff9a3d">orange</span> = leaves the 40–65 ft band or crosses a pad/FFZ (drag it clear → turns cyan). Green dot = FFZ connection. A2.2 editable preview.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} routing failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;
