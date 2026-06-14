@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.40
+// @version      4.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.40';
+    const SCRIPT_VERSION = '4.41';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6255,6 +6255,7 @@
         shieldMinFt: 40,    // shielded band: closer than this to a line = flag
         shieldMaxFt: 65,    // shielded band: farther than this from a line = flag
         sampleFt: 12,       // corridor resample spacing for offset/push/shield check
+        simplifyFt: 14,     // collapse corridor vertices within this of a straight run (kill scribble)
     };
     function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
     // Distance (m) from a point to the nearest power-line segment.
@@ -6333,6 +6334,43 @@
                 pts.push({ lat: p.lat, lng: p.lng, flag: (dLine < minM || dLine > maxM) });
             }
             out.push(pts);
+        }
+        return out;
+    }
+    // Collapse the dense pushed corridor into FEW clean vertices (the real FP uses
+    // ~19 for a whole site). Build one connected graph from all sample segments,
+    // then iteratively delete every degree-2 vertex that sits within tolM of the
+    // straight line between its two neighbours — keeping only corners, branch
+    // points, and ends. Returns connected segments [{a,b,flag}], flag recomputed
+    // per segment by sampling the shield distance.
+    function a2SimplifyCorridor(corridor, tolM, segs) {
+        const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        const kf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const nodes = new Map(), adj = new Map();
+        const add = (p) => { const k = kf(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, new Set()); } return k; };
+        for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) { const ka = add(pts[i]), kb = add(pts[i + 1]); if (ka !== kb) { adj.get(ka).add(kb); adj.get(kb).add(ka); } }
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const k of [...nodes.keys()]) {
+                const ns = adj.get(k); if (!ns || ns.size !== 2) continue;
+                const it = ns.values(); const a = it.next().value, b = it.next().value;
+                if (a === b) continue;
+                if (segDistM(nodes.get(k), nodes.get(a), nodes.get(b)) < tolM) {
+                    adj.get(a).delete(k); adj.get(b).delete(k); adj.get(a).add(b); adj.get(b).add(a);
+                    nodes.delete(k); adj.delete(k); changed = true;
+                }
+            }
+        }
+        const out = [], seen = new Set();
+        const sampleM = A2.sampleFt * GEN_FT_TO_M;
+        for (const [k, ns] of adj) for (const nk of ns) {
+            const e = k < nk ? k + '|' + nk : nk + '|' + k; if (seen.has(e)) continue; seen.add(e);
+            const a = nodes.get(k), b = nodes.get(nk);
+            const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / sampleM));
+            let flag = false;
+            for (let i = 0; i <= n && !flag; i++) { const p = a2Interp(a, b, i / n); const dL = a2PointToSegs(p, segs); if (dL < minM || dL > maxM) flag = true; }
+            out.push({ a, b, flag });
         }
         return out;
     }
@@ -6515,11 +6553,11 @@
         for (const f of ffzRings) obstacles.push(f.ring);
         const assetCens = ffzRings.map(f => f.cen);
         if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }
-        const corridor = a2BuildCorridor(edges, segs, obstacles, assetCens, basePt);
-        const corridorEdges = []; // pushed corridor as [a,b] segments, for the branch foot
-        for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) corridorEdges.push([pts[i], pts[i + 1]]);
+        const corridorRaw = a2BuildCorridor(edges, segs, obstacles, assetCens, basePt);
+        const corridor = a2SimplifyCorridor(corridorRaw, A2.simplifyFt * GEN_FT_TO_M, segs); // few clean verts → [{a,b,flag}]
+        const corridorEdges = corridor.map(s => [s.a, s.b]); // for the branch foot
         let flaggedFt = 0;
-        for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) if (pts[i].flag || pts[i + 1].flag) flaggedFt += approxMeters(pts[i].lat, pts[i].lng, pts[i + 1].lat, pts[i + 1].lng) / GEN_FT_TO_M;
+        for (const s of corridor) if (s.flag) flaggedFt += approxMeters(s.a.lat, s.a.lng, s.b.lat, s.b.lng) / GEN_FT_TO_M;
         // Branch from the PUSHED corridor to the MIDDLE of the FFZ near edge — for
         // EVERY asset that has a path (reachable AND out-of-shield), so nothing ever
         // draws a line to the FFZ centre.
@@ -6532,7 +6570,8 @@
             r.foot = foot.pt;
             if (r._ffzRing) { const e = a2NearestEdgeMidpoint(r._ffzRing, foot.pt); if (e) r.entry = e.pt; }
         }
-        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt) } };
+        const corrVerts = new Set(); for (const s of corridor) { corrVerts.add(`${s.a.lat.toFixed(7)},${s.a.lng.toFixed(7)}`); corrVerts.add(`${s.b.lat.toFixed(7)},${s.b.lng.toFixed(7)}`); }
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
     }
     // Returns the skip-state name (unreachable/unshielded/empty) for an asset
     // if it should be skipped, else null. Reads the poi_type_str suffix +
@@ -6762,11 +6801,8 @@
         //    edges). Cyan where shielded (40–65 ft from a line), ORANGE where the
         //    shield distance is out of band. Falls back to the raw tree if no corridor.
         if (result.corridor && result.corridor.length) {
-            for (const pts of result.corridor) {
-                for (let i = 0; i < pts.length - 1; i++) {
-                    const bad = pts[i].flag || pts[i + 1].flag;
-                    try { const pl = L.polyline([[pts[i].lat, pts[i].lng], [pts[i + 1].lat, pts[i + 1].lng]], { color: bad ? '#ff9a3d' : '#00e5ff', weight: bad ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
-                }
+            for (const s of result.corridor) {
+                try { const pl = L.polyline([[s.a.lat, s.a.lng], [s.b.lat, s.b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
             }
         } else {
             for (const [a, b] of result.edges) {
@@ -8073,7 +8109,8 @@
                 <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
             </label>`;
         box.innerHTML = `
-            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
+            <button id="aim-gen-x" title="Close" style="position:absolute;top:8px;right:10px;width:24px;height:24px;line-height:22px;text-align:center;background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:14px;font-weight:700;padding:0">✕</button>
+            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
             <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
             <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
                 Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
@@ -8167,6 +8204,7 @@
         };
         const statsEl = box.querySelector('#aim-gen-stats');
         box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
+        box.querySelector('#aim-gen-x').onclick = () => closeSiteGenerator();
         box.querySelector('#aim-gen-clear').onclick = () => {
             clearGenPreview();
             clearRoutePreview(); genRouteResult = null;
@@ -8193,7 +8231,8 @@
                 const baseNm = res.baseEntity && res.baseEntity.name ? genCleanName(res.baseEntity.name) : 'base';
                 const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
                 const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft out of 40–65 shield</span>` : '';
-                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
+                const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> reachable · <b style="color:#ff8a80">${s.unreachable}</b> out-of-shield, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} routing failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;

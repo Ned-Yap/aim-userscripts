@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 simplified corridor + close X (dev-only) — Asset Inspector v4.41
+
+Added the obvious missing **✕ close button** to the Generator modal. And killed the "scribble": the dense pushed corridor is now **collapsed to few clean vertices** — one connected graph, deleting every degree-2 vertex within 14 ft of the straight line between its neighbours, keeping only corners, branch points, and ends (offline: 181 samples → 6 verts). The stat line now reports the corridor vertex count so we can compare against a real flight path (~19 for a whole site). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 connected corridor + consistent side (dev-only) — Asset Inspector v4.40
 
 Rebuilt the corridor geometry to fix the disconnections. It now offsets at **shared nodes** (one position per node) so the network is **connected by construction** — no gaps; every FFZ links back to the base (out-of-shield assets included, they just fly a longer flagged approach). The offset **side is majority-smoothed** across neighbours so it no longer jumps across the line on isolated ~50 ft segments. And every FFZ connection goes to an **edge** (never the centre, no dashed) — including out-of-shield ones. *(Dev/latest only.)*
