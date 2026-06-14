@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — assignees (dev-only) — AIM Issues v1.12
+
+Issues can now be **assigned**. **Anyone** can assign or reassign (or unassign) an issue to any teammate — pick from the assignee chips in the issue popup (⭐ marks you; one click). The assignee shows in the **popup header**, on every **panel row**, and as a new **Assignee column** in the Copy→Sheets export, with an **"👤 Assigned to me" filter** in the panel. Assignments post a **threaded Slack reply** that pings the new assignee, and the **parent status board shows the current assignee**. Assign events are recorded in the issue history (👤). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — issue-popup polish (dev-only) — AIM Issues v1.11
 
 Cleaned up the issue popup: **history defaults to newest-first**, the **action area (status / priority / Add comment) moved above the history** so it's the first thing you reach, and **history entries now show the same emoji + status colors as Slack** (🚩 OPEN, 🟡 PENDING FIX, 🟣 PENDING IGNORE, ✅ RESOLVED, ⊘ IGNORED, 🗑 DELETED) so transitions are readable at a glance. Added a **✓ SLACK badge in the header** that confirms the issue was reported to Slack and **links straight to its thread** (amber ⧗ if it hasn't posted yet). *(Dev/latest only.)*

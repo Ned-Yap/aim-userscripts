@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.12';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -303,6 +303,7 @@
     // four active by default. M1 toggle, M2 solo (same as status chips).
     const panelPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
     let panelSearch = '';
+    let panelAssignedToMe = false;   // v1.12: "Assigned to me" filter toggle
     // v0.16: persisted size + position. Loaded from localStorage on open,
     // saved on drag/resize release. Use viewport-anchored top/left so the
     // panel sticks wherever the user left it across reloads.
@@ -776,10 +777,14 @@
         const link = siteLabelForSlack(issue.id);
         let note = slackEsc(issue.note || '(no description)');
         if (b.strike) note = `~${note}~`;
+        // v1.12: assignee shown as PLAIN @text (not a real <@id> mention) so
+        // re-rendering the parent on every transition never re-pings them —
+        // the actual ping happens in the assignment thread reply.
+        const assignedSuffix = issue.assignee ? ` · 👤 @${slackEsc(issue.assignee)}` : '';
         const lines = [
             `${b.icon} *${b.text}* — issue on ${link}${pri}`,
             `>${note}`,
-            `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}_`,
+            `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}${assignedSuffix}_`,
         ];
         const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
         if (mentions) lines.push(`cc ${mentions}`);
@@ -926,6 +931,29 @@
             }
         } catch (e) {
             console.warn(`${TAG} postSlackTransition threw:`, e);
+        }
+    }
+
+    // v1.12: assignment → threaded reply + pings the new assignee. Parent
+    // status board also re-rendered (shows assignee).
+    async function postSlackAssignment(issue, from, to, by) {
+        if (!slackPostable(issue)) return;
+        try {
+            const actor = slackMention(by) || ('@' + slackEsc(by));
+            let head;
+            if (!to) {
+                head = `👤 ${actor} *unassigned* this issue`;
+            } else if (to === by) {
+                head = `👤 ${actor} *self-assigned* this issue`;
+            } else {
+                head = `👤 ${actor} *assigned* this to ${slackMention(to) || ('@' + slackEsc(to))}`;
+            }
+            const text = issue.slackThreadTs ? head
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+            if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+        } catch (e) {
+            console.warn(`${TAG} postSlackAssignment threw:`, e);
         }
     }
 
@@ -2615,7 +2643,7 @@
         // Inline-styled table — Sheets/Excel honor most inline CSS.
         // v0.28: + Priority + Comment Count columns
         const headers = [
-            'Status', 'Priority', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By', 'Assignee',
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
@@ -2654,6 +2682,7 @@
                     trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -2668,6 +2697,7 @@
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(issue.note)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(createdWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(createdBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${issue.assignee ? '@' + escHtml(issue.assignee) : '<i style="color:#999">—</i>'}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-weight:bold;color:${meta.color}">${escHtml(lastEventLabel_)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(lastEventWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(lastEventBy)}</td>`);
@@ -2693,7 +2723,7 @@
 
     function buildIssuesTsv(issues, siteId, siteName_) {
         const headers = [
-            'Status', 'Priority', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By', 'Assignee',
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
@@ -2719,6 +2749,7 @@
                     trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -2729,6 +2760,7 @@
                 issue.note,
                 fmtDateTime(issue.createdAt),
                 '@' + (issue.createdBy || '?'),
+                issue.assignee ? '@' + issue.assignee : '',
                 lastEventLabel(issue),
                 lastEventWhen,
                 '@' + lastEventBy,
@@ -3371,6 +3403,45 @@
         return true;
     }
 
+    // v1.12: assignment. Doesn't change status. Audited via a history entry
+    // with kind='assign' + fromAssignee/toAssignee. Anyone can (re)assign.
+    // null assignee = unassigned. Mirrors applyComment's sync + Slack pattern.
+    function applyAssignment(issueId, newAssignee) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const from = issue.assignee || null;
+        const to = newAssignee || null;
+        if (from === to) return false;   // no-op
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'assign',
+            fromAssignee: from,
+            toAssignee: to,
+            note: '',
+        });
+        issue.assignee = to;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        if (panelEl) renderIssuesPanel();
+        console.log(`${TAG} assign ${issueId}: ${from || '(none)'} → ${to || '(none)'} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(to ? `Assigned to @${to} — pushing…` : 'Unassigned — pushing…', 2500);
+            commitIssuesToGitHub(`@${by}: assign → ${to || 'none'}`);
+            postSlackAssignment(issue, from, to, by);
+        } else {
+            showToast(to ? `Assigned to @${to} (local only).` : 'Unassigned (local only).', 2500);
+        }
+        return true;
+    }
+
     // v0.28: priority change. Doesn't change status. Audited via a history
     // entry with kind='priority' + fromPriority/toPriority fields.
     function applyPriorityChange(issueId, newPriority, optionalNote) {
@@ -3511,6 +3582,10 @@
                     label = `🚩 created → ${statusPill(h.toStatus)}`;
                 } else if (h.toStatus === 'deleted') {
                     label = `🗑 <span style="color:#ff8585;font-weight:700">DELETED</span>`;
+                } else if (h.kind === 'assign') {
+                    label = h.toAssignee
+                        ? `👤 assigned → <span style="color:#5fb3ff;font-weight:700">@${escHtml(h.toAssignee)}</span>`
+                        : `👤 <span style="color:#888;font-weight:700">unassigned</span>`;
                 } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
                     label = `💬 commented`;
                     labelColor = '#a8c4ff';
@@ -3633,6 +3708,24 @@
                         ${label}${isCur ? ' ●' : ''}
                     </button>`;
                 }).join('');
+                // v1.12: assignee chips — anyone can (re)assign. Roster =
+                // mapped Slack users + yourself + current assignee. One-click
+                // assign (no note step); current is highlighted; ⭐ marks you.
+                const assignSet = new Set(slackEnabled() ? Object.keys(slackConfig.users || {}) : []);
+                if (cachedUsername) assignSet.add(cachedUsername);
+                if (liveIssue.assignee) assignSet.add(liveIssue.assignee);
+                const cur = liveIssue.assignee || null;
+                const assignChips = Array.from(assignSet).sort().map(u => {
+                    const isCur = (cur === u);
+                    const isMe = (u === cachedUsername);
+                    return `<button class="aim-issues-assign-chip" data-assignee="${escHtml(u)}"
+                        style="padding:4px 9px;background:${isCur ? '#5fb3ff' : 'transparent'};color:${isCur ? '#0a1a2a' : '#5fb3ff'};border:1.5px solid #5fb3ff;border-radius:12px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">
+                        ${isMe ? '⭐ ' : ''}@${escHtml(u)}${isCur ? ' ✓' : ''}
+                    </button>`;
+                }).join('');
+                const unassignChip = `<button class="aim-issues-assign-chip" data-assignee=""
+                    style="padding:4px 9px;background:${cur ? 'transparent' : '#555'};color:${cur ? '#888' : '#fff'};border:1.5px solid #777;border-radius:12px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">
+                    Unassign</button>`;
                 actionSectionHtml = `
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
@@ -3641,6 +3734,10 @@
                     <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">🎯 Priority:</span>
                         ${priChips}
+                    </div>
+                    <div style="margin-top:10px">
+                        <div style="color:#aaa;font-size:12px;margin-bottom:4px">👤 Assignee: ${cur ? `<span style="color:#5fb3ff;font-weight:700">@${escHtml(cur)}</span>` : '<span style="color:#888">unassigned</span>'}</div>
+                        <div style="display:flex;gap:5px;flex-wrap:wrap">${assignChips}${unassignChip}</div>
                     </div>
                     <div style="margin-top:10px">
                         <button id="aim-issues-modal-commentbtn"
@@ -3772,6 +3869,7 @@
                     ${headerPri}
                     ${roleChip}
                     ${slackBadge}
+                    ${liveIssue.assignee ? `<span title="Assigned to @${escHtml(liveIssue.assignee)}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#13294a;color:#5fb3ff;font-size:9px;font-weight:700;border:1px solid rgba(95,179,255,0.45);letter-spacing:0.3px">👤 ${escHtml(liveIssue.assignee)}</span>` : ''}
                     <button id="aim-issues-modal-headerclose" title="Close"
                         style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
                                border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
@@ -3867,6 +3965,23 @@
                         if (ta) ta.focus();
                     }, 30);
                 };
+            });
+
+            // v1.12: assignee chips — one-click (re)assign. pointerdown+click
+            // +debounce for snappy, no-dropped-click behaviour; re-render to
+            // refresh the highlight + header chip.
+            let lastAssignFire = 0;
+            card.querySelectorAll('.aim-issues-assign-chip').forEach(chip => {
+                const handler = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastAssignFire < 300) return;
+                    lastAssignFire = now;
+                    const target = chip.dataset.assignee || null;
+                    if (applyAssignment(liveIssue.id, target)) render();
+                };
+                chip.addEventListener('pointerdown', handler, true);
+                chip.addEventListener('click', handler, true);
             });
 
             // v0.28: Comment button — arms a comment-mode (required note)
@@ -4165,6 +4280,8 @@
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
         if (!panelFilters.has(st)) return false;
+        // v1.12: "Assigned to me" filter.
+        if (panelAssignedToMe && (issue.assignee || null) !== (cachedUsername || null)) return false;
         // v0.29: priority filter — 'none' represents null/undefined.
         const priKey = issue.priority || 'none';
         if (!panelPriorityFilters.has(priKey)) return false;
@@ -4253,6 +4370,20 @@
         // M1 click: solo pending_fix + pending_ignore (hide everything else).
         // Always visible when role=approver, even if count is 0.
         const role = currentRole();
+        // v1.12: "Assigned to me" filter chip — everyone, when authed.
+        const myAssignedCount = cachedUsername
+            ? liveSiteIssues.filter(i => (i.assignee || null) === cachedUsername).length : 0;
+        const assignedToMeChipHtml = cachedUsername ? `
+            <button id="aim-issues-panel-assignedtome"
+                title="Show only issues assigned to you"
+                style="padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                       border:1.5px dashed #5fb3ff;
+                       background:${panelAssignedToMe ? '#5fb3ff' : 'transparent'};
+                       color:${panelAssignedToMe ? '#0a1a2a' : '#5fb3ff'};
+                       cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                <span>👤 Assigned to me</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${myAssignedCount}</span>
+            </button>` : '';
         const pendingShortcutHtml = (role === 'approver') ? `
             <button id="aim-issues-panel-pending-shortcut"
                 title="Solo pending issues (Pending Fix + Pending Ignore) — for your review"
@@ -4427,7 +4558,10 @@
                                     -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
                         ${affectsHtml}
                     </div>
-                    <div style="color:#a8c4ff;font-size:11px;text-align:right">@${safeBy}</div>
+                    <div style="color:#a8c4ff;font-size:11px;text-align:right">
+                        @${safeBy}
+                        ${issue.assignee ? `<div style="color:#5fb3ff;font-size:10px;margin-top:2px" title="Assigned to @${escHtml(issue.assignee)}">👤 ${escHtml(issue.assignee)}</div>` : ''}
+                    </div>
                 </div>`;
             }).join('');
         }
@@ -4457,6 +4591,7 @@
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
                 ${pendingShortcutHtml}
+                ${assignedToMeChipHtml}
                 <div style="margin-left:auto;display:flex;gap:6px">
                     ${hiddenIds.size > 0
                         ? `<button id="aim-issues-panel-unhide"
@@ -4550,6 +4685,14 @@
         }
         // v1.00: "Pending my review" shortcut — solo the two pending
         // statuses. Toggle: clicking again restores the prior full set.
+        // v1.12: "Assigned to me" filter toggle
+        const assignedToMeBtn = panelEl.querySelector('#aim-issues-panel-assignedtome');
+        if (assignedToMeBtn) {
+            assignedToMeBtn.onclick = () => {
+                panelAssignedToMe = !panelAssignedToMe;
+                renderIssuesPanel();
+            };
+        }
         const pendingShortcut = panelEl.querySelector('#aim-issues-panel-pending-shortcut');
         if (pendingShortcut) {
             pendingShortcut.onclick = () => {
