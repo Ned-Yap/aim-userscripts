@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.25
+// @version      4.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.25';
+    const SCRIPT_VERSION = '4.26';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7072,9 +7072,7 @@
         const left = offsetPolylineMiter(m, leftN, halfW);
         const right = offsetPolylineMiter(m, leftN, -halfW);
         const ll = left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
-        // snip the inner-corner twist, then drop near-collinear/dup vertices so
-        // each outer-bend corner is a single clean point.
-        return cleanRing(cleanSelfIntersections(ll), 2 * GEN_FT_TO_M, 2 * GEN_FT_TO_M);
+        return cleanSelfIntersections(ll); // snip the inner-corner twist (v4.24 behavior)
     }
     let genDraw = { active: false, drawing: false, pts: [], lastLL: null, poly: null, onDown: null, onMove: null, onUp: null };
     function renderDrawPreview(p) {
