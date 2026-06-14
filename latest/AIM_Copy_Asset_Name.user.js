@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.28
+// @version      4.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.28';
+    const SCRIPT_VERSION = '4.29';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7043,6 +7043,32 @@
         }
         return pts.filter((_, i) => keep[i]);
     }
+    // CLAMPED point-to-SEGMENT distance (m) — distance to the segment a-b, not the
+    // infinite line. Safe for collinear-cleanup: a real 90° corner is far from the
+    // segment between its neighbors (kept); a redundant near-flat facet is near it
+    // (dropped). The unclamped line version was the v4.25 blob bug — do not use it.
+    function segDistM(p, a, b) {
+        const proj = genProjector(p.lat, p.lng);
+        const A = proj.fwd(a), B = proj.fwd(b), P = proj.fwd(p);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        if (!l2) return Math.hypot(P.x - A.x, P.y - A.y);
+        let t = ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2; t = Math.max(0, Math.min(1, t));
+        return Math.hypot(P.x - (A.x + t * dx), P.y - (A.y + t * dy));
+    }
+    // Clean an OPEN polyline (centerline): drop a midpoint when it sits within tolM
+    // of the segment between its neighbors — collapses the 1–2 facet points the pad
+    // tracing leaves at a corner down to a single clean corner. Endpoints kept.
+    function cleanCenterline(pts, tolM) {
+        if (!pts || pts.length < 3) return (pts || []).slice();
+        let ring = pts.slice(), changed = true;
+        while (changed && ring.length > 2) {
+            changed = false;
+            for (let i = 1; i < ring.length - 1; i++) {
+                if (segDistM(ring[i], ring[i - 1], ring[i + 1]) < tolM) { ring.splice(i, 1); changed = true; break; }
+            }
+        }
+        return ring;
+    }
     // Perpendicular distance (m) of p from the LINE through a-b (for collinearity).
     function perpDistLL(p, a, b) {
         const proj = genProjector(p.lat, p.lng);
@@ -7096,11 +7122,13 @@
         if (!L || !map) return;
         if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
         clearDrawDots(map);
-        // dot markers at each placed corner
-        for (const q of genDraw.pts) {
+        // collapse pad-traced facets to one point per real corner (same as finalize)
+        const base = cleanCenterline(genDraw.pts, 3 * GEN_FT_TO_M);
+        // dot markers at each (cleaned) corner so dots match the strip's corners
+        for (const q of base) {
             try { const d = L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#003844', fillOpacity: 0.9, interactive: false }); d.addTo(map); genDraw.dots.push(d); } catch (e) {}
         }
-        const pts = genDraw.pts.concat(genDraw.tentative ? [genDraw.tentative] : []);
+        const pts = base.concat(genDraw.tentative ? [genDraw.tentative] : []);
         if (pts.length < 2) return;
         const outline = strokePolyline(pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
         if (!outline || outline.length < 4) return;
@@ -7116,8 +7144,10 @@
         genDraw.drawing = false; genDraw.tentative = null; genDraw.lastSnap = null;
         const p = genState.lastParams || GEN_DEFAULTS;
         // dedupe near-duplicate corners (a finishing double-click drops 2 near-same pts)
-        const center = [];
-        for (const q of genDraw.pts) { const last = center[center.length - 1]; if (!last || approxMeters(last.lat, last.lng, q.lat, q.lng) >= 4 * GEN_FT_TO_M) center.push(q); }
+        const dedup = [];
+        for (const q of genDraw.pts) { const last = dedup[dedup.length - 1]; if (!last || approxMeters(last.lat, last.lng, q.lat, q.lng) >= 4 * GEN_FT_TO_M) dedup.push(q); }
+        // collapse pad-traced facets to one clean point per real corner
+        const center = cleanCenterline(dedup, 3 * GEN_FT_TO_M);
         const outline = (center.length >= 2) ? strokePolyline(center, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M) : null;
         genDraw.pts = [];
         if (!outline || outline.length < 4) return;
@@ -7314,10 +7344,17 @@
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const p = genState.lastParams || GEN_DEFAULTS;
             const snap = snapDrawPoint(ll, p);
+            const prev = genDraw.lastSnap;
             genDraw.drawing = true;
-            // WYSIWYG: one click = exactly one centerline corner (snapped to a pad
-            // corner/edge). No auto-inserted pad vertices — the user clicks each
-            // corner they want, so every corner stays a single clean point.
+            // Follow the pad: if this click and the previous one are on the SAME
+            // pad's offset ring, trace the ring's corner vertices between them so
+            // the centerline hugs the pad at a constant 15 ft (square corners +
+            // correct standoff). The collinear-clean pass in render/finalize then
+            // collapses any near-flat facets to a single point per real corner.
+            if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
+                const verts = ringVerticesBetween(snap.off, prev.i, snap.i);
+                for (const v of verts) genDraw.pts.push(v);
+            }
             genDraw.pts.push(snap.pt); genDraw.lastSnap = snap; genDraw.tentative = null;
             renderDrawPreview(p);
         };

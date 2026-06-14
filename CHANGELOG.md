@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — draw: pad-follow + corner cleanup (dev-only) — Asset Inspector v4.29
+
+Restored the pad-following corner-tracing in Draw (v4.28's pure-WYSIWYG removed it, which lost square corners and the 15-ft standoff between clicks). Two clicks on the same pad again trace its offset-ring corners so the strip hugs the pad at a constant 15 ft with true right angles. The old downside (1–2 extra facet points at a corner) is fixed by a new **clamped collinear cleanup** that collapses each corner to a single point without touching real 90° corners (offline-verified: 9-pt L-path → 3 clean corners). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — WYSIWYG draw corners (dev-only) — Asset Inspector v4.28
 
 Refined click-to-place draw: removed the auto corner-tracing that inserted pad-outline vertices on top of your clicks (it was adding 1–2 extra points at some corners). Now **one click = exactly one corner** — the corner-magnet still snaps each click onto the nearest pad corner/edge, so every corner is a single clean point, matching the rest. *(Dev/latest only.)*
