@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.17';
+    const SCRIPT_VERSION = '1.18';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -863,6 +863,34 @@
         }
     }
 
+    // v1.18: adopt-on-first-touch. An issue created before Slack existed has
+    // no parent message. The first time someone acts on it (transition /
+    // comment / assignment), backfill a parent status board + the two seed
+    // replies and stamp the thread ts, so from then on it behaves like a
+    // native issue. Returns the thread ts (or null). No-op if it already has
+    // a thread, isn't postable, or the parent post fails. NOT used on delete
+    // (no point creating a thread just to strike it).
+    async function ensureSlackThread(issue) {
+        if (issue.slackThreadTs) return issue.slackThreadTs;
+        if (!slackPostable(issue)) return null;
+        try {
+            const ts = await slackPost(slackParentText(issue, null), null);
+            if (!ts) return null;
+            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            live.slackThreadTs = ts;
+            if (issue !== live) issue.slackThreadTs = ts;   // caller's ref too
+            saveIssuesToStorage(siteID, currentSiteIssues);
+            commitIssuesToGitHub(`adopt slack thread for ${issue.id.slice(0, 14)}`);
+            await postSlackOriginalRequest(live, ts);
+            await postSlackAffectedEntities(live, ts);
+            console.log(`${TAG} adopted pre-Slack issue ${issue.id} → thread ${ts}`);
+            return ts;
+        } catch (e) {
+            console.warn(`${TAG} ensureSlackThread threw:`, e);
+            return null;
+        }
+    }
+
     // v1.08: original report → first thread reply, preserved verbatim so
     // editing the parent (live status board) never loses what was filed.
     async function postSlackOriginalRequest(issue, threadTs) {
@@ -913,6 +941,7 @@
     async function postSlackTransition(issue, fromStatus, transition, note, by) {
         if (!slackPostable(issue)) return;
         try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
             const actor = slackPlain(by);
             const toLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
             // v1.13/v1.14: never ping the actor for their own action.
@@ -961,6 +990,7 @@
     async function postSlackAssignment(issue, from, to, by) {
         if (!slackPostable(issue)) return;
         try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
             const actor = slackPlain(by);
             let head;
             if (!to) {
@@ -994,6 +1024,7 @@
     async function postSlackComment(issue, note, by, notifyLogins) {
         if (!slackPostable(issue)) return;
         try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
             const actor = slackPlain(by);
             const body = slackifyMentions(slackEsc(note));
             // v1.13: don't ping yourself in your own comment.

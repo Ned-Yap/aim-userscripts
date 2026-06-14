@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — adopt pre-Slack issues on first touch (dev-only) — AIM Issues v1.18
+
+Issues created before Slack notifications existed had no thread, so acting on them posted loose standalone messages. Now the **first action** (transition / comment / assignment) on such an issue **backfills a full parent status board + original-report + affected-entities seed** and threads the action under it — from then on it behaves like a natively-created issue. (Deletes don't adopt — no point creating a thread just to strike it.) *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — filer no longer pinged on the parent (dev-only) — AIM Issues v1.17
 
 The "filed by @you" on the **parent** message was still a real @-mention (v1.14's plain-text change only landed on the thread reply, not the parent) — so filing an issue pinged you *and* made you follow the thread, which is why you kept getting notified of every later reply. Now the filer is plain text on the parent too. New issues won't ping or auto-follow you; existing issues created before this still will until muted/deleted. *(Dev/latest only.)*
