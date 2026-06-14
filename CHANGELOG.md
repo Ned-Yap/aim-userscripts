@@ -12,9 +12,9 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
-## 2026-06-12 — Site Setup Generator — Draw mode: clean single-point corners (dev-only) — Asset Inspector v4.25
+## 2026-06-12 — Site Setup Generator — revert v4.25 corner cleaner (dev-only) — Asset Inspector v4.26
 
-The drawn strip's outer bends still carried tiny extra facets/vertices. The finished outline now runs through a ring-cleaner that drops **near-duplicate and near-collinear vertices**, so each corner collapses to a single clean point — fewer vertices, easier to hand-edit. (Validated: a ring with near-collinear extras cleans back to just its real corners.)
+v4.25 tried to drop near-collinear vertices from the strip outline, but the collinearity test used the infinite-line distance and removed essential vertices — collapsing the strip back into a filled blob. **Reverted to v4.24's behavior** (the good one). The minor extra vertices at outer bends stay for now; not worth the blob risk. A safer corner-cleanup can come later (or via a click-to-place draw variant).
 
 ## 2026-06-12 — Site Setup Generator — Draw mode: fewer vertices, no blob (dev-only) — Asset Inspector v4.24
 
