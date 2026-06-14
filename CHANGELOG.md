@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-14 — AIM Issues — Slack notifications (dev-only) — AIM Issues v1.03
+## 2026-06-14 — AIM Issues — Slack notifications (dev-only) — AIM Issues v1.03 → v1.04
 
-AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues` bot. **New issues** post a parent message; **comments, proposals, approvals/rejections** post as **threaded replies** under that issue, so the channel stays one line per issue. **@-mentions**: proposing a fix/ignore pings the approvers to review; approving/rejecting cc's the original proposer; the create-issue modal gains an optional **Notify** picker to @-mention specific teammates on creation. Config (bot token + channel + GitHub-login→Slack-ID map) lives in the private `aim-userscripts-data/slack-config.json`. Degrades silently to no-post when unconfigured. *(Dev/latest only — not yet promoted to the prod build coworkers run.)*
+AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues` bot. **New issues** post a parent message; **comments, proposals, approvals/rejections** post as **threaded replies** under that issue, so the channel stays one line per issue. **@-mentions**: proposing a fix/ignore pings the approvers to review; approving/rejecting cc's the original proposer; the create-issue modal gains an optional **Notify** picker to @-mention specific teammates on creation. Config (bot token + channel + GitHub-login→Slack-ID map) lives in the private `aim-userscripts-data/slack-config.json`. Degrades silently to no-post when unconfigured. **v1.04:** also load the Slack config on the init path (not just the token-broadcast path) so it loads on a normal page load. *(Dev/latest only — not yet promoted to the prod build coworkers run.)*
 
 ---
 
