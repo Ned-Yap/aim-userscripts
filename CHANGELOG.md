@@ -12,6 +12,10 @@ New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** p
 
 ---
 
+## 2026-06-12 — Site Setup Generator — Draw mode: clean single-point corners (dev-only) — Asset Inspector v4.25
+
+The drawn strip's outer bends still carried tiny extra facets/vertices. The finished outline now runs through a ring-cleaner that drops **near-duplicate and near-collinear vertices**, so each corner collapses to a single clean point — fewer vertices, easier to hand-edit. (Validated: a ring with near-collinear extras cleans back to just its real corners.)
+
 ## 2026-06-12 — Site Setup Generator — Draw mode: fewer vertices, no blob (dev-only) — Asset Inspector v4.24
 
 - **No more filled-blob FFZ.** The corner-tracing could pick the *wrong way around* a pad when the snap flickered between far-apart edges, wrapping the strip into itself (which the cleanup then filled solid). It now only traces across **adjacent** edges (1–2 steps) — a real corner — and ignores big edge jumps.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.24
+// @version      4.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.24';
+    const SCRIPT_VERSION = '4.25';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7034,6 +7034,31 @@
         }
         return pts.filter((_, i) => keep[i]);
     }
+    // Perpendicular distance (m) of p from the LINE through a-b (for collinearity).
+    function perpDistLL(p, a, b) {
+        const proj = genProjector(p.lat, p.lng);
+        const A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        if (!l2) return Math.hypot(A.x, A.y);
+        const t = ((0 - A.x) * dx + (0 - A.y) * dy) / l2;
+        return Math.hypot(0 - (A.x + t * dx), 0 - (A.y + t * dy));
+    }
+    // Clean a closed ring: drop near-duplicate + near-collinear vertices so each
+    // corner is a single clean point (no tiny facets at outer bends).
+    function cleanRing(pts, tolM, minM) {
+        let ring = [];
+        for (const p of pts) { const last = ring[ring.length - 1]; if (!last || approxMeters(last.lat, last.lng, p.lat, p.lng) >= minM) ring.push(p); }
+        if (ring.length > 3 && approxMeters(ring[0].lat, ring[0].lng, ring[ring.length - 1].lat, ring[ring.length - 1].lng) < minM) ring.pop();
+        let changed = true;
+        while (changed && ring.length > 4) {
+            changed = false;
+            for (let i = 0; i < ring.length; i++) {
+                const a = ring[(i - 1 + ring.length) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
+                if (perpDistLL(b, a, c) < tolM) { ring.splice(i, 1); changed = true; break; }
+            }
+        }
+        return ring;
+    }
     // Stroke a centerline polyline into a strip outline (lat/lng), width 2*halfW.
     function strokePolyline(pts, halfW) {
         if (!pts || pts.length < 2) return null;
@@ -7047,7 +7072,9 @@
         const left = offsetPolylineMiter(m, leftN, halfW);
         const right = offsetPolylineMiter(m, leftN, -halfW);
         const ll = left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
-        return cleanSelfIntersections(ll); // snip the inner-corner twist
+        // snip the inner-corner twist, then drop near-collinear/dup vertices so
+        // each outer-bend corner is a single clean point.
+        return cleanRing(cleanSelfIntersections(ll), 2 * GEN_FT_TO_M, 2 * GEN_FT_TO_M);
     }
     let genDraw = { active: false, drawing: false, pts: [], lastLL: null, poly: null, onDown: null, onMove: null, onUp: null };
     function renderDrawPreview(p) {
