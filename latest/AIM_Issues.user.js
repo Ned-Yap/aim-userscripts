@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.05
+// @version      1.06
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -56,7 +56,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.05';
+    const SCRIPT_VERSION = '1.06';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -240,6 +240,7 @@
     let siteName = '';     // v0.20: friendly name from .site-select widget
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
+    let pendingFocusIssueId = null;              // v1.06: deep-link ?aim_issue=<id> target
 
     // GitHub sync state (v0.5)
     let cachedToken = gmGet(TOKEN_KEY, '') || '';       // recovered after refresh; also via TOKEN_VALUE broadcast
@@ -468,6 +469,7 @@
     function setCurrentSite(newId) {
         if (newId === siteID) return;
         siteID = newId;
+        readFocusParam();   // v1.06: a deep-link nav may carry ?aim_issue=<id>
         // v0.20: refresh friendly site name. Retries below in case the
         // .site-select widget isn't mounted yet on initial load.
         siteName = readSiteName();
@@ -728,10 +730,13 @@
 
     // v1.05: linked site label — clickable in Slack, jumps straight to the
     // site's Site Setup. <url|text> is Slack's link syntax; text can't hold
-    // | or <>, which site names never do.
-    function siteLabelForSlack() {
+    // | or <>, which site names never do. v1.06: when issueId is given, the
+    // URL carries ?aim_issue=<id> (before the hash, so SPA routing keeps it)
+    // and AIM Issues focuses that issue on load — see maybeFocusIssueFromUrl.
+    function siteLabelForSlack(issueId) {
         const label = siteName ? slackEsc(siteName) : `site ${siteID}`;
-        return `<https://percepto.app/#/site/${siteID}/control-panel/site-setup|${label}>`;
+        const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
+        return `<https://percepto.app/${q}#/site/${siteID}/control-panel/site-setup|${label}>`;
     }
 
     // Canonical parent-message text. Rebuilt identically on creation and on
@@ -741,15 +746,19 @@
     function slackParentText(issue, decoration) {
         const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
         const creator = slackMention(issue.createdBy) || ('@' + slackEsc(issue.createdBy));
+        const link = siteLabelForSlack(issue.id);
         let head, note = slackEsc(issue.note || '(no description)');
         if (decoration === 'resolved') {
-            head = `✅ *RESOLVED* — 🚩 issue on ${siteLabelForSlack()}${pri}`;
+            head = `✅ *RESOLVED* — 🚩 issue on ${link}${pri}`;
             note = `~${note}~`;
         } else if (decoration === 'ignored') {
-            head = `⊘ *IGNORED* — 🚩 issue on ${siteLabelForSlack()}${pri}`;
+            head = `⊘ *IGNORED* — 🚩 issue on ${link}${pri}`;
+            note = `~${note}~`;
+        } else if (decoration === 'deleted') {
+            head = `🗑 *DELETED* — 🚩 ~issue on ${link}~${pri}`;
             note = `~${note}~`;
         } else {
-            head = `🚩 *New issue* on ${siteLabelForSlack()}${pri}`;
+            head = `🚩 *New issue* on ${link}${pri}`;
         }
         const lines = [head, `>${note}`, `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}_`];
         const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
@@ -827,12 +836,14 @@
         }
     }
 
-    // Delete → threaded reply, so the thread shows created → … → deleted.
+    // Delete → threaded reply, so the thread shows created → … → deleted,
+    // and strike/badge the original parent message (v1.06).
     async function postSlackDelete(issue, by) {
         if (!slackPostable(issue) || !issue.slackThreadTs) return;
         try {
             const actor = slackMention(by) || ('@' + slackEsc(by));
             await slackPost(`🗑 ${actor} *deleted* this issue`, issue.slackThreadTs);
+            await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'deleted'));
         } catch (e) {
             console.warn(`${TAG} postSlackDelete threw:`, e);
         }
@@ -1961,20 +1972,31 @@
             };
         });
         // v1.03: notify chips — independent multi-select toggle. Filled = on.
+        // v1.06: Leaflet intermittently swallows `click` on elements inside
+        // the map iframe, so the first 1-2 taps did nothing. Listen on BOTH
+        // pointerdown AND click with a per-chip debounce so whichever event
+        // survives toggles exactly once (the paired event is ignored).
         const notifySelected = new Set();
+        const lastChipFire = new Map();
+        const toggleNotifyChip = (c) => {
+            const login = c.dataset.login;
+            const now = Date.now();
+            if (now - (lastChipFire.get(login) || 0) < 300) return;  // ignore paired event
+            lastChipFire.set(login, now);
+            if (notifySelected.has(login)) {
+                notifySelected.delete(login);
+                c.style.background = 'transparent';
+                c.style.color = '#5fb3ff';
+            } else {
+                notifySelected.add(login);
+                c.style.background = '#5fb3ff';
+                c.style.color = '#0a1a2a';
+            }
+        };
         card.querySelectorAll('.aim-issues-notify-chip').forEach(c => {
-            c.onclick = () => {
-                const login = c.dataset.login;
-                if (notifySelected.has(login)) {
-                    notifySelected.delete(login);
-                    c.style.background = 'transparent';
-                    c.style.color = '#5fb3ff';
-                } else {
-                    notifySelected.add(login);
-                    c.style.background = '#5fb3ff';
-                    c.style.color = '#0a1a2a';
-                }
-            };
+            const handler = (e) => { e.preventDefault(); e.stopPropagation(); toggleNotifyChip(c); };
+            c.addEventListener('pointerdown', handler, true);
+            c.addEventListener('click', handler, true);
         });
         cancel.onclick = () => { closeNoteModal(); showToast('Issue discarded.', 1800); };
         save.onclick = () => {
@@ -2183,6 +2205,9 @@
         live.forEach((issue) => {
             renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
         });
+        // v1.06: if we arrived via a ?aim_issue=<id> deep-link, focus it now
+        // that the issue + map are ready.
+        maybeFocusPendingIssue();
     }
 
     // v0.8: create high-z-index panes so issue shapes + markers sit on top
@@ -3142,13 +3167,15 @@
     // pending_fix in its place.
     const STATUS_TRANSITIONS = {
         'open': [
-            // CSM proposal path
+            // Proposal path. v1.06: approvers can ALSO propose (not just
+            // direct-resolve) so an approver can route their own find through
+            // another approver (e.g. Chris) instead of self-approving.
             { to: 'pending_fix',    label: '→ Propose Fix',     noteRequired: true,  color: '#FFD700', textColor: '#000',
               notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"',
-              roles: ['csm'] },
+              roles: ['csm', 'approver'] },
             { to: 'pending_ignore', label: '→ Propose Ignore',  noteRequired: true,  color: '#8000FF', textColor: '#fff',
               notePrompt: 'Why should this be ignored? e.g. "Not within our scope" or "Duplicate of #..."',
-              roles: ['csm'] },
+              roles: ['csm', 'approver'] },
             // Approver direct-action (skips pending step)
             { to: 'resolved',       label: '✓ Resolve (direct)',  noteRequired: false, color: '#5fff5f', textColor: '#000',
               notePrompt: 'Optional comment on resolution',
@@ -4524,6 +4551,43 @@
             const c = bestInteriorPoint(issue.polygon);
             if (c) { try { map.panTo(c, { animate: true, duration: 0.4 }); } catch (e2) {} }
         }
+    }
+
+    // v1.06: deep-link focus. A Slack issue link carries ?aim_issue=<id>
+    // (before the hash). On load / nav we read it, then once that issue is
+    // loaded + the map is ready we zoom to it and open its box — and strip
+    // the param so a refresh doesn't re-trigger.
+    function readFocusParam() {
+        try {
+            let search = '';
+            try { search = (window.top && window.top.location && window.top.location.search) || ''; } catch (e) {}
+            if (!search) search = location.search || '';
+            const m = search.match(/[?&]aim_issue=([^&]+)/);
+            if (m) pendingFocusIssueId = decodeURIComponent(m[1]);
+        } catch (e) { console.warn(`${TAG} readFocusParam threw:`, e); }
+    }
+    function clearFocusParam() {
+        try {
+            const w = window.top || window;
+            const url = new URL(w.location.href);
+            if (url.searchParams.has('aim_issue')) {
+                url.searchParams.delete('aim_issue');
+                w.history.replaceState(null, '', url.toString());
+            }
+        } catch (e) {}
+    }
+    function maybeFocusPendingIssue() {
+        if (IS_TOP || !pendingFocusIssueId) return;   // UI + map live in the iframe
+        const issue = liveIssues(currentSiteIssues).find(i => i.id === pendingFocusIssueId);
+        if (!issue) return;          // not loaded yet (or another site) — retry next render
+        const id = pendingFocusIssueId;
+        pendingFocusIssueId = null;
+        clearFocusParam();
+        try {
+            zoomToIssue(issue);
+            openStatusModal(issue);
+            console.log(`${TAG} deep-link focus → issue ${id}`);
+        } catch (e) { console.warn(`${TAG} deep-link focus threw:`, e); }
     }
 
     // v0.16: panel drag/resize. Header drag → move; corner handle → resize.

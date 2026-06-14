@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — deep-link focus + approver-propose (dev-only) — AIM Issues v1.06
+
+More from the feedback round: **(1) Deep-link focus** — clicking an issue's Slack link now lands you on the site *and* AIM Issues pans/zooms to that issue and opens its box automatically (the link carries `?aim_issue=<id>`; the param is stripped after focusing). **(2) Delete** now also strikes + badges the **original** Slack message (`🗑 DELETED`), matching resolve/ignore. **(3) Approvers can now Propose** (Fix/Ignore), not just direct-resolve — so an approver can route their own find through another approver instead of self-approving. **(4)** Fixed the **Notify chip needing 2-3 taps** (Leaflet was swallowing the first clicks; now pointerdown+click with a debounce). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — Slack notification polish (dev-only) — AIM Issues v1.05
 
 Round of refinements on the Slack notifications: **(1)** the site name in each post is now a **clickable link** straight to that site's Site Setup. **(2)** A new issue's first threaded reply lists the **affected entities** it overlaps. **(3) Deletes** are logged in the thread (`🗑 @user deleted this issue`) so the thread reads created → … → deleted. **(4)** The **Notify** picker now includes yourself (tag an issue for your own follow-up), and if you tag nobody it **defaults to the creator**. **(5)** When an issue is **resolved/ignored**, the bot **edits the original message** — strikes the description and prefixes ✅ RESOLVED / ⊘ IGNORED; re-opening restores it. *(Dev/latest only.)*
