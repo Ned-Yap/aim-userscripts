@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.43
+// @version      4.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.43';
+    const SCRIPT_VERSION = '4.44';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6273,54 +6273,45 @@
     function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
     // Distance (m) from a point to the nearest power-line segment.
     function a2PointToSegs(p, segs) { let best = Infinity; for (const s of segs) { const d = pointToSegMeters(p.lat, p.lng, s[0], s[1]); if (d < best) best = d; } return best; }
-    // Push a point OUT of any obstacle ring it sits inside (pad buffer / FFZ
-    // interior) to just OUTSIDE that ring's nearest boundary (+ a small margin so
-    // it never reads as inside) — so the corridor HUGS the near edge instead of
-    // crossing. A few iterations handle overlapping obstacles.
-    function a2PushOut(pt, obstacles) {
-        const marginM = 2 * GEN_FT_TO_M;
-        let p = { lat: pt.lat, lng: pt.lng }, pushed = false;
-        for (let iter = 0; iter < 6; iter++) {
-            let moved = false;
-            for (const ob of obstacles) {
-                if (pointInPolygon(p.lat, p.lng, ob)) {
-                    const np = nearestPointOnRing(p, ob);
-                    if (np && np.pt) {
-                        const proj = genProjector(p.lat, p.lng);
-                        const f = proj.fwd(np.pt); const L = Math.hypot(f.x, f.y) || 1; const ext = (L + marginM) / L;
-                        p = proj.inv({ x: f.x * ext, y: f.y * ext });
-                        pushed = true; moved = true;
-                    }
-                }
-            }
-            if (!moved) break;
-        }
-        return { pt: p, pushed };
-    }
     function a2InObstacle(p, obstacles) { for (const ob of obstacles) if (pointInPolygon(p.lat, p.lng, ob)) return true; return false; }
-    // Offset a line point toward the asset side, but CLAMP the offset DOWN toward
-    // the line so it never lands inside a pad/FFZ (keeps the trunk line-side of
-    // obstacles at the largest shielded offset that's clear — no swings out to the
-    // far edge). bf = on-line point in proj coords; (dx,dy) = unit dir × side.
-    function a2ClampOffset(proj, bf, dx, dy, maxOffM, obstacles) {
-        const step = maxOffM / 12;
-        for (let off = maxOffM; off > 1e-6; off -= step) {
-            const p = proj.inv({ x: bf.x + dx * off, y: bf.y + dy * off });
-            if (!a2InObstacle(p, obstacles)) return p;
+    // Offset-search order (ft), built once: prefer the in-band offset nearest 50 ft,
+    // then go OUTWARD (away from the line, safe, just out-of-band), then INWARD
+    // (toward the line, less safe) — last resort. (Validated offline vs the real
+    // 1502 FP: median 50 ft, 84% in-band, pads cleared, no line crossings.)
+    const A2_OFFSET_ORDER = (() => {
+        const inb = []; for (let o = A2.shieldMinFt; o <= A2.shieldMaxFt; o += 2) inb.push(o);
+        inb.sort((a, b) => Math.abs(a - A2.offsetFt) - Math.abs(b - A2.offsetFt));
+        const out = inb.slice();
+        for (let o = A2.shieldMaxFt + 1; o <= A2.offsetFt + 40; o += 3) out.push(o);
+        for (let o = A2.shieldMinFt - 2; o >= 12; o -= 3) out.push(o);
+        return out;
+    })();
+    // Offset a line point toward the asset side to the nearest offset (per the order
+    // above) that's clear of all PAD buffers — pads are the hard "never enter" set.
+    // Stays line-side ~50 ft where clear; detours outward to skirt a pad. FFZs are
+    // NOT avoided here (the path connects into them) — they're flagged instead.
+    // bf = on-line point in proj coords; (px,py) = unit perpendicular; side = ±1.
+    function a2OffsetClear(proj, bf, px, py, side, padObstacles) {
+        for (const offFt of A2_OFFSET_ORDER) {
+            const off = offFt * GEN_FT_TO_M;
+            const cand = proj.inv({ x: bf.x + px * off * side, y: bf.y + py * off * side });
+            if (!a2InObstacle(cand, padObstacles)) return cand;
         }
-        return proj.inv({ x: bf.x, y: bf.y }); // even the line is blocked → sit on it (flagged)
+        return proj.inv({ x: bf.x + px * A2.offsetFt * GEN_FT_TO_M * side, y: bf.y + py * A2.offsetFt * GEN_FT_TO_M * side }); // give up → 50 ft (flagged)
     }
     // A2.2 corridor geometry. CONNECTIVITY-FIRST: every shared graph node gets ONE
     // offset position, so the offset network is connected by construction (no gaps).
     // The offset side is chosen per node toward the nearest asset, then MAJORITY-
     // smoothed across neighbours so it never flips on an isolated ~50 ft segment.
     // The base node is NOT offset (it's a point, not on a line). Each edge is then
-    // resampled between its two cached node positions, interior samples pushed out
-    // of FFZ/pad obstacles, and flagged where the shield distance leaves 40–65 ft.
-    // Returns an array of point arrays (one per edge): [{lat,lng,flag}…].
-    function a2BuildCorridor(edges, segs, obstacles, assetCens, basePt) {
-        const offM = A2.offsetFt * GEN_FT_TO_M, sampleM = A2.sampleFt * GEN_FT_TO_M;
+    // resampled between its two cached node positions; each sample offsets to the
+    // nearest PAD-clear position (a2OffsetClear), and is flagged where the shield
+    // distance leaves 40–65 ft OR it sits inside an FFZ. padObs = hard avoid;
+    // ffzObs = flag-only. Returns an array of point arrays: [{lat,lng,flag}…].
+    function a2BuildCorridor(edges, segs, padObs, ffzObs, assetCens, basePt) {
+        const sampleM = A2.sampleFt * GEN_FT_TO_M;
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, ffzObs); };
         const baseKey = basePt ? vkey(basePt) : null;
         // node set + adjacency
         const nodes = new Map(), adj = new Map();
@@ -6338,7 +6329,7 @@
         for (const [k, p] of nodes) {
             if (k === baseKey) { nodeOff.set(k, { lat: p.lat, lng: p.lng }); continue; }
             const li = lineInfo(k), s = sideMap.get(k);
-            nodeOff.set(k, a2ClampOffset(li.proj, { x: 0, y: 0 }, li.px * s, li.py * s, offM, obstacles));
+            nodeOff.set(k, a2OffsetClear(li.proj, { x: 0, y: 0 }, li.px, li.py, s, padObs));
         }
         const out = [];
         for (const [a, b] of edges) {
@@ -6354,9 +6345,8 @@
                 let p;
                 if (i === 0) p = nodeOff.get(ka);            // shared endpoint → connected
                 else if (i === n) p = nodeOff.get(kb);
-                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2ClampOffset(proj, bf, nx * s, ny * s, offM, obstacles); }
-                const dLine = a2PointToSegs(p, segs);
-                pts.push({ lat: p.lat, lng: p.lng, flag: (dLine < minM || dLine > maxM) });
+                else { const base = a2Interp(a, b, i / n); const bf = proj.fwd(base); p = a2OffsetClear(proj, bf, nx, ny, s, padObs); }
+                pts.push({ lat: p.lat, lng: p.lng, flag: flagOf(p) });
             }
             out.push(pts);
         }
@@ -6368,8 +6358,9 @@
     // straight line between its two neighbours — keeping only corners, branch
     // points, and ends. Returns connected segments [{a,b,flag}], flag recomputed
     // per segment by sampling the shield distance.
-    function a2SimplifyCorridor(corridor, tolM, segs) {
+    function a2SimplifyCorridor(corridor, tolM, segs, ffzObs) {
         const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        ffzObs = ffzObs || [];
         const kf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
         const nodes = new Map(), adj = new Map();
         const add = (p) => { const k = kf(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, new Set()); } return k; };
@@ -6394,7 +6385,7 @@
             const a = nodes.get(k), b = nodes.get(nk);
             const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / sampleM));
             let flag = false;
-            for (let i = 0; i <= n && !flag; i++) { const p = a2Interp(a, b, i / n); const dL = a2PointToSegs(p, segs); if (dL < minM || dL > maxM) flag = true; }
+            for (let i = 0; i <= n && !flag; i++) { const p = a2Interp(a, b, i / n); const dL = a2PointToSegs(p, segs); if (dL < minM || dL > maxM || a2InObstacle(p, ffzObs)) flag = true; }
             out.push({ a, b, flag });
         }
         return out;
@@ -6572,16 +6563,17 @@
                 edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
             }
         }
-        // A2.2: obstacle-aware corridor. Offset the trunk toward the assets, then
-        // push out of pad buffers + FFZ interiors (NEVER enter; hug their near
-        // edges), and flag stretches outside the 40–65 ft shield band.
-        const obstacles = [];
-        for (const a of entities) { if (a.type !== 3) continue; const r = entityCoords(a); if (r && r.length >= 3) { const buf = getAssetOffsetRing(a, A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) obstacles.push(buf); } }
-        for (const f of ffzRings) obstacles.push(f.ring);
+        // A2.2: obstacle-aware corridor. Offset the trunk ~50 ft to the asset side;
+        // PAD buffers are hard-avoided (offset detours to the nearest clear), FFZ
+        // interiors are flag-only (the path connects into them). Validated offline
+        // against the real 1502 FP: median ~50 ft, ~85% in 40–65 ft band.
+        const padObstacles = [];
+        for (const a of entities) { if (a.type !== 3) continue; const r = entityCoords(a); if (r && r.length >= 3) { const buf = getAssetOffsetRing(a, A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObstacles.push(buf); } }
+        const ffzObstacles = ffzRings.map(f => f.ring);
         const assetCens = ffzRings.map(f => f.cen);
         if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }
-        const corridorRaw = a2BuildCorridor(edges, segs, obstacles, assetCens, basePt);
-        const corridor = a2SimplifyCorridor(corridorRaw, A2.simplifyFt * GEN_FT_TO_M, segs); // few clean verts → [{a,b,flag}]
+        const corridorRaw = a2BuildCorridor(edges, segs, padObstacles, ffzObstacles, assetCens, basePt);
+        const corridor = a2SimplifyCorridor(corridorRaw, A2.simplifyFt * GEN_FT_TO_M, segs, ffzObstacles); // few clean verts → [{a,b,flag}]
         const corridorEdges = corridor.map(s => [s.a, s.b]); // for the branch foot
         let flaggedFt = 0;
         for (const s of corridor) if (s.flag) flaggedFt += approxMeters(s.a.lat, s.a.lng, s.b.lat, s.b.lng) / GEN_FT_TO_M;
@@ -8258,7 +8250,7 @@
                 const s = res.stats;
                 const baseNm = res.baseEntity && res.baseEntity.name ? genCleanName(res.baseEntity.name) : 'base';
                 const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
-                const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft out of 40–65 shield</span>` : '';
+                const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft flagged (out-of-band / FFZ overlap)</span>` : '';
                 const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
                 statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}. Cyan = shielded corridor (offset, hugging FFZ/pad edges); orange = shield out of 40–65 ft; green dot = FFZ entry. PREVIEW — A2.2.</span>`;
             } catch (e) {
