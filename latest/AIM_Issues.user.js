@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.15
+// @version      1.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.15';
+    const SCRIPT_VERSION = '1.16';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3832,16 +3832,16 @@
             let slackBadge = '';
             if (slackEnabled() && liveIssue.slackThreadTs) {
                 const permalink = `https://percepto.slack.com/archives/${slackConfig.channelId}/p${String(liveIssue.slackThreadTs).replace('.', '')}`;
-                // v1.13: open via window.top.open in a click handler — the
-                // map iframe's sandbox blocks <a target="_blank">, so a plain
-                // link did nothing.
-                slackBadge = `<span class="aim-issues-slack-link" data-href="${permalink}"
+                // v1.15.1: real <button> so the header drag handler skips it
+                // (it skips buttons) and the click fires reliably. Opens via
+                // GM_openInTab (iframe sandbox blocks <a target=_blank>).
+                slackBadge = `<button type="button" class="aim-issues-slack-link" data-href="${permalink}"
                         title="Reported to Slack — click to open the thread"
                         style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
-                               background:#10331f;color:#5fff5f;font-size:9px;font-weight:700;
+                               background:#10331f;color:#5fff5f;font:inherit;font-size:9px;font-weight:700;
                                border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px;cursor:pointer">
                        ✓ SLACK
-                   </span>`;
+                   </button>`;
             } else if (slackEnabled()) {
                 slackBadge = `<span title="Not yet posted to Slack"
                         style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
@@ -4194,7 +4194,9 @@
             const handle = card.querySelector('#aim-issues-modal-resize');
             if (header) {
                 header.addEventListener('mousedown', (e) => {
-                    if (e.target.closest('button, input, textarea')) return;
+                    // v1.15.1: also skip the ✓ SLACK badge so clicking it
+                    // opens the thread instead of starting a drag.
+                    if (e.target.closest('button, input, textarea, .aim-issues-slack-link')) return;
                     if (e.button !== 0) return;
                     e.preventDefault(); e.stopPropagation();
                     startModalDrag(e, 'move');

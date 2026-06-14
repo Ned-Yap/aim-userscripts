@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — Slack badge click (real fix) (dev-only) — AIM Issues v1.16
+
+The ✓ SLACK badge was being grabbed by the header's drag handler (dragging it moved the popup; clicking did nothing). The drag handler skipped `button/input/textarea` but the badge was a `<span>`. Now the badge is a real `<button>` and the drag handler explicitly skips it — so clicking opens the thread. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — Slack badge click (capture-phase) (dev-only) — AIM Issues v1.15
 
 The ✓ SLACK badge still wasn't opening — it lives in the draggable header, which was swallowing the click. Now bound on capture-phase pointerdown (same pattern as the chips) so it fires before the drag logic, with a toast confirming it fired (and a clipboard-copy fallback if the browser blocks the open). *(Dev/latest only.)*
