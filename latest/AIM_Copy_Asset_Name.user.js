@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.32
+// @version      4.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.32';
+    const SCRIPT_VERSION = '4.33';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7164,21 +7164,27 @@
         const offM = (p.standoffFt + Math.max(p.depthFt, 30) / 2) * GEN_FT_TO_M;
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let bounds = null; try { bounds = map.getBounds().pad(0.15); } catch (e) {}
+        // Collect ALL pads (NOT centroid-in-view) — when zoomed into a corner both
+        // pad centroids are off-screen, and dropping them killed the A↔B junction
+        // and that pad's corner dots. Bounds only gate which DOTS we draw.
         const pads = [];
         for (const a of ents) {
             if (a.type !== 3) continue;
             const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
             const off = getAssetOffsetRing(a, offM); if (!off) continue;
-            const cen = ringCentroid(ring);
-            if (bounds && !bounds.contains([cen.lat, cen.lng])) continue;
-            pads.push({ ring, off, cen });
+            pads.push({ ring, off, cen: ringCentroid(ring) });
             for (const v of off) {
                 if (bounds && !bounds.contains([v.lat, v.lng])) continue;
                 try { const d = L.circleMarker([v.lat, v.lng], { radius: 3.5, color: '#00e5ff', weight: 1.5, opacity: 0.65, fillColor: '#08323b', fillOpacity: 0.55, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
             }
         }
-        // junctions: offset-ring crossings between nearby pad pairs, outside both pads
-        const NEAR = 260 * GEN_FT_TO_M;
+        // junctions: where a near-perpendicular offset edge of one pad meets one of
+        // another pad — the 15-ft-from-both corner for a corridor turning around a
+        // corner made of TWO assets. We accept not just strict crossings but
+        // near-misses (the intersection within JT of BOTH edges) so a corner where
+        // the offset rings only touch still locks. Near-parallel pairs are skipped.
+        const cornerDots = genDraw.targets.length;
+        const NEAR = 260 * GEN_FT_TO_M, JT = 12 * GEN_FT_TO_M;
         for (let i = 0; i < pads.length; i++) {
             for (let j = i + 1; j < pads.length; j++) {
                 if (approxMeters(pads[i].cen.lat, pads[i].cen.lng, pads[j].cen.lat, pads[j].cen.lng) > NEAR) continue;
@@ -7187,8 +7193,11 @@
                     const a1 = A[x], a2 = A[(x + 1) % A.length];
                     for (let y = 0; y < B.length; y++) {
                         const b1 = B[y], b2 = B[(y + 1) % B.length];
-                        if (!segmentsCross(a1, a2, b1, b2)) continue;
+                        let dang = Math.abs(segAngleRad(a1, a2) - segAngleRad(b1, b2)) % Math.PI;
+                        if (dang > Math.PI / 2) dang = Math.PI - dang;
+                        if (dang < 20 * Math.PI / 180) continue; // near-parallel → no real corner
                         const X = segIntersectPoint(a1, a2, b1, b2);
+                        if (segDistM(X, a1, a2) > JT || segDistM(X, b1, b2) > JT) continue; // must be on both edges
                         if (pointInPolygon(X.lat, X.lng, pads[i].ring) || pointInPolygon(X.lat, X.lng, pads[j].ring)) continue;
                         if (genDraw.junctions.some(q => approxMeters(q.lat, q.lng, X.lat, X.lng) < 8 * GEN_FT_TO_M)) continue;
                         genDraw.junctions.push({ lat: X.lat, lng: X.lng });
@@ -7199,6 +7208,7 @@
         for (const q of genDraw.junctions) {
             try { const d = L.circleMarker([q.lat, q.lng], { radius: 4.5, color: '#ff5fff', weight: 2, opacity: 0.85, fillColor: '#3a0a3a', fillOpacity: 0.7, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
         }
+        try { unsafeWindow.console.log(`${GEN_TAG} snap targets: ${cornerDots} corner + ${genDraw.junctions.length} junction`); } catch (e) {}
     }
     function renderDrawPreview(p) {
         const L = getLeafletL(), map = getLeafletMap();

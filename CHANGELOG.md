@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — draw: junctions at any zoom + two-asset corners (dev-only) — Asset Inspector v4.33
+
+Fixes the corridor corner made of **two different assets** that wouldn't lock. Two causes: (1) snap-targets skipped any pad whose **centroid** was off-screen, so zooming into a corner dropped both pads and their junction — now all pads are considered, and the view only decides which dots to *draw*. (2) Junctions required a strict offset-ring crossing; a corner where the two pads' offset edges merely *touch* found nothing — now a near-perpendicular pair whose intersection lands on **both** edges (within ~12 ft) counts, so the two-asset corner gets a magenta lock dot. Added a `[AIM GEN] snap targets: N corner + M junction` console line. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — draw: ortho right-angle mode (dev-only) — Asset Inspector v4.32
 
 For the corridor corner that has no pad/junction dot to lock to (pads too far apart for their offset rings to meet), Draw now **squares the corner automatically**: in open space the next leg snaps to either straight-ahead or an exact 90° turn off the previous leg (the cursor's dominant axis decides). The ghost marker turns **cyan** when ortho-locked (green = corner, yellow = edge). Hold **Shift** for fully free placement (no snap, no ortho). *(Dev/latest only.)*
