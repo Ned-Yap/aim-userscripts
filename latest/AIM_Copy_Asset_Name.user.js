@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.37
+// @version      4.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.37';
+    const SCRIPT_VERSION = '4.38';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6253,6 +6253,18 @@
         mergeFt: 60,        // parallel PL segments within this = one corridor (distro+trans on same poles)
     };
     function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
+    // Midpoint of the ring edge whose midpoint is nearest `pt` — the FP connects
+    // to the MIDDLE of the FFZ edge facing the corridor. Returns {pt, d(m)}.
+    function a2NearestEdgeMidpoint(ring, pt) {
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const d = approxMeters(pt.lat, pt.lng, mid.lat, mid.lng);
+            if (!best || d < best.d) best = { d, pt: mid };
+        }
+        return best;
+    }
     // Nearest point on a set of [a,b] edges to a lat/lng point. Returns {pt, d(m)}.
     function a2NearestOnEdges(pt, edges) {
         const proj = genProjector(pt.lat, pt.lng);
@@ -6394,7 +6406,7 @@
             const path = keyPath.map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
             path.push({ lat: target.lat, lng: target.lng }); // branch tip = FFZ (or pad edge); A2.2 refines entry
             const inBand = approachFt <= A2.approachMaxFt;
-            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz });
+            out.push({ asset: a, reachable: inBand, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz, _ffzRing: hasFfz ? ffz.ring : null });
             if (inBand) { reachable++; if (hasFfz) usedFfz++; } else unreachable++;
         }
         // union the per-asset key-paths into one branching tree (dedupe edges)
@@ -6410,14 +6422,17 @@
                 edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
             }
         }
-        // clean T-branch: drop the final approach from the perpendicular FOOT on the
-        // trunk straight to the FFZ MIDDLE (not from the nearest discrete node), so
-        // it reads as a T off the corridor into the centre rather than a parallel run.
+        // clean T-branch: the FP leaves the trunk at the perpendicular FOOT and
+        // connects to the MIDDLE of the FFZ's near EDGE (entry point) — it stops AT
+        // the edge, it does not run into the FFZ interior. No-FFZ assets keep the
+        // pad-edge tip.
         for (const r of out) {
             if (!r.reachable || !r.path || r.path.length < 2 || !edges.length) continue;
-            const tip = r.path[r.path.length - 1];
-            const foot = a2NearestOnEdges(tip, edges);
-            if (foot) { r.foot = foot.pt; r.approachFt = foot.d / GEN_FT_TO_M; }
+            const ref = r._ffzRing ? ringCentroid(r._ffzRing) : r.path[r.path.length - 1];
+            const foot = a2NearestOnEdges(ref, edges);
+            if (!foot) continue;
+            r.foot = foot.pt; r.approachFt = foot.d / GEN_FT_TO_M;
+            if (r._ffzRing) { const e = a2NearestEdgeMidpoint(r._ffzRing, foot.pt); if (e) r.entry = e.pt; }
         }
         return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length } };
     }
@@ -6649,16 +6664,17 @@
         for (const [a, b] of result.edges) {
             try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#00e5ff', weight: 3, opacity: 0.9, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
         }
-        // 2) per-asset branch tips + their final approach leg (dashed). The leg
-        //    starts at the perpendicular FOOT on the trunk (clean T to the FFZ
-        //    middle) when we have it, else the last corridor node.
+        // 2) per-asset branch: a solid leg from the trunk FOOT to the FFZ near-edge
+        //    ENTRY (the connection point) — it stops AT the edge, no line into the
+        //    interior. Marker sits on the edge. Cyan = reachable, red = out-of-shield.
         for (const r of result.assets) {
             if (!r.path || r.path.length < 2) continue;
-            const tip = r.path[r.path.length - 1];
+            const tip = r.entry || r.path[r.path.length - 1];
             const from = r.foot || r.path[r.path.length - 2];
-            const col = r.reachable ? '#5fff5f' : '#ff8a80';
-            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 2, opacity: 0.85, dashArray: '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
-            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: col, weight: 2, fillColor: r.reachable ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
+            const reach = r.reachable;
+            const col = reach ? '#00e5ff' : '#ff8a80';
+            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: reach ? 3 : 2, opacity: 0.9, dashArray: reach ? null : '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
+            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: reach ? '#5fff5f' : '#ff8a80', weight: 2, fillColor: reach ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
         }
         // 3) base marker — yellow diamond-ish ring
         if (result.base) {

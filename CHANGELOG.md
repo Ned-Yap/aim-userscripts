@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.1 connect at FFZ edge, not the interior (dev-only) — Asset Inspector v4.38
+
+The branch now connects to the **middle of the FFZ's near edge** (the actual entry point) with the marker on the edge, as a **solid** leg off the trunk — no more dashed line running into the FFZ centroid. Cleaner read of where the flight path actually meets the zone. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.1 follow lines exactly (no corner-cutting) (dev-only) — Asset Inspector v4.37
 
 The real cause of the parallel "extra segment" + paths not following the power line + cutting across a pad: my **connector edges were chording across a single line's own bends** (two densified nodes either side of a bend are <130 ft apart, so a shortcut got added). Rebuilt the graph with **line membership** — each power line is densified as its own chain (followed exactly), and connectors now bridge **only between different lines** (one closest bridge per line pair, no zigzag). So routes hug the power lines and stop shortcutting over pads. Offline-verified: a bent line gets 0 cross-bend chords; two distinct lines get exactly one bridge. *(Dev/latest only.)*
