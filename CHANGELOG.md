@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — draw: ortho right-angle mode (dev-only) — Asset Inspector v4.32
+
+For the corridor corner that has no pad/junction dot to lock to (pads too far apart for their offset rings to meet), Draw now **squares the corner automatically**: in open space the next leg snaps to either straight-ahead or an exact 90° turn off the previous leg (the cursor's dominant axis decides). The ghost marker turns **cyan** when ortho-locked (green = corner, yellow = edge). Hold **Shift** for fully free placement (no snap, no ortho). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — draw: 1-vert corners + back-to-back junction dots (dev-only) — Asset Inspector v4.31
 
 Two draw fixes. (1) **Outer corners are now a single vertex** — a miter-limit bug (`off*4` is negative for the right-hand offset, so that side always beveled into 2 verts) is fixed with `Math.abs`. Every corner now strokes to one clean point. (2) **Back-to-back pads now get a magenta junction dot** to lock the corridor's between-pads corner — it sits where the two pads' 15-ft offset rings cross (15 ft from *both* pads), so you no longer have to free-aim at a spot with no target and end up closer than 15 ft. Junction snap takes priority over edge snap. *(Dev/latest only.)*
