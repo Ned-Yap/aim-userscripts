@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.26
+// @version      4.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.26';
+    const SCRIPT_VERSION = '4.27';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6997,11 +6997,14 @@
         else { if (back > 6) return out; for (let k = 0; k < back; k++) out.push(ring[(iPrev - k + n) % n]); }
         return out;
     }
-    // Snap a cursor point to the asset's mitered OFFSET outline (sharp corners)
-    // if near one, else the cursor unchanged (free-draw). Returns { pt, assetId,
-    // off, i } so the caller can insert corner vertices when crossing edges.
+    // Snap a cursor point to the asset's mitered OFFSET outline if near one, else
+    // the cursor unchanged (free-place). For click-to-place we PREFER snapping to
+    // a corner VERTEX (a sharp right angle) when the cursor is close to one, so a
+    // click near a pad corner lands exactly on it. Returns { pt, assetId, off, i,
+    // vertex } so the caller can insert corner vertices when crossing edges.
     function snapDrawPoint(cursorLL, params) {
         const SNAP_M = 70 * GEN_FT_TO_M;
+        const VSNAP_M = 16 * GEN_FT_TO_M; // corner-magnet radius
         const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let best = null;
@@ -7012,10 +7015,16 @@
         }
         if (best && best.d < SNAP_M) {
             const off = getAssetOffsetRing(best.asset, offM);
-            const np = off && nearestPointOnRing(cursorLL, off);
-            if (np) return { pt: np.pt, assetId: best.asset.id, off, i: np.i };
+            if (off && off.length >= 3) {
+                // corner magnet: nearest offset-ring vertex within VSNAP_M wins
+                let vi = -1, vd = Infinity;
+                for (let i = 0; i < off.length; i++) { const d = approxMeters(cursorLL.lat, cursorLL.lng, off[i].lat, off[i].lng); if (d < vd) { vd = d; vi = i; } }
+                if (vi >= 0 && vd < VSNAP_M) return { pt: { lat: off[vi].lat, lng: off[vi].lng }, assetId: best.asset.id, off, i: vi, vertex: true };
+                const np = nearestPointOnRing(cursorLL, off);
+                if (np) return { pt: np.pt, assetId: best.asset.id, off, i: np.i, vertex: false };
+            }
         }
-        return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1 };
+        return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1, vertex: false };
     }
     // Douglas-Peucker — drop near-collinear samples, keep the corners. Far
     // fewer vertices → cleaner strip, easier to hand-edit.
@@ -7074,25 +7083,43 @@
         const ll = left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
         return cleanSelfIntersections(ll); // snip the inner-corner twist (v4.24 behavior)
     }
-    let genDraw = { active: false, drawing: false, pts: [], lastLL: null, poly: null, onDown: null, onMove: null, onUp: null };
+    // Click-to-place draw: pts[] are the user's clicked (snapped) corners; tentative
+    // is the live rubber-band point at the cursor; dots[] are the on-map corner
+    // markers so the user can see what they're building.
+    let genDraw = { active: false, drawing: false, pts: [], tentative: null, lastSnap: null, poly: null, dots: [], onDown: null, onMove: null, onDbl: null };
+    function clearDrawDots(map) {
+        for (const d of genDraw.dots) { try { map.removeLayer(d); } catch (e) {} }
+        genDraw.dots = [];
+    }
     function renderDrawPreview(p) {
         const L = getLeafletL(), map = getLeafletMap();
         if (!L || !map) return;
         if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
-        const outline = strokePolyline(simplifyPath(genDraw.pts, 10 * GEN_FT_TO_M), Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        clearDrawDots(map);
+        // dot markers at each placed corner
+        for (const q of genDraw.pts) {
+            try { const d = L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#003844', fillOpacity: 0.9, interactive: false }); d.addTo(map); genDraw.dots.push(d); } catch (e) {}
+        }
+        const pts = genDraw.pts.concat(genDraw.tentative ? [genDraw.tentative] : []);
+        if (pts.length < 2) return;
+        const outline = strokePolyline(pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
         if (!outline || outline.length < 4) return;
         try {
-            genDraw.poly = L.polygon(outline.map(q => [q.lat, q.lng]), { color: '#ffe14d', weight: 1.5, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.18, interactive: false });
+            genDraw.poly = L.polygon(outline.map(q => [q.lat, q.lng]), { color: '#ffe14d', weight: 1.5, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.18, interactive: false, dashArray: genDraw.tentative ? '4,4' : null });
             genDraw.poly.addTo(map);
         } catch (e) {}
     }
     async function finalizeDraw() {
         const map = getLeafletMap();
         if (genDraw.poly) { try { if (map) map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
+        if (map) clearDrawDots(map);
+        genDraw.drawing = false; genDraw.tentative = null; genDraw.lastSnap = null;
         const p = genState.lastParams || GEN_DEFAULTS;
-        const center = simplifyPath(genDraw.pts, 10 * GEN_FT_TO_M); // few clean vertices
-        const outline = strokePolyline(center, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
-        genDraw.pts = []; genDraw.lastLL = null;
+        // dedupe near-duplicate corners (a finishing double-click drops 2 near-same pts)
+        const center = [];
+        for (const q of genDraw.pts) { const last = center[center.length - 1]; if (!last || approxMeters(last.lat, last.lng, q.lat, q.lng) >= 4 * GEN_FT_TO_M) center.push(q); }
+        const outline = (center.length >= 2) ? strokePolyline(center, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M) : null;
+        genDraw.pts = [];
         if (!outline || outline.length < 4) return;
         const cen = ringCentroid(outline);
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
@@ -7248,6 +7275,15 @@
         // with the mouse button held); Delete removes the hovered/active FFZ.
         // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
         genEdit.onKey = (ev) => {
+            const k0 = (ev.key || '').toLowerCase();
+            // Esc cancels the in-progress drawn corridor (drops placed corners).
+            if (k0 === 'escape' && genDraw.active && genDraw.drawing) {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const map = getLeafletMap();
+                if (map) { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); }
+                genDraw.pts = []; genDraw.tentative = null; genDraw.lastSnap = null; genDraw.drawing = false;
+                return;
+            }
             const poly = genEdit.activePoly || genEdit.hovered;
             if (!poly || !poly._ffz || poly._ffz._committed) return;
             const k = (ev.key || '').toLowerCase();
@@ -7267,53 +7303,51 @@
         };
         genEdit.keyWin = uwin();
         try { genEdit.keyWin.addEventListener('keydown', genEdit.onKey, true); } catch (e) {}
-        // Freehand draw: capture-phase mousedown on the map container so it
-        // works in Draw mode over empty map AND over existing FFZs.
+        // Click-to-place draw: each capture-phase mousedown drops one corner
+        // (snapped to a pad's offset outline / its corners). Move shows a dashed
+        // rubber-band to the cursor. Double-click finishes. Works over empty map
+        // AND over existing FFZs.
         genDraw.onDown = (ev) => {
             if (!genDraw.active) return;
+            if (ev.button !== 0) return; // left-click only
             ev.preventDefault(); ev.stopPropagation();
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            genDraw.drawing = true; genDraw.pts = []; genDraw.lastLL = ll; genDraw._offCache = {};
-            try { map.dragging.disable(); } catch (e) {}
-            const p = genState.lastParams || GEN_DEFAULTS;
-            const snap0 = snapDrawPoint(ll, p);
-            genDraw.pts.push(snap0.pt); genDraw._lastSnap = snap0;
-            document.addEventListener('mousemove', genDraw.onMove, true);
-            document.addEventListener('mouseup', genDraw.onUp, true);
-        };
-        genDraw.onMove = (ev) => {
-            if (!genDraw.drawing) return;
-            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            if (genDraw.lastLL && approxMeters(genDraw.lastLL.lat, genDraw.lastLL.lng, ll.lat, ll.lng) < 8 * GEN_FT_TO_M) return;
             const p = genState.lastParams || GEN_DEFAULTS;
             const snap = snapDrawPoint(ll, p);
-            const prev = genDraw._lastSnap;
-            // crossed onto an ADJACENT edge of the same pad → trace the corner.
-            // Guard: only 1–2 edge steps (a real corner). A bigger jump means the
-            // snap flickered across the pad — inserting that arc wraps the pad and
-            // blobs the strip, so skip it.
+            const prev = genDraw.lastSnap;
+            genDraw.drawing = true;
+            // crossed onto a non-adjacent edge of the SAME pad between clicks →
+            // trace the corner vertices so the strip follows the pad's right angles.
             if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
                 const verts = ringVerticesBetween(snap.off, prev.i, snap.i);
-                if (verts.length && verts.length <= 2) for (const v of verts) genDraw.pts.push(v);
+                for (const v of verts) genDraw.pts.push(v);
             }
-            genDraw.pts.push(snap.pt); genDraw._lastSnap = snap; genDraw.lastLL = ll;
+            genDraw.pts.push(snap.pt); genDraw.lastSnap = snap; genDraw.tentative = null;
             renderDrawPreview(p);
         };
-        genDraw.onUp = () => {
-            if (!genDraw.drawing) return;
-            genDraw.drawing = false;
-            document.removeEventListener('mousemove', genDraw.onMove, true);
-            document.removeEventListener('mouseup', genDraw.onUp, true);
-            try { map.dragging.enable(); } catch (e) {}
+        genDraw.onMove = (ev) => {
+            if (!genDraw.active || !genDraw.drawing) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const p = genState.lastParams || GEN_DEFAULTS;
+            genDraw.tentative = snapDrawPoint(ll, p).pt;
+            renderDrawPreview(p);
+        };
+        genDraw.onDbl = (ev) => {
+            if (!genDraw.active || !genDraw.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
             finalizeDraw();
         };
         genEdit.container.addEventListener('mousedown', genDraw.onDown, true);
+        genEdit.container.addEventListener('mousemove', genDraw.onMove, true);
+        genEdit.container.addEventListener('dblclick', genDraw.onDbl, true);
         genEdit.wired = true;
     }
     function unwireGenEditing() {
-        if (genDraw.onDown && genEdit.container) { try { genEdit.container.removeEventListener('mousedown', genDraw.onDown, true); } catch (e) {} }
-        if (genDraw.onMove) { try { document.removeEventListener('mousemove', genDraw.onMove, true); } catch (e) {} }
-        if (genDraw.onUp) { try { document.removeEventListener('mouseup', genDraw.onUp, true); } catch (e) {} }
+        if (genEdit.container) {
+            if (genDraw.onDown) { try { genEdit.container.removeEventListener('mousedown', genDraw.onDown, true); } catch (e) {} }
+            if (genDraw.onMove) { try { genEdit.container.removeEventListener('mousemove', genDraw.onMove, true); } catch (e) {} }
+            if (genDraw.onDbl) { try { genEdit.container.removeEventListener('dblclick', genDraw.onDbl, true); } catch (e) {} }
+        }
         if (genEdit.domMove) { try { document.removeEventListener('mousemove', genEdit.domMove, true); } catch (e) {} }
         if (genEdit.domUp) { try { document.removeEventListener('mouseup', genEdit.domUp, true); } catch (e) {} }
         if (genEdit.container && genEdit.onWheel) { try { genEdit.container.removeEventListener('wheel', genEdit.onWheel, { capture: true }); } catch (e) {} }
@@ -7495,8 +7529,8 @@
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
-        genDraw.active = false; genDraw.drawing = false;
-        try { const mp = getLeafletMap(); if (mp) mp.getContainer().style.cursor = ''; } catch (e) {}
+        genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.lastSnap = null;
+        try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
 
     function openSiteGenerator(siteID) {
@@ -7661,11 +7695,25 @@
 
         const drawBtn = box.querySelector('#aim-gen-draw');
         drawBtn.onclick = () => {
+            const map = getLeafletMap();
             genDraw.active = !genDraw.active;
             drawBtn.style.background = genDraw.active ? 'rgba(255,225,77,0.32)' : 'rgba(255,225,77,0.12)';
-            drawBtn.textContent = genDraw.active ? '✏️ Drawing (press+drag) — click to stop' : '✏️ Draw';
-            const map = getLeafletMap();
-            try { if (map) { wireGenEditing(map); map.getContainer().style.cursor = genDraw.active ? 'crosshair' : ''; } } catch (e) {}
+            drawBtn.textContent = genDraw.active ? '✏️ Drawing — click corners, dbl-click to finish' : '✏️ Draw';
+            try {
+                if (map) {
+                    if (genDraw.active) {
+                        wireGenEditing(map);
+                        try { map.doubleClickZoom.disable(); } catch (e) {}
+                        map.getContainer().style.cursor = 'crosshair';
+                    } else {
+                        // turning off mid-draw finishes the current corridor
+                        if (genDraw.drawing && genDraw.pts.length >= 2) finalizeDraw();
+                        else { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); genDraw.pts = []; genDraw.tentative = null; genDraw.drawing = false; }
+                        try { map.doubleClickZoom.enable(); } catch (e) {}
+                        map.getContainer().style.cursor = '';
+                    }
+                }
+            } catch (e) {}
         };
 
         const dryEl = box.querySelector('#aim-gen-dryrun');

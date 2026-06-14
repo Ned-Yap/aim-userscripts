@@ -125,8 +125,12 @@
     const MISSION_LINK_SELECTOR = 'a[data-testid="edit-mission-link"]';
     const MISSION_HREF_RE = /\/mission-bank\/(\d+)(?:\/|$|\?)/;
     const CACHE_KEY_VISIBLE_COLS = 'aim-mb-visible-cols';
+    const CACHE_KEY_VISIBLE_COLS_LOG = 'aim-mb-visible-cols-log'; // separate column set for Mission Log mode
     const CACHE_KEY_DISTANCE_UNIT = 'aim-mb-distance-unit'; // 'imperial' | 'metric'
     const CACHE_KEY_FLIGHT_THRESHOLDS = 'aim-mb-flight-thresholds';
+    const CACHE_KEY_GAP_DAYS = 'aim-mb-log-gap-days';       // coverage-gap threshold (days)
+    const LOG_SUM_BTN_ID = 'aim-mb-log-sum-btn';            // launcher on the Mission Log page
+    const DEFAULT_GAP_DAYS = 7;
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -142,6 +146,12 @@
     // Data cache: { [siteID]: { missions: [...], fetchedAt: timestamp } }
     const missionsBySite = {};
     let inFlightFetch = null; // de-dupe concurrent fetches
+
+    // Mission Log cache: { [siteID]: { rows: [raw mission objects], total, fetchedAt } }
+    // Distinct from missionsBySite — the log is execution history from
+    // GET /missions/ (paginated), not the Mission Bank templates.
+    const logBySite = {};
+    let inFlightLogFetch = null;
 
     // Panel state — fresh each open
     let panelEl = null;
@@ -253,6 +263,25 @@
         const top = (() => { try { return window.top; } catch (e) { return window; } })();
         const hash = (top && top.location && top.location.hash) || location.hash || '';
         return /#\/site\/\d+\/control-panel\/mission-bank/.test(hash);
+    }
+
+    function isOnMissionLog() {
+        const top = (() => { try { return window.top; } catch (e) { return window; } })();
+        const hash = (top && top.location && top.location.hash) || location.hash || '';
+        return /#\/site\/\d+\/mission-log/.test(hash);
+    }
+
+    // Which column set + visible-cols storage key is live, keyed off the
+    // panel mode. 'bank' (default) preserves every existing Mission Bank
+    // behaviour byte-for-byte; 'log' swaps in the Mission Log schema.
+    function activeColumns() {
+        return (panelState && panelState.mode === 'log') ? LOG_COLUMNS : COLUMNS;
+    }
+    function activeColById() {
+        return (panelState && panelState.mode === 'log') ? LOG_COL_BY_ID : COL_BY_ID;
+    }
+    function visibleColsStorageKey() {
+        return (panelState && panelState.mode === 'log') ? CACHE_KEY_VISIBLE_COLS_LOG : CACHE_KEY_VISIBLE_COLS;
     }
 
     // ========================================================
@@ -710,20 +739,25 @@
     }
 
     function getVisibleColumnIds() {
-        const stored = gmGet(CACHE_KEY_VISIBLE_COLS, null);
+        const cols = activeColumns();
+        const byId = activeColById();
+        const stored = gmGet(visibleColsStorageKey(), null);
         if (Array.isArray(stored) && stored.length > 0) {
-            // Migrate v0.8 hardcoded step-type IDs → stype:… IDs
+            // Migrate v0.8 hardcoded step-type IDs → stype:… IDs (bank only;
+            // log IDs aren't in the map so this is a no-op for log).
             const migrated = stored.map(id => COLUMN_ID_MIGRATION[id] || id);
-            return migrated.filter(id => COL_BY_ID[id]);
+            return migrated.filter(id => byId[id]);
         }
-        return COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
+        return cols.filter(c => c.defaultVisible).map(c => c.id);
     }
 
     function setVisibleColumnIds(ids) {
-        gmSet(CACHE_KEY_VISIBLE_COLS, ids);
+        gmSet(visibleColsStorageKey(), ids);
     }
 
     function formatCellValue(row, col, unit, thresholds) {
+        // Columns may carry their own formatter (used by Mission Log mode).
+        if (typeof col.fmt === 'function') return col.fmt(row, unit);
         if (col.id === 'estFlights') {
             return fmtNum(estimateFlights(row.batteryConsumption, thresholds));
         }
@@ -743,11 +777,411 @@
     }
 
     function getSortValue(row, col, thresholds) {
+        if (typeof col.sortVal === 'function') return col.sortVal(row);
         if (col.id === 'estFlights') return estimateFlights(row.batteryConsumption, thresholds) || 0;
         if (col.dynamic && col.stepTypeKey) return (row.stepTypeCounts || {})[col.stepTypeKey] || 0;
         const v = row[col.key];
         if (col.kind === 'text' || col.kind === 'dot') return (v || '').toString().toLowerCase();
         return Number(v) || 0;
+    }
+
+    // ========================================================
+    // MISSION LOG MODE — execution-history SUM
+    // ========================================================
+    // The Mission Log (#/site/<id>/mission-log) is a DIFFERENT React page +
+    // data source from the Mission Bank: it's flight history pulled from
+    // GET /missions/ (paginated), not the bank templates. We reuse the whole
+    // SUM panel (chrome, table render, sort/filter, columns menu, export) by
+    // running it in panelState.mode === 'log' against LOG_COLUMNS + log rows.
+
+    const LOG_ONLY_FIELDS = 'id,mission_group_id,uploader_status,uploader_planned_images_count,drone_name,when,image_count,created_by_username,app_name,type,state,videos,landed,landing_files,tracking_files,landing_is_failed,duration,mission_data_reports,map_status,map_type,is_media_mission';
+
+    // Percepto stores `when` as ISO UTC and `duration` as milliseconds.
+    const LOG_CT_FMT = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: 'numeric', minute: '2-digit', hour12: true
+    });
+    function fmtWhenCT(ms) {
+        if (ms == null) return '';
+        const d = new Date(ms);
+        if (isNaN(d.getTime())) return '';
+        const p = {};
+        for (const x of LOG_CT_FMT.formatToParts(d)) p[x.type] = x.value;
+        return `${p.month}/${p.day}/${p.year} - ${p.hour}:${p.minute}${(p.dayPeriod || '').toLowerCase()} CT`;
+    }
+    function fmtDurationMs(ms) {
+        if (ms == null) return '';
+        const s = Math.round(ms / 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        if (s <= 0) return '00:00';
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    }
+    // Best-effort state-code labels — refine once the enum is confirmed.
+    const LOG_STATE_LABELS = { 0: 'Pending', 1: 'In Progress', 2: 'Completed', 3: 'Aborted', 4: 'Failed', 5: 'Cancelled' };
+    function logStateLabel(code) {
+        if (code == null) return '';
+        return LOG_STATE_LABELS[code] != null ? LOG_STATE_LABELS[code] : `State ${code}`;
+    }
+
+    const LOG_COLUMNS = [
+        { id: 'id', label: 'Mission ID', key: 'id', kind: 'num', defaultVisible: true },
+        { id: 'missionGroup', label: 'Group', key: 'missionGroup', kind: 'text', defaultVisible: true },
+        { id: 'name', label: 'Name', key: 'name', kind: 'text', defaultVisible: true, primary: true },
+        { id: 'timeCT', label: 'Time (CT)', kind: 'text', defaultVisible: true, fmt: (r) => fmtWhenCT(r.whenMs), sortVal: (r) => r.whenMs || 0 },
+        { id: 'duration', label: 'Duration', kind: 'text', defaultVisible: true, fmt: (r) => fmtDurationMs(r.durationMs), sortVal: (r) => r.durationMs || 0 },
+        { id: 'drone', label: 'Drone', key: 'drone', kind: 'text', defaultVisible: true },
+        { id: 'type', label: 'Type', key: 'type', kind: 'text', defaultVisible: true },
+        { id: 'state', label: 'State', kind: 'text', defaultVisible: true, fmt: (r) => r.stateLabel, sortVal: (r) => (r.stateCode == null ? -1 : r.stateCode) },
+        { id: 'status', label: 'Status', kind: 'text', defaultVisible: true, fmt: (r) => (r._aborted ? '⚠ Aborted' : (r.landed || '')), sortVal: (r) => (r._aborted ? 1 : 0) },
+        { id: 'images', label: 'Images', key: 'images', kind: 'num', defaultVisible: true },
+        { id: 'videos', label: 'Videos', key: 'videoCount', kind: 'num', defaultVisible: false },
+        { id: 'createdBy', label: 'Created By', key: 'createdBy', kind: 'text', defaultVisible: false },
+        { id: 'media', label: 'Media Mission', kind: 'text', defaultVisible: false, fmt: (r) => (r.isMedia ? 'Yes' : 'No'), sortVal: (r) => (r.isMedia ? 1 : 0) },
+    ];
+    const LOG_COL_BY_ID = Object.fromEntries(LOG_COLUMNS.map(c => [c.id, c]));
+
+    function buildLogRow(m) {
+        const whenMs = m.when ? Date.parse(m.when) : null;
+        const durationMs = (typeof m.duration === 'number') ? m.duration : (m.duration != null ? Number(m.duration) : 0);
+        const stateCode = (m.state != null) ? m.state : null;
+        const durS = durationMs != null ? Math.round(durationMs / 1000) : null;
+        const aborted = (durationMs === 0) || (m.landing_is_failed === true);
+        return {
+            id: m.id,
+            missionGroup: m.mission_group_id != null ? m.mission_group_id : '',
+            name: m.app_name || '',
+            whenMs, whenISO: m.when || '',
+            durationMs: durationMs == null ? 0 : durationMs, durationS: durS,
+            drone: m.drone_name || '',
+            type: m.type || '',
+            stateCode, stateLabel: logStateLabel(stateCode),
+            landed: m.landed || '',
+            landingFailed: m.landing_is_failed,
+            images: m.image_count != null ? m.image_count : 0,
+            videoCount: Array.isArray(m.videos) ? m.videos.length : 0,
+            isMedia: !!m.is_media_mission,
+            createdBy: m.created_by_username || '',
+            _aborted: aborted,
+            _raw: m,
+        };
+    }
+    function buildLogRows(siteID) {
+        const bucket = logBySite[siteID];
+        if (!bucket) return [];
+        return bucket.rows.map(buildLogRow);
+    }
+
+    // Paginated fetch of the full execution history. /missions/ returns the
+    // newest `past_missions` page + a `total_mission_count`; we walk backward
+    // via `last_mission_id` until we've collected the total (or a page is empty).
+    function fetchMissionLog(siteID, onDone, onErr) {
+        const all = [];
+        let total = null;
+        let guard = 0;
+        const end = new Date(), start = new Date();
+        start.setFullYear(start.getFullYear() - 2); // 2-year window
+        const fmt = (d) => d.toISOString().slice(0, 10);
+
+        function finish() {
+            inFlightLogFetch = null;
+            logBySite[siteID] = { rows: all, total: total != null ? total : all.length, fetchedAt: Date.now() };
+            dlog(`${TAG} log fetch done: ${all.length} missions (total ${total})`);
+            if (onDone) onDone();
+        }
+        function page(lastId) {
+            if (++guard > 80) { finish(); return; } // safety cap (~1600 missions)
+            const params = {
+                site_id: Number(siteID), drones: [], missionTypes: [], missionId: [],
+                users: [], state: null, takeoffCompleted: false,
+                start: fmt(start), end: fmt(end), last_mission_id: lastId
+            };
+            const url = `/missions/?site_id=${encodeURIComponent(siteID)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(LOG_ONLY_FIELDS)}`;
+            fetch(url, { credentials: 'include' })
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                .then(j => {
+                    const past = (j && j.past_missions) || [];
+                    if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+                    all.push(...past);
+                    const lastMid = past.length ? past[past.length - 1].id : null;
+                    const more = past.length > 0 && (total == null || all.length < total) && lastMid != null && lastMid !== lastId;
+                    if (more) page(lastMid); else finish();
+                })
+                .catch(e => {
+                    inFlightLogFetch = null;
+                    console.error(`${TAG} log fetch failed`, e);
+                    if (onErr) onErr(e.message || String(e));
+                });
+        }
+        inFlightLogFetch = siteID;
+        page(-1);
+    }
+
+    function renderLogTableView() {
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        panelState.drillId = null;
+        updateTitle();
+        const allRows = buildLogRows(sid);
+        const rows = filterAndSort(allRows);
+        const visibleCols = getVisibleColumnIds().map(id => LOG_COL_BY_ID[id]).filter(Boolean);
+        const total = (logBySite[sid] && logBySite[sid].total) || allRows.length;
+        const html = `
+            <div class="aim-mb-toolbar">
+                <input class="aim-mb-search" type="text" placeholder="Search name / type / drone / group…" value="${escapeHtml(panelState.search)}" />
+                <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
+                <button class="aim-mb-tbtn" data-stats title="Rollups, coverage gaps, outliers">📊 Stats</button>
+                <button class="aim-mb-tbtn" data-refresh title="Re-fetch the log">↻</button>
+            </div>
+            <div class="aim-mb-table-wrap" id="aim-mb-table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:32px;"><input type="checkbox" data-select-all ${selectAllState(rows)} /></th>
+                            ${visibleCols.map(col => renderHeaderCell(col)).join('')}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(r => renderRow(r, visibleCols, panelState.thresholds)).join('')}
+                    </tbody>
+                </table>
+            </div>
+            <div class="aim-mb-footer">
+                <div class="aim-mb-info">
+                    ${rows.length} of ${total} mission${total === 1 ? '' : 's'}${panelState.selectedIds.size > 0 ? ` · <strong style="color:#14d2dc">${panelState.selectedIds.size} selected</strong>` : ''}
+                </div>
+                <button class="aim-mb-tbtn" data-export="csv">Copy CSV</button>
+                <button class="aim-mb-tbtn" data-export="tsv">Copy → Sheets</button>
+                <button class="aim-mb-tbtn" data-export="json">Copy JSON</button>
+            </div>
+        `;
+        setBodyHtml(html);
+        const tw = panelEl.querySelector('#aim-mb-table-wrap');
+        if (tw && panelState.tableScrollY) tw.scrollTop = panelState.tableScrollY;
+        wireLogTableEvents(rows, visibleCols);
+    }
+
+    function wireLogTableEvents(rows, visibleCols) {
+        const search = panelEl.querySelector('.aim-mb-search');
+        if (search) {
+            let dbnc = null;
+            search.addEventListener('input', (e) => {
+                const cursor = e.target.selectionStart;
+                const newVal = e.target.value;
+                if (dbnc) clearTimeout(dbnc);
+                dbnc = setTimeout(() => {
+                    panelState.search = newVal;
+                    renderTableView();
+                    const ns = panelEl.querySelector('.aim-mb-search');
+                    if (ns) { ns.focus(); try { ns.setSelectionRange(cursor, cursor); } catch (er) {} }
+                }, 250);
+            });
+        }
+        const colsBtn = panelEl.querySelector('[data-cols]');
+        if (colsBtn) colsBtn.onclick = () => openColumnsMenu(colsBtn);
+        const statsBtn = panelEl.querySelector('[data-stats]');
+        if (statsBtn) statsBtn.onclick = () => renderLogStats();
+        const refreshBtn = panelEl.querySelector('[data-refresh]');
+        if (refreshBtn) refreshBtn.onclick = () => {
+            const sid = getCurrentSiteID();
+            delete logBySite[sid];
+            renderLoadingState();
+            fetchMissionLog(sid, () => renderTableView(), (err) => renderErrorState(err));
+        };
+        panelEl.querySelectorAll('th[data-col]').forEach(th => {
+            th.onclick = () => {
+                const colId = th.dataset.col;
+                if (panelState.sortKey === colId) {
+                    if (panelState.sortDir === 'asc') panelState.sortDir = 'desc';
+                    else if (panelState.sortDir === 'desc') { panelState.sortKey = 'timeCT'; panelState.sortDir = 'desc'; }
+                    else panelState.sortDir = 'asc';
+                } else { panelState.sortKey = colId; panelState.sortDir = 'asc'; }
+                renderTableView();
+            };
+        });
+        panelEl.querySelectorAll('tbody tr[data-id]').forEach(tr => {
+            tr.onclick = (e) => {
+                if (e.target.matches('input[type="checkbox"]')) return;
+                const tw = panelEl.querySelector('#aim-mb-table-wrap');
+                if (tw) panelState.tableScrollY = tw.scrollTop;
+                renderLogDetail(Number(tr.dataset.id));
+            };
+        });
+        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const id = Number(cb.dataset.row);
+                if (cb.checked) panelState.selectedIds.add(id); else panelState.selectedIds.delete(id);
+                renderTableView();
+            };
+        });
+        const selAll = panelEl.querySelector('[data-select-all]');
+        if (selAll) selAll.onclick = (e) => {
+            e.stopPropagation();
+            if (selAll.checked) rows.forEach(r => panelState.selectedIds.add(r.id));
+            else rows.forEach(r => panelState.selectedIds.delete(r.id));
+            renderTableView();
+        };
+        panelEl.querySelectorAll('[data-export]').forEach(b => {
+            b.onclick = () => doExport(b.dataset.export, rows, visibleCols);
+        });
+    }
+
+    function renderLogDetail(missionId) {
+        const sid = getCurrentSiteID();
+        const row = buildLogRows(sid).find(r => r.id === missionId);
+        if (!row) { renderTableView(); return; }
+        panelState.drillId = missionId;
+        const m = row._raw || {};
+        const f = (label, val) => `<div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px solid #1f1f1f;"><span style="color:#888;min-width:150px;flex-shrink:0;">${escapeHtml(label)}</span><span style="color:#e6e6e6;word-break:break-word;">${escapeHtml(val == null || val === '' ? '—' : String(val))}</span></div>`;
+        const html = `
+            <div class="aim-mb-toolbar">
+                <button class="aim-mb-tbtn" data-back>← Back</button>
+                <span style="font-weight:700;color:#14d2dc;">${escapeHtml(row.name)} · #${row.id}</span>
+            </div>
+            <div class="aim-mb-table-wrap" style="padding:10px 14px;font-size:12px;">
+                ${f('Name', row.name)}
+                ${f('Mission ID', row.id)}
+                ${f('Group', row.missionGroup)}
+                ${f('Time (CT)', fmtWhenCT(row.whenMs))}
+                ${f('Time (raw UTC)', row.whenISO)}
+                ${f('Duration', fmtDurationMs(row.durationMs))}
+                ${f('Drone', row.drone)}
+                ${f('Type', row.type)}
+                ${f('State', `${row.stateLabel} (${row.stateCode})`)}
+                ${f('Landed', row.landed)}
+                ${f('Landing failed', row.landingFailed)}
+                ${f('Aborted (derived)', row._aborted ? 'Yes' : 'No')}
+                ${f('Images', row.images)}
+                ${f('Videos', row.videoCount)}
+                ${f('Media mission', row.isMedia ? 'Yes' : 'No')}
+                ${f('Created by', row.createdBy)}
+                ${f('Map status', m.map_status)}
+                ${f('Map type', m.map_type)}
+                ${f('Uploader status', m.uploader_status)}
+                ${f('Planned images', m.uploader_planned_images_count)}
+            </div>
+        `;
+        setBodyHtml(html);
+        const back = panelEl.querySelector('[data-back]');
+        if (back) back.onclick = () => renderTableView();
+    }
+
+    function renderLogStats() {
+        const sid = getCurrentSiteID();
+        const rows = buildLogRows(sid);
+        const gapDays = Number(gmGet(CACHE_KEY_GAP_DAYS, DEFAULT_GAP_DAYS)) || DEFAULT_GAP_DAYS;
+        const now = Date.now();
+        const daysSince = (ms) => (ms ? Math.floor((now - ms) / 86400000) : null);
+
+        const groups = {};
+        let totalMs = 0, minWhen = Infinity, maxWhen = -Infinity;
+        rows.forEach(r => {
+            totalMs += r.durationMs || 0;
+            if (r.whenMs) { if (r.whenMs < minWhen) minWhen = r.whenMs; if (r.whenMs > maxWhen) maxWhen = r.whenMs; }
+            const g = r.missionGroup === '' ? '(none)' : r.missionGroup;
+            if (!groups[g]) groups[g] = { group: g, names: new Set(), count: 0, totalMs: 0, durs: [], lastMs: 0 };
+            const gg = groups[g];
+            gg.count++; gg.totalMs += r.durationMs || 0;
+            if (r.durationMs) gg.durs.push(r.durationMs);
+            if (r.name) gg.names.add(r.name);
+            if (r.whenMs && r.whenMs > gg.lastMs) gg.lastMs = r.whenMs;
+        });
+        const groupArr = Object.values(groups).sort((a, b) => b.lastMs - a.lastMs);
+        const avgMs = rows.length ? totalMs / rows.length : 0;
+        const gaps = groupArr.filter(g => g.lastMs && daysSince(g.lastMs) > gapDays);
+        const outliers = rows.filter(r => r._aborted || (r.durationS != null && r.durationS > 0 && r.durationS < 60))
+            .sort((a, b) => (b.whenMs || 0) - (a.whenMs || 0));
+
+        const statCard = (label, val) => `<div style="background:#151a20;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;min-width:120px;"><div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">${escapeHtml(label)}</div><div style="color:#14d2dc;font-size:16px;font-weight:700;">${escapeHtml(val)}</div></div>`;
+        const min = (arr) => arr.length ? Math.min(...arr) : 0;
+        const max = (arr) => arr.length ? Math.max(...arr) : 0;
+
+        const html = `
+            <div class="aim-mb-toolbar">
+                <button class="aim-mb-tbtn" data-back>← Back</button>
+                <span style="font-weight:700;color:#14d2dc;">📊 Mission Log Stats</span>
+                <span style="margin-left:auto;color:#888;font-size:11px;">Gap threshold:</span>
+                <input type="number" min="1" data-gap-days value="${gapDays}" style="width:54px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px;font-size:12px;border-radius:3px;" /> <span style="color:#888;font-size:11px;">days</span>
+            </div>
+            <div class="aim-mb-table-wrap" style="padding:12px 14px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+                    ${statCard('Missions', String(rows.length))}
+                    ${statCard('Groups', String(groupArr.length))}
+                    ${statCard('Total flight time', fmtDurationMs(totalMs))}
+                    ${statCard('Avg duration', fmtDurationMs(avgMs))}
+                    ${statCard('Date range', (minWhen === Infinity ? '—' : `${fmtWhenCT(minWhen).split(' - ')[0]} → ${fmtWhenCT(maxWhen).split(' - ')[0]}`))}
+                    ${statCard('Aborted/short', String(outliers.length))}
+                </div>
+
+                <div style="color:#14d2dc;font-weight:700;font-size:12px;margin:6px 0;">Per-group rollup</div>
+                <table style="margin-bottom:16px;">
+                    <thead><tr>
+                        <th>Group</th><th>Runs</th><th>Total</th><th>Avg</th><th>Min</th><th>Max</th><th>Last run (CT)</th><th>Days ago</th>
+                    </tr></thead>
+                    <tbody>
+                        ${groupArr.map(g => {
+                            const d = daysSince(g.lastMs);
+                            const stale = d != null && d > gapDays;
+                            return `<tr${stale ? ' style="background:rgba(255,82,82,0.12);"' : ''}>
+                                <td title="${escapeHtml(Array.from(g.names).join(', '))}">${escapeHtml(String(g.group))}</td>
+                                <td>${g.count}</td>
+                                <td>${fmtDurationMs(g.totalMs)}</td>
+                                <td>${fmtDurationMs(g.durs.length ? g.totalMs / g.count : 0)}</td>
+                                <td>${fmtDurationMs(min(g.durs))}</td>
+                                <td>${fmtDurationMs(max(g.durs))}</td>
+                                <td>${g.lastMs ? escapeHtml(fmtWhenCT(g.lastMs)) : '—'}</td>
+                                <td${stale ? ' style="color:#ff5252;font-weight:700;"' : ''}>${d == null ? '—' : d}</td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+
+                <div style="color:#ff8c42;font-weight:700;font-size:12px;margin:6px 0;">Coverage gaps (last run &gt; ${gapDays} days ago) — ${gaps.length}</div>
+                ${gaps.length ? `<table style="margin-bottom:16px;"><thead><tr><th>Group</th><th>Last run (CT)</th><th>Days ago</th></tr></thead><tbody>
+                    ${gaps.map(g => `<tr><td>${escapeHtml(String(g.group))}</td><td>${escapeHtml(fmtWhenCT(g.lastMs))}</td><td style="color:#ff5252;font-weight:700;">${daysSince(g.lastMs)}</td></tr>`).join('')}
+                </tbody></table>` : `<div style="color:#5fff5f;font-size:11px;margin-bottom:16px;">✓ No groups exceed the gap threshold.</div>`}
+
+                <div style="color:#ff8c42;font-weight:700;font-size:12px;margin:6px 0;">Duration outliers (aborted / &lt; 60s) — ${outliers.length}</div>
+                ${outliers.length ? `<table><thead><tr><th>Mission</th><th>Time (CT)</th><th>Duration</th><th>Reason</th></tr></thead><tbody>
+                    ${outliers.map(r => `<tr data-go="${r.id}" style="cursor:pointer;"><td>${escapeHtml(r.name)} · #${r.id}</td><td>${escapeHtml(fmtWhenCT(r.whenMs))}</td><td>${fmtDurationMs(r.durationMs)}</td><td>${r._aborted ? '⚠ aborted (0:00 / landing failed)' : 'short run'}</td></tr>`).join('')}
+                </tbody></table>` : `<div style="color:#5fff5f;font-size:11px;">✓ No aborted or abnormally short missions.</div>`}
+            </div>
+        `;
+        setBodyHtml(html);
+        const back = panelEl.querySelector('[data-back]');
+        if (back) back.onclick = () => renderTableView();
+        const gapInput = panelEl.querySelector('[data-gap-days]');
+        if (gapInput) gapInput.onchange = () => {
+            const v = Math.max(1, Number(gapInput.value) || DEFAULT_GAP_DAYS);
+            gmSet(CACHE_KEY_GAP_DAYS, v);
+            renderLogStats();
+        };
+        panelEl.querySelectorAll('tr[data-go]').forEach(tr => {
+            tr.onclick = () => renderLogDetail(Number(tr.dataset.go));
+        });
+    }
+
+    // Floating launcher on the Mission Log page (the log page has no
+    // Mission-Bank-style header to host an inline button, so we use a
+    // fixed pill bottom-right). Re-placeable inline later if desired.
+    function injectLogSumButton(doc) {
+        if (!masterEnabled) return;
+        if (!isOnMissionLog()) return;
+        if (doc.getElementById(LOG_SUM_BTN_ID)) return;
+        const btn = doc.createElement('button');
+        btn.id = LOG_SUM_BTN_ID;
+        btn.type = 'button';
+        btn.textContent = '📋 LOG SUM';
+        btn.title = 'Open Mission Log summary (AIM Mission Bank Tools)';
+        Object.assign(btn.style, {
+            position: 'fixed', bottom: '18px', right: '18px', zIndex: '99998',
+            background: '#14d2dc', color: '#000', border: 'none', borderRadius: '6px',
+            padding: '8px 14px', fontSize: '12px', fontWeight: '700', cursor: 'pointer',
+            fontFamily: "'Lato','Segoe UI',sans-serif", boxShadow: '0 3px 12px rgba(0,0,0,0.5)'
+        });
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('log'); };
+        (doc.body || doc.documentElement).appendChild(btn);
     }
 
     // ========================================================
@@ -818,12 +1252,14 @@
         // floating button at the top-right of the viewport.
         if (CONTEXT !== 'IFRAME') return;
         try { injectSumButton(document); } catch (e) {}
+        try { injectLogSumButton(document); } catch (e) {}
     }
 
     function hideSumButton() {
         try {
             document.querySelectorAll(`#${SUM_BTN_ID}`).forEach(el => el.remove());
             document.querySelectorAll(`#${TOOLBAR_ROW_ID}`).forEach(el => el.remove());
+            document.querySelectorAll(`#${LOG_SUM_BTN_ID}`).forEach(el => el.remove());
         } catch (e) {}
     }
 
@@ -1121,12 +1557,24 @@
     // ========================================================
     // Panel — open/close + state
     // ========================================================
-    function openPanel() {
+    function openPanel(mode) {
+        mode = mode || 'bank';
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('No site loaded.', '#ff5252'); return; }
-        if (!panelState) initPanelState();
+        // (Re)init when opening fresh or switching surfaces between opens.
+        if (!panelState || panelState.mode !== mode) initPanelState(mode);
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
+        if (mode === 'log') {
+            const bucket = logBySite[siteID];
+            if (!bucket) {
+                renderLoadingState();
+                fetchMissionLog(siteID, () => renderTableView(), (err) => renderErrorState(err));
+            } else {
+                renderTableView();
+            }
+            return;
+        }
         const bucket = missionsBySite[siteID];
         if (!bucket) {
             renderLoadingState();
@@ -1145,9 +1593,11 @@
         panelState = null;
     }
 
-    function initPanelState() {
+    function initPanelState(mode) {
+        mode = mode || 'bank';
         panelState = {
-            sortKey: 'flightDistance', // default: longest distance first
+            mode,
+            sortKey: mode === 'log' ? 'timeCT' : 'flightDistance', // log: newest first
             sortDir: 'desc',
             search: '',
             selectedIds: new Set(),
@@ -1390,11 +1840,12 @@
 
     function updateTitle() {
         if (!panelEl) return;
-        const span = panelEl.querySelector('[data-site]');
-        if (!span) return;
+        const titleEl = panelEl.querySelector('.aim-mb-header-title');
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
-        span.textContent = name || (sid ? `Site ${sid}` : '?');
+        const site = name || (sid ? `Site ${sid}` : '?');
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : '📋 Mission Summary';
+        if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
     function renderLoadingState() {
@@ -1414,6 +1865,7 @@
         const sid = getCurrentSiteID();
         if (!sid) return;
         if (!panelState) initPanelState();
+        if (panelState.mode === 'log') { renderLogTableView(); return; }
         panelState.drillId = null;
         updateTitle();
         // Rebuild dynamic step-type columns from the loaded missions so
@@ -1610,8 +2062,9 @@
         const visSet = new Set(visIds);
         // Build the list: visible columns first in their stored order
         // (with ↑/↓ arrows), then hidden columns below a divider.
-        const visibleRows = visIds.map(id => COL_BY_ID[id]).filter(Boolean);
-        const hiddenRows = COLUMNS.filter(c => !visSet.has(c.id));
+        const byId = activeColById();
+        const visibleRows = visIds.map(id => byId[id]).filter(Boolean);
+        const hiddenRows = activeColumns().filter(c => !visSet.has(c.id));
         menu.innerHTML = `
             <div class="aim-mb-menu-head">
                 <div class="aim-mb-menu-title">Columns</div>
@@ -1808,10 +2261,15 @@
         const q = (panelState.search || '').trim().toLowerCase();
         let out = rows;
         if (q) {
-            out = out.filter(r => (r.name || '').toLowerCase().includes(q)
-                || (r.description || '').toLowerCase().includes(q));
+            if (panelState.mode === 'log') {
+                out = out.filter(r => [r.name, r.type, r.drone, r.stateLabel, r.createdBy, String(r.missionGroup), String(r.id)]
+                    .some(v => (v || '').toString().toLowerCase().includes(q)));
+            } else {
+                out = out.filter(r => (r.name || '').toLowerCase().includes(q)
+                    || (r.description || '').toLowerCase().includes(q));
+            }
         }
-        const col = COL_BY_ID[panelState.sortKey];
+        const col = activeColById()[panelState.sortKey];
         if (col) {
             const dir = panelState.sortDir === 'asc' ? 1 : -1;
             out = out.slice().sort((a, b) => {
@@ -3854,8 +4312,14 @@ ${placemarks}
         } else if (kind === 'json') {
             // JSON dumps everything (full mission objects, not just visible cols)
             const sid = getCurrentSiteID();
-            const bucket = missionsBySite[sid];
-            const full = bucket ? bucket.missions.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            let full;
+            if (panelState.mode === 'log') {
+                const bucket = logBySite[sid];
+                full = bucket ? bucket.rows.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            } else {
+                const bucket = missionsBySite[sid];
+                full = bucket ? bucket.missions.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            }
             copyToClipboard(JSON.stringify(full, null, 2));
             showToast(`Copied ${full.length} mission${full.length === 1 ? '' : 's'} as JSON`, '#5fff5f');
         }

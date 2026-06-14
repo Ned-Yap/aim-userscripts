@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — click-to-place corridor draw (dev-only) — Asset Inspector v4.27
+
+Replaced the freehand press-drag Draw mode (which kept blobbing on inside corners and pad-to-pad transitions) with **click-to-place corners**. In Draw mode you now **click each corner** of the corridor — every click snaps to a nearby pad's 15-ft offset outline, and clicks near a pad **corner snap to that exact corner** (16 ft magnet) for true right angles. A dashed rubber-band previews the strip to the cursor; cyan dots mark placed corners. **Double-click** (or toggle Draw off) finishes; **Esc** cancels. Crossing between two edges of the same pad still auto-traces the corner vertices, so a single corridor can span two adjacent pads cleanly with few vertices. *(Dev/latest only — not promoted.)*
+
+---
+
 ## 2026-06-12 — AIM Mission Log CT v1.0 (new script)
 
 New standalone userscript: **AIM Mission Log CT**. On a site's **Mission Log** page it rewrites the TIME column from the site's fixed **GMT-5** stamps into real local **Central Time** — `Jun 11, 2026 13:28` → `06/11/2026 - 1:28pm CT` — and relabels the header site clock to CT. Each GMT-5 stamp is read as an absolute instant and re-rendered through `America/Chicago`, so summer missions read identically (GMT-5 = CDT) while winter missions correctly drop an hour. Layout survives Percepto's React re-renders via a MutationObserver. No hotkeys; brand-new install (not auto-distributed). *(Follow-up in progress: a richer Mission Log SUM folded into Mission Bank Tools.)*
