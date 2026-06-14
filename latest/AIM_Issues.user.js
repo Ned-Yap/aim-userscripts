@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.14';
+    const SCRIPT_VERSION = '1.15';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -3943,22 +3943,33 @@
             // window (iframe sandbox blocks <a target=_blank>).
             const slackLink = card.querySelector('.aim-issues-slack-link');
             if (slackLink) {
-                slackLink.onclick = (e) => {
+                // v1.15: the badge sits in the draggable header, which was
+                // eating the click — bind capture-phase pointerdown (like the
+                // chips) so it fires before the drag logic. Always toast so we
+                // know it fired even if opening is blocked.
+                let lastOpen = 0;
+                const openSlack = (e) => {
                     e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastOpen < 400) return;   // ignore the paired event
+                    lastOpen = now;
                     const href = slackLink.dataset.href;
                     if (!href) return;
-                    // v1.14: GM_openInTab bypasses the map iframe's sandbox +
-                    // popup blockers (window.top.open silently did nothing).
-                    // Fall back to window.open, then clipboard-copy.
+                    let opened = false;
                     if (typeof GM_openInTab === 'function') {
-                        try { GM_openInTab(href, { active: true, insert: true, setParent: true }); return; }
-                        catch (e2) {}
+                        try { GM_openInTab(href, { active: true, insert: true, setParent: true }); opened = true; } catch (e2) {}
                     }
-                    try { const w = (window.top || window).open(href, '_blank'); if (w) return; } catch (e3) {}
-                    copyTextToClipboard(href)
-                        .then(() => showToast('Slack link copied — paste to open.', 3000))
-                        .catch(() => {});
+                    if (!opened) { try { opened = !!(window.top || window).open(href, '_blank'); } catch (e3) {} }
+                    if (opened) {
+                        showToast('Opening Slack thread…', 1500);
+                    } else {
+                        copyTextToClipboard(href)
+                            .then(() => showToast('Slack link copied — paste it in your browser.', 3500))
+                            .catch(() => showToast('Could not open Slack link.', 3000));
+                    }
                 };
+                slackLink.addEventListener('pointerdown', openSlack, true);
+                slackLink.addEventListener('click', openSlack, true);
             }
 
             // v0.30: history sort toggle

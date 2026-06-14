@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — Slack badge click (capture-phase) (dev-only) — AIM Issues v1.15
+
+The ✓ SLACK badge still wasn't opening — it lives in the draggable header, which was swallowing the click. Now bound on capture-phase pointerdown (same pattern as the chips) so it fires before the drag logic, with a toast confirming it fired (and a clipboard-copy fallback if the browser blocks the open). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — real self-ping fix + ping rules + Slack badge (dev-only) — AIM Issues v1.14
 
 The actual self-ping cause: every message header @-mentioned the actor (a real `<@id>`), so you pinged yourself on every action (assign, comment, etc.). Now the "who did it" text is plain `@name` (no ping) and real mentions are reserved for intended recipients. **Ping rules now:** propose → the *other* approvers; **approve/reject → the assigned CSM** (falls back to the proposer); comment → only the people you tag (multiple supported). Also: the **✓ SLACK badge** now opens via `GM_openInTab` (the previous fix still didn't work — the iframe sandbox blocked it; falls back to clipboard-copy). **Note: this adds a `GM_openInTab` grant, so Tampermonkey will prompt to re-approve on update.** *(Dev/latest only.)*
