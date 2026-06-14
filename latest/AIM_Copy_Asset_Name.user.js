@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.27
+// @version      4.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.27';
+    const SCRIPT_VERSION = '4.28';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7314,14 +7314,10 @@
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const p = genState.lastParams || GEN_DEFAULTS;
             const snap = snapDrawPoint(ll, p);
-            const prev = genDraw.lastSnap;
             genDraw.drawing = true;
-            // crossed onto a non-adjacent edge of the SAME pad between clicks →
-            // trace the corner vertices so the strip follows the pad's right angles.
-            if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
-                const verts = ringVerticesBetween(snap.off, prev.i, snap.i);
-                for (const v of verts) genDraw.pts.push(v);
-            }
+            // WYSIWYG: one click = exactly one centerline corner (snapped to a pad
+            // corner/edge). No auto-inserted pad vertices — the user clicks each
+            // corner they want, so every corner stays a single clean point.
             genDraw.pts.push(snap.pt); genDraw.lastSnap = snap; genDraw.tentative = null;
             renderDrawPreview(p);
         };

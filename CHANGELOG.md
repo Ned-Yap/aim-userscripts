@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — WYSIWYG draw corners (dev-only) — Asset Inspector v4.28
+
+Refined click-to-place draw: removed the auto corner-tracing that inserted pad-outline vertices on top of your clicks (it was adding 1–2 extra points at some corners). Now **one click = exactly one corner** — the corner-magnet still snaps each click onto the nearest pad corner/edge, so every corner is a single clean point, matching the rest. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — click-to-place corridor draw (dev-only) — Asset Inspector v4.27
 
 Replaced the freehand press-drag Draw mode (which kept blobbing on inside corners and pad-to-pad transitions) with **click-to-place corners**. In Draw mode you now **click each corner** of the corridor — every click snaps to a nearby pad's 15-ft offset outline, and clicks near a pad **corner snap to that exact corner** (16 ft magnet) for true right angles. A dashed rubber-band previews the strip to the cursor; cyan dots mark placed corners. **Double-click** (or toggle Draw off) finishes; **Esc** cancels. Crossing between two edges of the same pad still auto-traces the corner vertices, so a single corridor can span two adjacent pads cleanly with few vertices. *(Dev/latest only — not promoted.)*
