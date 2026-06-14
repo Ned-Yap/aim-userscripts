@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 obstacle-aware shielded corridor (dev-only) — Asset Inspector v4.39
+
+First A2.2 slice: the corridor is no longer the bare centerline on the power line. It now **offsets ~50 ft toward the asset side**, then **pushes out of every pad buffer (15 ft) and FFZ interior** — NEVER entering them, hugging their near edges instead — and **flags** any stretch where the resulting shield distance falls outside **40–65 ft** (drawn orange; the stat line shows total flagged feet). Resolves the "flight path runs through an FFZ" problem. Still preview-only (no altitudes/commit). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.1 connect at FFZ edge, not the interior (dev-only) — Asset Inspector v4.38
 
 The branch now connects to the **middle of the FFZ's near edge** (the actual entry point) with the marker on the edge, as a **solid** leg off the trunk — no more dashed line running into the FFZ centroid. Cleaner read of where the flight path actually meets the zone. *(Dev/latest only.)*
