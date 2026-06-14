@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.35
+// @version      4.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.35';
+    const SCRIPT_VERSION = '4.36';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6250,15 +6250,45 @@
         connectFt: 130,     // two corridors within this can be hopped between (2×65 ft shield reach)
         approachMaxFt: 220, // asset/base further than this from any line = out-of-shield (flag)
         bufferFt: 15,       // never enter a pad+this buffer
+        mergeFt: 60,        // parallel PL segments within this = one corridor (distro+trans on same poles)
     };
     function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
+    // Drop parallel/overlapping power-line segments (distro + trans usually trace
+    // the same corridor a few ft apart) so we get ONE corridor with a clean
+    // T-branch, not two parallel FP runs. A seg is a duplicate when BOTH its
+    // endpoints lie within mergeM of an already-kept segment.
+    function dedupeParallelSegs(segs, mergeM) {
+        const kept = [];
+        for (const s of segs) {
+            let dup = false;
+            for (const k of kept) {
+                if (pointToSegMeters(s[0].lat, s[0].lng, k[0], k[1]) <= mergeM &&
+                    pointToSegMeters(s[1].lat, s[1].lng, k[0], k[1]) <= mergeM) { dup = true; break; }
+            }
+            if (!dup) kept.push(s);
+        }
+        return kept;
+    }
+    // Nearest point on a set of [a,b] edges to a lat/lng point. Returns {pt, d(m)}.
+    function a2NearestOnEdges(pt, edges) {
+        const proj = genProjector(pt.lat, pt.lng);
+        let best = null;
+        for (const [a, b] of edges) {
+            const A = proj.fwd(a), B = proj.fwd(b);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const fx = A.x + t * dx, fy = A.y + t * dy, d = Math.hypot(fx, fy);
+            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }) };
+        }
+        return best;
+    }
     // Build a routing graph from the site's power lines: densified vertices along
     // each segment (shielded travel edges) + connector edges between any two
     // vertices within connectFt (lets the drone cross between nearby corridors).
     // Returns { adj, verts } — same shape as buildFlightPathGraph, so dijkstra*/
     // nearestGraphVertex work unchanged. Every edge carries { shielded:true }.
     function buildPowerLineGraph(siteID) {
-        const segs = powerLineSegments(siteID);
+        const segs = dedupeParallelSegs(powerLineSegments(siteID), A2.mergeFt * GEN_FT_TO_M);
         const adj = new Map(), verts = new Map();
         const addVert = (p) => { const k = vkey(p); if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng }); if (!adj.has(k)) adj.set(k, []); return k; };
         const addEdge = (ka, kb, shielded) => { if (ka === kb) return; const w = approxMeters(verts.get(ka).lat, verts.get(ka).lng, verts.get(kb).lat, verts.get(kb).lng); adj.get(ka).push({ to: kb, w, shielded }); adj.get(kb).push({ to: ka, w, shielded }); };
@@ -6361,6 +6391,15 @@
                 const va = graph.verts.get(kp[i]), vb = graph.verts.get(kp[i + 1]);
                 edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
             }
+        }
+        // clean T-branch: drop the final approach from the perpendicular FOOT on the
+        // trunk straight to the FFZ MIDDLE (not from the nearest discrete node), so
+        // it reads as a T off the corridor into the centre rather than a parallel run.
+        for (const r of out) {
+            if (!r.reachable || !r.path || r.path.length < 2 || !edges.length) continue;
+            const tip = r.path[r.path.length - 1];
+            const foot = a2NearestOnEdges(tip, edges);
+            if (foot) { r.foot = foot.pt; r.approachFt = foot.d / GEN_FT_TO_M; }
         }
         return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, assets: out, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length } };
     }
@@ -6592,12 +6631,15 @@
         for (const [a, b] of result.edges) {
             try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#00e5ff', weight: 3, opacity: 0.9, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
         }
-        // 2) per-asset branch tips + their final approach leg (dashed)
+        // 2) per-asset branch tips + their final approach leg (dashed). The leg
+        //    starts at the perpendicular FOOT on the trunk (clean T to the FFZ
+        //    middle) when we have it, else the last corridor node.
         for (const r of result.assets) {
             if (!r.path || r.path.length < 2) continue;
-            const tip = r.path[r.path.length - 1], pen = r.path[r.path.length - 2];
+            const tip = r.path[r.path.length - 1];
+            const from = r.foot || r.path[r.path.length - 2];
             const col = r.reachable ? '#5fff5f' : '#ff8a80';
-            try { const ap = L.polyline([[pen.lat, pen.lng], [tip.lat, tip.lng]], { color: col, weight: 2, opacity: 0.85, dashArray: '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
+            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 2, opacity: 0.85, dashArray: '5,4', interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
             try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: col, weight: 2, fillColor: r.reachable ? '#0a3d0a' : '#3d0a0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
         }
         // 3) base marker — yellow diamond-ish ring

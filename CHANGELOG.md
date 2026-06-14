@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-13 — Site Setup Generator — A2.1 single corridor + clean T-branches (dev-only) — Asset Inspector v4.36
+
+Two routing-quality fixes. (1) **No more parallel double-back corridors** — distro + trans power lines trace the same corridor a few ft apart, so both were being densified into parallel runs and the tree split between them. Now overlapping/parallel PL segments (within 60 ft) are deduped to one corridor before graphing, so a branch T's off cleanly instead of running parallel. (2) **Branch connects to the FFZ middle via a clean perpendicular T** off the trunk (the foot of the perpendicular from the FFZ centroid), not from the nearest discrete graph node. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-13 — Site Setup Generator — A2.1 routes connect to FFZs, not pad centers (dev-only) — Asset Inspector v4.35
 
 Routing now targets the **asset's FFZ** (committed or in the current generator preview) instead of the pad center — a big pad's center sits 100+ ft inside, so pads were wrongly flagged out-of-shield even though their FFZ is right next to the corridor. Each asset connects to its nearest FFZ within 70 ft of the pad edge; if it has no FFZ yet, it falls back to the nearest **pad edge** vertex (never the center). Stats now show how many routed via FFZ vs pad edge. So the intended flow is FFZs first → Routes, but it works either way. *(Dev/latest only.)*
