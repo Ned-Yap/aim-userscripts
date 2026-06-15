@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.62
+// @version      4.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.62';
+    const SCRIPT_VERSION = '4.63';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7627,6 +7627,91 @@
         return { ok: true, snapped: snappedCount, verts: nv.length, segs: nseg.length };
     }
 
+    // ===== Native-draw CTRL-snap =====
+    // Hold CTRL while drawing a flight path in Percepto's OWN draw tool → the placed
+    // waypoint snaps ~50 ft parallel off the nearest power line. Release CTRL → free.
+    // HOW: Leaflet fires its map 'click' (which the native draw tool listens to, to add
+    // a vertex) from the DOM 'click' event, computing latlng via mouseEventToLatLng. We
+    // listen for the DOM 'click' in CAPTURE on the map container (runs before Leaflet's
+    // bubble-phase handler — same trick genDraw uses). When armed + CTRL + a power line
+    // is in range, we cancel the real click and re-dispatch a synthetic click at the
+    // SNAPPED pixel, so Leaflet computes the snapped latlng and the native tool records
+    // the snapped vertex. FRAGILE by nature (leans on Leaflet's DOM-click→map-click
+    // path) — every step is guarded so a miss just falls back to a normal un-snapped
+    // click rather than eating the click.
+    let fpSnap = { armed: false, container: null, map: null, segs: [], onClick: null, onMove: null, onKey: null, reentrant: false, indicator: null };
+    function fpSnapClearIndicator() {
+        if (fpSnap.indicator && fpSnap.map) { try { fpSnap.map.removeLayer(fpSnap.indicator); } catch (e) {} }
+        fpSnap.indicator = null;
+    }
+    function fpSnapShowIndicator(ll) {
+        const L = getLeafletL(), map = fpSnap.map; if (!L || !map) return;
+        if (!fpSnap.indicator) {
+            try { fpSnap.indicator = L.circleMarker([ll.lat, ll.lng], { radius: 6, color: '#ba8cff', weight: 2, fillColor: '#2a1a4d', fillOpacity: 0.9, interactive: false }); fpSnap.indicator.addTo(map); } catch (e) {}
+        } else { try { fpSnap.indicator.setLatLng([ll.lat, ll.lng]); } catch (e) {} }
+    }
+    function fpSnapCompute(ll) {
+        return a2SnapToLineOffset(ll, fpSnap.segs, A2.offsetFt * GEN_FT_TO_M, A2.approachMaxFt * GEN_FT_TO_M);
+    }
+    function setFpSnap(on, siteID) {
+        const map = getLeafletMap();
+        if (on) {
+            if (!map) return { ok: false, msg: 'Map not ready.' };
+            try { requestPowerLinesKml(siteID); } catch (e) {}
+            const segs = powerLineSegments(siteID);
+            if (!segs.length) return { ok: false, msg: 'No power lines loaded — open Map Styler, then ↻ Refresh.' };
+            fpSnap.armed = true; fpSnap.map = map; fpSnap.segs = segs;
+            wireFpSnap(map);
+            return { ok: true, segs: segs.length };
+        }
+        fpSnap.armed = false;
+        fpSnapClearIndicator();
+        unwireFpSnap();
+        return { ok: true };
+    }
+    function wireFpSnap(map) {
+        if (fpSnap.onClick) return;
+        fpSnap.container = map.getContainer();
+        fpSnap.onClick = (ev) => {
+            if (!fpSnap.armed || fpSnap.reentrant) return;       // let our own synthetic click through
+            if (!ev.ctrlKey || ev.button !== 0) return;          // only CTRL + left button
+            if (ev.detail >= 2) return;                          // don't touch the finishing double-click
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const r = fpSnapCompute(ll);
+            if (!r.snapped) return;                              // no line in range → normal click
+            let cpt; try { cpt = map.latLngToContainerPoint([r.pt.lat, r.pt.lng]); } catch (e) { return; }
+            const rect = fpSnap.container.getBoundingClientRect();
+            const clientX = rect.left + cpt.x, clientY = rect.top + cpt.y;
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            try {
+                const synth = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, ctrlKey: true, detail: 1 });
+                fpSnap.reentrant = true;
+                (ev.target || fpSnap.container).dispatchEvent(synth);
+            } catch (e) { console.error(`${GEN_TAG} CTRL-snap re-dispatch failed:`, e); }
+            finally { fpSnap.reentrant = false; }
+        };
+        fpSnap.onMove = (ev) => {
+            if (!fpSnap.armed) return;
+            if (!ev.ctrlKey) { if (fpSnap.indicator) fpSnapClearIndicator(); return; }
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const r = fpSnapCompute(ll);
+            if (r.snapped) fpSnapShowIndicator(r.pt); else fpSnapClearIndicator();
+        };
+        fpSnap.onKey = (ev) => { if (fpSnap.armed && !ev.ctrlKey) fpSnapClearIndicator(); }; // CTRL released → hide dot
+        fpSnap.container.addEventListener('click', fpSnap.onClick, true);
+        fpSnap.container.addEventListener('mousemove', fpSnap.onMove, true);
+        window.addEventListener('keyup', fpSnap.onKey, true);
+    }
+    function unwireFpSnap() {
+        const c = fpSnap.container;
+        if (c) {
+            if (fpSnap.onClick) try { c.removeEventListener('click', fpSnap.onClick, true); } catch (e) {}
+            if (fpSnap.onMove) try { c.removeEventListener('mousemove', fpSnap.onMove, true); } catch (e) {}
+        }
+        if (fpSnap.onKey) try { window.removeEventListener('keyup', fpSnap.onKey, true); } catch (e) {}
+        fpSnap.onClick = fpSnap.onMove = fpSnap.onKey = null;
+    }
+
     // ---- shared FFZ preview styling ----
     function ffzColor(f) {
         return f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
@@ -8879,6 +8964,7 @@
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
+        try { setFpSnap(false); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -8945,6 +9031,7 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
@@ -9011,6 +9098,16 @@
             clearGenPreview();
             clearRoutePreview(); genRouteResult = null;
             statsEl.textContent = 'Preview cleared.';
+        };
+        const fpSnapBtn = box.querySelector('#aim-gen-fpsnap');
+        fpSnapBtn.onclick = () => {
+            const turningOn = !fpSnap.armed;
+            const r = setFpSnap(turningOn, siteID);
+            if (turningOn && !r.ok) { statsEl.innerHTML = `<span style="color:#ffb347">${r.msg}</span>`; return; }
+            fpSnapBtn.style.background = fpSnap.armed ? 'rgba(186,140,255,0.32)' : 'rgba(186,140,255,0.12)';
+            fpSnapBtn.textContent = fpSnap.armed ? '🧲 CTRL-snap: ON' : '🧲 CTRL-snap: off';
+            if (fpSnap.armed) statsEl.innerHTML = `<b style="color:#ba8cff">CTRL-snap armed</b> (${r.segs} power-line segs). Use Percepto's <b>native flight-path draw</b> tool: <b>hold CTRL</b> as you click a waypoint → it snaps ~50 ft off the nearest power line (purple dot = where it lands). <b>Release CTRL</b> for a free point. Finish the path with CTRL <b>released</b> (double-click).`;
+            else statsEl.innerHTML = `CTRL-snap off.`;
         };
         const loadFpBtn = box.querySelector('#aim-gen-loadfp');
         loadFpBtn.onclick = () => {

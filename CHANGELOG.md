@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-15 — Site Setup Generator — 🧲 CTRL-snap for native FP drawing (dev-only) — Asset Inspector v4.63
+
+New **🧲 CTRL-snap** toggle: arm it, then draw flight paths with Percepto's **own** draw tool — **hold CTRL** while clicking a waypoint and it snaps ~50 ft parallel to the nearest power line (a purple dot shows where it'll land); **release CTRL** for a free point. Works by intercepting the map click and re-firing it at the snapped pixel into Percepto's native draw handler, so snapping happens inside the tool you already use. Finish the path with CTRL released. *(Dev/latest only; fragile by design — falls back to a normal click if anything misses.)*
+
 ## 2026-06-15 — Site Setup Generator — clean up natively-drawn FPs (dev-only) — Asset Inspector v4.62
 
 Pivoted the flight-path workflow: **draw FPs natively in Percepto, then clean them up here**. New **📥 Load site FPs** button pulls the site's existing flight-path entities into the editable preview — out-of-band segments show **orange** immediately so you can see what's off the shielding band. Then **✨ Snap & Clean** snaps the whole network ~50 ft parallel to the power lines + simplifies (segs keep their source-FP id so a later save can write back per entity). Removed the in-script Draw FP tool (you draw natively now). *(Save-back + elevation pass next. Dev/latest only.)*
