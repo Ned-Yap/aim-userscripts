@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.58
+// @version      4.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.58';
+    const SCRIPT_VERSION = '4.59';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1260,6 +1260,29 @@
             hFt: approxMeters(minLat, minLng, maxLat, minLng) * M_TO_FT,
         };
     }
+    // Axis-aligned bbox of a ring (or any {lat,lng}[] list).
+    function bboxOfRing(ring) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        for (const p of ring) {
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        }
+        return { minLat, maxLat, minLng, maxLng };
+    }
+    // Cheap spatial prefilters (skip far pairs before the O(verts) math) so the
+    // validator stays fast on big sites. Margins are in meters → degrees.
+    function pointNearBbox(lat, lng, bb, marginM) {
+        const dLat = marginM / 111320;
+        const dLng = marginM / ((111320 * Math.cos(lat * Math.PI / 180)) || 1e-6);
+        return lat >= bb.minLat - dLat && lat <= bb.maxLat + dLat
+            && lng >= bb.minLng - dLng && lng <= bb.maxLng + dLng;
+    }
+    function bboxesNear(a, b, marginM, latRef) {
+        const dLat = marginM / 111320;
+        const dLng = marginM / ((111320 * Math.cos(latRef * Math.PI / 180)) || 1e-6);
+        return !(a.maxLat + dLat < b.minLat || a.minLat - dLat > b.maxLat
+              || a.maxLng + dLng < b.minLng || a.minLng - dLng > b.maxLng);
+    }
     // True if segment a-b crosses any edge of the ring.
     function ringCrossesSeg(ring, a, b) {
         for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -1307,7 +1330,7 @@
     // Run the enabled SOP proximity checks for a site. Returns
     // [{ check, severity, distFt, threshFt, note, polygon:[[lat,lng]…] }].
     // Geometry in meters, thresholds/output in feet.
-    function runSopValidators(siteID) {
+    async function runSopValidators(siteID, onProgress) {
         const bucket = mapObjectsBySite[siteID];
         if (!bucket || !Array.isArray(bucket.entities)) return [];
         const ents = bucket.entities;
@@ -1340,18 +1363,50 @@
         const ffzBand = (e) => (e.restrictions && typeof e.restrictions.minAlt === 'number' && typeof e.restrictions.maxAlt === 'number') ? { min: e.restrictions.minAlt, max: e.restrictions.maxAlt } : null;
         const boxAt = (lat, lng) => boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]);
 
+        // Precomputed FFZ bboxes + per-arc bbox for the spatial prefilters that
+        // keep the O(n²) checks fast on large sites.
+        const ffzBox = new Map();
+        ffzs.forEach(ffz => { const r = getRing(ffz); if (r) ffzBox.set(ffz, bboxOfRing(r)); });
+        const assetBox = new Map();
+        assets.forEach(a => { const r = getRing(a); if (r) assetBox.set(a, bboxOfRing(r)); });
+        const fpBox = new Map();
+        fps.forEach(fp => {
+            const pts = [];
+            (fp.arcs || []).forEach(a => { if (a.point_a) pts.push(a.point_a); if (a.point_b) pts.push(a.point_b); });
+            if (pts.length) fpBox.set(fp, bboxOfRing(pts));
+        });
+        const arcBox = (arc) => bboxOfRing([arc.point_a, arc.point_b]);
+        // Cooperative yielding: the whole run used to block the main thread for
+        // tens of seconds on big sites (Chrome "page unresponsive"). We now yield
+        // to the event loop whenever a check has run > ~35 ms, so the page stays
+        // live and a progress callback can update. perfNow falls back to Date.
+        const perfNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        let _lastYield = perfNow();
+        const yieldMaybe = async (done, total) => {
+            if (perfNow() - _lastYield > 35) {
+                if (onProgress) { try { onProgress(done, total); } catch (e) {} }
+                await new Promise(r => setTimeout(r));
+                _lastYield = perfNow();
+            }
+        };
+
         // 1. FFZ ↔ Asset standoff — each FFZ surrounds one asset; flag if
         //    the inner boundary gap drops below the threshold.
         if (sopEnabled.ffzAsset && assets.length && ffzs.length) {
             const th = sopThresholds.ffzAssetFt;
-            for (const ffz of ffzs) {
+            for (let fi = 0; fi < ffzs.length; fi++) {
+                const ffz = ffzs[fi];
                 const fr = getRing(ffz); if (!fr) continue;
+                const fb = ffzBox.get(ffz);
                 let nearest = null;
                 for (const a of assets) {
+                    const ab = assetBox.get(a);
+                    if (fb && ab && !bboxesNear(fb, ab, th / M_TO_FT + 5, fr[0].lat)) continue;
                     const ar = getRing(a); if (!ar) continue;
                     const d = boundaryMinMeters(fr, ar);
                     if (!nearest || d < nearest.d) nearest = { a, d };
                 }
+                await yieldMaybe(fi, ffzs.length);
                 if (!nearest) continue;
                 const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
                 if (ft < th) {
@@ -1368,13 +1423,18 @@
         //    from any asset boundary.
         if (sopEnabled.fpAsset && assets.length && fps.length) {
             const th = sopThresholds.fpAssetFt;
-            for (const a of assets) {
+            for (let ci = 0; ci < assets.length; ci++) {
+                const a = assets[ci];
                 const ar = getRing(a); if (!ar) continue;
+                const ab = assetBox.get(a);
                 let nearest = null;
                 for (const fp of fps) {
+                    const pb = fpBox.get(fp);
+                    if (ab && pb && !bboxesNear(ab, pb, th / M_TO_FT + 5, ar[0].lat)) continue;
                     const d = fpToRingMeters(fp, ar);
                     if (!nearest || d < nearest.d) nearest = { fp, d };
                 }
+                await yieldMaybe(ci, assets.length);
                 if (!nearest) continue;
                 const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
                 if (ft < th) {
@@ -1394,7 +1454,10 @@
             const th = sopThresholds.ffzFfzFt;
             for (let i = 0; i < ffzs.length; i++) {
                 const ra = getRing(ffzs[i]); if (!ra) continue;
+                const ba = ffzBox.get(ffzs[i]);
                 for (let k = i + 1; k < ffzs.length; k++) {
+                    const bb = ffzBox.get(ffzs[k]);
+                    if (ba && bb && !bboxesNear(ba, bb, th / M_TO_FT + 1, ra[0].lat)) continue;
                     const rb = getRing(ffzs[k]); if (!rb) continue;
                     const overlap = polygonsIntersect(ra, rb);
                     const gapFt = overlap ? 0 : Math.round(boundaryMinMeters(ra, rb) * M_TO_FT);
@@ -1407,6 +1470,7 @@
                         });
                     }
                 }
+                await yieldMaybe(i, ffzs.length);
             }
         }
 
@@ -1461,26 +1525,33 @@
             });
             // 4b. FP segment entering an FFZ — needs alt overlap with the zone.
             if (ffzs.length) {
-                allArcs.forEach(rec => {
-                    const ba = arcBand(rec.arc); if (!ba) return;
-                    for (const ffz of ffzs) {
-                        const fr = getRing(ffz); if (!fr) continue;
-                        const enters = pointInPolygon(rec.arc.point_a.lat, rec.arc.point_a.lng, fr)
-                            || pointInPolygon(rec.arc.point_b.lat, rec.arc.point_b.lng, fr)
-                            || ringCrossesSeg(fr, rec.arc.point_a, rec.arc.point_b);
-                        if (!enters) continue;
-                        const fb = ffzBand(ffz); if (!fb) continue;
-                        const ovM = altBandOverlapM(ba.min, ba.max, fb.min, fb.max);
-                        const ovFt = ovM * M_TO_FT;
-                        if (ovM < thM) {
-                            out.push({
-                                check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
-                                note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : ovFt.toFixed(1) + ' ft'} altitude overlap (need ${thFt} ft)`,
-                                polygon: fr.map(p => [p.lat, p.lng]),
-                            });
+                for (let ai = 0; ai < allArcs.length; ai++) {
+                    const rec = allArcs[ai];
+                    const ba = arcBand(rec.arc);
+                    if (ba) {
+                        const ab = arcBox(rec.arc);
+                        for (const ffz of ffzs) {
+                            const fbb = ffzBox.get(ffz);
+                            if (fbb && !bboxesNear(ab, fbb, 2, rec.arc.point_a.lat)) continue;  // can't enter
+                            const fr = getRing(ffz); if (!fr) continue;
+                            const enters = pointInPolygon(rec.arc.point_a.lat, rec.arc.point_a.lng, fr)
+                                || pointInPolygon(rec.arc.point_b.lat, rec.arc.point_b.lng, fr)
+                                || ringCrossesSeg(fr, rec.arc.point_a, rec.arc.point_b);
+                            if (!enters) continue;
+                            const fb = ffzBand(ffz); if (!fb) continue;
+                            const ovM = altBandOverlapM(ba.min, ba.max, fb.min, fb.max);
+                            const ovFt = ovM * M_TO_FT;
+                            if (ovM < thM) {
+                                out.push({
+                                    check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
+                                    note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : ovFt.toFixed(1) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                                    polygon: fr.map(p => [p.lat, p.lng]),
+                                });
+                            }
                         }
                     }
-                });
+                    await yieldMaybe(ai, allArcs.length);
+                }
             }
         }
 
@@ -1631,16 +1702,21 @@
             const th = sopThresholds.gmTowerFt;
             const towers = ents.filter(e => e.type === 19 && e.general_marker_type === 'tower'
                 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
-            towers.forEach(gm => {
+            for (let ti = 0; ti < towers.length; ti++) {
+                const gm = towers[ti];
                 const lat = gm.coords[0].lat, lng = gm.coords[0].lng;
+                const margM = th / M_TO_FT + 2;
                 let ffzD = Infinity, ffzN = null;
                 for (const ffz of ffzs) {
+                    const bb = ffzBox.get(ffz);
+                    if (bb && !pointNearBbox(lat, lng, bb, margM)) continue;
                     const ring = getRing(ffz); if (!ring) continue;
                     const d = pointToPolygonMeters(lat, lng, ring);   // 0 if the tower is inside
                     if (d < ffzD) { ffzD = d; ffzN = ffz; }
                 }
                 let fpD = Infinity, fpN = null;
                 for (const rec of allArcs) {
+                    if (!pointNearBbox(lat, lng, arcBox(rec.arc), margM)) continue;
                     const d = pointToSegMeters(lat, lng, rec.arc.point_a, rec.arc.point_b);
                     if (d < fpD) { fpD = d; fpN = rec; }
                 }
@@ -1655,7 +1731,8 @@
                         note: `violation: Tower GM "${nameOf(gm)}" within ${th} ft — ${parts.join('; ')}`,
                         polygon: boxAt(lat, lng) });
                 }
-            });
+                await yieldMaybe(ti, towers.length);
+            }
         }
 
         // 12. FP → FFZ connection angle — an FP connects to an FFZ where its
@@ -1670,25 +1747,29 @@
             const th = sopThresholds.fpFfzAngleDeg;
             const CONNECT_FT = 10;   // FP endpoint within this of an FFZ edge = on it
             const conn = new Map();
-            allArcs.forEach(rec => {
-                [[rec.arc.point_a, rec.arc.point_b], [rec.arc.point_b, rec.arc.point_a]].forEach(([P, other]) => {
+            for (let ai = 0; ai < allArcs.length; ai++) {
+                const rec = allArcs[ai];
+                for (const [P, other] of [[rec.arc.point_a, rec.arc.point_b], [rec.arc.point_b, rec.arc.point_a]]) {
                     let best = null;
-                    ffzs.forEach(ffz => {
-                        const r = getRing(ffz); if (!r) return;
+                    for (const ffz of ffzs) {
+                        const bb = ffzBox.get(ffz);
+                        if (bb && !pointNearBbox(P.lat, P.lng, bb, CONNECT_FT / M_TO_FT)) continue;
+                        const r = getRing(ffz); if (!r) continue;
                         for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
                             const d = pointToSegMeters(P.lat, P.lng, r[j], r[i]) * M_TO_FT;
                             if (!best || d < best.d) best = { d, e1: r[j], e2: r[i], ffz, ring: r };
                         }
-                    });
-                    if (!best || best.d > CONNECT_FT) return;
-                    if (pointInPolygon(other.lat, other.lng, best.ring)) return;  // not an approach leg
+                    }
+                    if (!best || best.d > CONNECT_FT) continue;
+                    if (pointInPolygon(other.lat, other.lng, best.ring)) continue;  // not an approach leg
                     const deg = segAngleDeg(other, P, best.e1, best.e2);
-                    if (deg == null) return;
+                    if (deg == null) continue;
                     const key = `${best.ffz.id}|${vkey(P)}`;
                     const prev = conn.get(key);
                     if (!prev || deg < prev.deg) conn.set(key, { deg, ffz: best.ffz, rec, P });
-                });
-            });
+                }
+                await yieldMaybe(ai, allArcs.length);
+            }
             conn.forEach(c => {
                 if (Math.round(c.deg) >= th) return;
                 out.push({ check: 'FP↔FFZ angle', severity: 'high', distFt: Math.round(c.deg), threshFt: th,
@@ -1730,8 +1811,18 @@
                     });
                 }
             }
-            return demStep.then(() => {
-            const violations = runSopValidators(sid);
+            return demStep.then(async () => {
+            // Async + cooperative-yielding so a big site doesn't freeze the tab.
+            // The progress toast is re-shown periodically just to stay visible.
+            showToast('Validating site…');
+            let lastProgAt = Date.now();
+            const onProgress = (done, total) => {
+                const now = Date.now();
+                if (now - lastProgAt < 700) return;
+                lastProgAt = now;
+                showToast('Validating site…');
+            };
+            const violations = await runSopValidators(sid, onProgress);
             const ch = ensureValidatorChannel();
             if (!ch) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
             ch.postMessage({
