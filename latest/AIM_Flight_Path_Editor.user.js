@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.27
+// @version      0.28
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.27';
+    const SCRIPT_VERSION = '0.28';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1060,6 +1060,25 @@
     // ==================================================================
     let peekMode = false, peekLayer = null, peekPoints = [], peekMoveTs = 0;
     const peekMarkers = new Map(); // point index -> circleMarker
+    // Custom floating tip (not a Leaflet tooltip) so we can LINGER it ~250 ms after the
+    // cursor leaves a dot — easier to read than an instant hide.
+    let peekTipEl = null, peekTipTimer = null, peekTipOwner = null;
+    function showPeekTip(html, px, py, owner) {
+        if (!peekTipEl) {
+            peekTipEl = document.createElement('div');
+            peekTipEl.style.cssText = 'position:fixed;z-index:100050;pointer-events:none;background:#1f2228;color:#ffd400;border:1px solid #ffd40066;border-radius:5px;padding:4px 8px;font:11px -apple-system,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,0.6);white-space:nowrap;display:none';
+            document.body.appendChild(peekTipEl);
+        }
+        peekTipEl.innerHTML = html;
+        peekTipEl.style.left = (px + 12) + 'px';
+        peekTipEl.style.top = (py - 30) + 'px';
+        peekTipEl.style.display = 'block';
+        peekTipOwner = owner || null;
+        if (peekTipTimer) { clearTimeout(peekTipTimer); peekTipTimer = null; }
+    }
+    const PEEK_TIP_LINGER_MS = 250;
+    function hidePeekTipSoon() { if (peekTipTimer) clearTimeout(peekTipTimer); peekTipTimer = setTimeout(() => { if (peekTipEl) peekTipEl.style.display = 'none'; peekTipOwner = null; }, PEEK_TIP_LINGER_MS); }
+    function hidePeekTipNow() { if (peekTipTimer) { clearTimeout(peekTipTimer); peekTipTimer = null; } if (peekTipEl) peekTipEl.style.display = 'none'; peekTipOwner = null; }
     function buildPeekPoints() {
         const pts = [];
         findFpWorkingCopies().forEach(wc => (wc.state.arcs || []).forEach((arc, idx) => {
@@ -1080,16 +1099,37 @@
         }
         return s;
     }
+    // point→segment distance in metres (equirectangular) — for "which arc/seg is this?"
+    function ptToSegM(p, a, b) {
+        if (!finitePt(a) || !finitePt(b) || !finitePt(p)) return Infinity;
+        const cos = Math.cos(p.lat * Math.PI / 180);
+        const bx = (b.lng - a.lng) * 111320 * cos, by = (b.lat - a.lat) * 111320;
+        const px = (p.lng - a.lng) * 111320 * cos, py = (p.lat - a.lat) * 111320;
+        const len2 = bx * bx + by * by || 1; let t = (px * bx + py * by) / len2; t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - bx * t, py - by * t);
+    }
+    function findNearestArc(lat, lng) {
+        let best = null, bestD = Infinity, seg = 0;
+        findFpWorkingCopies().forEach(wc => (wc.state.arcs || []).forEach((arc, idx) => { const d = ptToSegM({ lat, lng }, arc.point_a, arc.point_b); if (d < bestD) { bestD = d; best = arc; seg = idx + 1; } }));
+        return best ? { arc: best, seg } : null;
+    }
     function addPeekMarker(i, p) {
         const L = unsafeWindow.L, map = getLeafletMap();
         if (!L || !map) return;
         const cached = elevCache.has(ekey(p.lat, p.lng)) ? elevCache.get(ekey(p.lat, p.lng)) : null;
-        const m = L.circleMarker(L.latLng(p.lat, p.lng), { radius: 6, color: '#1a1a1a', weight: 1, fillColor: cached != null ? '#ffd400' : '#999', fillOpacity: 0.92 });
-        m.bindTooltip(peekLabel(cached, p.arc, p.seg), { direction: 'top', offset: [0, -6], opacity: 0.97, className: 'aim-fpe-peek-tip' });
+        const m = L.circleMarker(L.latLng(p.lat, p.lng), { radius: 8, color: '#1a1a1a', weight: 1, fillColor: cached != null ? '#ffd400' : '#999', fillOpacity: 0.92 });
+        m._peekHtml = peekLabel(cached, p.arc, p.seg);
+        m.on('mouseover', ev => { const oe = ev.originalEvent || {}; showPeekTip(m._peekHtml, oe.pageX || 0, oe.pageY || 0, m); });
+        m.on('mouseout', hidePeekTipSoon);
         peekLayer.addLayer(m);
         peekMarkers.set(i, m);
         if (cached == null) {
-            fetchElevation(p.lat, p.lng).then(g => { if (peekMarkers.get(i) === m) { try { m.setTooltipContent(peekLabel(g, p.arc, p.seg)); m.setStyle({ fillColor: g != null ? '#ffd400' : '#888' }); } catch (e) {} } });
+            fetchElevation(p.lat, p.lng).then(g => {
+                if (peekMarkers.get(i) !== m) return;
+                m._peekHtml = peekLabel(g, p.arc, p.seg);
+                try { m.setStyle({ fillColor: g != null ? '#ffd400' : '#888' }); } catch (e) {}
+                if (peekTipOwner === m && peekTipEl) showPeekTip(m._peekHtml, parseFloat(peekTipEl.style.left) - 12, parseFloat(peekTipEl.style.top) + 30, m); // refresh in place
+            });
         }
     }
     function onPeekMove(e) {
@@ -1112,7 +1152,35 @@
             inRange.add(i);
             if (!peekMarkers.has(i)) addPeekMarker(i, p);
         }
-        for (const [i, m] of peekMarkers) { if (!inRange.has(i)) { try { peekLayer.removeLayer(m); } catch (e2) {} peekMarkers.delete(i); } }
+        for (const [i, m] of peekMarkers) { if (!inRange.has(i)) { if (peekTipOwner === m) hidePeekTipSoon(); try { peekLayer.removeLayer(m); } catch (e2) {} peekMarkers.delete(i); } }
+    }
+    // Percepto's own vertex handles + segment-number badges sit ON TOP of our dots (and
+    // are draggable, so we can't cover them) — but you still want the numbers there. While
+    // peeking, hovering a vertex/badge shows the same tip (terrain at that exact point).
+    let peekDomToken = 0;
+    function onPeekDomOver(e) {
+        if (!peekMode) return;
+        const el = e.target && e.target.closest && (e.target.closest(VERTEX_SEL) || e.target.closest(ARC_BADGE_SEL));
+        if (!el) return;
+        const map = getLeafletMap(), L = unsafeWindow.L; if (!map || !L) return;
+        const cr = map.getContainer().getBoundingClientRect(), r = el.getBoundingClientRect();
+        const cx = r.left + r.width / 2 - cr.left, cy = r.top + r.height / 2 - cr.top;
+        let ll; try { ll = map.containerPointToLatLng(L.point(cx, cy)); } catch (err) { return; }
+        const hit = findNearestArc(ll.lat, ll.lng);
+        const arc = hit ? hit.arc : null, seg = hit ? hit.seg : '?';
+        const px = e.pageX || (r.left + r.width / 2), py = e.pageY || r.top;
+        const key = ekey(ll.lat, ll.lng);
+        const cached = elevCache.has(key) ? elevCache.get(key) : null;
+        showPeekTip(peekLabel(cached, arc, seg), px, py, el);
+        if (cached == null) {
+            const tok = ++peekDomToken;
+            fetchElevation(ll.lat, ll.lng).then(g => { if (peekMode && peekTipOwner === el && tok === peekDomToken) showPeekTip(peekLabel(g, arc, seg), px, py, el); });
+        }
+    }
+    function onPeekDomOut(e) {
+        if (!peekMode) return;
+        const el = e.target && e.target.closest && (e.target.closest(VERTEX_SEL) || e.target.closest(ARC_BADGE_SEL));
+        if (el) hidePeekTipSoon();
     }
     function enterPeek() {
         const map = getLeafletMap(), L = unsafeWindow.L; if (!map || !L) return;
@@ -1121,14 +1189,19 @@
         if (!peekLayer) peekLayer = L.layerGroup();
         peekLayer.addTo(map);
         document.addEventListener('mousemove', onPeekMove, true);
-        toast(`⛰ Elevation peek ON — hover the yellow dots near your cursor (${peekPoints.length} check points). Release Alt to hide.`, '#ffd400');
+        document.addEventListener('mouseover', onPeekDomOver, true);
+        document.addEventListener('mouseout', onPeekDomOut, true);
+        toast(`⛰ Elevation peek ON — hover the yellow dots, or the vertices / segment numbers, near your cursor (${peekPoints.length} check points). Release Alt to hide.`, '#ffd400');
     }
     function exitPeek() {
         if (!peekMode) return;
         peekMode = false;
         document.removeEventListener('mousemove', onPeekMove, true);
+        document.removeEventListener('mouseover', onPeekDomOver, true);
+        document.removeEventListener('mouseout', onPeekDomOut, true);
         for (const [, m] of peekMarkers) { try { peekLayer.removeLayer(m); } catch (e) {} }
         peekMarkers.clear();
+        hidePeekTipNow();
         try { const map = getLeafletMap(); if (map && peekLayer) map.removeLayer(peekLayer); } catch (e) {}
         if (elevDirty) persistElevCache(); // keep what hovering warmed
     }
