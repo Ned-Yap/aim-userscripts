@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.53
+// @version      4.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.53';
+    const SCRIPT_VERSION = '4.54';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1337,11 +1337,11 @@
                     if (!nearest || d < nearest.d) nearest = { a, d };
                 }
                 if (!nearest) continue;
-                const ft = nearest.d * M_TO_FT;
+                const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
                 if (ft < th) {
                     out.push({
                         check: 'FFZ↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
-                        note: `violation: FFZ "${nameOf(ffz)}" is ${Math.round(ft)} ft from asset "${nameOf(nearest.a)}" (min ${th} ft)`,
+                        note: `violation: FFZ "${nameOf(ffz)}" is ${ft} ft from asset "${nameOf(nearest.a)}" (min ${th} ft)`,
                         polygon: fr.map(p => [p.lat, p.lng]),
                     });
                 }
@@ -1360,11 +1360,11 @@
                     if (!nearest || d < nearest.d) nearest = { fp, d };
                 }
                 if (!nearest) continue;
-                const ft = nearest.d * M_TO_FT;
+                const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
                 if (ft < th) {
                     out.push({
                         check: 'FP↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
-                        note: `violation: flight path "${nameOf(nearest.fp)}" is ${Math.round(ft)} ft from asset "${nameOf(a)}" (min ${th} ft)`,
+                        note: `violation: flight path "${nameOf(nearest.fp)}" is ${ft} ft from asset "${nameOf(a)}" (min ${th} ft)`,
                         polygon: ar.map(p => [p.lat, p.lng]),
                     });
                 }
@@ -1381,9 +1381,9 @@
                 for (let k = i + 1; k < ffzs.length; k++) {
                     const rb = getRing(ffzs[k]); if (!rb) continue;
                     const overlap = polygonsIntersect(ra, rb);
-                    const gapFt = overlap ? 0 : boundaryMinMeters(ra, rb) * M_TO_FT;
+                    const gapFt = overlap ? 0 : Math.round(boundaryMinMeters(ra, rb) * M_TO_FT);
                     if (overlap || gapFt < th) {
-                        const desc = overlap ? 'overlaps' : `is ${Math.round(gapFt)} ft from`;
+                        const desc = overlap ? 'overlaps' : `is ${gapFt} ft from`;
                         out.push({
                             check: 'FFZ↔FFZ', severity: overlap ? 'high' : sev(gapFt, th), distFt: gapFt, threshFt: th,
                             note: `violation: FFZ "${nameOf(ffzs[i])}" ${desc} FFZ "${nameOf(ffzs[k])}"${(th > 0 && !overlap) ? ` (min ${th} ft)` : ''}`,
@@ -1434,7 +1434,7 @@
                 if (!bad.length) return;
                 const anchor = list[0].p;  // the shared junction vertex
                 const lines = bad.map(p =>
-                    `#${p.A.rec.segNum} (id ${p.A.rec.segId}) ↔ #${p.B.rec.segNum} (id ${p.B.rec.segId}): ${p.ovFt < 0 ? 'no' : Math.round(p.ovFt) + ' ft'}`);
+                    `#${p.A.rec.segNum} (id ${p.A.rec.segId}) ↔ #${p.B.rec.segNum} (id ${p.B.rec.segId}): ${p.ovFt < 0 ? 'no' : p.ovFt.toFixed(1) + ' ft'}`);
                 const fpNames = [...new Set(bad.flatMap(p => [nameOf(p.A.rec.fp), nameOf(p.B.rec.fp)]))].join(' / ');
                 out.push({
                     check: 'FP↔FP alt', severity: 'high',
@@ -1459,7 +1459,7 @@
                         if (ovM < thM) {
                             out.push({
                                 check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
-                                note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                                note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : ovFt.toFixed(1) + ' ft'} altitude overlap (need ${thFt} ft)`,
                                 polygon: fr.map(p => [p.lat, p.lng]),
                             });
                         }
@@ -1484,14 +1484,16 @@
                     if (gMin == null || g < gMin) gMin = g;
                 }
                 if (gMax == null) return;                       // no DEM yet — skip silently
-                const aglLowFt = (floorM - gMax) * M_TO_FT;     // lowest AGL along it
-                const aglHighFt = (floorM - gMin) * M_TO_FT;    // highest AGL along it
-                if (aglLowFt < lo) {
-                    out.push({ check: 'AGL floor low', severity: 'high', distFt: aglLowFt, threshFt: lo,
-                        note: `🔴 violation: ${label} floor is ${Math.round(aglLowFt)} ft AGL (min ${lo} ft)`, polygon });
-                } else if (aglHighFt > hi) {
-                    out.push({ check: 'AGL floor high', severity: 'warn', distFt: aglHighFt, threshFt: hi,
-                        note: `🔵 violation: ${label} floor is ${Math.round(aglHighFt)} ft AGL (max ${hi} ft)`, polygon });
+                // Flag on the ROUNDED value the user sees, so a floor shown as
+                // "90 ft (min 90)" never flags — only "89 ft (min 90)" or less.
+                const aglLow = Math.round((floorM - gMax) * M_TO_FT);   // lowest AGL along it
+                const aglHigh = Math.round((floorM - gMin) * M_TO_FT);  // highest AGL along it
+                if (aglLow < lo) {
+                    out.push({ check: 'AGL floor low', severity: 'high', distFt: aglLow, threshFt: lo,
+                        note: `🔴 violation: ${label} floor is ${aglLow} ft AGL (min ${lo} ft)`, polygon });
+                } else if (aglHigh > hi) {
+                    out.push({ check: 'AGL floor high', severity: 'warn', distFt: aglHigh, threshFt: hi,
+                        note: `🔵 violation: ${label} floor is ${aglHigh} ft AGL (max ${hi} ft)`, polygon });
                 }
             };
             allArcs.forEach(rec => {
@@ -1510,10 +1512,11 @@
             const th = sopThresholds.nfzMinFt;
             nfzs.forEach(nfz => {
                 const ring = entityCoords(nfz); if (!ring || ring.length < 3) return;
-                const { wFt, hFt } = bboxDimsFt(ring);
+                const dims = bboxDimsFt(ring);
+                const wFt = Math.round(dims.wFt), hFt = Math.round(dims.hFt);
                 if (Math.min(wFt, hFt) < th) {
                     out.push({ check: 'NFZ size', severity: 'high', distFt: Math.min(wFt, hFt), threshFt: th,
-                        note: `violation: NFZ "${nameOf(nfz)}" is ${Math.round(wFt)}×${Math.round(hFt)} ft (min ${th}×${th} ft)`,
+                        note: `violation: NFZ "${nameOf(nfz)}" is ${wFt}×${hFt} ft (min ${th}×${th} ft)`,
                         polygon: ring.map(p => [p.lat, p.lng]) });
                 }
             });
@@ -1525,10 +1528,10 @@
             const th = sopThresholds.nfzSepFt;
             const pairFlag = (ra, rb, label, otherName) => {
                 const overlap = polygonsIntersect(ra, rb);
-                const gapFt = overlap ? 0 : boundaryMinMeters(ra, rb) * M_TO_FT;
+                const gapFt = overlap ? 0 : Math.round(boundaryMinMeters(ra, rb) * M_TO_FT);
                 if (overlap || gapFt < th) {
                     out.push({ check: label, severity: 'high', distFt: gapFt, threshFt: th,
-                        note: `violation: ${otherName} (${overlap ? 'overlaps' : Math.round(gapFt) + ' ft apart'}, min ${th} ft)`,
+                        note: `violation: ${otherName} (${overlap ? 'overlaps' : gapFt + ' ft apart'}, min ${th} ft)`,
                         polygon: ra.map(p => [p.lat, p.lng]) });
                 }
             };
@@ -1552,13 +1555,13 @@
             const soft = sopThresholds.bandSoftFt, hard = sopThresholds.bandHardFt;
             const checkBand = (band, label, polygon) => {
                 if (!band) return;
-                const tallFt = (band.max - band.min) * M_TO_FT;
+                const tallFt = Math.round((band.max - band.min) * M_TO_FT);  // flag on displayed value
                 if (tallFt > hard) {
                     out.push({ check: 'Band height', severity: 'high', distFt: tallFt, threshFt: hard,
-                        note: `violation: ${label} altitude band is ${Math.round(tallFt)} ft tall (hard max ${hard} ft — likely a typo)`, polygon });
+                        note: `violation: ${label} altitude band is ${tallFt} ft tall (hard max ${hard} ft — likely a typo)`, polygon });
                 } else if (tallFt > soft) {
                     out.push({ check: 'Band height', severity: 'warn', distFt: tallFt, threshFt: soft,
-                        note: `⚠ ${label} altitude band is ${Math.round(tallFt)} ft tall (soft max ${soft} ft)`, polygon });
+                        note: `⚠ ${label} altitude band is ${tallFt} ft tall (soft max ${soft} ft)`, polygon });
                 }
             };
             allArcs.forEach(rec => { const m = arcMid(rec.arc); checkBand(arcBand(rec.arc), segRef(rec), boxAt(m.lat, m.lng)); });
