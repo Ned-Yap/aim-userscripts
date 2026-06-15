@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators fix: false "FFZ N ft from asset" flags — Asset Inspector v4.52 (latest, dev-only)
+
+The FFZ→Asset / FP→Asset checks were running every asset pad through `simplifyPolygon` (an angular-sort meant only for bowtie well-pads). On multi-vertex BATTERY/COMPRESSOR pads that **scrambled** the boundary into phantom edges, which then measured a few feet from a neighboring FFZ — producing bogus violations like "FFZ is 4 ft from asset" that don't exist on the map. Now the validator uses the **raw drawn polygon** (the true boundary) and only repairs genuine self-intersecting bowtie pads (via convex hull). No effect on real near-misses; removes the phantom ones.
+
 ## 2026-06-14 — SOP Validators (Phase 4b/4c) — Asset Inspector v4.51 (latest, dev-only)
 
 Adds 7 more SOP checks to the validator, each with its own enable + editable threshold in the **SOP Validators** Control Panel section:
