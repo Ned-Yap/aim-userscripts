@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.50
+// @version      4.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.50';
+    const SCRIPT_VERSION = '4.51';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -63,8 +63,18 @@
     // Defaults: FFZ must stay ≥15 ft from an asset boundary; a flight path
     // ≥15 ft from an asset; two FFZs may not overlap (0 ft separation =
     // flag overlap only — raise to flag near-misses). All user-editable.
-    const SOP_THRESH_DEFAULTS = { ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0 };
-    const SOP_ENABLE_DEFAULTS = { ffzAsset: true, fpAsset: true, ffzFfz: true };
+    const SOP_THRESH_DEFAULTS = {
+        ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0,
+        fpOverlapFt: 6.56,                      // min shared altitude band (= 2 m, the SOP/server minimum), connected FP / FP-in-FFZ
+        aglFloorMinFt: 90, aglFloorMaxFt: 210,  // floor (min alt) must sit in this AGL band
+        nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
+        bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
+    };
+    const SOP_ENABLE_DEFAULTS = {
+        ffzAsset: true, fpAsset: true, ffzFfz: true,
+        fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
+        bandHeight: true, altInverted: true, fpDegenerate: true,
+    };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
     function loadSopThresholds() {
@@ -1176,6 +1186,66 @@
         return best;
     }
 
+    // Altitude-band overlap (m): min(maxA,maxB) − max(minA,minB). Negative = a gap.
+    function altBandOverlapM(minA, maxA, minB, maxB) {
+        return Math.min(maxA, maxB) - Math.max(minA, minB);
+    }
+    // A small square polygon (4 corners) centered on a point, half-size in
+    // meters → [{lat,lng}…]. Marks point/segment violations (FP junctions,
+    // segment midpoints) where there's no entity ring to outline.
+    function boxAroundPoint(lat, lng, halfM) {
+        const dLat = halfM / 111320;
+        const dLng = halfM / ((111320 * Math.cos(lat * Math.PI / 180)) || 1e-6);
+        return [
+            { lat: lat - dLat, lng: lng - dLng },
+            { lat: lat - dLat, lng: lng + dLng },
+            { lat: lat + dLat, lng: lng + dLng },
+            { lat: lat + dLat, lng: lng - dLng },
+        ];
+    }
+    // Bounding-box width (E-W) / height (N-S) of a ring, in feet.
+    function bboxDimsFt(ring) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        for (const p of ring) {
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        }
+        return {
+            wFt: approxMeters(minLat, minLng, minLat, maxLng) * M_TO_FT,
+            hFt: approxMeters(minLat, minLng, maxLat, minLng) * M_TO_FT,
+        };
+    }
+    // True if segment a-b crosses any edge of the ring.
+    function ringCrossesSeg(ring, a, b) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            if (segmentsCross(a, b, ring[j], ring[i])) return true;
+        }
+        return false;
+    }
+    // Ground elevation (m) under a point from the DEM cache, or null.
+    // drawSopIssues prefetches these before the AGL check runs.
+    function groundAtCached(lat, lng) {
+        const v = getElevationFromCache(lat, lng);
+        return (v == null) ? null : v;
+    }
+    // Sample points whose DEM ground the AGL check needs (FP arc endpoints +
+    // midpoints, FFZ vertices). Prefetched in bulk before runSopValidators.
+    function collectAglSamplePoints(ents) {
+        const pts = [];
+        (ents || []).forEach(e => {
+            if (e.type === 15 && Array.isArray(e.arcs)) {
+                e.arcs.forEach(arc => {
+                    if (arc.point_a) pts.push({ lat: arc.point_a.lat, lng: arc.point_a.lng });
+                    if (arc.point_b) pts.push({ lat: arc.point_b.lat, lng: arc.point_b.lng });
+                    if (arc.point_a && arc.point_b) pts.push({ lat: (arc.point_a.lat + arc.point_b.lat) / 2, lng: (arc.point_a.lng + arc.point_b.lng) / 2 });
+                });
+            } else if (e.type === 16 && Array.isArray(e.coords)) {
+                e.coords.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng }); });
+            }
+        });
+        return pts;
+    }
+
     // Run the enabled SOP proximity checks for a site. Returns
     // [{ check, severity, distFt, threshFt, note, polygon:[[lat,lng]…] }].
     // Geometry in meters, thresholds/output in feet.
@@ -1192,6 +1262,20 @@
         // Within 10% of the threshold = warn, otherwise a hard violation.
         const sev = (distFt, threshFt) => (threshFt > 0 && distFt > threshFt * 0.9) ? 'warn' : 'high';
         const out = [];
+
+        // Shared setup for the altitude / NFZ checks (4b/4c).
+        const nfzs = ents.filter(e => e.type === 4 && entityCoords(e));
+        const allArcs = [];
+        fps.forEach(fp => (fp.arcs || []).forEach(arc => {
+            if (arc && arc.point_a && arc.point_b
+                && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number') {
+                allArcs.push({ arc, fp });
+            }
+        }));
+        const arcMid = (arc) => ({ lat: (arc.point_a.lat + arc.point_b.lat) / 2, lng: (arc.point_a.lng + arc.point_b.lng) / 2 });
+        const arcBand = (arc) => (typeof arc.min_alt === 'number' && typeof arc.max_alt === 'number') ? { min: arc.min_alt, max: arc.max_alt } : null;
+        const ffzBand = (e) => (e.restrictions && typeof e.restrictions.minAlt === 'number' && typeof e.restrictions.maxAlt === 'number') ? { min: e.restrictions.minAlt, max: e.restrictions.maxAlt } : null;
+        const boxAt = (lat, lng) => boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]);
 
         // 1. FFZ ↔ Asset standoff — each FFZ surrounds one asset; flag if
         //    the inner boundary gap drops below the threshold.
@@ -1262,6 +1346,209 @@
                 }
             }
         }
+
+        // 4. FP alt-band overlap — connected FP segments (shared waypoint) and
+        //    FP segments entering an FFZ must share ≥ threshold of altitude
+        //    band so the drone has a continuous band to transition. Flag if the
+        //    overlap (min(maxA,maxB) − max(minA,minB)) is below the threshold.
+        if (sopEnabled.fpOverlap && allArcs.length) {
+            const thFt = sopThresholds.fpOverlapFt;
+            const thM = thFt / M_TO_FT;
+            // 4a. connected FP↔FP at shared vertices
+            const byVert = new Map();
+            allArcs.forEach((rec, idx) => {
+                [rec.arc.point_a, rec.arc.point_b].forEach(p => {
+                    const k = vkey(p);
+                    if (!byVert.has(k)) byVert.set(k, []);
+                    byVert.get(k).push({ rec, idx, p });
+                });
+            });
+            const seenPair = new Set();
+            byVert.forEach((list) => {
+                if (list.length < 2) return;
+                for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+                    const A = list[i], B = list[j];
+                    if (A.idx === B.idx) continue;
+                    const pk = A.idx < B.idx ? `${A.idx}-${B.idx}` : `${B.idx}-${A.idx}`;
+                    if (seenPair.has(pk)) continue;
+                    seenPair.add(pk);
+                    const ba = arcBand(A.rec.arc), bb = arcBand(B.rec.arc);
+                    if (!ba || !bb) continue;
+                    // Compare in METERS — comparing the rounded ft would
+                    // false-flag arcs that overlap by exactly 2 m (= 6.562 ft).
+                    const ovM = altBandOverlapM(ba.min, ba.max, bb.min, bb.max);
+                    const ovFt = ovM * M_TO_FT;
+                    if (ovM < thM) {
+                        out.push({
+                            check: 'FP↔FP alt', severity: 'high', distFt: ovFt, threshFt: thFt,
+                            note: `violation: connected FP segments ("${nameOf(A.rec.fp)}" ↔ "${nameOf(B.rec.fp)}") share only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                            polygon: boxAt(A.p.lat, A.p.lng),
+                        });
+                    }
+                }
+            });
+            // 4b. FP segment entering an FFZ — needs alt overlap with the zone.
+            if (ffzs.length) {
+                allArcs.forEach(rec => {
+                    const ba = arcBand(rec.arc); if (!ba) return;
+                    for (const ffz of ffzs) {
+                        const fr = getRing(ffz); if (!fr) continue;
+                        const enters = pointInPolygon(rec.arc.point_a.lat, rec.arc.point_a.lng, fr)
+                            || pointInPolygon(rec.arc.point_b.lat, rec.arc.point_b.lng, fr)
+                            || ringCrossesSeg(fr, rec.arc.point_a, rec.arc.point_b);
+                        if (!enters) continue;
+                        const fb = ffzBand(ffz); if (!fb) continue;
+                        const ovM = altBandOverlapM(ba.min, ba.max, fb.min, fb.max);
+                        const ovFt = ovM * M_TO_FT;
+                        if (ovM < thM) {
+                            out.push({
+                                check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
+                                note: `violation: FP "${nameOf(rec.fp)}" enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                                polygon: fr.map(p => [p.lat, p.lng]),
+                            });
+                        }
+                    }
+                });
+            }
+        }
+
+        // 5. AGL floor band — the floor (min altitude) of FP segments and FFZs
+        //    must sit between the low/high AGL thresholds. Ground comes from the
+        //    DEM cache (prefetched in drawSopIssues). Too low = 🔴 (ground
+        //    collision), too high = 🔵. Worst-case ground is used per side:
+        //    highest ground → lowest AGL (low check), lowest → highest AGL.
+        if (sopEnabled.aglFloor) {
+            const lo = sopThresholds.aglFloorMinFt, hi = sopThresholds.aglFloorMaxFt;
+            const checkFloor = (floorM, samplePts, label, polygon) => {
+                let gMax = null, gMin = null;
+                for (const p of samplePts) {
+                    const g = groundAtCached(p.lat, p.lng);
+                    if (g == null) continue;
+                    if (gMax == null || g > gMax) gMax = g;
+                    if (gMin == null || g < gMin) gMin = g;
+                }
+                if (gMax == null) return;                       // no DEM yet — skip silently
+                const aglLowFt = (floorM - gMax) * M_TO_FT;     // lowest AGL along it
+                const aglHighFt = (floorM - gMin) * M_TO_FT;    // highest AGL along it
+                if (aglLowFt < lo) {
+                    out.push({ check: 'AGL floor low', severity: 'high', distFt: aglLowFt, threshFt: lo,
+                        note: `🔴 violation: ${label} floor is ${Math.round(aglLowFt)} ft AGL (min ${lo} ft)`, polygon });
+                } else if (aglHighFt > hi) {
+                    out.push({ check: 'AGL floor high', severity: 'warn', distFt: aglHighFt, threshFt: hi,
+                        note: `🔵 violation: ${label} floor is ${Math.round(aglHighFt)} ft AGL (max ${hi} ft)`, polygon });
+                }
+            };
+            allArcs.forEach(rec => {
+                const ba = arcBand(rec.arc); if (!ba) return;
+                const mid = arcMid(rec.arc);
+                checkFloor(ba.min, [rec.arc.point_a, rec.arc.point_b, mid], `FP "${nameOf(rec.fp)}" segment`, boxAt(mid.lat, mid.lng));
+            });
+            ffzs.forEach(ffz => {
+                const fb = ffzBand(ffz); const ring = getRing(ffz);
+                if (fb && ring) checkFloor(fb.min, ring, `FFZ "${nameOf(ffz)}"`, ring.map(p => [p.lat, p.lng]));
+            });
+        }
+
+        // 6. NFZ minimum size — bounding box ≥ threshold on BOTH sides.
+        if (sopEnabled.nfzSize && nfzs.length) {
+            const th = sopThresholds.nfzMinFt;
+            nfzs.forEach(nfz => {
+                const ring = entityCoords(nfz); if (!ring || ring.length < 3) return;
+                const { wFt, hFt } = bboxDimsFt(ring);
+                if (Math.min(wFt, hFt) < th) {
+                    out.push({ check: 'NFZ size', severity: 'high', distFt: Math.min(wFt, hFt), threshFt: th,
+                        note: `violation: NFZ "${nameOf(nfz)}" is ${Math.round(wFt)}×${Math.round(hFt)} ft (min ${th}×${th} ft)`,
+                        polygon: ring.map(p => [p.lat, p.lng]) });
+                }
+            });
+        }
+
+        // 7. NFZ proximity — an NFZ must stay ≥ threshold from other NFZs and
+        //    from any FFZ edge.
+        if (sopEnabled.nfzProx && nfzs.length) {
+            const th = sopThresholds.nfzSepFt;
+            const pairFlag = (ra, rb, label, otherName) => {
+                const overlap = polygonsIntersect(ra, rb);
+                const gapFt = overlap ? 0 : boundaryMinMeters(ra, rb) * M_TO_FT;
+                if (overlap || gapFt < th) {
+                    out.push({ check: label, severity: 'high', distFt: gapFt, threshFt: th,
+                        note: `violation: ${otherName} (${overlap ? 'overlaps' : Math.round(gapFt) + ' ft apart'}, min ${th} ft)`,
+                        polygon: ra.map(p => [p.lat, p.lng]) });
+                }
+            };
+            for (let i = 0; i < nfzs.length; i++) {
+                const ra = entityCoords(nfzs[i]); if (!ra || ra.length < 3) continue;
+                for (let k = i + 1; k < nfzs.length; k++) {
+                    const rb = entityCoords(nfzs[k]); if (!rb || rb.length < 3) continue;
+                    pairFlag(ra, rb, 'NFZ↔NFZ', `NFZ "${nameOf(nfzs[i])}" ↔ NFZ "${nameOf(nfzs[k])}"`);
+                }
+                for (const ffz of ffzs) {
+                    const fr = getRing(ffz); if (!fr) continue;
+                    pairFlag(ra, fr, 'NFZ↔FFZ', `NFZ "${nameOf(nfzs[i])}" ↔ FFZ "${nameOf(ffz)}"`);
+                }
+            }
+        }
+
+        // 8. Alt-band height — (max − min). Inspection bands are ~30 ft; soft
+        //    warn over the soft threshold, hard flag over the hard one (almost
+        //    always a data-entry typo). Applies to FP segments + FFZs.
+        if (sopEnabled.bandHeight) {
+            const soft = sopThresholds.bandSoftFt, hard = sopThresholds.bandHardFt;
+            const checkBand = (band, label, polygon) => {
+                if (!band) return;
+                const tallFt = (band.max - band.min) * M_TO_FT;
+                if (tallFt > hard) {
+                    out.push({ check: 'Band height', severity: 'high', distFt: tallFt, threshFt: hard,
+                        note: `violation: ${label} altitude band is ${Math.round(tallFt)} ft tall (hard max ${hard} ft — likely a typo)`, polygon });
+                } else if (tallFt > soft) {
+                    out.push({ check: 'Band height', severity: 'warn', distFt: tallFt, threshFt: soft,
+                        note: `⚠ ${label} altitude band is ${Math.round(tallFt)} ft tall (soft max ${soft} ft)`, polygon });
+                }
+            };
+            allArcs.forEach(rec => { const m = arcMid(rec.arc); checkBand(arcBand(rec.arc), `FP "${nameOf(rec.fp)}" segment`, boxAt(m.lat, m.lng)); });
+            ffzs.forEach(ffz => { const r = getRing(ffz); if (r) checkBand(ffzBand(ffz), `FFZ "${nameOf(ffz)}"`, r.map(p => [p.lat, p.lng])); });
+        }
+
+        // 9. Inverted / degenerate altitude band — min ≥ max (zero or inverted
+        //    envelope). Breaks flight planning. FP segments + FFZs.
+        if (sopEnabled.altInverted) {
+            allArcs.forEach(rec => {
+                const b = arcBand(rec.arc); if (!b || b.min < b.max) return;
+                const m = arcMid(rec.arc);
+                out.push({ check: 'Alt band inverted', severity: 'high', distFt: 0, threshFt: 0,
+                    note: `violation: FP "${nameOf(rec.fp)}" segment has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
+                    polygon: boxAt(m.lat, m.lng) });
+            });
+            ffzs.forEach(ffz => {
+                const b = ffzBand(ffz), r = getRing(ffz); if (!b || !r || b.min < b.max) return;
+                out.push({ check: 'Alt band inverted', severity: 'high', distFt: 0, threshFt: 0,
+                    note: `violation: FFZ "${nameOf(ffz)}" has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
+                    polygon: r.map(p => [p.lat, p.lng]) });
+            });
+        }
+
+        // 10. Zero-length / duplicate FP arcs — editing leftovers that confuse
+        //     routing. Zero-length = identical endpoints; duplicate = same
+        //     endpoint pair as an earlier arc.
+        if (sopEnabled.fpDegenerate && allArcs.length) {
+            const seenArc = new Set();
+            allArcs.forEach(rec => {
+                const ka = vkey(rec.arc.point_a), kb = vkey(rec.arc.point_b);
+                const m = arcMid(rec.arc);
+                if (ka === kb) {
+                    out.push({ check: 'FP arc degenerate', severity: 'high', distFt: 0, threshFt: 0,
+                        note: `violation: FP "${nameOf(rec.fp)}" has a zero-length segment (endpoints identical)`,
+                        polygon: boxAt(m.lat, m.lng) });
+                    return;
+                }
+                const pk = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+                if (seenArc.has(pk)) {
+                    out.push({ check: 'FP arc degenerate', severity: 'warn', distFt: 0, threshFt: 0,
+                        note: `violation: FP "${nameOf(rec.fp)}" has a duplicate segment (same endpoints as another arc)`,
+                        polygon: boxAt(m.lat, m.lng) });
+                } else seenArc.add(pk);
+            });
+        }
         return out;
     }
 
@@ -1284,6 +1571,19 @@
                 showToast('Entities not ready — try again in a moment', 'rgba(255,96,96,0.55)');
                 return;
             }
+            // The AGL-floor check needs DEM ground under every FP segment + FFZ
+            // — prefetch in bulk first so runSopValidators reads it from cache.
+            let demStep = Promise.resolve();
+            if (sopEnabled.aglFloor) {
+                const pts = collectAglSamplePoints(bucket.entities);
+                if (pts.length) {
+                    showToast(`Fetching ground elevations (${pts.length})…`);
+                    demStep = Promise.resolve(bulkFetchElevations(pts)).catch(e => {
+                        console.warn(`${TAG} AGL DEM prefetch threw:`, e);
+                    });
+                }
+            }
+            return demStep.then(() => {
             const violations = runSopValidators(sid);
             const ch = ensureValidatorChannel();
             if (!ch) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
@@ -1298,6 +1598,7 @@
             showToast(violations.length
                 ? `SOP: ${violations.length} violation(s) drawn (${breakdown}). Needs AIM Issues enabled.`
                 : 'SOP: no violations found ✓');
+            });
         }).catch(e => console.warn(`${TAG} drawSopIssues threw:`, e));
     }
     function clearSopIssues() {
@@ -2363,6 +2664,20 @@
                 { id: 'fpAssetFt', label: 'FP → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.fpAssetFt, unit: 'ft' },
                 { id: 'ffzFfz', label: 'Check · FFZ ↔ FFZ overlap', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzFfz },
                 { id: 'ffzFfzFt', label: 'FFZ ↔ FFZ min separation (0 = overlap only)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.ffzFfzFt, unit: 'ft' },
+                { id: 'fpOverlap', label: 'Check · FP alt-band overlap (FP↔FP, FP↔FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpOverlap },
+                { id: 'fpOverlapFt', label: 'FP min shared alt overlap', type: 'number', min: 0, max: 50, step: 0.1, default: SOP_THRESH_DEFAULTS.fpOverlapFt, unit: 'ft' },
+                { id: 'aglFloor', label: 'Check · AGL floor band (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.aglFloor },
+                { id: 'aglFloorMinFt', label: 'AGL floor min (🔴 below)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMinFt, unit: 'ft' },
+                { id: 'aglFloorMaxFt', label: 'AGL floor max (🔵 above)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMaxFt, unit: 'ft' },
+                { id: 'bandHeight', label: 'Check · Alt-band height (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.bandHeight },
+                { id: 'bandSoftFt', label: 'Band height soft max (⚠ warn)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.bandSoftFt, unit: 'ft' },
+                { id: 'bandHardFt', label: 'Band height hard max (flag)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.bandHardFt, unit: 'ft' },
+                { id: 'nfzSize', label: 'Check · NFZ minimum size', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzSize },
+                { id: 'nfzMinFt', label: 'NFZ min side', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzMinFt, unit: 'ft' },
+                { id: 'nfzProx', label: 'Check · NFZ proximity (NFZ + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzProx },
+                { id: 'nfzSepFt', label: 'NFZ min separation', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzSepFt, unit: 'ft' },
+                { id: 'altInverted', label: 'Check · Inverted / zero alt band', type: 'boolean', default: SOP_ENABLE_DEFAULTS.altInverted },
+                { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
@@ -6158,7 +6473,7 @@
     let genRouteResult = null;  // last routeFlightPaths() result
     // editable corridor: verts[] + segs[{a,b,flag}] (indices into verts). Built from
     // result.corridor; drag a handle to move a waypoint, flags recompute live.
-    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null, onContext: null };
+    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], entryHandles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null, onContext: null };
     function routePointFlag(p) {
         const ctx = genRoute.ctx; if (!ctx) return false;
         const d = a2PointToSegs(p, ctx.segs), minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
@@ -6850,14 +7165,19 @@
             const a = genRoute.verts[s.a], b = genRoute.verts[s.b];
             try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
         }
-        // 2) per-asset branch: trunk FOOT (recomputed to the CURRENT corridor) → FFZ edge
+        // 2) per-asset branch: trunk FOOT (recomputed to the CURRENT corridor) → FFZ
+        //    edge. The green tip is a draggable/deletable handle (move where it meets
+        //    the FFZ; right-click to drop the branch).
+        genRoute.entryHandles = [];
         for (const r of genRoute.assets) {
+            if (r._noBranch) continue;
             const tip = r.entry || (r.path && r.path[r.path.length - 1]); if (!tip) continue;
             const foot = edges.length ? a2NearestOnEdges(tip, edges) : null;
             const from = foot ? foot.pt : r.foot; if (!from) continue;
             const col = r.longApproach ? '#ff8a80' : '#00e5ff';
             try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
             try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: r.longApproach ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: r.longApproach ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
+            genRoute.entryHandles.push(r);
         }
         // 3) base launch (base → nearest corridor pt) + base marker
         if (genRoute.base && edges.length) { const bl = a2NearestOnEdges(genRoute.base, edges); if (bl) { try { const l = L.polyline([[genRoute.base.lat, genRoute.base.lng], [bl.pt.lat, bl.pt.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); l.addTo(map); genRouteLayers.push(l); } catch (e) {} } }
@@ -6872,29 +7192,34 @@
     function wireRouteEdit(map) {
         if (genRoute.wired || !map) return;
         genRoute.map = map; genRoute.container = map.getContainer();
-        const startDrag = (i) => {
-            genRoute.drag = i; try { map.dragging.disable(); } catch (e) {}
+        const startDrag = (desc) => {
+            genRoute.drag = desc; try { map.dragging.disable(); } catch (e) {}
             document.addEventListener('mousemove', genRoute.onMove, true);
             document.addEventListener('mouseup', genRoute.onUp, true);
         };
+        const hitVert = (cp) => { let best = -1, bd = 14; for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } } return best; };
+        const hitEntry = (cp) => { let best = null, bd = 14; for (const r of genRoute.entryHandles) { if (!r.entry) continue; const p = map.latLngToContainerPoint([r.entry.lat, r.entry.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = r; } } return best; };
         genRoute.onDown = (ev) => {
             if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            // 1) drag an existing waypoint (white dot within 14 px)
-            let best = -1, bd = 14;
-            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
-            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag(best); return; }
-            // 2) click ON a corridor line (within 8 px) → INSERT a waypoint there + drag it
+            // 1) drag an FFZ-connection (green) tip
+            const er = hitEntry(cp);
+            if (er) { ev.preventDefault(); ev.stopPropagation(); startDrag({ k: 'e', r: er }); return; }
+            // 2) drag an existing corridor waypoint (white dot within 14 px)
+            const best = hitVert(cp);
+            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag({ k: 'v', i: best }); return; }
+            // 3) click ON a corridor line (within 8 px) → INSERT a waypoint there + drag it
             let bestSeg = -1, bsd = 8, bsp = null;
             for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
-            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag(ni); }
+            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag({ k: 'v', i: ni }); }
         };
-        // right-click a waypoint → delete it (bridge the gap)
+        // right-click: delete a corridor waypoint (bridge the gap) OR drop a branch
         genRoute.onContext = (ev) => {
             if (genDraw.active || !genRoute.verts.length) return;
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            let best = -1, bd = 14;
-            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
+            const er = hitEntry(cp);
+            if (er) { ev.preventDefault(); ev.stopPropagation(); er._noBranch = true; drawGenRoute(); return; }
+            const best = hitVert(cp);
             if (best < 0) return;
             ev.preventDefault(); ev.stopPropagation();
             deleteVert(best); drawGenRoute(); syncRouteToResult();
@@ -6902,8 +7227,15 @@
         genRoute.onMove = (ev) => {
             if (genRoute.drag == null) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            const v = genRoute.verts[genRoute.drag]; v.lat = ll.lat; v.lng = ll.lng;
-            for (const s of genRoute.segs) if (s.a === genRoute.drag || s.b === genRoute.drag) reflagSeg(s);
+            if (genRoute.drag.k === 'e') {
+                const r = genRoute.drag.r;
+                // keep the FFZ connection ON the FFZ edge (snap to its ring) if we have it
+                if (r._ffzRing) { const np = nearestPointOnRing(ll, r._ffzRing); r.entry = (np && np.pt) ? { lat: np.pt.lat, lng: np.pt.lng } : { lat: ll.lat, lng: ll.lng }; }
+                else r.entry = { lat: ll.lat, lng: ll.lng };
+            } else {
+                const v = genRoute.verts[genRoute.drag.i]; v.lat = ll.lat; v.lng = ll.lng;
+                for (const s of genRoute.segs) if (s.a === genRoute.drag.i || s.b === genRoute.drag.i) reflagSeg(s);
+            }
             drawGenRoute();
         };
         genRoute.onUp = () => {
