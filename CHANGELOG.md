@@ -96,6 +96,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 corridor insert/delete waypoints (dev-only) — Asset Inspector v4.50
+
+Corridor editing now has **insert + delete**: **click directly on a corridor line** to drop a new waypoint there (and immediately drag it), and **right-click a waypoint** to delete it (its two neighbours bridge so the path stays connected). Flags recompute on every edit; changes flow into the export. Full drag / add / remove. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 EDITABLE corridor (drag to fix) (dev-only) — Asset Inspector v4.49
 
 The corridor preview is now **editable**: every waypoint has a **white dot you can drag** to move the path. Flags recompute **live** — drag an orange (out-of-band / over-a-pad/FFZ) stretch clear and it turns cyan. The asset branches + base launch re-attach to the corridor as you move it, and edits flow into the JSON export. This makes "flag the problem" actually actionable — the CSM drags the few flagged spots instead of the tool trying (and failing) to auto-perfect them. *(Dev/latest only.)*

@@ -745,10 +745,16 @@
         }
     }
 
-    // Should this issue ever generate Slack traffic? Validator (ephemeral)
-    // and local-only issues never sync, so they never post.
+    // Should this issue ever generate Slack traffic?
+    //  • local-only issues never sync → never post.
+    //  • validator findings (ephemeral, self-diagnose-and-fix) default OFF —
+    //    they post only when the user opts a specific one in via the
+    //    "🔔 Notify Slack" toggle (v1.19). Field absent/false = off.
+    //  • normal issues are unchanged — auto-ping.
     function slackPostable(issue) {
-        return slackEnabled() && issue && issue.createdBy !== 'local-only' && issue.source !== 'validator';
+        if (!slackEnabled() || !issue || issue.createdBy === 'local-only') return false;
+        if (issue.source === 'validator') return !!issue.slackNotifyOptIn;   // default OFF
+        return true;
     }
 
     // v1.05: linked site label — clickable in Slack, jumps straight to the
@@ -879,8 +885,12 @@
             const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
             live.slackThreadTs = ts;
             if (issue !== live) issue.slackThreadTs = ts;   // caller's ref too
-            saveIssuesToStorage(siteID, currentSiteIssues);
-            commitIssuesToGitHub(`adopt slack thread for ${issue.id.slice(0, 14)}`);
+            saveIssuesToStorage(siteID, currentSiteIssues);   // strips validator
+            // v1.19: validator findings are ephemeral — the ts lives in memory
+            // only (session-scoped). Don't churn a GitHub commit for them.
+            if (live.source !== 'validator') {
+                commitIssuesToGitHub(`adopt slack thread for ${issue.id.slice(0, 14)}`);
+            }
             await postSlackOriginalRequest(live, ts);
             await postSlackAffectedEntities(live, ts);
             console.log(`${TAG} adopted pre-Slack issue ${issue.id} → thread ${ts}`);
@@ -3780,7 +3790,25 @@
                 const unassignChip = `<button class="aim-issues-assign-chip" data-assignee=""
                     style="padding:4px 9px;background:${cur ? 'transparent' : '#555'};color:${cur ? '#888' : '#fff'};border:1.5px solid #777;border-radius:12px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">
                     Unassign</button>`;
+                // v1.19: validator findings default to NO Slack. This toggle
+                // lets the user escalate a specific finding to Slack on demand
+                // (turning it on backfills the parent thread). Shown only for
+                // source==='validator' issues.
+                const isValidator = (liveIssue.source === 'validator');
+                const optedIn = !!liveIssue.slackNotifyOptIn;
+                const validatorSlackToggle = isValidator ? `
+                    <div style="margin-top:14px;padding:10px 12px;background:#14171b;border:1px solid ${optedIn ? 'rgba(95,255,95,0.40)' : 'rgba(255,255,255,0.12)'};border-radius:6px">
+                        <button class="aim-issues-slacknotify-toggle"
+                            title="Validator findings don't post to Slack by default. Turn this on to escalate THIS finding to the channel."
+                            style="display:inline-flex;align-items:center;gap:8px;padding:6px 12px;font:inherit;font-size:12px;font-weight:700;
+                                   border:1.5px solid ${optedIn ? '#5fff5f' : '#777'};border-radius:14px;cursor:pointer;
+                                   background:${optedIn ? '#10331f' : 'transparent'};color:${optedIn ? '#5fff5f' : '#aaa'}">
+                            🔔 Notify Slack: ${optedIn ? 'ON' : 'OFF'}
+                        </button>
+                        <span style="color:#888;font-size:10px;margin-left:8px;font-style:italic">${optedIn ? 'this finding is posting to Slack' : 'validator findings are silent by default'}</span>
+                    </div>` : '';
                 actionSectionHtml = `
+                    ${validatorSlackToggle}
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
                         ${transBtns}

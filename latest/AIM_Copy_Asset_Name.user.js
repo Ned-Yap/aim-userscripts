@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.49
+// @version      4.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.49';
+    const SCRIPT_VERSION = '4.50';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6158,7 +6158,7 @@
     let genRouteResult = null;  // last routeFlightPaths() result
     // editable corridor: verts[] + segs[{a,b,flag}] (indices into verts). Built from
     // result.corridor; drag a handle to move a waypoint, flags recompute live.
-    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null };
+    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null, onContext: null };
     function routePointFlag(p) {
         const ctx = genRoute.ctx; if (!ctx) return false;
         const d = a2PointToSegs(p, ctx.segs), minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
@@ -6170,6 +6170,25 @@
         let flag = false; for (let i = 0; i <= n && !flag; i++) if (routePointFlag(a2Interp(a, b, i / n))) flag = true; seg.flag = flag;
     }
     function routeCorridorEdges() { return genRoute.segs.map(s => [genRoute.verts[s.a], genRoute.verts[s.b]]); }
+    // Insert a new waypoint on segment segIdx at pt; returns the new vert index.
+    function insertVertOnSeg(segIdx, pt) {
+        const s = genRoute.segs[segIdx], a = s.a, b = s.b, ni = genRoute.verts.length;
+        genRoute.verts.push({ lat: pt.lat, lng: pt.lng });
+        genRoute.segs.splice(segIdx, 1, { a, b: ni, flag: false }, { a: ni, b, flag: false });
+        reflagSeg(genRoute.segs[segIdx]); reflagSeg(genRoute.segs[segIdx + 1]);
+        return ni;
+    }
+    // Delete a waypoint; bridge its two neighbours so the path stays connected.
+    function deleteVert(i) {
+        const inc = genRoute.segs.filter(s => s.a === i || s.b === i);
+        const keep = genRoute.segs.filter(s => s.a !== i && s.b !== i);
+        if (inc.length === 2) { const n0 = inc[0].a === i ? inc[0].b : inc[0].a, n1 = inc[1].a === i ? inc[1].b : inc[1].a; if (n0 !== n1) keep.push({ a: n0, b: n1, flag: false }); }
+        genRoute.segs = keep;
+        genRoute.verts.splice(i, 1);
+        for (const s of genRoute.segs) { if (s.a > i) s.a--; if (s.b > i) s.b--; }
+        for (const s of genRoute.segs) reflagSeg(s);
+    }
+    function ptSegPx(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t)); return { dist: Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)), foot: { x: a.x + t * dx, y: a.y + t * dy } }; }
     function buildRouteEdit(result) {
         genRoute.ctx = result._ctx || null;
         genRoute.assets = result.assets || [];
@@ -6853,16 +6872,32 @@
     function wireRouteEdit(map) {
         if (genRoute.wired || !map) return;
         genRoute.map = map; genRoute.container = map.getContainer();
+        const startDrag = (i) => {
+            genRoute.drag = i; try { map.dragging.disable(); } catch (e) {}
+            document.addEventListener('mousemove', genRoute.onMove, true);
+            document.addEventListener('mouseup', genRoute.onUp, true);
+        };
         genRoute.onDown = (ev) => {
             if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
+            let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            // 1) drag an existing waypoint (white dot within 14 px)
+            let best = -1, bd = 14;
+            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
+            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag(best); return; }
+            // 2) click ON a corridor line (within 8 px) → INSERT a waypoint there + drag it
+            let bestSeg = -1, bsd = 8, bsp = null;
+            for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
+            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag(ni); }
+        };
+        // right-click a waypoint → delete it (bridge the gap)
+        genRoute.onContext = (ev) => {
+            if (genDraw.active || !genRoute.verts.length) return;
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
             let best = -1, bd = 14;
             for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
             if (best < 0) return;
             ev.preventDefault(); ev.stopPropagation();
-            genRoute.drag = best; try { map.dragging.disable(); } catch (e) {}
-            document.addEventListener('mousemove', genRoute.onMove, true);
-            document.addEventListener('mouseup', genRoute.onUp, true);
+            deleteVert(best); drawGenRoute(); syncRouteToResult();
         };
         genRoute.onMove = (ev) => {
             if (genRoute.drag == null) return;
@@ -6879,10 +6914,14 @@
             syncRouteToResult();
         };
         genRoute.container.addEventListener('mousedown', genRoute.onDown, true);
+        genRoute.container.addEventListener('contextmenu', genRoute.onContext, true);
         genRoute.wired = true;
     }
     function unwireRouteEdit() {
-        if (genRoute.container && genRoute.onDown) { try { genRoute.container.removeEventListener('mousedown', genRoute.onDown, true); } catch (e) {} }
+        if (genRoute.container) {
+            if (genRoute.onDown) { try { genRoute.container.removeEventListener('mousedown', genRoute.onDown, true); } catch (e) {} }
+            if (genRoute.onContext) { try { genRoute.container.removeEventListener('contextmenu', genRoute.onContext, true); } catch (e) {} }
+        }
         if (genRoute.onMove) { try { document.removeEventListener('mousemove', genRoute.onMove, true); } catch (e) {} }
         if (genRoute.onUp) { try { document.removeEventListener('mouseup', genRoute.onUp, true); } catch (e) {} }
         const map = genRoute.map; if (map && genRoute.drag != null) { try { map.dragging.enable(); } catch (e) {} }
@@ -8303,7 +8342,7 @@
                 const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
                 const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft flagged (out-of-band / FFZ overlap)</span>` : '';
                 const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
-                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}.<br><b style="color:#fff">Drag the white dots</b> to move the path — <span style="color:#ff9a3d">orange</span> = leaves the 40–65 ft band or crosses a pad/FFZ (drag it clear → turns cyan). Green dot = FFZ connection. A2.2 editable preview.</span>`;
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}.<br><b style="color:#fff">Drag</b> a white dot to move · <b style="color:#fff">click a line</b> to add a point · <b style="color:#fff">right-click</b> a dot to delete. <span style="color:#ff9a3d">Orange</span> = out of 40–65 ft band or over a pad/FFZ (drag it clear → cyan). Green = FFZ connection. A2.2 editable preview.</span>`;
             } catch (e) {
                 console.error(`${GEN_TAG} routing failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;
