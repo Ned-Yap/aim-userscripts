@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — AIM Issues — per-issue Slack opt-in for validator findings (dev-only) — AIM Issues v1.19
+
+Validator findings (the ephemeral SOP-validator issues) stay **silent on Slack by default** — they're for self-diagnose-and-fix, not channel noise. A new **🔔 Notify Slack** toggle on the issue popup (validator findings only) lets you **escalate a specific finding to Slack on demand**: flipping it on posts a full thread for that finding, and later comments/assignments thread under it. It's session-scoped (resets when the finding is re-drawn) — a deliberate "push this one now" action. Normal issues are unchanged (still auto-ping). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — AIM Issues — adopt pre-Slack issues on first touch (dev-only) — AIM Issues v1.18
 
 Issues created before Slack notifications existed had no thread, so acting on them posted loose standalone messages. Now the **first action** (transition / comment / assignment) on such an issue **backfills a full parent status board + original-report + affected-entities seed** and threads the action under it — from then on it behaves like a natively-created issue. (Deletes don't adopt — no point creating a thread just to strike it.) *(Dev/latest only.)*

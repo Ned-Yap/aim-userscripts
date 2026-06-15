@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.18';
+    const SCRIPT_VERSION = '1.19';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -4100,6 +4100,35 @@
                 chip.addEventListener('pointerdown', handler, true);
                 chip.addEventListener('click', handler, true);
             });
+
+            // v1.19: validator "🔔 Notify Slack" opt-in toggle. Turning it ON
+            // sets the flag (so slackPostable now passes) then backfills the
+            // parent thread; OFF just stops future posts (existing thread stays).
+            const slackToggle = card.querySelector('.aim-issues-slacknotify-toggle');
+            if (slackToggle) {
+                let lastToggle = 0;
+                const onToggle = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastToggle < 350) return;
+                    lastToggle = now;
+                    const issueObj = currentSiteIssues.find(i => i.id === liveIssue.id) || liveIssue;
+                    const turningOn = !issueObj.slackNotifyOptIn;
+                    issueObj.slackNotifyOptIn = turningOn;
+                    if (turningOn) {
+                        showToast('Escalating finding to Slack…', 2000);
+                        ensureSlackThread(issueObj).then((ts) => {
+                            if (!ts) showToast('Could not post to Slack — see console.', 4000);
+                            render();
+                        });
+                    } else {
+                        showToast('Slack notifications off for this finding (existing thread kept).', 3000);
+                    }
+                    render();
+                };
+                slackToggle.addEventListener('pointerdown', onToggle, true);
+                slackToggle.addEventListener('click', onToggle, true);
+            }
 
             // v0.28: Comment button — arms a comment-mode (required note)
             const commentBtn = card.querySelector('#aim-issues-modal-commentbtn');
