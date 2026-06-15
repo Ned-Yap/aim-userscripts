@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.21
+// @version      0.22
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,8 +64,8 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.21';
-    const SMART_SAMPLE_SPACING_FT = 50;   // dense terrain sampling along a segment (for split detection)
+    const SCRIPT_VERSION = '0.22';
+    const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
     const FT_TO_M = 1 / 3.28084;
@@ -652,36 +652,54 @@
     const arcSig = (a) => [rk(a.point_a), rk(a.point_b)].sort().join('~'); // undirected — survives direction flips
     const procState = new Map();  // fpId -> { count, sigs:Set } — what we've already smart-processed
 
-    // ---- DEM ground elevation (Percepto's own endpoint; cached, deduped, THROTTLED) ----
-    // The endpoint rate-limits (HTTP 429) — and it's shared with the Asset Inspector /
-    // Map Styler, which fetch site DEM too. So we cap real concurrency low and back off
-    // exponentially on 429/error instead of hammering. A 429 body is NOT JSON, so we
-    // must check res.ok BEFORE parsing (a blind r.json() throws on the rate-limit text).
+    // ---- DEM ground elevation (Percepto's own endpoint; cached, deduped, RATE-LIMITED) ----
+    // The endpoint rate-limits HARD (HTTP 429): a long segment fired as a burst of fresh
+    // points 429s even at low concurrency, and the retries land in the same saturated
+    // window → cascade. So we RATE-LIMIT (min interval between request STARTS, not just a
+    // concurrency cap) to turn the burst into a steady trickle that stays under the quota,
+    // plus exponential backoff on 429. A 429 body is NOT JSON, so check res.ok BEFORE
+    // parsing. Results persist to GM so re-running over the same area survives a reload.
     const elevCache = new Map(), elevInflight = new Map();
     const ekey = (lat, lng) => lat.toFixed(5) + ',' + lng.toFixed(5);
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    const ELEV_MAX_CONCURRENT = 3;     // be a polite neighbour to the other AIM scripts
-    const ELEV_MAX_RETRIES = 5;        // exponential backoff: ~0.6/1.2/2.4/4.8/9.6 s + jitter
-    let elevActive = 0; const elevQueue = [];
+    const ELEV_MAX_CONCURRENT = 2;
+    const ELEV_MIN_INTERVAL_MS = 220;  // ≤ ~4.5 req/s — gentle on the shared limiter
+    const ELEV_MAX_RETRIES = 6;        // backoff ~0.8/1.6/3.2/6.4/12.8 s + jitter (rides out a load-time storm)
+    const ELEV_CACHE_KEY = 'aim_fpe_elev_cache';
+    let elevActive = 0, elevLastStart = 0, elevPumpScheduled = false;
+    const elevQueue = [];
     let elevRateLimited = false;       // surfaced to the user when we give up after backoff
+    let elevDirty = 0;
+    function loadElevCache() {
+        try { if (typeof GM_getValue === 'function') { const raw = GM_getValue(ELEV_CACHE_KEY, null); if (raw) { const o = JSON.parse(raw); for (const k in o) elevCache.set(k, o[k]); log(`loaded ${elevCache.size} cached elevations`); } } }
+        catch (e) { warn('loadElevCache failed', e); }
+    }
+    function persistElevCache() {
+        try { if (typeof GM_setValue === 'function') { const o = {}; elevCache.forEach((v, k) => { o[k] = v; }); GM_setValue(ELEV_CACHE_KEY, JSON.stringify(o)); elevDirty = 0; } }
+        catch (e) { warn('persistElevCache failed', e); }
+    }
     function elevPump() {
-        while (elevActive < ELEV_MAX_CONCURRENT && elevQueue.length) {
-            const job = elevQueue.shift(); elevActive++;
-            job().finally(() => { elevActive--; elevPump(); });
-        }
+        if (elevActive >= ELEV_MAX_CONCURRENT || !elevQueue.length) return;
+        const now = Date.now();
+        const wait = ELEV_MIN_INTERVAL_MS - (now - elevLastStart);
+        if (wait > 0) { if (!elevPumpScheduled) { elevPumpScheduled = true; setTimeout(() => { elevPumpScheduled = false; elevPump(); }, wait); } return; }
+        elevLastStart = now;
+        const job = elevQueue.shift(); elevActive++;
+        job().finally(() => { elevActive--; elevPump(); });
+        elevPump(); // try to fill the other concurrency slot (interval-gated)
     }
     async function rawFetchElev(lat, lng, attempt) {
         const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
         try {
             const res = await fetch(url, { credentials: 'include' });
             if (res.status === 429 || !res.ok) {
-                if (attempt < ELEV_MAX_RETRIES) { await sleep(600 * Math.pow(2, attempt) + Math.random() * 300); return rawFetchElev(lat, lng, attempt + 1); }
+                if (attempt < ELEV_MAX_RETRIES) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
                 elevRateLimited = true; warn(`elevation ${res.status} after ${attempt + 1} tries — giving up on this point`); return null;
             }
             const j = await res.json().catch(() => null);
             return (j && typeof j.altitude === 'number') ? j.altitude : null;
         } catch (e) {
-            if (attempt < ELEV_MAX_RETRIES) { await sleep(600 * Math.pow(2, attempt) + Math.random() * 300); return rawFetchElev(lat, lng, attempt + 1); }
+            if (attempt < ELEV_MAX_RETRIES) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
             warn('elevation fetch failed', e); return null;
         }
     }
@@ -690,15 +708,20 @@
         if (elevCache.has(k)) return Promise.resolve(elevCache.get(k));
         if (elevInflight.has(k)) return elevInflight.get(k);
         const p = new Promise((resolve) => {
-            elevQueue.push(() => rawFetchElev(lat, lng, 0).then(m => { if (m != null) elevCache.set(k, m); elevInflight.delete(k); resolve(m); }));
+            elevQueue.push(() => rawFetchElev(lat, lng, 0).then(m => {
+                if (m != null) { elevCache.set(k, m); if (++elevDirty >= 20) persistElevCache(); }
+                elevInflight.delete(k); resolve(m);
+            }));
             elevPump();
         });
         elevInflight.set(k, p);
         return p;
     }
     async function mapLimit(items, limit, fn) {
-        // The global elev queue is the real throttle; this just maps in order.
-        return Promise.all(items.map((it, i) => fn(it, i)));
+        // The global elev queue (rate-limited) is the real throttle; this just maps in order.
+        const out = await Promise.all(items.map((it, i) => fn(it, i)));
+        if (elevDirty) persistElevCache();
+        return out;
     }
 
     // ---- band from a sub-segment's highest ground (integer meters; server floors anyway) ----
@@ -1001,6 +1024,7 @@
 
     // ---- boot ----
     loadSettings();
+    loadElevCache();
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
