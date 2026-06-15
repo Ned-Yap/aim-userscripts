@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.23
+// @version      0.24
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.23';
+    const SCRIPT_VERSION = '0.24';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -668,6 +668,7 @@
     const ELEV_BREAKER_TRIP = 3;       // this many consecutive 429s ⇒ quota looks blown
     const ELEV_BREAKER_MS = 60000;     // …so STOP hitting it for 60 s (poking a penalty box keeps it alive)
     const ELEV_CACHE_KEY = 'aim_fpe_elev_cache';
+    const AI_NEAREST_M = 30;           // accept the Asset Inspector's nearest cached DEM point within this many metres
     let elevActive = 0, elevLastStart = 0, elevPumpScheduled = false;
     const elevQueue = [];
     let elevRateLimited = false;       // surfaced to the user when we give up / the breaker opens
@@ -723,8 +724,16 @@
         const k = ekey(lat, lng);
         if (elevCache.has(k)) return Promise.resolve(elevCache.get(k));
         // Asset Inspector's warm/shared cache — free, skips the rate-limited endpoint.
+        // Exact key first, then NEAREST cached point: the AI's DEM grid is dense (~10 m)
+        // but a freshly-drawn path never samples the exact grid coords, so an exact match
+        // always misses. Nearest within ~30 m is plenty — terrain barely moves over metres
+        // and we add a 100 ft floor on top. This turns a cached site into free terrain.
         const ai = aiElev();
-        if (ai) { const c = ai.getCached(lat, lng); if (c != null) { elevCache.set(k, c); return Promise.resolve(c); } }
+        if (ai) {
+            let c = ai.getCached(lat, lng);
+            if (c == null && ai.getNearest) c = ai.getNearest(lat, lng, AI_NEAREST_M);
+            if (c != null) { elevCache.set(k, c); return Promise.resolve(c); }
+        }
         if (breakerOpen()) return Promise.resolve(null); // quota recovering — serve cache-only
         if (elevInflight.has(k)) return elevInflight.get(k);
         const p = new Promise((resolve) => {

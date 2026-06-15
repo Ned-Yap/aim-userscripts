@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.65
+// @version      4.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.65';
+    const SCRIPT_VERSION = '4.66';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -434,21 +434,51 @@
         ));
     }
 
-    // ---- elevation service bridge (v4.65) ----
+    // ---- elevation service bridge (v4.66) ----
     // Let sibling AIM scripts in the same window (e.g. the Flight Path Editor's smart
     // altitude) reuse THIS script's warm GM cache + shared-GitHub team cache + fetch
     // queue, instead of each hammering /location_altitude/ on its own (it rate-limits
-    // hard — HTTP 429). getCached() is free (no network); fetch()/bulk() go through the
-    // same dedup + persistence + shared-cache push everything else here uses. Exposed on
-    // unsafeWindow because GM storage is per-script (siblings can't read our cache directly).
+    // hard — HTTP 429). getCached()/getNearest() are free (no network); fetch()/bulk() go
+    // through the same dedup + persistence + shared-cache push everything else here uses.
+    // Exposed on unsafeWindow because GM storage is per-script (siblings can't read it).
+    //
+    // getNearest(): the cache is a DENSE grid (a site with AGL analysis has tens of
+    // thousands of points ~10 m apart), but an exact 5-dp key match only hits if the
+    // caller samples the exact same coordinate. A flight path drawn fresh never does — so
+    // we return the CLOSEST cached point within maxMeters. DEM barely changes over a few
+    // metres, so this turns the whole cached site into free terrain for any sample point.
+    let _nnArr = null, _nnSize = -1;
+    function elevNearest(lat, lng, maxMeters) {
+        try {
+            const cache = loadElevationCache();
+            const keys = Object.keys(cache);
+            if (!_nnArr || _nnSize !== keys.length) {
+                _nnArr = keys.map(k => { const c = k.split(','); return { la: +c[0], ln: +c[1], m: cache[k] }; }).filter(p => Number.isFinite(p.la) && Number.isFinite(p.ln) && typeof p.m === 'number');
+                _nnSize = keys.length;
+            }
+            const maxM = maxMeters || 25;
+            const cosLat = Math.cos(lat * Math.PI / 180) || 1e-6;
+            const dLat = maxM / 111320, dLng = maxM / (111320 * cosLat);
+            let bestM = null, bestD = Infinity;
+            for (const p of _nnArr) {
+                if (Math.abs(p.la - lat) > dLat || Math.abs(p.ln - lng) > dLng) continue; // cheap bbox prefilter
+                const dy = (p.la - lat) * 111320, dx = (p.ln - lng) * 111320 * cosLat;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; bestM = p.m; }
+            }
+            return (bestM != null && bestD <= maxM * maxM) ? bestM : null;
+        } catch (e) { return null; }
+    }
     try {
         unsafeWindow.__aimAIElevation = {
             version: SCRIPT_VERSION,
             getCached: (lat, lng) => { try { const v = getElevationFromCache(lat, lng); return (v == null ? null : v); } catch (e) { return null; } },
+            getNearest: (lat, lng, maxMeters) => elevNearest(lat, lng, maxMeters),
+            cacheSize: () => { try { return Object.keys(loadElevationCache()).length; } catch (e) { return 0; } },
             fetch: (lat, lng) => fetchElevation(lat, lng),
             bulk: (points, onProgress) => bulkFetchElevations(points, onProgress),
         };
-        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (cache + queue reuse for sibling scripts)`);
+        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (cache + nearest-lookup + queue reuse for sibling scripts)`);
     } catch (e) {}
 
     // Best-effort centroid for any entity type. Returns {lat, lng} or null.
