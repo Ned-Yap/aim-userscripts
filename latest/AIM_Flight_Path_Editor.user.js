@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.32
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.32';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -819,7 +819,7 @@
         for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t, t }); }
         const elevs = await mapLimit(pts, 8, p => fetchElevation(p.lat, p.lng));
         const valid = pts.map((p, i) => ({ t: p.t, e: elevs[i] })).filter(x => typeof x.e === 'number');
-        if (valid.length < 2) { warn('planArc: no elevation data for a segment — left unchanged'); return null; }
+        if (valid.length < 2) { if (debugOn()) log('planArc: no elevation data for a segment — left unchanged (cache cold / quota paused)'); return null; }
         // greedy partition by ground range ≤ maxVar, never below SMART_MIN_STEP_FT
         const maxVarM = settings.maxVarFt * FT_TO_M, minStepM = SMART_MIN_STEP_FT * FT_TO_M;
         const subs = []; let s = 0, cmin = valid[0].e, cmax = valid[0].e;
@@ -952,7 +952,7 @@
                 const plan = await computePlan(wc.id, candidates);
                 if (plan && !plan.error) commitPlan(plan, { auto: true });
                 else {
-                    if (plan && plan.error) warn('auto smart-fill skipped:', plan.error);
+                    if (plan && plan.error && debugOn()) log('auto smart-fill skipped:', plan.error);
                     // Baseline what we saw, but keep any un-banded (no-elevation) segments as
                     // candidates so the next drop auto-retries them once the cache/quota recovers.
                     const sigs = new Set(arcs.map(arcSig));
