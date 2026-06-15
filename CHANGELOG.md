@@ -116,6 +116,12 @@ AIM Issues now posts to the **CSM-Site-Issues** Slack channel via the `csmissues
 
 ---
 
+## 2026-06-14 — Site Setup Generator — A2.2 FFZ-connection points editable (dev-only) — Asset Inspector v4.51
+
+The **green FFZ-connection dots** are now editable too (they weren't before — they're branch endpoints, not corridor vertices): **drag** one to move where the path meets the FFZ (it snaps to the FFZ edge), or **right-click** it to drop that branch. Closes the "the vertex that connects to the FFZ can't be moved or deleted" gap. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — Site Setup Generator — A2.2 corridor insert/delete waypoints (dev-only) — Asset Inspector v4.50
 
 Corridor editing now has **insert + delete**: **click directly on a corridor line** to drop a new waypoint there (and immediately drag it), and **right-click a waypoint** to delete it (its two neighbours bridge so the path stays connected). Flags recompute on every edit; changes flow into the export. Full drag / add / remove. *(Dev/latest only.)*
