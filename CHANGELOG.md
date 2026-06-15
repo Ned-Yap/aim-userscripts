@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: FP→FFZ crossing angle — Asset Inspector v4.56 (latest, dev-only)
+
+New check: where an FP segment crosses an FFZ boundary, the angle between the segment and that edge must be **≥ 15°** (editable; ideal 45°). A near-parallel / grazing crossing is "too sharp" and gets flagged at the entry point, naming the segment, the FFZ and the measured angle. Own enable + threshold in the SOP Validators panel.
+
 ## 2026-06-14 — SOP Validators: Tower GM standoff — Asset Inspector v4.55 (latest, dev-only)
 
 New check: general markers of type **"tower"** must stay **≥ 60 ft** (editable) from every FFZ edge and every flight-path segment. Flags any tower closer than that, naming the offending FFZ and/or FP with the measured distance. Own enable + threshold in the SOP Validators panel.
