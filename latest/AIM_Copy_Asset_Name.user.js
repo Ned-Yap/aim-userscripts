@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.59
+// @version      4.60
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.59';
+    const SCRIPT_VERSION = '4.60';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6745,9 +6745,9 @@
     }
     // Split the nearest NON-branch (corridor) segment at the foot of pt; return that
     // vert index (reuses an endpoint if the foot is ~on it). For baking branch stubs.
-    function splitAtNearest(pt) {
+    function splitAtNearest(pt, includeBranch) {
         let bestSeg = -1, bd = Infinity, bestPr = null;
-        for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; if (s.branch) continue; const pr = segProject(pt, genRoute.verts[s.a], genRoute.verts[s.b]); if (pr.dist < bd) { bd = pr.dist; bestSeg = si; bestPr = pr; } }
+        for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; if (s.branch && !includeBranch) continue; const pr = segProject(pt, genRoute.verts[s.a], genRoute.verts[s.b]); if (pr.dist < bd) { bd = pr.dist; bestSeg = si; bestPr = pr; } }
         if (bestSeg < 0) return -1;
         const s = genRoute.segs[bestSeg];
         if (bestPr.t < 0.03) return s.a;
@@ -7458,7 +7458,7 @@
         };
         const hitVert = (cp) => { let best = -1, bd = 14; for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } } return best; };
         genRoute.onDown = (ev) => {
-            if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
+            if (ev.button !== 0 || genDraw.active || genFpDraw.active || !genRoute.verts.length) return; // not during FFZ/FP draw
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
             // 1) drag an existing waypoint (white path dot OR green FFZ-connection, within 14 px)
             const best = hitVert(cp);
@@ -7470,7 +7470,7 @@
         };
         // right-click a waypoint → delete it (bridges the gap; an FFZ tip drops the branch)
         genRoute.onContext = (ev) => {
-            if (genDraw.active || !genRoute.verts.length) return;
+            if (genDraw.active || genFpDraw.active || !genRoute.verts.length) return;
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
             const best = hitVert(cp);
             if (best < 0) return;
@@ -7551,17 +7551,24 @@
         return { segs, avoidObs: padObs.concat(ffzObs) };
     }
     // Turn a drawn polyline into the editable corridor (genRoute) + wire editing.
+    // APPEND a drawn polyline to the editable graph (so you can draw MULTIPLE FPs and
+    // BRANCH off existing ones). Each drawn point is mapped to a vert index: reuse an
+    // existing waypoint (vIdx, from snapping onto one), split an existing segment
+    // (onPath → T-junction), or add a new vert. insertVertOnSeg only APPENDS verts,
+    // so captured vIdx stay valid through the splits.
     function buildRouteFromDrawnPath(pts, siteID) {
         const map = getLeafletMap();
-        clearRoutePreview();                                          // resets genRoute.verts/segs
-        genRoute.ctx = routeCtxForSite(siteID); genRoute.assets = []; genRoute.base = null;
-        genRoute.verts = pts.map(p => ({ lat: p.lat, lng: p.lng }));
-        genRoute.segs = [];
-        for (let i = 0; i < genRoute.verts.length - 1; i++) { const seg = { a: i, b: i + 1, flag: false }; reflagSeg(seg); genRoute.segs.push(seg); }
-        genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx };  // so export/sync work
-        syncRouteToResult();
+        if (!genRoute.ctx) genRoute.ctx = routeCtxForSite(siteID);
+        if (!genRouteResult || !genRouteResult.ok) genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx };
+        const idxs = pts.map(dp => {
+            if (dp.vIdx != null && dp.vIdx < genRoute.verts.length) return dp.vIdx;
+            if (dp.onPath) { const ni = splitAtNearest(dp, true); if (ni >= 0) return ni; }
+            const ni = genRoute.verts.length; genRoute.verts.push({ lat: dp.lat, lng: dp.lng }); return ni;
+        });
+        for (let i = 0; i < idxs.length - 1; i++) { if (idxs[i] !== idxs[i + 1]) { const seg = { a: idxs[i], b: idxs[i + 1], flag: false }; reflagSeg(seg); genRoute.segs.push(seg); } }
         drawGenRoute();
         if (map) wireRouteEdit(map);
+        syncRouteToResult();
     }
     let genFpDraw = { active: false, pts: [], tentative: null, ctx: null, layers: [], container: null, onDown: null, onMove: null, onDbl: null };
     function clearFpDrawLayers() { const map = getLeafletMap(); genFpDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genFpDraw.layers = []; }
@@ -7572,10 +7579,23 @@
         if (pts.length >= 2) { try { const pl = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#00e5ff', weight: 3, opacity: 0.9, dashArray: genFpDraw.tentative ? '5,4' : null, interactive: false }); pl.addTo(map); genFpDraw.layers.push(pl); } catch (e) {} }
         for (const p of genFpDraw.pts) { try { const d = L.circleMarker([p.lat, p.lng], { radius: 4, color: '#fff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); d.addTo(map); genFpDraw.layers.push(d); } catch (e) {} }
     }
-    function snapFpPoint(ll) {
+    // Snap a drawn point: (1) onto an existing FP waypoint (≤12 px → branch/join),
+    // (2) onto an existing FP segment (≤8 px → T-junction), (3) ~50 ft parallel off
+    // the nearest power line (≤150 ft), else free. Returns {lat,lng,vIdx?,onPath?}.
+    function snapFpPoint(ll, cp, map) {
+        if (cp && map && genRoute.verts.length) {
+            let best = -1, bd = 12;
+            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
+            if (best >= 0) { const v = genRoute.verts[best]; return { lat: v.lat, lng: v.lng, vIdx: best }; }
+        }
+        if (cp && map && genRoute.segs.length) {
+            let bestSeg = -1, bsd = 8, bsp = null;
+            for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
+            if (bestSeg >= 0) { const l2 = map.containerPointToLatLng(bsp); return { lat: l2.lat, lng: l2.lng, onPath: true }; }
+        }
         const segs = (genFpDraw.ctx && genFpDraw.ctx.segs) || [];
         const r = a2SnapToLineOffset(ll, segs, A2.offsetFt * GEN_FT_TO_M, 150 * GEN_FT_TO_M);
-        return r.pt;
+        return { lat: r.pt.lat, lng: r.pt.lng };
     }
     function setFpDraw(on, siteID) {
         const map = getLeafletMap();
@@ -7596,13 +7616,13 @@
         genFpDraw.onDown = (ev) => {
             if (!genFpDraw.active || ev.button !== 0) return;
             ev.preventDefault(); ev.stopPropagation();
-            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            genFpDraw.pts.push(snapFpPoint(ll)); genFpDraw.tentative = null; renderFpDraw();
+            let ll, cp; try { ll = map.mouseEventToLatLng(ev); cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            genFpDraw.pts.push(snapFpPoint(ll, cp, map)); genFpDraw.tentative = null; renderFpDraw();
         };
         genFpDraw.onMove = (ev) => {
             if (!genFpDraw.active) return;
-            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            genFpDraw.tentative = snapFpPoint(ll); renderFpDraw();
+            let ll, cp; try { ll = map.mouseEventToLatLng(ev); cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            genFpDraw.tentative = snapFpPoint(ll, cp, map); renderFpDraw();
         };
         genFpDraw.onDbl = (ev) => {
             if (!genFpDraw.active) return;
@@ -7610,9 +7630,10 @@
             const pts = genFpDraw.pts.slice();
             // dedupe the finishing double-click's near-duplicate point
             while (pts.length >= 2 && approxMeters(pts[pts.length - 1].lat, pts[pts.length - 1].lng, pts[pts.length - 2].lat, pts[pts.length - 2].lng) < 4 * GEN_FT_TO_M) pts.pop();
-            const sid = genState.siteID;
-            setFpDraw(false);
-            if (pts.length >= 2) buildRouteFromDrawnPath(pts, sid);
+            // commit this path, but STAY in draw mode so you can sketch the next FP /
+            // branch right away (toggle the button off when done).
+            genFpDraw.pts = []; genFpDraw.tentative = null; clearFpDrawLayers();
+            if (pts.length >= 2) buildRouteFromDrawnPath(pts, genState.siteID);
         };
         genFpDraw.container.addEventListener('mousedown', genFpDraw.onDown, true);
         genFpDraw.container.addEventListener('mousemove', genFpDraw.onMove, true);
@@ -9015,8 +9036,8 @@
             const on = !genFpDraw.active;
             setFpDraw(on, siteID);
             fpDrawBtn.style.background = on ? 'rgba(0,229,255,0.32)' : 'rgba(0,229,255,0.12)';
-            fpDrawBtn.textContent = on ? '🛩 Drawing — click waypoints · dbl-click finish' : '🛩✏️ Draw FP';
-            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Click rough waypoints</span> — each snaps to ~50 ft parallel off the nearest power line (draw away from a line = stays free). <b>Double-click</b> to finish → editable path.`;
+            fpDrawBtn.textContent = on ? '🛩 Drawing — dbl-click ends a path · click button to stop' : '🛩✏️ Draw FP';
+            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Click rough waypoints</span> — each snaps ~50 ft parallel off the nearest power line (away from a line = free). <b>Double-click</b> ends a path; start clicking again for the <b>next FP</b>. <b>Click an existing path/dot</b> to <b>branch</b> off it. Click <b>🛩 Drawing</b> again when done → editable.`;
         };
         const routesBtn = box.querySelector('#aim-gen-routes');
         routesBtn.onclick = () => {

@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — Site Setup Generator — Draw FP: multiple paths + branching (dev-only) — Asset Inspector v4.60
+
+Draw FP now supports **multiple flight paths and branching** (was one-path-only). Each finished path **adds** to the graph instead of replacing it, and clicks **snap onto existing FP waypoints/segments** so you can **branch** off a path (clicking mid-segment splits it into a T-junction). Draw FP also **stays active** after a double-click so you can sketch the next path right away — toggle the button off when done. Everything stays in the editable corridor (drag/insert/delete). *(Dev/latest only.)*
+
+---
+
 ## 2026-06-14 — SOP Validators: no more page hang on large sites — Asset Inspector v4.59 (latest, dev-only)
 
 On a big site the validator did all its work in one synchronous burst and froze the tab (Chrome "page unresponsive"). It now (1) runs **asynchronously, yielding to the browser** periodically so the page stays responsive with a "Validating site…" indicator, and (2) uses a **bounding-box spatial prefilter** on the heavy proximity/angle checks so each entity only compares against nearby ones — roughly 100× less work on large sites. Results are identical (the prefilter only skips pairs that are provably too far to match).
