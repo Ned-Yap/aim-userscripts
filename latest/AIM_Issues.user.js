@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.20
+// @version      1.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.20';
+    const SCRIPT_VERSION = '1.21';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -2390,6 +2390,10 @@
 
     function renderAllIssues() {
         if (renderRetryTimer) { clearTimeout(renderRetryTimer); renderRetryTimer = null; }
+        // The map + issue overlays live in the IFRAME — the TOP frame has no map, so a
+        // render there just retries 60× and dumps a giant async stack on give-up (e.g. on
+        // a ?aim_issue deep-link). Rendering is iframe-owned; bail in TOP.
+        if (IS_TOP) return;
         renderAllIssuesAttempt(0);
     }
 
