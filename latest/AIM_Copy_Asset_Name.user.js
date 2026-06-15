@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.57
+// @version      4.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.57';
+    const SCRIPT_VERSION = '4.58';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1659,51 +1659,40 @@
         }
 
         // 12. FP → FFZ connection angle — an FP connects to an FFZ where its
-        //     segment endpoint lands at/near an FFZ vertex (corner). The angle
-        //     between that connecting segment and the FFZ's LONG AXIS must be ≥
-        //     the threshold (ideal 45°). An FP grazing in nearly parallel to
-        //     the long edge (< 15°) is "too sharp". One finding per connection
-        //     point (the sharpest approaching segment), drawn at that vertex.
+        //     segment endpoint lands ON an FFZ edge (mid-edge; never a corner).
+        //     The angle between that approaching segment and the edge it meets
+        //     must be ≥ threshold (ideal 45°); a grazing approach nearly
+        //     parallel to the edge (< 15°) is "too sharp". One finding per
+        //     connection point, drawn there. (Only the APPROACH segment — the
+        //     one whose far end is OUTSIDE the FFZ — is measured, so an internal
+        //     leg running along the boundary isn't mistaken for a sharp entry.)
         if (sopEnabled.fpFfzAngle && allArcs.length && ffzs.length) {
             const th = sopThresholds.fpFfzAngleDeg;
-            const CONNECT_FT = 25;   // FP endpoint within this of an FFZ vertex = a connection
-            // Each FFZ's long axis = direction of its longest edge.
-            const ffzAxis = new Map();
-            ffzs.forEach(ffz => {
-                const r = getRing(ffz); if (!r || r.length < 2) return;
-                let best = null, bd = -1;
-                for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
-                    const d = approxMeters(r[j].lat, r[j].lng, r[i].lat, r[i].lng);
-                    if (d > bd) { bd = d; best = [r[j], r[i]]; }
-                }
-                if (best) ffzAxis.set(ffz, best);
-            });
-            // Dedupe by connection point: adjacent arcs share the endpoint, so
-            // key on FFZ + the vertex; keep the sharpest approaching segment.
+            const CONNECT_FT = 10;   // FP endpoint within this of an FFZ edge = on it
             const conn = new Map();
             allArcs.forEach(rec => {
                 [[rec.arc.point_a, rec.arc.point_b], [rec.arc.point_b, rec.arc.point_a]].forEach(([P, other]) => {
-                    let near = null;
+                    let best = null;
                     ffzs.forEach(ffz => {
                         const r = getRing(ffz); if (!r) return;
-                        for (const v of r) {
-                            const d = approxMeters(P.lat, P.lng, v.lat, v.lng) * M_TO_FT;
-                            if (!near || d < near.d) near = { d, ffz, v };
+                        for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+                            const d = pointToSegMeters(P.lat, P.lng, r[j], r[i]) * M_TO_FT;
+                            if (!best || d < best.d) best = { d, e1: r[j], e2: r[i], ffz, ring: r };
                         }
                     });
-                    if (!near || near.d > CONNECT_FT) return;
-                    const axis = ffzAxis.get(near.ffz); if (!axis) return;
-                    const deg = segAngleDeg(other, P, axis[0], axis[1]);
+                    if (!best || best.d > CONNECT_FT) return;
+                    if (pointInPolygon(other.lat, other.lng, best.ring)) return;  // not an approach leg
+                    const deg = segAngleDeg(other, P, best.e1, best.e2);
                     if (deg == null) return;
-                    const key = `${near.ffz.id}|${vkey(near.v)}`;
+                    const key = `${best.ffz.id}|${vkey(P)}`;
                     const prev = conn.get(key);
-                    if (!prev || deg < prev.deg) conn.set(key, { deg, ffz: near.ffz, rec, P });
+                    if (!prev || deg < prev.deg) conn.set(key, { deg, ffz: best.ffz, rec, P });
                 });
             });
             conn.forEach(c => {
                 if (Math.round(c.deg) >= th) return;
                 out.push({ check: 'FP↔FFZ angle', severity: 'high', distFt: Math.round(c.deg), threshFt: th,
-                    note: `violation: ${segRef(c.rec)} connects to FFZ "${nameOf(c.ffz)}" at ${Math.round(c.deg)}° to its long axis (min ${th}°, ideal 45°)`,
+                    note: `violation: ${segRef(c.rec)} connects to FFZ "${nameOf(c.ffz)}" at ${Math.round(c.deg)}° to the edge (min ${th}°, ideal 45°)`,
                     polygon: boxAt(c.P.lat, c.P.lng) });
             });
         }
@@ -2839,7 +2828,7 @@
                 { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
                 { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
                 { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
-                { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to long axis (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
+                { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
