@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: FP overlap segment IDs + junction grouping — Asset Inspector v4.53 (latest, dev-only)
+
+FP alt-band overlap findings now name each segment as **"FP <name> seg #N (id <arc.id>)"** (N = on-map segment number) instead of the ambiguous "flight_path_1 ↔ flight_path_1". And a 3-way junction is now **one** issue listing every under-overlap pair at that vertex (e.g. "#67↔#69: 7 ft; #68↔#69: 10 ft") rather than duplicate-looking rows. Segment #/id also added to the FP↔FFZ, AGL-floor, band-height, inverted-band and degenerate-arc notes.
+
 ## 2026-06-14 — SOP Validators fix: false "FFZ N ft from asset" flags — Asset Inspector v4.52 (latest, dev-only)
 
 The FFZ→Asset / FP→Asset checks were running every asset pad through `simplifyPolygon` (an angular-sort meant only for bowtie well-pads). On multi-vertex BATTERY/COMPRESSOR pads that **scrambled** the boundary into phantom edges, which then measured a few feet from a neighboring FFZ — producing bogus violations like "FFZ is 4 ft from asset" that don't exist on the map. Now the validator uses the **raw drawn polygon** (the true boundary) and only repairs genuine self-intersecting bowtie pads (via convex hull). No effect on real near-misses; removes the phantom ones.
