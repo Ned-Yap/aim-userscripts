@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: FP→FFZ angle = angle to the edge it lands on — Asset Inspector v4.58 (latest, dev-only)
+
+Corrected: FPs connect to an FFZ **mid-edge**, never at a corner. The check now just measures the angle between the approaching FP segment and the **edge it terminates on**, flagging **< 15°** (grazing). Detection is "FP endpoint on an FFZ edge"; only the approach leg is measured. Site 1583: 55 connections, all 50–90° → 0 false positives (the prior corner/long-axis attempt wrongly flagged 23).
+
 ## 2026-06-14 — SOP Validators: FP→FFZ angle reworked (vertex connection vs long axis) — Asset Inspector v4.57 (latest, dev-only)
 
 The FP→FFZ angle check now matches how FPs actually connect — at an FFZ **corner (vertex)**, not crossing an edge mid-span. It measures the angle between the connecting FP segment and the FFZ's **long axis** and flags anything **< 15°** (ideal 45°): an FP grazing in nearly parallel to the long edge is "too sharp". Deduped per connection point, drawn at the vertex.
