@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.24
+// @version      0.25
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.24';
+    const SCRIPT_VERSION = '0.25';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -834,8 +834,9 @@
         const targets = (wc0.state.arcs || []).filter(a => targetSigs.has(arcSig(a)));
         if (!targets.length) return null;
         const planned = [];
-        for (const a of targets) { const sub = await planArc(a); if (sub && sub.length) planned.push({ sig: arcSig(a), subArcs: sub }); }
-        if (!planned.length) return null;
+        const unresolved = []; // targets we couldn't band (no elevation yet) — keep them retry-able
+        for (const a of targets) { const sub = await planArc(a); if (sub && sub.length) planned.push({ sig: arcSig(a), subArcs: sub }); else unresolved.push(arcSig(a)); }
+        if (!planned.length) return unresolved.length ? { error: 'no elevation data yet', unresolved } : null;
         const wc = findFpWorkingCopies().find(w => w.id === fpId);
         if (!wc || !wc.dispatch) return null;
         const st = wc.state;
@@ -861,7 +862,7 @@
         const post = checkFlightPath({ arcs: newArcs, coords: newCoords });
         const fresh = post.filter(p => !preIssues.includes(p));
         if (fresh.length) return { error: fresh[0] };
-        return { fpId, name: st.name, origArcs, origCoords, newArcs, newCoords, interiorPts, addedVerts: interiorPts.length, bridges: bridges.length, targets: planned.length, preIssues };
+        return { fpId, name: st.name, origArcs, origCoords, newArcs, newCoords, interiorPts, addedVerts: interiorPts.length, bridges: bridges.length, targets: planned.length, preIssues, unresolved };
     }
 
     // ---- commit a plan into the working copy (same write path as the splitter) ----
@@ -878,7 +879,12 @@
         undoStack.push({ id: plan.fpId, name: plan.name, kind: 'smart', arcs: plan.origArcs, coords: plan.origCoords });
         wc.dispatch({ ...wc.state, arcs: plan.newArcs, coords: plan.newCoords });
         state.inserts++;
-        procState.set(plan.fpId, { count: plan.newArcs.length, sigs: new Set(plan.newArcs.map(arcSig)) });
+        // Mark everything processed EXCEPT segments we couldn't band yet (no elevation):
+        // leaving them out keeps them candidates so the next drop auto-retries them once
+        // the cache/quota catches up — no need to nudge the vertex by hand.
+        const resolvedSigs = new Set(plan.newArcs.map(arcSig));
+        (plan.unresolved || []).forEach(s => resolvedSigs.delete(s));
+        procState.set(plan.fpId, { count: plan.newArcs.length, sigs: resolvedSigs });
         log(`smart altitude on "${plan.name}": ${plan.targets} segment(s) → +${plan.addedVerts} step(s), ${plan.newArcs.length} arcs, ${plan.bridges} seam bridge(s) (validated · live working copy)`);
         renderPanel();
         toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft). ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
@@ -913,7 +919,14 @@
             try {
                 const plan = await computePlan(wc.id, candidates);
                 if (plan && !plan.error) commitPlan(plan, { auto: true });
-                else { if (plan && plan.error) warn('auto smart-fill skipped (would break path):', plan.error); procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); }
+                else {
+                    if (plan && plan.error) warn('auto smart-fill skipped:', plan.error);
+                    // Baseline what we saw, but keep any un-banded (no-elevation) segments as
+                    // candidates so the next drop auto-retries them once the cache/quota recovers.
+                    const sigs = new Set(arcs.map(arcSig));
+                    (plan && plan.unresolved || []).forEach(s => sigs.delete(s));
+                    procState.set(wc.id, { count: arcs.length, sigs });
+                }
             } finally { autoBusy = false; }
             if (elevRateLimited) toast('⛰ Percepto’s elevation quota is exhausted — paused ~60s. Some segments unfilled; hit ⛰ Smart-fill again shortly (or run the Asset Inspector’s elevation pass to pre-cache).', '#ffb14e');
             break; // one path per pass — the next drop re-checks
