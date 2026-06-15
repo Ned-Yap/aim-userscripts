@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.29
+// @version      0.30
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.29';
+    const SCRIPT_VERSION = '0.30';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -674,17 +674,25 @@
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const ELEV_MAX_CONCURRENT = 2;
     const ELEV_MIN_INTERVAL_MS = 220;  // ≤ ~4.5 req/s — gentle on the shared limiter
-    const ELEV_MAX_RETRIES = 3;        // backoff ~0.8/1.6/3.2 s + jitter (breaker handles the rest)
-    const ELEV_BREAKER_TRIP = 3;       // this many consecutive 429s ⇒ quota looks blown
-    const ELEV_BREAKER_MS = 60000;     // …so STOP hitting it for 60 s (poking a penalty box keeps it alive)
+    const ELEV_MAX_RETRIES = 2;        // for genuine NETWORK errors only (429 trips the breaker immediately)
+    const ELEV_BREAKER_TRIP = 1;       // ONE 429 ⇒ quota is blown; stop instantly (no point hammering)
+    const ELEV_BREAKER_BASE_MS = 60000;  // first pause 60 s…
+    const ELEV_BREAKER_MAX_MS = 600000;  // …escalating ×2 each immediate re-trip up to 10 min (stops re-storming)
     const ELEV_CACHE_KEY = 'aim_fpe_elev_cache';
     const AI_NEAREST_M = 30;           // accept the Asset Inspector's nearest cached DEM point within this many metres
     let elevActive = 0, elevLastStart = 0, elevPumpScheduled = false;
     const elevQueue = [];
     let elevRateLimited = false;       // surfaced to the user when we give up / the breaker opens
     let elevDirty = 0;
-    let elevConsec429 = 0, elevBreakerUntil = 0;
+    let elevConsec429 = 0, elevBreakerUntil = 0, elevBreakerStreak = 0;
     const breakerOpen = () => Date.now() < elevBreakerUntil;
+    function openBreaker() {
+        elevBreakerStreak++;
+        const ms = Math.min(ELEV_BREAKER_MAX_MS, ELEV_BREAKER_BASE_MS * Math.pow(2, elevBreakerStreak - 1));
+        elevBreakerUntil = Date.now() + ms; elevRateLimited = true;
+        return ms;
+    }
+    function breakerSuccess() { elevConsec429 = 0; elevBreakerUntil = 0; elevBreakerStreak = 0; } // quota flowing again
     // Reuse the Asset Inspector's warm/shared/persistent elevation cache when present (it
     // exposes a service on unsafeWindow). getCached() is FREE — no network — so analyzed
     // sites / teammate-cached terrain never touch the rate-limited endpoint at all.
@@ -712,18 +720,17 @@
         const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
         try {
             const res = await fetch(url, { credentials: 'include' });
-            if (res.status === 429 || !res.ok) {
-                if (res.status === 429 && ++elevConsec429 >= ELEV_BREAKER_TRIP) {
-                    elevBreakerUntil = Date.now() + ELEV_BREAKER_MS; elevRateLimited = true;
-                    warn(`DEM quota looks exhausted (${elevConsec429} consecutive 429) — pausing elevation lookups for ${ELEV_BREAKER_MS / 1000}s; cached terrain still works`);
-                    return null;
+            if (res.status === 429) {
+                if (++elevConsec429 >= ELEV_BREAKER_TRIP) {
+                    const ms = openBreaker();
+                    warn(`DEM 429 — quota blown; pausing elevation lookups ${Math.round(ms / 1000)}s (cached terrain still works)`);
                 }
-                if (attempt < ELEV_MAX_RETRIES && !breakerOpen()) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
-                elevRateLimited = true; return null;
+                return null; // never retry a 429 — that just keeps the penalty alive + floods the console
             }
+            if (!res.ok) { elevRateLimited = true; return null; }
             const j = await res.json().catch(() => null);
             const m = (j && typeof j.altitude === 'number') ? j.altitude : null;
-            if (m != null) { elevConsec429 = 0; elevBreakerUntil = 0; } // success ⇒ quota is flowing again
+            if (m != null) breakerSuccess(); // quota is flowing again
             return m;
         } catch (e) {
             if (attempt < ELEV_MAX_RETRIES && !breakerOpen()) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
