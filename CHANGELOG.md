@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-15 — Site Setup Generator — free-draw FP + ✨ Snap & Clean (dev-only) — Asset Inspector v4.61
+
+Split drawing from cleanup so sketching stops fighting you. **Draw FP is now a free sketch** — no per-click power-line snapping; draw roughly where you want paths (clicking an existing waypoint/segment still snaps so you can **branch**). Then the new **✨ Snap & Clean** button does a batch pass over the whole drawn network: densifies every segment, snaps each sample ~50 ft parallel off the nearest power line (following line bends), and Douglas-Peucker-simplifies to a few clean verts. Shared junction/branch verts snap once so connectivity survives; points farther than ~220 ft from any line stay where drawn (open-ground / base connectors). Result stays fully editable (drag/insert/delete). *(Elevation points next. Dev/latest only.)*
+
 ## 2026-06-14 — Site Setup Generator — Draw FP: multiple paths + branching (dev-only) — Asset Inspector v4.60
 
 Draw FP now supports **multiple flight paths and branching** (was one-path-only). Each finished path **adds** to the graph instead of replacing it, and clicks **snap onto existing FP waypoints/segments** so you can **branch** off a path (clicking mid-segment splits it into a T-junction). Draw FP also **stays active** after a double-click so you can sketch the next path right away — toggle the button off when done. Everything stays in the editable corridor (drag/insert/delete). *(Dev/latest only.)*

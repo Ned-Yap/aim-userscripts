@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.60
+// @version      4.61
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.60';
+    const SCRIPT_VERSION = '4.61';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7570,6 +7570,45 @@
         if (map) wireRouteEdit(map);
         syncRouteToResult();
     }
+    // ✨ Snap & Clean — batch pass over the WHOLE drawn network: densify each segment,
+    // snap every sample ~50 ft parallel off the nearest power line (within approachMax),
+    // then Douglas-Peucker simplify so the path follows line bends with few clean
+    // verts. Shared junction/branch verts are snapped ONCE (deterministic) so
+    // connectivity survives the rebuild. Points farther than approachMax from any line
+    // stay where drawn (open-ground / base connectors). Re-flags + redraws + re-wires
+    // editing so you can still drag/insert/delete after cleaning.
+    function snapCleanRoute() {
+        if (!genRoute.segs.length) return { ok: false, msg: 'Nothing drawn yet — sketch some flight paths first.' };
+        const ctx = genRoute.ctx || (genState.siteID ? routeCtxForSite(genState.siteID) : null);
+        const segsPL = (ctx && ctx.segs) || [];
+        if (!segsPL.length) return { ok: false, msg: 'No power lines loaded for this site.' };
+        const offM = A2.offsetFt * GEN_FT_TO_M, rangeM = A2.approachMaxFt * GEN_FT_TO_M;
+        const sampleM = A2.sampleFt * GEN_FT_TO_M, tolM = A2.simplifyFt * GEN_FT_TO_M;
+        // 1. snap each existing vert ONCE — shared junctions snap identically → stay shared.
+        const snapV = genRoute.verts.map(v => { const r = a2SnapToLineOffset(v, segsPL, offM, rangeM); return { lat: r.pt.lat, lng: r.pt.lng }; });
+        // 2. rebuild the graph. Endpoints reuse the snapped junction verts (vi dedup);
+        //    interior densified+snapped samples become fresh per-segment verts.
+        const nv = [], nseg = [], idx = new Map();
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = nv.length; nv.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        let snappedCount = 0;
+        for (const s of genRoute.segs) {
+            const oa = genRoute.verts[s.a], ob = genRoute.verts[s.b];
+            const sa = snapV[s.a], sb = snapV[s.b];
+            const len = approxMeters(oa.lat, oa.lng, ob.lat, ob.lng);
+            const n = Math.max(1, Math.round(len / sampleM));
+            const chain = [sa];
+            for (let i = 1; i < n; i++) { const p = a2Interp(oa, ob, i / n); const r = a2SnapToLineOffset(p, segsPL, offM, rangeM); if (r.snapped) snappedCount++; chain.push({ lat: r.pt.lat, lng: r.pt.lng }); }
+            chain.push(sb);
+            const simp = simplifyPath(chain, tolM);
+            for (let i = 0; i < simp.length - 1; i++) { const ai = vi(simp[i]), bi = vi(simp[i + 1]); if (ai !== bi) nseg.push({ a: ai, b: bi, flag: false, branch: !!s.branch }); }
+        }
+        genRoute.verts = nv; genRoute.segs = nseg;
+        for (const seg of genRoute.segs) reflagSeg(seg);
+        drawGenRoute();
+        syncRouteToResult();
+        const map = getLeafletMap(); if (map) wireRouteEdit(map);
+        return { ok: true, snapped: snappedCount, verts: nv.length, segs: nseg.length };
+    }
     let genFpDraw = { active: false, pts: [], tentative: null, ctx: null, layers: [], container: null, onDown: null, onMove: null, onDbl: null };
     function clearFpDrawLayers() { const map = getLeafletMap(); genFpDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genFpDraw.layers = []; }
     function renderFpDraw() {
@@ -7579,9 +7618,10 @@
         if (pts.length >= 2) { try { const pl = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#00e5ff', weight: 3, opacity: 0.9, dashArray: genFpDraw.tentative ? '5,4' : null, interactive: false }); pl.addTo(map); genFpDraw.layers.push(pl); } catch (e) {} }
         for (const p of genFpDraw.pts) { try { const d = L.circleMarker([p.lat, p.lng], { radius: 4, color: '#fff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); d.addTo(map); genFpDraw.layers.push(d); } catch (e) {} }
     }
-    // Snap a drawn point: (1) onto an existing FP waypoint (≤12 px → branch/join),
-    // (2) onto an existing FP segment (≤8 px → T-junction), (3) ~50 ft parallel off
-    // the nearest power line (≤150 ft), else free. Returns {lat,lng,vIdx?,onPath?}.
+    // Snap a drawn point for BRANCHING ONLY: (1) onto an existing FP waypoint
+    // (≤12 px → branch/join), (2) onto an existing FP segment (≤8 px → T-junction).
+    // Otherwise the point is FREE (no power-line snap while drawing) — sketch roughly,
+    // then ✨ Snap & Clean snaps the whole network. Returns {lat,lng,vIdx?,onPath?}.
     function snapFpPoint(ll, cp, map) {
         if (cp && map && genRoute.verts.length) {
             let best = -1, bd = 12;
@@ -7593,9 +7633,10 @@
             for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
             if (bestSeg >= 0) { const l2 = map.containerPointToLatLng(bsp); return { lat: l2.lat, lng: l2.lng, onPath: true }; }
         }
-        const segs = (genFpDraw.ctx && genFpDraw.ctx.segs) || [];
-        const r = a2SnapToLineOffset(ll, segs, A2.offsetFt * GEN_FT_TO_M, 150 * GEN_FT_TO_M);
-        return { lat: r.pt.lat, lng: r.pt.lng };
+        // Free sketch: NO per-click power-line snap. Draw roughly where you want the
+        // path; the ✨ Snap & Clean pass snaps the whole network to the power lines
+        // afterward. Only branch-to-existing-FP (verts/segs above) snaps while drawing.
+        return { lat: ll.lat, lng: ll.lng };
     }
     function setFpDraw(on, siteID) {
         const map = getLeafletMap();
@@ -8964,7 +9005,8 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
-                <button id="aim-gen-fpdraw" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩✏️ Draw FP</button>
+                <button id="aim-gen-fpdraw" title="Sketch flight paths roughly (free draw). Double-click to finish a path; click an existing waypoint/line to branch. Then hit Snap & Clean." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩✏️ Draw FP</button>
+                <button id="aim-gen-snapclean" title="Snap the whole drawn network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
@@ -9037,7 +9079,23 @@
             setFpDraw(on, siteID);
             fpDrawBtn.style.background = on ? 'rgba(0,229,255,0.32)' : 'rgba(0,229,255,0.12)';
             fpDrawBtn.textContent = on ? '🛩 Drawing — dbl-click ends a path · click button to stop' : '🛩✏️ Draw FP';
-            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Click rough waypoints</span> — each snaps ~50 ft parallel off the nearest power line (away from a line = free). <b>Double-click</b> ends a path; start clicking again for the <b>next FP</b>. <b>Click an existing path/dot</b> to <b>branch</b> off it. Click <b>🛩 Drawing</b> again when done → editable.`;
+            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Sketch rough waypoints</span> — <b>free draw</b>, no snapping (draw roughly where you want paths). <b>Double-click</b> ends a path; start clicking again for the <b>next FP</b>. <b>Click an existing path/dot</b> to <b>branch</b> off it. Click <b>🛩 Drawing</b> again when done, then hit <b style="color:#ba8cff">✨ Snap &amp; Clean</b>.`;
+        };
+        const snapCleanBtn = box.querySelector('#aim-gen-snapclean');
+        snapCleanBtn.onclick = () => {
+            if (genFpDraw.active) { statsEl.innerHTML = `<span style="color:#ffb347">Finish drawing first — click <b>🛩 Drawing</b> to stop, then Snap &amp; Clean.</span>`; return; }
+            if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
+            snapCleanBtn.disabled = true; const restore = snapCleanBtn.textContent; snapCleanBtn.textContent = 'Snapping…';
+            try {
+                const r = snapCleanRoute();
+                if (!r.ok) { statsEl.innerHTML = `<span style="color:#ff8a80">${r.msg}</span>`; return; }
+                statsEl.innerHTML = `<b style="color:#ba8cff">Snapped & cleaned.</b> ${r.snapped} samples snapped to power lines → <b>${r.verts}</b> verts / <b>${r.segs}</b> segs.<br><span style="color:#888"><b style="color:#fff">Drag</b> a white dot to nudge · <b style="color:#fff">click a line</b> to add a point · <b style="color:#fff">right-click</b> a dot to delete. <span style="color:#ff9a3d">Orange</span> = out of 40–65 ft band or over a pad/FFZ. Next: elevation points (coming).</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} snap & clean failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Snap & Clean error: ${String(e.message || e)}</span>`;
+            } finally {
+                snapCleanBtn.disabled = false; snapCleanBtn.textContent = restore;
+            }
         };
         const routesBtn = box.querySelector('#aim-gen-routes');
         routesBtn.onclick = () => {
