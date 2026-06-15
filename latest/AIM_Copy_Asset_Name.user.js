@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.63
+// @version      4.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.63';
+    const SCRIPT_VERSION = '4.64';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7662,6 +7662,7 @@
             if (!segs.length) return { ok: false, msg: 'No power lines loaded — open Map Styler, then ↻ Refresh.' };
             fpSnap.armed = true; fpSnap.map = map; fpSnap.segs = segs;
             wireFpSnap(map);
+            try { console.log(`${GEN_TAG} CTRL-snap ARMED`, { segs: segs.length, container: map.getContainer().className, hasL: !!getLeafletL() }); } catch (e) {}
             return { ok: true, segs: segs.length };
         }
         fpSnap.armed = false;
@@ -7676,8 +7677,9 @@
             if (!fpSnap.armed || fpSnap.reentrant) return;       // let our own synthetic click through
             if (!ev.ctrlKey || ev.button !== 0) return;          // only CTRL + left button
             if (ev.detail >= 2) return;                          // don't touch the finishing double-click
-            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { console.warn(`${GEN_TAG} CTRL-snap: mouseEventToLatLng threw`, e); return; }
             const r = fpSnapCompute(ll);
+            try { console.log(`${GEN_TAG} CTRL-snap CLICK`, { snapped: r.snapped, raw: ll, snap: r.pt, target: ev.target && ev.target.tagName, cls: ev.target && ev.target.getAttribute && ev.target.getAttribute('class') }); } catch (e) {}
             if (!r.snapped) return;                              // no line in range → normal click
             let cpt; try { cpt = map.latLngToContainerPoint([r.pt.lat, r.pt.lng]); } catch (e) { return; }
             const rect = fpSnap.container.getBoundingClientRect();
@@ -7687,6 +7689,7 @@
                 const synth = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, ctrlKey: true, detail: 1 });
                 fpSnap.reentrant = true;
                 (ev.target || fpSnap.container).dispatchEvent(synth);
+                console.log(`${GEN_TAG} CTRL-snap re-dispatched click at px`, { clientX: Math.round(clientX), clientY: Math.round(clientY) });
             } catch (e) { console.error(`${GEN_TAG} CTRL-snap re-dispatch failed:`, e); }
             finally { fpSnap.reentrant = false; }
         };
@@ -7696,10 +7699,20 @@
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             const r = fpSnapCompute(ll);
             if (r.snapped) fpSnapShowIndicator(r.pt); else fpSnapClearIndicator();
+            fpSnap._mN = (fpSnap._mN || 0) + 1;
+            if (fpSnap._mN % 15 === 0) { try { console.log(`${GEN_TAG} CTRL-snap move`, { snapped: r.snapped, dot: !!fpSnap.indicator }); } catch (e) {} }
         };
         fpSnap.onKey = (ev) => { if (fpSnap.armed && !ev.ctrlKey) fpSnapClearIndicator(); }; // CTRL released → hide dot
+        // DIAGNOSTIC PROBE: log the native event sequence when CTRL is held, so we can
+        // see which event Percepto's draw tool actually uses to place a vertex. Passive
+        // (never cancels). Remove once the snap path is confirmed.
+        fpSnap.onProbe = (ev) => {
+            if (!fpSnap.armed || !ev.ctrlKey || fpSnap.reentrant) return;
+            try { console.log(`${GEN_TAG} CTRL-snap PROBE ${ev.type}`, { button: ev.button, detail: ev.detail, target: ev.target && ev.target.tagName, cls: (ev.target && ev.target.getAttribute && ev.target.getAttribute('class')) || '' }); } catch (e) {}
+        };
         fpSnap.container.addEventListener('click', fpSnap.onClick, true);
         fpSnap.container.addEventListener('mousemove', fpSnap.onMove, true);
+        ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick'].forEach(t => { try { fpSnap.container.addEventListener(t, fpSnap.onProbe, true); } catch (e) {} });
         window.addEventListener('keyup', fpSnap.onKey, true);
     }
     function unwireFpSnap() {
@@ -7707,9 +7720,10 @@
         if (c) {
             if (fpSnap.onClick) try { c.removeEventListener('click', fpSnap.onClick, true); } catch (e) {}
             if (fpSnap.onMove) try { c.removeEventListener('mousemove', fpSnap.onMove, true); } catch (e) {}
+            if (fpSnap.onProbe) try { ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick'].forEach(t => c.removeEventListener(t, fpSnap.onProbe, true)); } catch (e) {}
         }
         if (fpSnap.onKey) try { window.removeEventListener('keyup', fpSnap.onKey, true); } catch (e) {}
-        fpSnap.onClick = fpSnap.onMove = fpSnap.onKey = null;
+        fpSnap.onClick = fpSnap.onMove = fpSnap.onKey = fpSnap.onProbe = null;
     }
 
     // ---- shared FFZ preview styling ----
