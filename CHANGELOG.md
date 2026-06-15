@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: FP→FFZ angle reworked (vertex connection vs long axis) — Asset Inspector v4.57 (latest, dev-only)
+
+The FP→FFZ angle check now matches how FPs actually connect — at an FFZ **corner (vertex)**, not crossing an edge mid-span. It measures the angle between the connecting FP segment and the FFZ's **long axis** and flags anything **< 15°** (ideal 45°): an FP grazing in nearly parallel to the long edge is "too sharp". Deduped per connection point, drawn at the vertex.
+
 ## 2026-06-14 — SOP Validators: FP→FFZ crossing angle — Asset Inspector v4.56 (latest, dev-only)
 
 New check: where an FP segment crosses an FFZ boundary, the angle between the segment and that edge must be **≥ 15°** (editable; ideal 45°). A near-parallel / grazing crossing is "too sharp" and gets flagged at the entry point, naming the segment, the FFZ and the measured angle. Own enable + threshold in the SOP Validators panel.
