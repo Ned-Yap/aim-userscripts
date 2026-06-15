@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.19
-// @description  Edit Percepto flight paths from the map while natively editing one: (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). No button, no mode. SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.20
+// @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -56,6 +56,30 @@
     const POPUP_ITEM_CLASS = 'flight-path-vertex-popup__menu-item';
     const OPEN_ITEM_CLASS = 'aim-fpe-open-path';                 // our injected "OPEN PATH" item
     const UNSNAP_OFFSET_PX = 50;  // how far (screen px) the freed vertex lands off the junction
+
+    // ---- smart-altitude (terrain-following auto band + auto-step) ----
+    // As you draw an under-vertexed path, on each drop/snap we sample the ground under
+    // the new segment(s), set each segment's band to ground+floor / +band, and — if the
+    // ground varies more than maxVar across a segment — insert step vertices (greedy,
+    // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
+    // keeps connected segments overlapping by the 2 m the server demands. See the smart
+    // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
+    const SCRIPT_VERSION = '0.20';
+    const SMART_SAMPLE_SPACING_FT = 50;   // dense terrain sampling along a segment (for split detection)
+    const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
+    const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
+    const FT_TO_M = 1 / 3.28084;
+    const SETTINGS_KEY = 'aim_fpe_smart_settings';
+    const DEF_SETTINGS = { master: true, autoDraw: true, floorFt: 100, bandFt: 30, maxVarFt: 30, overlapM: 2 };
+    let settings = { ...DEF_SETTINGS };
+    function loadSettings() {
+        try { if (typeof GM_getValue === 'function') { const raw = GM_getValue(SETTINGS_KEY, null); if (raw) settings = { ...DEF_SETTINGS, ...JSON.parse(raw) }; } }
+        catch (e) { warn('loadSettings failed — using defaults', e); }
+    }
+    function saveSettings() {
+        try { if (typeof GM_setValue === 'function') GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); }
+        catch (e) { warn('saveSettings failed', e); }
+    }
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
     const warn = (...a) => { try { (unsafeWindow.console || console).warn(TAG, ...a); } catch (e) {} };
@@ -212,9 +236,17 @@
     const VERTEX_SEL = '.map-marker__flight-path-vertex';
     const DRAG_PX = 5;          // movement past this between mousedown and the click = a drag, not a click
     let lastDown = { x: 0, y: 0, onVertex: false };
+    let mouseDown = false;       // true between mousedown and mouseup — used to defer the smart pass until a drop
     function editingFP() { return !!document.querySelector(ARC_BADGE_SEL) || findFpWorkingCopies().length > 0; }
     function onDownTrack(e) {
+        mouseDown = true;
         lastDown = { x: e.clientX, y: e.clientY, onVertex: !!(e.target && e.target.closest && e.target.closest(VERTEX_SEL)) };
+    }
+    // On drop/snap (mouseup) while editing a flight path, re-check for new segments and
+    // smart-fill them. Debounced so a drag fires the pass once, after the geometry settles.
+    function onUpTrack() {
+        mouseDown = false;
+        if (editingFP()) scheduleSmartPass();
     }
     let blockedCount = 0;       // exposed on unsafeWindow.__aim_fpe_blocked
     function debugOn() { try { return !!unsafeWindow.__aim_fpe_debug; } catch (e) { return false; } }
@@ -238,6 +270,9 @@
         document.addEventListener('mousedown', onDownTrack, true);
         document.addEventListener('pointerdown', onDownTrack, true);
         document.addEventListener('click', onClickGuard, true);
+        // smart-altitude trigger: re-evaluate on every drop/snap
+        document.addEventListener('mouseup', onUpTrack, true);
+        document.addEventListener('pointerup', onUpTrack, true);
     }
 
     // Subtle cue that segment numbers are click-to-split while editing (CSS only).
@@ -604,6 +639,304 @@
         log('OPEN PATH ready — popupopen hook attached');
     }
 
+    // ==================================================================
+    // SMART ALTITUDE — terrain-following auto band + greedy auto-step.
+    //   For each target segment: dense-sample the ground under it, then
+    //   greedily cut it into the FEWEST sub-segments whose ground varies
+    //   ≤ maxVar. Each sub-segment's band = groundMax+floor / +band, with
+    //   emergency = min (matches Percepto's native default). Then bridge
+    //   connected arcs so they overlap by the 2 m the server requires.
+    //   Two modes: AUTO (new segments as you draw) + PREVIEW (whole path).
+    // ==================================================================
+    const rk = (p) => (p && num(p.lat)) ? p.lat.toFixed(6) + ',' + p.lng.toFixed(6) : '?';
+    const arcSig = (a) => [rk(a.point_a), rk(a.point_b)].sort().join('~'); // undirected — survives direction flips
+    const procState = new Map();  // fpId -> { count, sigs:Set } — what we've already smart-processed
+
+    // ---- DEM ground elevation (Percepto's own endpoint; cached + in-flight deduped) ----
+    const elevCache = new Map(), elevInflight = new Map();
+    const ekey = (lat, lng) => lat.toFixed(5) + ',' + lng.toFixed(5);
+    function fetchElevation(lat, lng) {
+        const k = ekey(lat, lng);
+        if (elevCache.has(k)) return Promise.resolve(elevCache.get(k));
+        if (elevInflight.has(k)) return elevInflight.get(k);
+        const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
+        const p = fetch(url, { credentials: 'include' })
+            .then(r => r.json())
+            .then(j => { const m = (j && typeof j.altitude === 'number') ? j.altitude : null; if (m != null) elevCache.set(k, m); elevInflight.delete(k); return m; })
+            .catch(e => { elevInflight.delete(k); warn('elevation fetch failed', e); return null; });
+        elevInflight.set(k, p);
+        return p;
+    }
+    async function mapLimit(items, limit, fn) {
+        const out = new Array(items.length); let idx = 0;
+        const worker = async () => { while (idx < items.length) { const i = idx++; out[i] = await fn(items[i], i); } };
+        await Promise.all(Array.from({ length: Math.min(limit, items.length || 1) }, worker));
+        return out;
+    }
+
+    // ---- band from a sub-segment's highest ground (integer meters; server floors anyway) ----
+    function bandForGroundMax(gmaxM) {
+        const minM = Math.round(gmaxM + settings.floorFt * FT_TO_M);
+        const maxM = Math.max(minM + 1, Math.round(gmaxM + (settings.floorFt + settings.bandFt) * FT_TO_M));
+        return { min_alt: minM, max_alt: maxM, min_emergency_alt: minM };
+    }
+
+    // ---- continuity bridge: connected arcs must overlap with positive width ----
+    // (ported from Asset Inspector's bridgeArcContinuity) — raises ONLY the lower
+    // neighbour's ceiling so every floor keeps its true AGL; the band just fattens
+    // at a terrain step (up to ~36.6 ft when floors differ by the full band width).
+    function bridgeArcContinuity(arcs, overlapM) {
+        if (!Array.isArray(arcs) || arcs.length < 2) return [];
+        const OVERLAP_M = (typeof overlapM === 'number' && overlapM > 0) ? overlapM : 2;
+        const vkey = (p) => (p && num(p.lat)) ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : null;
+        const origMax = arcs.map(a => (a && num(a.max_alt)) ? a.max_alt : null);
+        const byVertex = new Map();
+        arcs.forEach((a, i) => { if (!a) return; [vkey(a.point_a), vkey(a.point_b)].forEach(kk => { if (!kk) return; if (!byVertex.has(kk)) byVertex.set(kk, []); byVertex.get(kk).push(i); }); });
+        const edges = new Set();
+        for (const idxs of byVertex.values()) for (let x = 0; x < idxs.length; x++) for (let y = x + 1; y < idxs.length; y++) edges.add(Math.min(idxs[x], idxs[y]) + ':' + Math.max(idxs[x], idxs[y]));
+        const edgeList = [...edges].map(s => s.split(':').map(Number));
+        for (let pass = 0; pass < 8; pass++) {
+            let changed = false;
+            for (const [i, j] of edgeList) {
+                const A = arcs[i], B = arcs[j];
+                if (!A || !B || !num(A.min_alt) || !num(A.max_alt) || !num(B.min_alt) || !num(B.max_alt)) continue;
+                if (A.max_alt > B.min_alt && B.max_alt > A.min_alt) continue; // already strictly overlap
+                if (A.max_alt <= B.min_alt) { A.max_alt = B.min_alt + OVERLAP_M; changed = true; }
+                else { B.max_alt = A.min_alt + OVERLAP_M; changed = true; }
+            }
+            if (!changed) break;
+        }
+        const bridges = [];
+        arcs.forEach((a, i) => { if (origMax[i] != null && a && num(a.max_alt) && a.max_alt > origMax[i] + 0.01) bridges.push({ seg: i + 1, fromM: origMax[i], toM: a.max_alt }); });
+        return bridges;
+    }
+
+    // ---- plan one segment: returns its replacement sub-arcs (≥1; >1 means steps added) ----
+    async function planArc(arc) {
+        const A = arc.point_a, B = arc.point_b;
+        if (!finitePt(A) || !finitePt(B)) return null;
+        const distM = hav(A, B) || 0;
+        const n = Math.max(3, Math.min(SMART_MAX_SAMPLES, Math.ceil(distM / (SMART_SAMPLE_SPACING_FT * FT_TO_M)) + 1));
+        const pts = [];
+        for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t, t }); }
+        const elevs = await mapLimit(pts, 8, p => fetchElevation(p.lat, p.lng));
+        const valid = pts.map((p, i) => ({ t: p.t, e: elevs[i] })).filter(x => typeof x.e === 'number');
+        if (valid.length < 2) { warn('planArc: no elevation data for a segment — left unchanged'); return null; }
+        // greedy partition by ground range ≤ maxVar, never below SMART_MIN_STEP_FT
+        const maxVarM = settings.maxVarFt * FT_TO_M, minStepM = SMART_MIN_STEP_FT * FT_TO_M;
+        const subs = []; let s = 0, cmin = valid[0].e, cmax = valid[0].e;
+        for (let i = 1; i < valid.length; i++) {
+            const nmin = Math.min(cmin, valid[i].e), nmax = Math.max(cmax, valid[i].e);
+            const lenFromS = distM * (valid[i - 1].t - valid[s].t);
+            if ((nmax - nmin) > maxVarM && lenFromS >= minStepM && (i - 1) > s) {
+                subs.push({ i0: s, i1: i - 1 }); s = i - 1; cmin = Math.min(valid[i - 1].e, valid[i].e); cmax = Math.max(valid[i - 1].e, valid[i].e);
+            } else { cmin = nmin; cmax = nmax; }
+        }
+        subs.push({ i0: s, i1: valid.length - 1 });
+        const lerp = (t) => ({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t });
+        const verts = [clone(A)];
+        for (let k = 0; k < subs.length - 1; k++) verts.push(lerp(valid[subs[k].i1].t));
+        verts.push(clone(B));
+        const subArcs = [];
+        for (let k = 0; k < subs.length; k++) {
+            let g = -Infinity; for (let j = subs[k].i0; j <= subs[k].i1; j++) g = Math.max(g, valid[j].e);
+            const band = bandForGroundMax(g);
+            subArcs.push({ ...arc, point_a: clone(verts[k]), point_b: clone(verts[k + 1]), distance: hav(verts[k], verts[k + 1]),
+                min_alt: band.min_alt, max_alt: band.max_alt, min_emergency_alt: band.min_emergency_alt,
+                id: k === 0 ? arc.id : ((arc.id || 0) * 1000 + k) });
+        }
+        return subArcs;
+    }
+
+    // ---- build a full plan for a path from a set of target arc signatures ----
+    async function computePlan(fpId, targetSigs) {
+        const wc0 = findFpWorkingCopies().find(w => w.id === fpId);
+        if (!wc0) return null;
+        const targets = (wc0.state.arcs || []).filter(a => targetSigs.has(arcSig(a)));
+        if (!targets.length) return null;
+        const planned = [];
+        for (const a of targets) { const sub = await planArc(a); if (sub && sub.length) planned.push({ sig: arcSig(a), subArcs: sub }); }
+        if (!planned.length) return null;
+        const wc = findFpWorkingCopies().find(w => w.id === fpId);
+        if (!wc || !wc.dispatch) return null;
+        const st = wc.state;
+        const repl = new Map(planned.map(x => [x.sig, x.subArcs]));
+        const origArcs = clone(st.arcs), origCoords = clone(st.coords || []);
+        const newArcs = []; let newCoords = clone(st.coords || []); const interiorPts = [];
+        st.arcs.forEach(a => {
+            const r = repl.get(arcSig(a));
+            if (r) {
+                newArcs.push(...r.map(clone));
+                const interior = r.slice(0, -1).map(sa => clone(sa.point_b)); // the new step vertices
+                if (interior.length) {
+                    const ai = newCoords.findIndex(c => ptEq(c, a.point_a));
+                    const at = ai >= 0 ? ai + 1 : newCoords.length;
+                    newCoords.splice(at, 0, ...interior.map(clone));
+                    interiorPts.push(...interior);
+                }
+            } else newArcs.push(a);
+        });
+        const bridges = bridgeArcContinuity(newArcs, settings.overlapM);
+        // SAFETY GATE — the result must introduce no NEW integrity problem vs before.
+        const preIssues = checkFlightPath(st);
+        const post = checkFlightPath({ arcs: newArcs, coords: newCoords });
+        const fresh = post.filter(p => !preIssues.includes(p));
+        if (fresh.length) return { error: fresh[0] };
+        return { fpId, name: st.name, origArcs, origCoords, newArcs, newCoords, interiorPts, addedVerts: interiorPts.length, bridges: bridges.length, targets: planned.length, preIssues };
+    }
+
+    // ---- commit a plan into the working copy (same write path as the splitter) ----
+    function commitPlan(plan, opts) {
+        const auto = !!(opts && opts.auto);
+        const wc = findFpWorkingCopies().find(w => w.id === plan.fpId);
+        if (!wc || !wc.dispatch) { toast('Open the flight path editor to apply.', '#ff8a80'); return false; }
+        // staleness guard: the path must not have changed since we planned it
+        const curSigs = new Set((wc.state.arcs || []).map(arcSig));
+        const origSigs = new Set(plan.origArcs.map(arcSig));
+        if (curSigs.size !== origSigs.size || [...origSigs].some(s => !curSigs.has(s))) {
+            toast('Path changed while analyzing — re-run smart-fill.', '#ffb14e'); return false;
+        }
+        undoStack.push({ id: plan.fpId, name: plan.name, kind: 'smart', arcs: plan.origArcs, coords: plan.origCoords });
+        wc.dispatch({ ...wc.state, arcs: plan.newArcs, coords: plan.newCoords });
+        state.inserts++;
+        procState.set(plan.fpId, { count: plan.newArcs.length, sigs: new Set(plan.newArcs.map(arcSig)) });
+        log(`smart altitude on "${plan.name}": ${plan.targets} segment(s) → +${plan.addedVerts} step(s), ${plan.newArcs.length} arcs, ${plan.bridges} seam bridge(s) (validated · live working copy)`);
+        renderPanel();
+        toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft). ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
+        verifyEdit(plan.fpId, plan.preIssues, plan.newArcs.length, 'Smart altitude');
+        return true;
+    }
+
+    // ---- AUTO mode: smart-fill segments added since we last looked (debounced on drop) ----
+    let smartTimer = null, autoBusy = false;
+    function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, 320); }
+    async function smartAutoPass() {
+        if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || pendingPreview) return;
+        const wcs = findFpWorkingCopies();
+        for (const wc of wcs) {
+            const arcs = wc.state.arcs || [];
+            let ps = procState.get(wc.id);
+            if (!ps) {
+                // First time we've seen this path. Opened with ≥2 segments ⇒ an EXISTING
+                // path — baseline it so we never auto-touch what was already there (use the
+                // ⛰ Smart-fill button to re-do an existing path on purpose). ≤1 segment ⇒
+                // it's being freshly drawn now — fall through and smart-fill from the start.
+                if (arcs.length > 1) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; }
+                ps = { count: 0, sigs: new Set() }; procState.set(wc.id, ps);
+            }
+            if (arcs.length <= ps.count) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; } // drag/merge (no growth) — resync, don't auto-reband
+            const newSigs = new Set(arcs.filter(a => !ps.sigs.has(arcSig(a))).map(arcSig));
+            if (!newSigs.size) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; }
+            autoBusy = true;
+            try {
+                const plan = await computePlan(wc.id, newSigs);
+                if (plan && !plan.error) commitPlan(plan, { auto: true });
+                else { if (plan && plan.error) warn('auto smart-fill skipped (would break path):', plan.error); procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); }
+            } finally { autoBusy = false; }
+            break; // one path per pass — the next drop re-checks
+        }
+    }
+
+    // ---- PREVIEW mode: analyze the whole open path, show proposed steps, await confirm ----
+    let pendingPreview = null;  // { layer, panel }
+    function clearPreview() {
+        if (!pendingPreview) return;
+        try { if (pendingPreview.layer) getLeafletMap().removeLayer(pendingPreview.layer); } catch (e) {}
+        try { if (pendingPreview.panel) pendingPreview.panel.remove(); } catch (e) {}
+        pendingPreview = null;
+    }
+    async function previewFill() {
+        if (!settings.master) { toast('Smart altitude is off (enable it in the Control Panel).', '#ffb14e'); return; }
+        clearPreview();
+        const wcs = findFpWorkingCopies();
+        if (!wcs.length) { toast('Open a flight path editor first.', '#ffb14e'); return; }
+        const wc = wcs[0];
+        const sigs = new Set((wc.state.arcs || []).map(arcSig));
+        toast('⛰ Analyzing terrain under the path…', '#7fdfff');
+        const plan = await computePlan(wc.id, sigs);
+        if (!plan) { toast('Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
+        if (plan.error) { toast(`⛰ Smart-fill blocked: ${plan.error}. Path untouched.`, '#ff8a80'); return; }
+        showPreview(plan);
+    }
+    function showPreview(plan) {
+        const map = getLeafletMap();
+        const L = unsafeWindow.L;
+        const layer = (map && L) ? L.layerGroup().addTo(map) : null;
+        if (layer) plan.interiorPts.forEach(p => {
+            try { L.circleMarker(L_ll(p), { radius: 6, color: '#7fdfff', weight: 2, fillColor: '#7fdfff', fillOpacity: 0.55 }).addTo(layer); } catch (e) {}
+        });
+        const panel = document.createElement('div');
+        panel.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2228;color:#e6e6e6;border:1px solid #7fdfff88;border-radius:8px;padding:14px 18px;font:13px -apple-system,sans-serif;z-index:100003;box-shadow:0 6px 22px rgba(0,0,0,0.7);max-width:84vw;text-align:center';
+        panel.innerHTML = `<div style="font-weight:600;color:#7fdfff;margin-bottom:6px">⛰ Smart-fill "${plan.name}"</div>` +
+            `<div style="margin-bottom:10px">+<b>${plan.addedVerts}</b> step(s) across <b>${plan.targets}</b> segment(s)` +
+            (plan.bridges ? ` · ${plan.bridges} seam bridge(s)` : '') +
+            `<br><span style="opacity:.75">bands = ground +${settings.floorFt} / +${settings.floorFt + settings.bandFt} ft · steps where ground varies >${settings.maxVarFt} ft</span></div>`;
+        const mkBtn = (txt, bg, fn) => { const b = document.createElement('button'); b.textContent = txt; b.style.cssText = `margin:0 6px;padding:6px 16px;border:none;border-radius:5px;font:13px -apple-system;font-weight:600;cursor:pointer;background:${bg};color:#11151a`; b.addEventListener('click', fn); return b; };
+        panel.appendChild(mkBtn('Apply', '#5fff5f', () => { const pl = plan; clearPreview(); commitPlan(pl, { auto: false }); }));
+        panel.appendChild(mkBtn('Cancel', '#888', () => clearPreview()));
+        document.body.appendChild(panel);
+        pendingPreview = { layer, panel };
+    }
+
+    // ---- a floating "Smart-fill" button while editing (works without the Control Panel) ----
+    function ensureSmartUI() {
+        let b = document.getElementById('aim-fpe-smart-btn');
+        if (!settings.master || !editingFP()) { if (b) b.remove(); return; }
+        if (!b) {
+            b = document.createElement('div');
+            b.id = 'aim-fpe-smart-btn';
+            b.textContent = '⛰ Smart-fill path';
+            b.title = 'Sample terrain under this path, add steps where the ground varies, and set every segment’s band (preview first)';
+            b.style.cssText = 'position:fixed;bottom:64px;right:18px;background:#1f2228;border:1px solid rgba(127,223,255,0.6);border-radius:6px;padding:8px 12px;color:#7fdfff;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);cursor:pointer;user-select:none';
+            ['mousedown', 'click'].forEach(t => b.addEventListener(t, e => e.stopPropagation()));
+            b.addEventListener('click', (e) => { e.preventDefault(); previewFill().catch(err => warn('previewFill threw', err)); });
+            document.body.appendChild(b);
+        }
+    }
+
+    // ---- Control Panel integration (config lives here; matches the AIM house pattern) ----
+    const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
+    const SCRIPT_ID = 'aim-flight-path-editor';
+    let controlChannel = null;
+    function registerWithControlPanel() {
+        if (!controlChannel) return;
+        try {
+            controlChannel.postMessage({
+                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Flight Path Editor', version: SCRIPT_VERSION, group: 'Hotkeys', priority: 60,
+                toggles: [
+                    { id: 'master', label: 'Smart altitude', type: 'boolean', default: settings.master, master: true },
+                    { id: 'autoDraw', label: 'Auto-set bands as you draw', type: 'boolean', default: settings.autoDraw },
+                    { id: 'floorFt', label: 'AGL floor (ft)', type: 'number', default: settings.floorFt },
+                    { id: 'bandFt', label: 'Band width (ft)', type: 'number', default: settings.bandFt },
+                    { id: 'maxVarFt', label: 'Max step variation (ft)', type: 'number', default: settings.maxVarFt },
+                    { id: 'fillPath', label: '⛰ Smart-fill open path (preview)', type: 'button' },
+                ],
+                hotkeys: [],
+            });
+        } catch (e) { warn('registerWithControlPanel failed', e); }
+    }
+    function setupControlPanel() {
+        try { controlChannel = new BroadcastChannel(CONTROL_CHANNEL_NAME); }
+        catch (e) { warn('Control Panel channel unavailable — floating button still works', e); return; }
+        controlChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'REQUEST_REGISTRATIONS') { registerWithControlPanel(); return; }
+            if (m.scriptId !== SCRIPT_ID) return;
+            if (m.type === 'SET_TOGGLE') {
+                const v = (m.value !== undefined ? m.value : m.enabled);
+                let changed = false;
+                if (m.toggleId === 'master') { const nv = !!v; if (nv !== settings.master) { settings.master = nv; changed = true; } }
+                else if (m.toggleId === 'autoDraw') { const nv = !!v; if (nv !== settings.autoDraw) { settings.autoDraw = nv; changed = true; } }
+                else if (m.toggleId === 'floorFt') { const nv = Number(v) || DEF_SETTINGS.floorFt; if (nv !== settings.floorFt) { settings.floorFt = nv; changed = true; } }
+                else if (m.toggleId === 'bandFt') { const nv = Number(v) || DEF_SETTINGS.bandFt; if (nv !== settings.bandFt) { settings.bandFt = nv; changed = true; } }
+                else if (m.toggleId === 'maxVarFt') { const nv = Number(v) || DEF_SETTINGS.maxVarFt; if (nv !== settings.maxVarFt) { settings.maxVarFt = nv; changed = true; } }
+                if (changed) { saveSettings(); ensureSmartUI(); }
+            } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'fillPath') {
+                previewFill().catch(e => warn('previewFill threw', e));
+            }
+        };
+    }
+
     // ---- UI ----
     function toast(msg, color) {
         try {
@@ -635,10 +968,14 @@
     }
 
     // ---- boot ----
+    loadSettings();
     patchLeafletMap();
     ensureStyle();
     installBadgeListeners();
+    setupControlPanel();
+    registerWithControlPanel();
+    setInterval(ensureSmartUI, 1500);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log('v0.19 ready (iframe) — split (click a segment number) + OPEN PATH (vertex popup, un-close a loop; toast reminds to SAVE+refresh before editing again) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug');
+    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
 })();
