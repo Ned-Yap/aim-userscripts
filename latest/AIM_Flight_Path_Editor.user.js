@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.21
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.21';
     const SMART_SAMPLE_SPACING_FT = 50;   // dense terrain sampling along a segment (for split detection)
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -652,26 +652,53 @@
     const arcSig = (a) => [rk(a.point_a), rk(a.point_b)].sort().join('~'); // undirected — survives direction flips
     const procState = new Map();  // fpId -> { count, sigs:Set } — what we've already smart-processed
 
-    // ---- DEM ground elevation (Percepto's own endpoint; cached + in-flight deduped) ----
+    // ---- DEM ground elevation (Percepto's own endpoint; cached, deduped, THROTTLED) ----
+    // The endpoint rate-limits (HTTP 429) — and it's shared with the Asset Inspector /
+    // Map Styler, which fetch site DEM too. So we cap real concurrency low and back off
+    // exponentially on 429/error instead of hammering. A 429 body is NOT JSON, so we
+    // must check res.ok BEFORE parsing (a blind r.json() throws on the rate-limit text).
     const elevCache = new Map(), elevInflight = new Map();
     const ekey = (lat, lng) => lat.toFixed(5) + ',' + lng.toFixed(5);
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const ELEV_MAX_CONCURRENT = 3;     // be a polite neighbour to the other AIM scripts
+    const ELEV_MAX_RETRIES = 5;        // exponential backoff: ~0.6/1.2/2.4/4.8/9.6 s + jitter
+    let elevActive = 0; const elevQueue = [];
+    let elevRateLimited = false;       // surfaced to the user when we give up after backoff
+    function elevPump() {
+        while (elevActive < ELEV_MAX_CONCURRENT && elevQueue.length) {
+            const job = elevQueue.shift(); elevActive++;
+            job().finally(() => { elevActive--; elevPump(); });
+        }
+    }
+    async function rawFetchElev(lat, lng, attempt) {
+        const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
+        try {
+            const res = await fetch(url, { credentials: 'include' });
+            if (res.status === 429 || !res.ok) {
+                if (attempt < ELEV_MAX_RETRIES) { await sleep(600 * Math.pow(2, attempt) + Math.random() * 300); return rawFetchElev(lat, lng, attempt + 1); }
+                elevRateLimited = true; warn(`elevation ${res.status} after ${attempt + 1} tries — giving up on this point`); return null;
+            }
+            const j = await res.json().catch(() => null);
+            return (j && typeof j.altitude === 'number') ? j.altitude : null;
+        } catch (e) {
+            if (attempt < ELEV_MAX_RETRIES) { await sleep(600 * Math.pow(2, attempt) + Math.random() * 300); return rawFetchElev(lat, lng, attempt + 1); }
+            warn('elevation fetch failed', e); return null;
+        }
+    }
     function fetchElevation(lat, lng) {
         const k = ekey(lat, lng);
         if (elevCache.has(k)) return Promise.resolve(elevCache.get(k));
         if (elevInflight.has(k)) return elevInflight.get(k);
-        const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
-        const p = fetch(url, { credentials: 'include' })
-            .then(r => r.json())
-            .then(j => { const m = (j && typeof j.altitude === 'number') ? j.altitude : null; if (m != null) elevCache.set(k, m); elevInflight.delete(k); return m; })
-            .catch(e => { elevInflight.delete(k); warn('elevation fetch failed', e); return null; });
+        const p = new Promise((resolve) => {
+            elevQueue.push(() => rawFetchElev(lat, lng, 0).then(m => { if (m != null) elevCache.set(k, m); elevInflight.delete(k); resolve(m); }));
+            elevPump();
+        });
         elevInflight.set(k, p);
         return p;
     }
     async function mapLimit(items, limit, fn) {
-        const out = new Array(items.length); let idx = 0;
-        const worker = async () => { while (idx < items.length) { const i = idx++; out[i] = await fn(items[i], i); } };
-        await Promise.all(Array.from({ length: Math.min(limit, items.length || 1) }, worker));
-        return out;
+        // The global elev queue is the real throttle; this just maps in order.
+        return Promise.all(items.map((it, i) => fn(it, i)));
     }
 
     // ---- band from a sub-segment's highest ground (integer meters; server floors anyway) ----
@@ -812,6 +839,7 @@
     function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, 320); }
     async function smartAutoPass() {
         if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || pendingPreview) return;
+        elevRateLimited = false;
         const wcs = findFpWorkingCopies();
         for (const wc of wcs) {
             const arcs = wc.state.arcs || [];
@@ -824,15 +852,18 @@
                 if (arcs.length > 1) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; }
                 ps = { count: 0, sigs: new Set() }; procState.set(wc.id, ps);
             }
-            if (arcs.length <= ps.count) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; } // drag/merge (no growth) — resync, don't auto-reband
-            const newSigs = new Set(arcs.filter(a => !ps.sigs.has(arcSig(a))).map(arcSig));
-            if (!newSigs.size) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; }
+            // Candidates = any arc we haven't smart-processed at its CURRENT geometry. That
+            // covers a freshly-drawn segment (new sig) AND a segment just moved by a drag/
+            // snap drop (its endpoints changed → new sig). Drops are exactly when we recalc.
+            const candidates = new Set(arcs.filter(a => !ps.sigs.has(arcSig(a))).map(arcSig));
+            if (!candidates.size) { procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); continue; }
             autoBusy = true;
             try {
-                const plan = await computePlan(wc.id, newSigs);
+                const plan = await computePlan(wc.id, candidates);
                 if (plan && !plan.error) commitPlan(plan, { auto: true });
                 else { if (plan && plan.error) warn('auto smart-fill skipped (would break path):', plan.error); procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); }
             } finally { autoBusy = false; }
+            if (elevRateLimited) toast('⛰ Elevation service is rate-limiting — some segments may be unfilled. Try ⛰ Smart-fill again in a moment.', '#ffb14e');
             break; // one path per pass — the next drop re-checks
         }
     }
@@ -852,9 +883,10 @@
         if (!wcs.length) { toast('Open a flight path editor first.', '#ffb14e'); return; }
         const wc = wcs[0];
         const sigs = new Set((wc.state.arcs || []).map(arcSig));
+        elevRateLimited = false;
         toast('⛰ Analyzing terrain under the path…', '#7fdfff');
         const plan = await computePlan(wc.id, sigs);
-        if (!plan) { toast('Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
+        if (!plan) { toast(elevRateLimited ? '⛰ Elevation service is rate-limiting — wait a few seconds and try ⛰ Smart-fill again.' : 'Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
         if (plan.error) { toast(`⛰ Smart-fill blocked: ${plan.error}. Path untouched.`, '#ff8a80'); return; }
         showPreview(plan);
     }
