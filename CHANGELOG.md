@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: Tower GM standoff — Asset Inspector v4.55 (latest, dev-only)
+
+New check: general markers of type **"tower"** must stay **≥ 60 ft** (editable) from every FFZ edge and every flight-path segment. Flags any tower closer than that, naming the offending FFZ and/or FP with the measured distance. Own enable + threshold in the SOP Validators panel.
+
 ## 2026-06-14 — SOP Validators: flag on the displayed value — Asset Inspector v4.54 (latest, dev-only)
 
 A floor of 89.6 ft AGL was flagged but rendered "90 ft AGL (min 90 ft)" — the rounded note disagreed with the raw comparison, so a finding could look compliant. Now every threshold check flags on the **same rounded number it shows**: "90 (min 90)" never flags, only "89 (min 90)" or lower. Applied to AGL floor, FFZ→Asset, FP→Asset, FFZ↔FFZ, NFZ size/proximity and band height. (FP alt-overlap now shows 1 decimal since its 6.56 ft threshold is sub-foot.)
