@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.66
+// @version      4.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.66';
+    const SCRIPT_VERSION = '4.67';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -297,7 +297,8 @@
     // Same pattern as MBT v0.40+; see feedback-percepto-location-
     // altitude-endpoint memory for the discovery story.
     // ============================================================
-    const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
+    const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // LEGACY global blob (v4.66 and earlier) — now READ-ONLY fallback, migrated per-site on access
+    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${siteID}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files)
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
@@ -306,7 +307,9 @@
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
     const ELEV_CONCURRENCY = 4;
-    let elevationCache = null;
+    let elevationCache = null;      // per-site cache for elevCacheSiteID
+    let elevCacheSiteID = null;     // which site elevationCache holds
+    let legacyElevCache = null;     // lazy-loaded old global blob — READ-ONLY fallback
     let elevQueue = [];
     let elevActive = 0;
     const elevInFlight = {};
@@ -336,14 +339,32 @@
             console.warn(`${TAG} ⚠ GM_setValue not available — check @grant directives. Persistence is BROKEN until fixed.`);
         }
     }
+    // PER-SITE cache (v4.67): load only the current site's points, not one
+    // global blob of every site ever. Swaps when the site changes (flushing the
+    // previous site first). The old global blob is kept as a read-only fallback
+    // (loadLegacyElevCache) so nothing already cached is lost — points are
+    // migrated into the per-site cache on first access.
     function loadElevationCache() {
-        if (elevationCache) return elevationCache;
-        try { elevationCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        const sid = getCurrentSiteID() || elevCacheSiteID || '_nosite_';
+        if (elevationCache && elevCacheSiteID === sid) return elevationCache;
+        if (elevationCache && elevCacheSiteID && elevCacheSiteID !== sid) flushElevationCache(); // persist the site we're leaving
+        elevCacheSiteID = sid;
+        try { elevationCache = elevGmGet(elevSiteKey(sid), {}) || {}; }
         catch (e) { elevationCache = {}; }
         const n = Object.keys(elevationCache).length;
-        const sizeKb = Math.round(JSON.stringify(elevationCache).length / 1024);
-        console.log(`${TAG} DEM elevation cache loaded: ${n.toLocaleString()} points (${sizeKb} KB)${n === 0 ? ' — empty (first run / cleared / Tampermonkey storage evicted)' : ''}`);
+        console.log(`${TAG} DEM cache for site ${sid}: ${n.toLocaleString()} points (per-site)${n === 0 ? ' — empty; will fill from shared cache / legacy / fetch' : ''}`);
         return elevationCache;
+    }
+    // Old global blob — loaded once, lazily, only when a per-site lookup misses.
+    // Read-only: we never write it, so the write-amplification is gone. Its points
+    // get copied into the per-site cache as they're touched (self-migrating).
+    function loadLegacyElevCache() {
+        if (legacyElevCache) return legacyElevCache;
+        try { legacyElevCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        catch (e) { legacyElevCache = {}; }
+        const n = Object.keys(legacyElevCache).length;
+        if (n) console.log(`${TAG} legacy global DEM cache available as read-only fallback: ${n.toLocaleString()} points (migrating per-site on access; run __aimAIElevPurgeLegacy() once per-site is warm to reclaim ~${Math.round(JSON.stringify(legacyElevCache).length / 1024)} KB)`);
+        return legacyElevCache;
     }
     // Cache write strategy (v3.37):
     //   - CHECKPOINT every ELEV_SAVE_BATCH new entries (50).
@@ -360,42 +381,51 @@
     let elevDirtyCount = 0;
     let elevSaveTimer = null;
     function saveElevationCache() {
-        if (!elevationCache) return;
+        if (!elevationCache || !elevCacheSiteID || elevCacheSiteID === '_nosite_') return;
+        const key = elevSiteKey(elevCacheSiteID);
         elevDirtyCount++;
         if (elevDirtyCount >= ELEV_SAVE_BATCH) {
             if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
             const totalCount = Object.keys(elevationCache).length;
             elevDirtyCount = 0;
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            try { elevGmSet(key, elevationCache); }
             catch (e) { console.warn(`${TAG} elevation cache write failed:`, e); }
-            console.log(`${TAG} DEM cache checkpoint: ${totalCount.toLocaleString()} total entries persisted`);
+            console.log(`${TAG} DEM cache checkpoint (site ${elevCacheSiteID}): ${totalCount.toLocaleString()} points persisted`);
             return;
         }
         if (elevSaveTimer) clearTimeout(elevSaveTimer);
         elevSaveTimer = setTimeout(() => {
             elevSaveTimer = null;
             elevDirtyCount = 0;
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            try { elevGmSet(key, elevationCache); }
             catch (e) { console.warn(`${TAG} elevation cache trailing-write failed:`, e); }
         }, 1000);
     }
     function flushElevationCache() {
         if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
-        if (!elevationCache) return;
+        if (!elevationCache || !elevCacheSiteID || elevCacheSiteID === '_nosite_') return;
         elevDirtyCount = 0;
-        try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+        try { elevGmSet(elevSiteKey(elevCacheSiteID), elevationCache); }
         catch (e) {}
     }
     function elevCacheKey(lat, lng) {
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
     }
     function getElevationFromCache(lat, lng) {
-        return loadElevationCache()[elevCacheKey(lat, lng)];
+        const key = elevCacheKey(lat, lng);
+        const cache = loadElevationCache();
+        if (cache[key] != null) return cache[key];
+        // miss → consult the legacy global blob; migrate the hit up so future
+        // lookups stay in the (small) per-site cache and legacy fades out.
+        const legacy = loadLegacyElevCache();
+        const v = legacy[key];
+        if (v != null) { cache[key] = v; saveElevationCache(); }
+        return v;
     }
     function fetchElevation(lat, lng) {
         const key = elevCacheKey(lat, lng);
-        const cache = loadElevationCache();
-        if (cache[key] != null) return Promise.resolve(cache[key]);
+        const cached = getElevationFromCache(lat, lng);
+        if (cached != null) return Promise.resolve(cached);
         if (elevInFlight[key]) return elevInFlight[key];
         const p = new Promise(resolve => {
             elevQueue.push({ lat, lng, key, resolve });
@@ -447,26 +477,44 @@
     // caller samples the exact same coordinate. A flight path drawn fresh never does — so
     // we return the CLOSEST cached point within maxMeters. DEM barely changes over a few
     // metres, so this turns the whole cached site into free terrain for any sample point.
-    let _nnArr = null, _nnSize = -1;
+    // Nearest-point lookup. Scans the (small) per-site cache first; only if that
+    // misses does it scan the legacy global blob (bbox-prefiltered, so the other
+    // sites' points are rejected cheaply). Each parsed array is memoized + size-
+    // invalidated independently.
+    let _nnSiteArr = null, _nnSiteSize = -1, _nnSiteId = null;
+    let _nnLegArr = null, _nnLegSize = -1;
+    function nearestInArr(arr, lat, lng, maxM) {
+        const cosLat = Math.cos(lat * Math.PI / 180) || 1e-6;
+        const dLat = maxM / 111320, dLng = maxM / (111320 * cosLat);
+        let bestM = null, bestD = Infinity;
+        for (const p of arr) {
+            if (Math.abs(p.la - lat) > dLat || Math.abs(p.ln - lng) > dLng) continue; // cheap bbox prefilter
+            const dy = (p.la - lat) * 111320, dx = (p.ln - lng) * 111320 * cosLat;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; bestM = p.m; }
+        }
+        return (bestM != null && bestD <= maxM * maxM) ? bestM : null;
+    }
+    function parseCacheArr(cache) {
+        return Object.keys(cache).map(k => { const c = k.split(','); return { la: +c[0], ln: +c[1], m: cache[k] }; })
+            .filter(p => Number.isFinite(p.la) && Number.isFinite(p.ln) && typeof p.m === 'number');
+    }
     function elevNearest(lat, lng, maxMeters) {
         try {
+            const maxM = maxMeters || 25;
             const cache = loadElevationCache();
             const keys = Object.keys(cache);
-            if (!_nnArr || _nnSize !== keys.length) {
-                _nnArr = keys.map(k => { const c = k.split(','); return { la: +c[0], ln: +c[1], m: cache[k] }; }).filter(p => Number.isFinite(p.la) && Number.isFinite(p.ln) && typeof p.m === 'number');
-                _nnSize = keys.length;
+            if (!_nnSiteArr || _nnSiteSize !== keys.length || _nnSiteId !== elevCacheSiteID) {
+                _nnSiteArr = parseCacheArr(cache); _nnSiteSize = keys.length; _nnSiteId = elevCacheSiteID;
             }
-            const maxM = maxMeters || 25;
-            const cosLat = Math.cos(lat * Math.PI / 180) || 1e-6;
-            const dLat = maxM / 111320, dLng = maxM / (111320 * cosLat);
-            let bestM = null, bestD = Infinity;
-            for (const p of _nnArr) {
-                if (Math.abs(p.la - lat) > dLat || Math.abs(p.ln - lng) > dLng) continue; // cheap bbox prefilter
-                const dy = (p.la - lat) * 111320, dx = (p.ln - lng) * 111320 * cosLat;
-                const d = dx * dx + dy * dy;
-                if (d < bestD) { bestD = d; bestM = p.m; }
-            }
-            return (bestM != null && bestD <= maxM * maxM) ? bestM : null;
+            const hit = nearestInArr(_nnSiteArr, lat, lng, maxM);
+            if (hit != null) return hit;
+            // fall back to the legacy global blob (lazy)
+            const legacy = loadLegacyElevCache();
+            const lk = Object.keys(legacy);
+            if (!lk.length) return null;
+            if (!_nnLegArr || _nnLegSize !== lk.length) { _nnLegArr = parseCacheArr(legacy); _nnLegSize = lk.length; }
+            return nearestInArr(_nnLegArr, lat, lng, maxM);
         } catch (e) { return null; }
     }
     try {
@@ -478,7 +526,17 @@
             fetch: (lat, lng) => fetchElevation(lat, lng),
             bulk: (points, onProgress) => bulkFetchElevations(points, onProgress),
         };
-        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (cache + nearest-lookup + queue reuse for sibling scripts)`);
+        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (per-site cache + nearest-lookup + queue reuse for sibling scripts)`);
+        // One-shot reclaim: once the per-site caches are warm, drop the old global
+        // blob to free ~1.5 MB of GM storage. Safe — per-site + shared files cover it.
+        unsafeWindow.__aimAIElevPurgeLegacy = () => {
+            try {
+                const n = Object.keys(loadLegacyElevCache()).length;
+                elevGmSet(CACHE_KEY_ELEVATIONS, {}); legacyElevCache = {}; _nnLegArr = null; _nnLegSize = -1;
+                console.log(`${TAG} purged legacy global DEM blob (${n.toLocaleString()} points). Per-site caches are now the only store.`);
+                return n;
+            } catch (e) { console.warn(`${TAG} purge failed`, e); return 0; }
+        };
     } catch (e) {}
 
     // Best-effort centroid for any entity type. Returns {lat, lng} or null.
@@ -788,7 +846,7 @@
             }
         });
         if (added > 0) {
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, cache); } catch (e) {}
+            flushElevationCache(); // persist into the per-site key
             console.log(`${TAG} merged shared cache for site ${siteID}: +${added.toLocaleString()} points from teammates (updated ${parsed.updatedAt || '?'})`);
         } else {
             console.log(`${TAG} shared cache for site ${siteID} loaded, but local already has all ${Object.keys(parsed.entries).length.toLocaleString()} entries`);
