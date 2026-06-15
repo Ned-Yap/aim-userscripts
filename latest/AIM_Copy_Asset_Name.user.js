@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.52
+// @version      4.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.52';
+    const SCRIPT_VERSION = '4.53';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1308,12 +1308,17 @@
         // Shared setup for the altitude / NFZ checks (4b/4c).
         const nfzs = ents.filter(e => e.type === 4 && entityCoords(e));
         const allArcs = [];
-        fps.forEach(fp => (fp.arcs || []).forEach(arc => {
+        fps.forEach(fp => (fp.arcs || []).forEach((arc, i) => {
             if (arc && arc.point_a && arc.point_b
                 && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number') {
-                allArcs.push({ arc, fp });
+                // segNum = 1-based position in the path (matches Percepto's
+                // on-map segment badge); segId = arc.id (stable-ish reference).
+                allArcs.push({ arc, fp, segNum: i + 1, segId: (arc.id != null ? arc.id : '?') });
             }
         }));
+        // "FP "name" seg #N (id X)" — names a specific segment in a note so a
+        // junction violation isn't an ambiguous "flight_path_1 ↔ flight_path_1".
+        const segRef = (rec) => `FP "${nameOf(rec.fp)}" seg #${rec.segNum} (id ${rec.segId})`;
         const arcMid = (arc) => ({ lat: (arc.point_a.lat + arc.point_b.lat) / 2, lng: (arc.point_a.lng + arc.point_b.lng) / 2 });
         const arcBand = (arc) => (typeof arc.min_alt === 'number' && typeof arc.max_alt === 'number') ? { min: arc.min_alt, max: arc.max_alt } : null;
         const ffzBand = (e) => (e.restrictions && typeof e.restrictions.minAlt === 'number' && typeof e.restrictions.maxAlt === 'number') ? { min: e.restrictions.minAlt, max: e.restrictions.maxAlt } : null;
@@ -1405,9 +1410,14 @@
                     byVert.get(k).push({ rec, idx, p });
                 });
             });
+            // Group by the shared vertex: a 3-way junction has 3 pairs, so
+            // reporting per-pair reads as duplicates. Emit ONE issue per
+            // junction listing every under-overlap segment pair (with seg
+            // #/id), drawn once at that vertex.
             const seenPair = new Set();
             byVert.forEach((list) => {
                 if (list.length < 2) return;
+                const bad = [];
                 for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
                     const A = list[i], B = list[j];
                     if (A.idx === B.idx) continue;
@@ -1419,15 +1429,19 @@
                     // Compare in METERS — comparing the rounded ft would
                     // false-flag arcs that overlap by exactly 2 m (= 6.562 ft).
                     const ovM = altBandOverlapM(ba.min, ba.max, bb.min, bb.max);
-                    const ovFt = ovM * M_TO_FT;
-                    if (ovM < thM) {
-                        out.push({
-                            check: 'FP↔FP alt', severity: 'high', distFt: ovFt, threshFt: thFt,
-                            note: `violation: connected FP segments ("${nameOf(A.rec.fp)}" ↔ "${nameOf(B.rec.fp)}") share only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
-                            polygon: boxAt(A.p.lat, A.p.lng),
-                        });
-                    }
+                    if (ovM < thM) bad.push({ A, B, ovFt: ovM * M_TO_FT });
                 }
+                if (!bad.length) return;
+                const anchor = list[0].p;  // the shared junction vertex
+                const lines = bad.map(p =>
+                    `#${p.A.rec.segNum} (id ${p.A.rec.segId}) ↔ #${p.B.rec.segNum} (id ${p.B.rec.segId}): ${p.ovFt < 0 ? 'no' : Math.round(p.ovFt) + ' ft'}`);
+                const fpNames = [...new Set(bad.flatMap(p => [nameOf(p.A.rec.fp), nameOf(p.B.rec.fp)]))].join(' / ');
+                out.push({
+                    check: 'FP↔FP alt', severity: 'high',
+                    distFt: Math.min.apply(null, bad.map(p => p.ovFt)), threshFt: thFt,
+                    note: `violation: FP junction (${fpNames}) — connected segments share < ${thFt} ft altitude overlap (need ${thFt} ft): ${lines.join('; ')}`,
+                    polygon: boxAt(anchor.lat, anchor.lng),
+                });
             });
             // 4b. FP segment entering an FFZ — needs alt overlap with the zone.
             if (ffzs.length) {
@@ -1445,7 +1459,7 @@
                         if (ovM < thM) {
                             out.push({
                                 check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
-                                note: `violation: FP "${nameOf(rec.fp)}" enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                                note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : Math.round(ovFt) + ' ft'} altitude overlap (need ${thFt} ft)`,
                                 polygon: fr.map(p => [p.lat, p.lng]),
                             });
                         }
@@ -1483,7 +1497,7 @@
             allArcs.forEach(rec => {
                 const ba = arcBand(rec.arc); if (!ba) return;
                 const mid = arcMid(rec.arc);
-                checkFloor(ba.min, [rec.arc.point_a, rec.arc.point_b, mid], `FP "${nameOf(rec.fp)}" segment`, boxAt(mid.lat, mid.lng));
+                checkFloor(ba.min, [rec.arc.point_a, rec.arc.point_b, mid], segRef(rec), boxAt(mid.lat, mid.lng));
             });
             ffzs.forEach(ffz => {
                 const fb = ffzBand(ffz); const ring = getRing(ffz);
@@ -1547,7 +1561,7 @@
                         note: `⚠ ${label} altitude band is ${Math.round(tallFt)} ft tall (soft max ${soft} ft)`, polygon });
                 }
             };
-            allArcs.forEach(rec => { const m = arcMid(rec.arc); checkBand(arcBand(rec.arc), `FP "${nameOf(rec.fp)}" segment`, boxAt(m.lat, m.lng)); });
+            allArcs.forEach(rec => { const m = arcMid(rec.arc); checkBand(arcBand(rec.arc), segRef(rec), boxAt(m.lat, m.lng)); });
             ffzs.forEach(ffz => { const r = getRing(ffz); if (r) checkBand(ffzBand(ffz), `FFZ "${nameOf(ffz)}"`, r.map(p => [p.lat, p.lng])); });
         }
 
@@ -1558,7 +1572,7 @@
                 const b = arcBand(rec.arc); if (!b || b.min < b.max) return;
                 const m = arcMid(rec.arc);
                 out.push({ check: 'Alt band inverted', severity: 'high', distFt: 0, threshFt: 0,
-                    note: `violation: FP "${nameOf(rec.fp)}" segment has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
+                    note: `violation: ${segRef(rec)} has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
                     polygon: boxAt(m.lat, m.lng) });
             });
             ffzs.forEach(ffz => {
@@ -1579,14 +1593,14 @@
                 const m = arcMid(rec.arc);
                 if (ka === kb) {
                     out.push({ check: 'FP arc degenerate', severity: 'high', distFt: 0, threshFt: 0,
-                        note: `violation: FP "${nameOf(rec.fp)}" has a zero-length segment (endpoints identical)`,
+                        note: `violation: ${segRef(rec)} is a zero-length segment (endpoints identical)`,
                         polygon: boxAt(m.lat, m.lng) });
                     return;
                 }
                 const pk = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
                 if (seenArc.has(pk)) {
                     out.push({ check: 'FP arc degenerate', severity: 'warn', distFt: 0, threshFt: 0,
-                        note: `violation: FP "${nameOf(rec.fp)}" has a duplicate segment (same endpoints as another arc)`,
+                        note: `violation: ${segRef(rec)} is a duplicate segment (same endpoints as another arc)`,
                         polygon: boxAt(m.lat, m.lng) });
                 } else seenArc.add(pk);
             });
