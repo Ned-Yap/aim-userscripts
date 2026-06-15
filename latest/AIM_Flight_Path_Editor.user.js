@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.26
-// @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.27
+// @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -64,10 +64,11 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.26';
+    const SCRIPT_VERSION = '0.27';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
+    const PEEK_RADIUS_PX = 130;           // Alt-peek: reveal terrain dots within this many px of the cursor
     const FT_TO_M = 1 / 3.28084;
     const SETTINGS_KEY = 'aim_fpe_smart_settings';
     const DEF_SETTINGS = { master: true, autoDraw: true, floorFt: 100, bandFt: 30, maxVarFt: 30, overlapM: 2 };
@@ -273,6 +274,10 @@
         // smart-altitude trigger: re-evaluate on every drop/snap
         document.addEventListener('mouseup', onUpTrack, true);
         document.addEventListener('pointerup', onUpTrack, true);
+        // elevation peek: hold Alt while editing an FP to reveal terrain dots near the cursor
+        document.addEventListener('keydown', onPeekKeyDown, true);
+        document.addEventListener('keyup', onPeekKeyUp, true);
+        window.addEventListener('blur', exitPeek);
     }
 
     // Subtle cue that segment numbers are click-to-split while editing (CSS only).
@@ -285,6 +290,11 @@
             ${ARC_BADGE_SEL}:hover {
                 box-shadow: 0 0 0 2px #5fff5f, 0 0 8px 1px rgba(95,255,95,0.8) !important;
             }
+            .aim-fpe-peek-tip {
+                background:#1f2228 !important; color:#ffd400 !important; border:1px solid #ffd40066 !important;
+                font:11px -apple-system,sans-serif !important; padding:3px 7px !important; box-shadow:0 3px 10px rgba(0,0,0,0.6) !important;
+            }
+            .aim-fpe-peek-tip::before { border-top-color:#1f2228 !important; }
         `;
         (document.head || document.documentElement).appendChild(s);
     }
@@ -1041,6 +1051,95 @@
         };
     }
 
+    // ==================================================================
+    // ELEVATION PEEK — hold Alt while editing a flight path to reveal the
+    // terrain-check dots, but ONLY near the cursor (paths run hundreds of
+    // segments, so we never render them all). Hover a yellow dot for live
+    // ground + AGL data. Cache-first; uncached dots fetch gently (breaker-
+    // gated + rate-limited), which organically warms the cache as you hover.
+    // ==================================================================
+    let peekMode = false, peekLayer = null, peekPoints = [], peekMoveTs = 0;
+    const peekMarkers = new Map(); // point index -> circleMarker
+    function buildPeekPoints() {
+        const pts = [];
+        findFpWorkingCopies().forEach(wc => (wc.state.arcs || []).forEach((arc, idx) => {
+            const A = arc.point_a, B = arc.point_b;
+            if (!finitePt(A) || !finitePt(B)) return;
+            const distM = hav(A, B) || 0;
+            const n = Math.max(2, Math.min(SMART_MAX_SAMPLES, Math.ceil(distM / (SMART_SAMPLE_SPACING_FT * FT_TO_M)) + 1));
+            for (let i = 0; i < n; i++) { const t = i / (n - 1); pts.push({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t, seg: idx + 1, arc }); }
+        }));
+        return pts;
+    }
+    function peekLabel(groundM, arc, seg) {
+        if (groundM == null) return `seg ${seg || '?'} · ground: fetching…`;
+        let s = `seg ${seg || '?'} · ground ${Math.round(groundM * 3.28084)} ft`;
+        if (arc && num(arc.min_alt) && num(arc.max_alt)) {
+            const floorAgl = Math.round((arc.min_alt - groundM) * 3.28084), ceilAgl = Math.round((arc.max_alt - groundM) * 3.28084);
+            s += ` · band ${Math.round(arc.min_alt * 3.28084)}–${Math.round(arc.max_alt * 3.28084)} ft (AGL ${floorAgl}–${ceilAgl})`;
+        }
+        return s;
+    }
+    function addPeekMarker(i, p) {
+        const L = unsafeWindow.L, map = getLeafletMap();
+        if (!L || !map) return;
+        const cached = elevCache.has(ekey(p.lat, p.lng)) ? elevCache.get(ekey(p.lat, p.lng)) : null;
+        const m = L.circleMarker(L.latLng(p.lat, p.lng), { radius: 6, color: '#1a1a1a', weight: 1, fillColor: cached != null ? '#ffd400' : '#999', fillOpacity: 0.92 });
+        m.bindTooltip(peekLabel(cached, p.arc, p.seg), { direction: 'top', offset: [0, -6], opacity: 0.97, className: 'aim-fpe-peek-tip' });
+        peekLayer.addLayer(m);
+        peekMarkers.set(i, m);
+        if (cached == null) {
+            fetchElevation(p.lat, p.lng).then(g => { if (peekMarkers.get(i) === m) { try { m.setTooltipContent(peekLabel(g, p.arc, p.seg)); m.setStyle({ fillColor: g != null ? '#ffd400' : '#888' }); } catch (e) {} } });
+        }
+    }
+    function onPeekMove(e) {
+        if (!peekMode) return;
+        const now = Date.now(); if (now - peekMoveTs < 45) return; peekMoveTs = now;
+        const map = getLeafletMap(), L = unsafeWindow.L; if (!map || !L) return;
+        const cr = map.getContainer().getBoundingClientRect();
+        const cx = e.clientX - cr.left, cy = e.clientY - cr.top;
+        if (cx < 0 || cy < 0 || cx > cr.width || cy > cr.height) return;
+        let cll; try { cll = map.containerPointToLatLng(L.point(cx, cy)); } catch (err) { return; }
+        let metersR; try { metersR = map.distance(cll, map.containerPointToLatLng(L.point(cx + PEEK_RADIUS_PX, cy))); } catch (err) { metersR = 300; }
+        const cos = Math.cos(cll.lat * Math.PI / 180) || 1e-6;
+        const dLat = metersR / 111320, dLng = metersR / (111320 * cos);
+        const inRange = new Set();
+        for (let i = 0; i < peekPoints.length; i++) {
+            const p = peekPoints[i];
+            if (Math.abs(p.lat - cll.lat) > dLat || Math.abs(p.lng - cll.lng) > dLng) continue; // cheap bbox prefilter
+            let cp; try { cp = map.latLngToContainerPoint(L.latLng(p.lat, p.lng)); } catch (err) { continue; }
+            if (Math.hypot(cp.x - cx, cp.y - cy) > PEEK_RADIUS_PX) continue;
+            inRange.add(i);
+            if (!peekMarkers.has(i)) addPeekMarker(i, p);
+        }
+        for (const [i, m] of peekMarkers) { if (!inRange.has(i)) { try { peekLayer.removeLayer(m); } catch (e2) {} peekMarkers.delete(i); } }
+    }
+    function enterPeek() {
+        const map = getLeafletMap(), L = unsafeWindow.L; if (!map || !L) return;
+        peekMode = true;
+        peekPoints = buildPeekPoints();
+        if (!peekLayer) peekLayer = L.layerGroup();
+        peekLayer.addTo(map);
+        document.addEventListener('mousemove', onPeekMove, true);
+        toast(`⛰ Elevation peek ON — hover the yellow dots near your cursor (${peekPoints.length} check points). Release Alt to hide.`, '#ffd400');
+    }
+    function exitPeek() {
+        if (!peekMode) return;
+        peekMode = false;
+        document.removeEventListener('mousemove', onPeekMove, true);
+        for (const [, m] of peekMarkers) { try { peekLayer.removeLayer(m); } catch (e) {} }
+        peekMarkers.clear();
+        try { const map = getLeafletMap(); if (map && peekLayer) map.removeLayer(peekLayer); } catch (e) {}
+        if (elevDirty) persistElevCache(); // keep what hovering warmed
+    }
+    function onPeekKeyDown(e) {
+        if (e.key !== 'Alt' || peekMode || !settings.master || !editingFP()) return;
+        const t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+        enterPeek();
+    }
+    function onPeekKeyUp(e) { if (e.key === 'Alt') exitPeek(); }
+
     // ---- UI ----
     function toast(msg, color) {
         try {
@@ -1082,5 +1181,5 @@
     setInterval(ensureSmartUI, 1500);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
+    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
 })();
