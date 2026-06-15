@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-15 — AIM Issues — stale-issue auto-bump (dev-only) — AIM Issues v1.20
+
+Issues that sit unresolved get a nudge: any issue in **open / pending fix / pending ignore / ready-for-review for more than 7 days** now posts a Slack bump pinging the **assignee + approvers**, re-bumping **weekly** until it's resolved/ignored. It runs **inside AIM Issues** (on site load + hourly while open), threads under the issue (adopting pre-Slack issues into a thread first), and records a `kind:'bump'` history entry so it never double-fires across browsers. Uses the GitHub token the browser already has — no extra setup. *(Dev/latest only. Replaces the planned cloud routine, which was blocked on cloud GitHub authorization.)*
+
+---
+
 ## 2026-06-15 — Site Setup Generator — 🧲 CTRL-snap for native FP drawing (dev-only) — Asset Inspector v4.63
 
 New **🧲 CTRL-snap** toggle: arm it, then draw flight paths with Percepto's **own** draw tool — **hold CTRL** while clicking a waypoint and it snaps ~50 ft parallel to the nearest power line (a purple dot shows where it'll land); **release CTRL** for a free point. Works by intercepting the map click and re-firing it at the snapped pixel into Percepto's native draw handler, so snapping happens inside the tool you already use. Finish the path with CTRL released. *(Dev/latest only; fragile by design — falls back to a normal click if anything misses.)*

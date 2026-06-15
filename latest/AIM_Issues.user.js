@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.19';
+    const SCRIPT_VERSION = '1.20';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1166,6 +1166,69 @@
         return out;
     }
 
+    // ---- v1.20: stale-issue auto-bump (client-side) -------------------
+    // Pings assignee + approvers when an issue sits in open/pending for >7
+    // days, re-bumping weekly. Runs in the IFRAME (sync owner) after each
+    // refetch + hourly. Dedups across browsers via the synced kind:'bump'
+    // history entry, and adopts pre-Slack issues first. Uses the PAT the
+    // browser already has — no cloud/GitHub-App auth needed.
+    const STALE_BUMP_STATUSES = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review']);
+    const STALE_BUMP_MS = 7 * 24 * 60 * 60 * 1000;
+    let staleBumpRunning = false;
+    function issueStaleSince(issue) {
+        const h = issue.history || [];
+        for (let i = h.length - 1; i >= 0; i--) if (h[i].toStatus === issue.status) return new Date(h[i].at).getTime();
+        return new Date(issue.createdAt).getTime();
+    }
+    function issueLastBumpAt(issue) {
+        const h = issue.history || [];
+        for (let i = h.length - 1; i >= 0; i--) if (h[i].kind === 'bump') return new Date(h[i].at).getTime();
+        return 0;
+    }
+    async function runStaleBumpCheck() {
+        if (IS_TOP || staleBumpRunning) return;
+        if (!slackEnabled() || !cachedToken || !siteID) return;
+        staleBumpRunning = true;
+        try {
+            const now = Date.now();
+            let bumped = 0;
+            for (const issue of currentSiteIssues) {
+                if (!issue || issue.deleted || issue.source === 'validator' || issue.createdBy === 'local-only') continue;
+                if (!STALE_BUMP_STATUSES.has(issue.status)) continue;
+                const since = issueStaleSince(issue);
+                if (now - since <= STALE_BUMP_MS) continue;                 // not stale yet
+                if (now - issueLastBumpAt(issue) < STALE_BUMP_MS) continue; // bumped within 7d
+                const days = Math.floor((now - since) / 86400000);
+                const label = (STATUS_LABEL[issue.status] || { text: issue.status.toUpperCase() }).text;
+                await ensureSlackThread(issue);   // adopt pre-Slack issues into a thread first
+                const seen = new Set();
+                const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
+                    .map(t => { if (seen.has(t)) return ''; seen.add(t); return slackMention(t); })
+                    .filter(Boolean).join(' ');
+                const head = `⏰ *Stale ${days}d* — still *${label}* since ${new Date(since).toISOString().slice(0, 10)}`;
+                const text = issue.slackThreadTs
+                    ? `${head}${mentions ? '\ncc ' + mentions : ''}`
+                    : `${head} · ${siteLabelForSlack(issue.id)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
+                const ts = await slackPost(text, issue.slackThreadTs || null);
+                if (!ts) continue;   // post failed — don't record a bump (retry next run)
+                if (!Array.isArray(issue.history)) issue.history = [];
+                issue.history.push({ at: new Date().toISOString(), by: 'auto-bump', fromStatus: issue.status, toStatus: issue.status, kind: 'bump', note: `Auto-bump: ${days}d in ${label}` });
+                bumped++;
+            }
+            if (bumped) {
+                saveIssuesToStorage(siteID, currentSiteIssues);
+                commitIssuesToGitHub('stale-issue auto-bump');
+                renderButtonState();
+                if (panelEl) renderIssuesPanel();
+                console.log(`${TAG} stale-bump: ${bumped} issue(s) bumped`);
+            }
+        } catch (e) {
+            console.warn(`${TAG} runStaleBumpCheck threw:`, e);
+        } finally {
+            staleBumpRunning = false;
+        }
+    }
+
     async function refetchIssues() {
         // Sync only runs in the IFRAME — TOP also gets TOKEN_VALUE +
         // hashchange but would fire duplicate API calls otherwise.
@@ -1230,6 +1293,9 @@
                 setSyncStatus('ok');
                 console.log(`${TAG} synced from GitHub: ${remote.issues.length} issue${remote.issues.length === 1 ? '' : 's'} on site ${sid}`);
             }
+            // v1.20: after we have authoritative synced data, check for stale
+            // issues to bump (fire-and-forget).
+            runStaleBumpCheck();
         } catch (e) {
             setSyncStatus('error');
             console.warn(`${TAG} refetchIssues failed:`, e);
@@ -5266,6 +5332,10 @@
         } else {
             syncStatus = 'no-token';
         }
+        // v1.20: hourly stale-issue bump check while the page is open
+        // (refetchIssues also triggers one on each site load). IFRAME-gated
+        // inside runStaleBumpCheck.
+        if (!IS_TOP) setInterval(() => { try { runStaleBumpCheck(); } catch (e) {} }, 60 * 60 * 1000);
         // Always ask the Control Panel for the current token so we get
         // the latest if the user updated it elsewhere.
         try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
