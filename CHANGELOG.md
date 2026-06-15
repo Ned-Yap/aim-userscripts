@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators (Phase 4b/4c) — Asset Inspector v4.51 (latest, dev-only)
+
+Adds 7 more SOP checks to the validator, each with its own enable + editable threshold in the **SOP Validators** Control Panel section:
+
+- **FP alt-band overlap** — connected flight-path segments (sharing a waypoint) **and** an FP segment passing through an FFZ must share **≥ 2 m (6.56 ft)** of altitude band so the drone has a continuous band to transition. (Compared in meters so arcs that overlap by *exactly* 2 m aren't false-flagged.)
+- **AGL floor band** — the floor (min altitude − DEM ground) of FP segments **and FFZs** must sit **90–210 ft AGL**: too low = 🔴, too high = 🔵. Ground is fetched on run.
+- **NFZ minimum size** — NFZ bounding box must be ≥ **30 × 30 ft**.
+- **NFZ proximity** — an NFZ must stay ≥ **15 ft** from other NFZs and from any FFZ edge.
+- **Alt-band height** — soft-warn over **40 ft**, hard-flag over **200 ft** (the latter is almost always a data-entry typo).
+- **Inverted / zero alt band** — min ≥ max altitude.
+- **Zero-length / duplicate FP arc.**
+
+Note: AIM Issues draws every validator finding in its red "open" style, so the 🔴/🔵 distinction is in the note text, not the marker color. Offline-validated against site 1583 (0 false positives on the compliant FP-overlap set; 11 band-height soft warnings). Coworkers unaffected (root prod has no validator code).
+
 ## 2026-06-14 — AIM Issues — per-issue Slack opt-in for validator findings (dev-only) — AIM Issues v1.19
 
 Validator findings (the ephemeral SOP-validator issues) stay **silent on Slack by default** — they're for self-diagnose-and-fix, not channel noise. A new **🔔 Notify Slack** toggle on the issue popup (validator findings only) lets you **escalate a specific finding to Slack on demand**: flipping it on posts a full thread for that finding, and later comments/assignments thread under it. It's session-scoped (resets when the finding is re-drawn) — a deliberate "push this one now" action. Normal issues are unchanged (still auto-ping). *(Dev/latest only.)*
