@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.25
+// @version      0.26
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.25';
+    const SCRIPT_VERSION = '0.26';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -812,6 +812,13 @@
             } else { cmin = nmin; cmax = nmax; }
         }
         subs.push({ i0: s, i1: valid.length - 1 });
+        // Diagnostic: shows whether "+0 steps" is genuinely flat terrain vs missing interior
+        // DEM. Low coverage (valid ≪ n) means the open-space interior had no cached/live data,
+        // so variation can't be seen — pre-warm the corridor. Full coverage + small Δ = flat.
+        try {
+            const gs = valid.map(v => v.e), gMinFt = Math.min(...gs) * 3.28084, gMaxFt = Math.max(...gs) * 3.28084;
+            log(`segment terrain: ${valid.length}/${n} samples with data · ground ${gMinFt.toFixed(0)}–${gMaxFt.toFixed(0)} ft (Δ${(gMaxFt - gMinFt).toFixed(0)} ft, threshold ${settings.maxVarFt}) → ${subs.length - 1} step(s)`);
+        } catch (e) {}
         const lerp = (t) => ({ lat: A.lat + (B.lat - A.lat) * t, lng: A.lng + (B.lng - A.lng) * t });
         const verts = [clone(A)];
         for (let k = 0; k < subs.length - 1; k++) verts.push(lerp(valid[subs[k].i1].t));
