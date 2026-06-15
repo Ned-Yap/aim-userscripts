@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.51
+// @version      4.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.51';
+    const SCRIPT_VERSION = '4.52';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1101,17 +1101,59 @@
     // ============================================================
     // SOP VALIDATOR GEOMETRY (Phase 4) — builds on the spatial core above.
     //
-    // Ring rule (v3.99): asset pads (type 3) store a bowtie vertex order
-    // that breaks ray-casting/edge-walks → angular-sort (simplifyPolygon).
-    // FFZ/NFZ polygons (16/4) are drawn as simple closed shapes → use the
-    // RAW ring (simplify can scramble a non-star FFZ and report distances
-    // outside its true green border). ringForEntity centralizes this.
+    // Ring rule (v4.52): the TRUE boundary is the raw drawn polygon. Most
+    // asset pads (incl. multi-vertex BATTERY/COMPRESSOR pads) are stored as
+    // a simple ring in correct order → use it RAW. simplifyPolygon's angular
+    // sort SCRAMBLES any non-star pad (reorders vertices into phantom
+    // cross-cut edges), which produced false "FFZ is 4 ft from asset" flags.
+    // The ONLY pads that need repair are genuine bowtie well-pads whose raw
+    // order self-intersects (an interior wellhead vertex); for those the
+    // convex hull drops the interior point and recovers the real rectangle.
+    // FFZ/NFZ polygons (16/4) are always drawn simple → raw. ringForEntity
+    // centralizes this. (Superseded the v3.99 "simplify all type-3" rule —
+    // 0/163 pads on site 1583 were actually self-intersecting; simplify was
+    // mangling 19 of them needlessly.)
     // ============================================================
     const M_TO_FT = 3.28084;
+    // True if any non-adjacent edge pair of the ring crosses (self-intersect).
+    function isSelfIntersecting(ring) {
+        const n = ring.length;
+        if (n < 4) return false;
+        for (let i = 0; i < n; i++) {
+            const a1 = ring[i], a2 = ring[(i + 1) % n];
+            for (let j = i + 1; j < n; j++) {
+                const b1 = ring[j], b2 = ring[(j + 1) % n];
+                if (a1 === b1 || a1 === b2 || a2 === b1 || a2 === b2) continue; // shared vertex
+                if (segmentsCross(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+    // Convex hull (Andrew's monotone chain). Returns CCW hull of the points.
+    function convexHull(points) {
+        if (!points || points.length < 3) return points || [];
+        const pts = points.slice().sort((a, b) => a.lng - b.lng || a.lat - b.lat);
+        const crs = (o, a, b) => (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng);
+        const lower = [];
+        for (const p of pts) {
+            while (lower.length >= 2 && crs(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper = [];
+        for (let i = pts.length - 1; i >= 0; i--) {
+            const p = pts[i];
+            while (upper.length >= 2 && crs(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+            upper.push(p);
+        }
+        lower.pop(); upper.pop();
+        const h = lower.concat(upper);
+        return h.length >= 3 ? h : points;
+    }
     function ringForEntity(e) {
         const ring = entityCoords(e);
         if (!ring || ring.length < 3) return null;
-        return e.type === 3 ? simplifyPolygon(ring) : ring;
+        if (e.type !== 3) return ring;                       // FFZ/NFZ drawn simple → raw
+        return isSelfIntersecting(ring) ? convexHull(ring) : ring;  // raw unless bowtie
     }
     // Projected closest point of p onto segment a-b (returns {lat,lng}).
     function nearestOnSeg(p, a, b) {
