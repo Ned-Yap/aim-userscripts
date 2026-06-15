@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.30
+// @version      0.31
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.30';
+    const SCRIPT_VERSION = '0.31';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1014,10 +1014,74 @@
         pendingPreview = { layer, panel };
     }
 
-    // ---- a floating "Smart-fill" button while editing (works without the Control Panel) ----
+    // ==================================================================
+    // CORRIDOR PRE-WARM — fetch the WHOLE path's terrain once (gently),
+    // resuming through the quota breaker, persisting as it goes. Afterward
+    // smart-fill / peek / stepping run entirely from cache — no live calls,
+    // quota-proof. The durable fix for fresh sites + open-space segments.
+    // ==================================================================
+    let prewarmActive = false, prewarmCancel = false, prewarmPanel = null;
+    function setPrewarmPanel(html, withCancel) {
+        if (!prewarmPanel) {
+            prewarmPanel = document.createElement('div');
+            prewarmPanel.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2228;color:#e6e6e6;border:1px solid #ffd40088;border-radius:8px;padding:12px 18px;font:13px -apple-system,sans-serif;z-index:100003;box-shadow:0 6px 22px rgba(0,0,0,0.7);max-width:84vw;text-align:center';
+            document.body.appendChild(prewarmPanel);
+        }
+        prewarmPanel.innerHTML = html;
+        if (withCancel) {
+            const b = document.createElement('button');
+            b.textContent = 'Cancel';
+            b.style.cssText = 'margin-left:12px;padding:5px 14px;border:none;border-radius:5px;font:13px -apple-system;font-weight:600;cursor:pointer;background:#888;color:#11151a';
+            b.addEventListener('click', () => { prewarmCancel = true; });
+            prewarmPanel.appendChild(b);
+        }
+    }
+    function hidePrewarmPanel() { if (prewarmPanel) { prewarmPanel.remove(); prewarmPanel = null; } }
+    async function preWarmCorridor() {
+        if (prewarmActive) { prewarmCancel = true; return; } // a second trigger cancels
+        if (!settings.master) { toast('Smart altitude is off (enable it in the Control Panel).', '#ffb14e'); return; }
+        const wcs = findFpWorkingCopies();
+        if (!wcs.length) { toast('Open a flight path editor first.', '#ffb14e'); return; }
+        // all sample points across the open path(s), deduped by rounded key
+        const uniq = new Map();
+        for (const p of buildPeekPoints()) { const k = ekey(p.lat, p.lng); if (!uniq.has(k)) uniq.set(k, p); }
+        // drop points we already know (FPE cache, or Asset Inspector exact/nearest)
+        const ai = aiElev();
+        const todo = [];
+        for (const [k, p] of uniq) {
+            if (elevCache.has(k)) continue;
+            if (ai) { let c = ai.getCached(p.lat, p.lng); if (c == null && ai.getNearest) c = ai.getNearest(p.lat, p.lng, AI_NEAREST_M); if (c != null) { elevCache.set(k, c); continue; } }
+            todo.push(p);
+        }
+        if (!todo.length) { toast('⛰ Terrain already cached for this path — nothing to pre-warm. Smart-fill is instant.', '#5fff5f'); return; }
+        prewarmActive = true; prewarmCancel = false;
+        let done = 0, failed = 0;
+        setPrewarmPanel(`⛰ Pre-warming terrain — 0 / ${todo.length}…`, true);
+        for (const p of todo) {
+            if (prewarmCancel) break;
+            // wait out an open quota breaker, counting down, before each fetch
+            while (breakerOpen() && !prewarmCancel) {
+                setPrewarmPanel(`⛰ Pre-warming — ${done} / ${todo.length} · quota paused ${Math.ceil((elevBreakerUntil - Date.now()) / 1000)}s…`, true);
+                await sleep(1000);
+            }
+            if (prewarmCancel) break;
+            const g = await fetchElevation(p.lat, p.lng); // queue + rate-limit + persist on success
+            if (g == null) failed++; else done++;
+            setPrewarmPanel(`⛰ Pre-warming — ${done} / ${todo.length}${failed ? ` · ${failed} waiting on quota` : ''}…`, true);
+        }
+        if (elevDirty) persistElevCache();
+        prewarmActive = false;
+        hidePrewarmPanel();
+        if (prewarmCancel) toast(`⛰ Pre-warm stopped — ${done}/${todo.length} cached (persisted). Run again to finish.`, '#ffd479');
+        else if (failed) toast(`⛰ Pre-warm: ${done}/${todo.length} cached; ${failed} still blocked by quota. Wait a bit and run again to finish.`, '#ffb14e');
+        else toast(`⛰ Pre-warm complete — ${todo.length} points cached + persisted. Smart-fill & peek are now instant + offline for this path.`, '#5fff5f');
+    }
+
+    // ---- floating "Smart-fill" + "Pre-warm" buttons while editing (work without the Control Panel) ----
     function ensureSmartUI() {
         let b = document.getElementById('aim-fpe-smart-btn');
-        if (!settings.master || !editingFP()) { if (b) b.remove(); return; }
+        let pw = document.getElementById('aim-fpe-prewarm-btn');
+        if (!settings.master || !editingFP()) { if (b) b.remove(); if (pw) pw.remove(); return; }
         if (!b) {
             b = document.createElement('div');
             b.id = 'aim-fpe-smart-btn';
@@ -1027,6 +1091,16 @@
             ['mousedown', 'click'].forEach(t => b.addEventListener(t, e => e.stopPropagation()));
             b.addEventListener('click', (e) => { e.preventDefault(); previewFill().catch(err => warn('previewFill threw', err)); });
             document.body.appendChild(b);
+        }
+        if (!pw) {
+            pw = document.createElement('div');
+            pw.id = 'aim-fpe-prewarm-btn';
+            pw.textContent = '⤓ Pre-warm terrain';
+            pw.title = 'Fetch the whole path’s terrain once (gently, resuming through quota pauses) + persist it, so smart-fill/peek/stepping run from cache. Click again to cancel.';
+            pw.style.cssText = 'position:fixed;bottom:102px;right:18px;background:#1f2228;border:1px solid rgba(255,212,0,0.55);border-radius:6px;padding:8px 12px;color:#ffd400;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);cursor:pointer;user-select:none';
+            ['mousedown', 'click'].forEach(t => pw.addEventListener(t, e => e.stopPropagation()));
+            pw.addEventListener('click', (e) => { e.preventDefault(); preWarmCorridor().catch(err => warn('preWarmCorridor threw', err)); });
+            document.body.appendChild(pw);
         }
     }
 
@@ -1046,6 +1120,7 @@
                     { id: 'bandFt', label: 'Band width (ft)', type: 'number', default: settings.bandFt },
                     { id: 'maxVarFt', label: 'Max step variation (ft)', type: 'number', default: settings.maxVarFt },
                     { id: 'fillPath', label: '⛰ Smart-fill open path (preview)', type: 'button' },
+                    { id: 'prewarm', label: '⤓ Pre-warm path terrain (cache)', type: 'button' },
                 ],
                 hotkeys: [],
             });
@@ -1069,6 +1144,8 @@
                 if (changed) { saveSettings(); ensureSmartUI(); }
             } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'fillPath') {
                 previewFill().catch(e => warn('previewFill threw', e));
+            } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'prewarm') {
+                preWarmCorridor().catch(e => warn('preWarmCorridor threw', e));
             }
         };
     }
