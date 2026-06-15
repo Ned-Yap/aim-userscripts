@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: no more page hang on large sites — Asset Inspector v4.59 (latest, dev-only)
+
+On a big site the validator did all its work in one synchronous burst and froze the tab (Chrome "page unresponsive"). It now (1) runs **asynchronously, yielding to the browser** periodically so the page stays responsive with a "Validating site…" indicator, and (2) uses a **bounding-box spatial prefilter** on the heavy proximity/angle checks so each entity only compares against nearby ones — roughly 100× less work on large sites. Results are identical (the prefilter only skips pairs that are provably too far to match).
+
 ## 2026-06-14 — SOP Validators: FP→FFZ angle = angle to the edge it lands on — Asset Inspector v4.58 (latest, dev-only)
 
 Corrected: FPs connect to an FFZ **mid-edge**, never at a corner. The check now just measures the angle between the approaching FP segment and the **edge it terminates on**, flagging **< 15°** (grazing). Detection is "FP endpoint on an FFZ edge"; only the approach leg is measured. Site 1583: 55 connections, all 50–90° → 0 false positives (the prior corner/long-axis attempt wrongly flagged 23).
