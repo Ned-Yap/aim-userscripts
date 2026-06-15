@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-14 — SOP Validators: flag on the displayed value — Asset Inspector v4.54 (latest, dev-only)
+
+A floor of 89.6 ft AGL was flagged but rendered "90 ft AGL (min 90 ft)" — the rounded note disagreed with the raw comparison, so a finding could look compliant. Now every threshold check flags on the **same rounded number it shows**: "90 (min 90)" never flags, only "89 (min 90)" or lower. Applied to AGL floor, FFZ→Asset, FP→Asset, FFZ↔FFZ, NFZ size/proximity and band height. (FP alt-overlap now shows 1 decimal since its 6.56 ft threshold is sub-foot.)
+
 ## 2026-06-14 — SOP Validators: FP overlap segment IDs + junction grouping — Asset Inspector v4.53 (latest, dev-only)
 
 FP alt-band overlap findings now name each segment as **"FP <name> seg #N (id <arc.id>)"** (N = on-map segment number) instead of the ambiguous "flight_path_1 ↔ flight_path_1". And a 3-way junction is now **one** issue listing every under-overlap pair at that vertex (e.g. "#67↔#69: 7 ft; #68↔#69: 10 ft") rather than duplicate-looking rows. Segment #/id also added to the FP↔FFZ, AGL-floor, band-height, inverted-band and degenerate-arc notes.
