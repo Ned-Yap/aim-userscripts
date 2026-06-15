@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.22
+// @version      0.23
 // @description  Edit Percepto flight paths from the map while natively editing one: (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.22';
+    const SCRIPT_VERSION = '0.23';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -664,12 +664,20 @@
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const ELEV_MAX_CONCURRENT = 2;
     const ELEV_MIN_INTERVAL_MS = 220;  // ≤ ~4.5 req/s — gentle on the shared limiter
-    const ELEV_MAX_RETRIES = 6;        // backoff ~0.8/1.6/3.2/6.4/12.8 s + jitter (rides out a load-time storm)
+    const ELEV_MAX_RETRIES = 3;        // backoff ~0.8/1.6/3.2 s + jitter (breaker handles the rest)
+    const ELEV_BREAKER_TRIP = 3;       // this many consecutive 429s ⇒ quota looks blown
+    const ELEV_BREAKER_MS = 60000;     // …so STOP hitting it for 60 s (poking a penalty box keeps it alive)
     const ELEV_CACHE_KEY = 'aim_fpe_elev_cache';
     let elevActive = 0, elevLastStart = 0, elevPumpScheduled = false;
     const elevQueue = [];
-    let elevRateLimited = false;       // surfaced to the user when we give up after backoff
+    let elevRateLimited = false;       // surfaced to the user when we give up / the breaker opens
     let elevDirty = 0;
+    let elevConsec429 = 0, elevBreakerUntil = 0;
+    const breakerOpen = () => Date.now() < elevBreakerUntil;
+    // Reuse the Asset Inspector's warm/shared/persistent elevation cache when present (it
+    // exposes a service on unsafeWindow). getCached() is FREE — no network — so analyzed
+    // sites / teammate-cached terrain never touch the rate-limited endpoint at all.
+    const aiElev = () => { try { return unsafeWindow.__aimAIElevation || null; } catch (e) { return null; } };
     function loadElevCache() {
         try { if (typeof GM_getValue === 'function') { const raw = GM_getValue(ELEV_CACHE_KEY, null); if (raw) { const o = JSON.parse(raw); for (const k in o) elevCache.set(k, o[k]); log(`loaded ${elevCache.size} cached elevations`); } } }
         catch (e) { warn('loadElevCache failed', e); }
@@ -689,23 +697,35 @@
         elevPump(); // try to fill the other concurrency slot (interval-gated)
     }
     async function rawFetchElev(lat, lng, attempt) {
+        if (breakerOpen()) return null; // quota looks blown — don't poke the penalty box
         const url = 'https://percepto.app/location_altitude/?location=' + encodeURIComponent(JSON.stringify({ lat, lng }));
         try {
             const res = await fetch(url, { credentials: 'include' });
             if (res.status === 429 || !res.ok) {
-                if (attempt < ELEV_MAX_RETRIES) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
-                elevRateLimited = true; warn(`elevation ${res.status} after ${attempt + 1} tries — giving up on this point`); return null;
+                if (res.status === 429 && ++elevConsec429 >= ELEV_BREAKER_TRIP) {
+                    elevBreakerUntil = Date.now() + ELEV_BREAKER_MS; elevRateLimited = true;
+                    warn(`DEM quota looks exhausted (${elevConsec429} consecutive 429) — pausing elevation lookups for ${ELEV_BREAKER_MS / 1000}s; cached terrain still works`);
+                    return null;
+                }
+                if (attempt < ELEV_MAX_RETRIES && !breakerOpen()) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
+                elevRateLimited = true; return null;
             }
             const j = await res.json().catch(() => null);
-            return (j && typeof j.altitude === 'number') ? j.altitude : null;
+            const m = (j && typeof j.altitude === 'number') ? j.altitude : null;
+            if (m != null) { elevConsec429 = 0; elevBreakerUntil = 0; } // success ⇒ quota is flowing again
+            return m;
         } catch (e) {
-            if (attempt < ELEV_MAX_RETRIES) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
+            if (attempt < ELEV_MAX_RETRIES && !breakerOpen()) { await sleep(800 * Math.pow(2, attempt) + Math.random() * 400); return rawFetchElev(lat, lng, attempt + 1); }
             warn('elevation fetch failed', e); return null;
         }
     }
     function fetchElevation(lat, lng) {
         const k = ekey(lat, lng);
         if (elevCache.has(k)) return Promise.resolve(elevCache.get(k));
+        // Asset Inspector's warm/shared cache — free, skips the rate-limited endpoint.
+        const ai = aiElev();
+        if (ai) { const c = ai.getCached(lat, lng); if (c != null) { elevCache.set(k, c); return Promise.resolve(c); } }
+        if (breakerOpen()) return Promise.resolve(null); // quota recovering — serve cache-only
         if (elevInflight.has(k)) return elevInflight.get(k);
         const p = new Promise((resolve) => {
             elevQueue.push(() => rawFetchElev(lat, lng, 0).then(m => {
@@ -886,7 +906,7 @@
                 if (plan && !plan.error) commitPlan(plan, { auto: true });
                 else { if (plan && plan.error) warn('auto smart-fill skipped (would break path):', plan.error); procState.set(wc.id, { count: arcs.length, sigs: new Set(arcs.map(arcSig)) }); }
             } finally { autoBusy = false; }
-            if (elevRateLimited) toast('⛰ Elevation service is rate-limiting — some segments may be unfilled. Try ⛰ Smart-fill again in a moment.', '#ffb14e');
+            if (elevRateLimited) toast('⛰ Percepto’s elevation quota is exhausted — paused ~60s. Some segments unfilled; hit ⛰ Smart-fill again shortly (or run the Asset Inspector’s elevation pass to pre-cache).', '#ffb14e');
             break; // one path per pass — the next drop re-checks
         }
     }
@@ -909,7 +929,7 @@
         elevRateLimited = false;
         toast('⛰ Analyzing terrain under the path…', '#7fdfff');
         const plan = await computePlan(wc.id, sigs);
-        if (!plan) { toast(elevRateLimited ? '⛰ Elevation service is rate-limiting — wait a few seconds and try ⛰ Smart-fill again.' : 'Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
+        if (!plan) { toast(elevRateLimited ? '⛰ Percepto’s elevation quota is exhausted — paused ~60s. Wait, then try ⛰ Smart-fill again (or pre-cache via the Asset Inspector’s elevation pass).' : 'Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
         if (plan.error) { toast(`⛰ Smart-fill blocked: ${plan.error}. Path untouched.`, '#ff8a80'); return; }
         showPreview(plan);
     }

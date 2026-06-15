@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.64
+// @version      4.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.64';
+    const SCRIPT_VERSION = '4.65';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -433,6 +433,23 @@
             })
         ));
     }
+
+    // ---- elevation service bridge (v4.65) ----
+    // Let sibling AIM scripts in the same window (e.g. the Flight Path Editor's smart
+    // altitude) reuse THIS script's warm GM cache + shared-GitHub team cache + fetch
+    // queue, instead of each hammering /location_altitude/ on its own (it rate-limits
+    // hard — HTTP 429). getCached() is free (no network); fetch()/bulk() go through the
+    // same dedup + persistence + shared-cache push everything else here uses. Exposed on
+    // unsafeWindow because GM storage is per-script (siblings can't read our cache directly).
+    try {
+        unsafeWindow.__aimAIElevation = {
+            version: SCRIPT_VERSION,
+            getCached: (lat, lng) => { try { const v = getElevationFromCache(lat, lng); return (v == null ? null : v); } catch (e) { return null; } },
+            fetch: (lat, lng) => fetchElevation(lat, lng),
+            bulk: (points, onProgress) => bulkFetchElevations(points, onProgress),
+        };
+        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (cache + queue reuse for sibling scripts)`);
+    } catch (e) {}
 
     // Best-effort centroid for any entity type. Returns {lat, lng} or null.
     // Assets/Markers: first coord. Polygons (FFZ/NFZ): average of coords.
