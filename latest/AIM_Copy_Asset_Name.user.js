@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.54
+// @version      4.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.54';
+    const SCRIPT_VERSION = '4.55';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -69,11 +69,12 @@
         aglFloorMinFt: 90, aglFloorMaxFt: 210,  // floor (min alt) must sit in this AGL band
         nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
+        gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
     };
     const SOP_ENABLE_DEFAULTS = {
         ffzAsset: true, fpAsset: true, ffzFfz: true,
         fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
-        bandHeight: true, altInverted: true, fpDegenerate: true,
+        bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
@@ -1608,6 +1609,39 @@
                 } else seenArc.add(pk);
             });
         }
+
+        // 11. GM "Tower" standoff — general-markers of type 'tower' must stay
+        //     ≥ threshold ft from every FFZ edge and every flight-path segment.
+        if (sopEnabled.gmTower) {
+            const th = sopThresholds.gmTowerFt;
+            const towers = ents.filter(e => e.type === 19 && e.general_marker_type === 'tower'
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+            towers.forEach(gm => {
+                const lat = gm.coords[0].lat, lng = gm.coords[0].lng;
+                let ffzD = Infinity, ffzN = null;
+                for (const ffz of ffzs) {
+                    const ring = getRing(ffz); if (!ring) continue;
+                    const d = pointToPolygonMeters(lat, lng, ring);   // 0 if the tower is inside
+                    if (d < ffzD) { ffzD = d; ffzN = ffz; }
+                }
+                let fpD = Infinity, fpN = null;
+                for (const rec of allArcs) {
+                    const d = pointToSegMeters(lat, lng, rec.arc.point_a, rec.arc.point_b);
+                    if (d < fpD) { fpD = d; fpN = rec; }
+                }
+                const ffzFt = Math.round(ffzD * M_TO_FT);
+                const fpFt = Math.round(fpD * M_TO_FT);
+                const parts = [];
+                if (ffzN && ffzFt < th) parts.push(`FFZ "${nameOf(ffzN)}" ${ffzFt} ft`);
+                if (fpN && fpFt < th) parts.push(`${segRef(fpN)} ${fpFt} ft`);
+                if (parts.length) {
+                    out.push({ check: 'GM Tower standoff', severity: 'high',
+                        distFt: Math.min(ffzN ? ffzFt : Infinity, fpN ? fpFt : Infinity), threshFt: th,
+                        note: `violation: Tower GM "${nameOf(gm)}" within ${th} ft — ${parts.join('; ')}`,
+                        polygon: boxAt(lat, lng) });
+                }
+            });
+        }
         return out;
     }
 
@@ -2737,6 +2771,8 @@
                 { id: 'nfzSepFt', label: 'NFZ min separation', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzSepFt, unit: 'ft' },
                 { id: 'altInverted', label: 'Check · Inverted / zero alt band', type: 'boolean', default: SOP_ENABLE_DEFAULTS.altInverted },
                 { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
+                { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
+                { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
@@ -6546,11 +6582,30 @@
     function routeCorridorEdges() { return genRoute.segs.map(s => [genRoute.verts[s.a], genRoute.verts[s.b]]); }
     // Insert a new waypoint on segment segIdx at pt; returns the new vert index.
     function insertVertOnSeg(segIdx, pt) {
-        const s = genRoute.segs[segIdx], a = s.a, b = s.b, ni = genRoute.verts.length;
+        const s = genRoute.segs[segIdx], a = s.a, b = s.b, br = s.branch, ni = genRoute.verts.length;
         genRoute.verts.push({ lat: pt.lat, lng: pt.lng });
-        genRoute.segs.splice(segIdx, 1, { a, b: ni, flag: false }, { a: ni, b, flag: false });
+        genRoute.segs.splice(segIdx, 1, { a, b: ni, flag: false, branch: br }, { a: ni, b, flag: false, branch: br });
         reflagSeg(genRoute.segs[segIdx]); reflagSeg(genRoute.segs[segIdx + 1]);
         return ni;
+    }
+    // Project a point onto segment a-b; returns {dist(m), foot{lat,lng}, t}.
+    function segProject(p, a, b) {
+        const proj = genProjector(p.lat, p.lng), A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        const fx = A.x + t * dx, fy = A.y + t * dy;
+        return { dist: Math.hypot(fx, fy), foot: proj.inv({ x: fx, y: fy }), t };
+    }
+    // Split the nearest NON-branch (corridor) segment at the foot of pt; return that
+    // vert index (reuses an endpoint if the foot is ~on it). For baking branch stubs.
+    function splitAtNearest(pt) {
+        let bestSeg = -1, bd = Infinity, bestPr = null;
+        for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; if (s.branch) continue; const pr = segProject(pt, genRoute.verts[s.a], genRoute.verts[s.b]); if (pr.dist < bd) { bd = pr.dist; bestSeg = si; bestPr = pr; } }
+        if (bestSeg < 0) return -1;
+        const s = genRoute.segs[bestSeg];
+        if (bestPr.t < 0.03) return s.a;
+        if (bestPr.t > 0.97) return s.b;
+        return insertVertOnSeg(bestSeg, bestPr.foot);
     }
     // Delete a waypoint; bridge its two neighbours so the path stays connected.
     function deleteVert(i) {
@@ -6570,6 +6625,17 @@
         const idx = new Map(); genRoute.verts = []; genRoute.segs = [];
         const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = genRoute.verts.length; genRoute.verts.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
         for (const s of (result.corridor || [])) { const a = vi(s.a), b = vi(s.b); if (a !== b) genRoute.segs.push({ a, b, flag: !!s.flag }); }
+        // BAKE each asset branch into the editable graph so the whole path (corridor
+        // + branches) is uniformly drag/insert/delete-able: a stub from the FOOT on
+        // the corridor (split in) to the FFZ-connection vert (green, soft-snaps to the
+        // FFZ edge). The base launch stays a separate auto leg.
+        for (const r of genRoute.assets) {
+            if (r._noBranch || !r.entry || !genRoute.segs.length) continue;
+            const footIdx = splitAtNearest(r.entry); if (footIdx < 0) continue;
+            const ev = { lat: r.entry.lat, lng: r.entry.lng, _entry: true, _ffzRing: r._ffzRing || null, _asset: r };
+            const entryIdx = genRoute.verts.length; genRoute.verts.push(ev);
+            if (entryIdx !== footIdx) { const seg = { a: footIdx, b: entryIdx, flag: false, branch: true }; reflagSeg(seg); genRoute.segs.push(seg); }
+        }
     }
     // push the edited verts/segs back into result.corridor so export + commit + the
     // flagged-ft stat reflect the edits.
@@ -7219,32 +7285,19 @@
         const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return 0;
         genRouteLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} }); genRouteLayers = []; genRoute.handles = [];
         const edges = routeCorridorEdges();
-        // 1) corridor segments — cyan shielded, ORANGE where it leaves the band / hits a pad/FFZ
+        // 1) all segments (corridor + baked branch stubs) — cyan shielded, ORANGE
+        //    where it leaves the band / hits a pad/FFZ
         for (const s of genRoute.segs) {
             const a = genRoute.verts[s.a], b = genRoute.verts[s.b];
             try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
         }
-        // 2) per-asset branch: trunk FOOT (recomputed to the CURRENT corridor) → FFZ
-        //    edge. The green tip is a draggable/deletable handle (move where it meets
-        //    the FFZ; right-click to drop the branch).
-        genRoute.entryHandles = [];
-        for (const r of genRoute.assets) {
-            if (r._noBranch) continue;
-            const tip = r.entry || (r.path && r.path[r.path.length - 1]); if (!tip) continue;
-            const foot = edges.length ? a2NearestOnEdges(tip, edges) : null;
-            const from = foot ? foot.pt : r.foot; if (!from) continue;
-            const col = r.longApproach ? '#ff8a80' : '#00e5ff';
-            try { const ap = L.polyline([[from.lat, from.lng], [tip.lat, tip.lng]], { color: col, weight: 3, opacity: 0.9, interactive: false }); ap.addTo(map); genRouteLayers.push(ap); } catch (e) {}
-            try { const d = L.circleMarker([tip.lat, tip.lng], { radius: 5, color: r.longApproach ? '#ff8a80' : '#5fff5f', weight: 2, fillColor: r.longApproach ? '#3d0a0a' : '#0a3d0a', fillOpacity: 0.9, interactive: false }); d.addTo(map); genRouteLayers.push(d); } catch (e) {}
-            genRoute.entryHandles.push(r);
-        }
-        // 3) base launch (base → nearest corridor pt) + base marker
+        // 2) base launch (base → nearest corridor pt) + base marker (base is fixed)
         if (genRoute.base && edges.length) { const bl = a2NearestOnEdges(genRoute.base, edges); if (bl) { try { const l = L.polyline([[genRoute.base.lat, genRoute.base.lng], [bl.pt.lat, bl.pt.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); l.addTo(map); genRouteLayers.push(l); } catch (e) {} } }
         if (genRoute.base) { try { const b = L.circleMarker([genRoute.base.lat, genRoute.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {} }
-        // 4) draggable vertex handles (white dots) — drag to move a waypoint
+        // 3) draggable handles — GREEN at FFZ connections, white elsewhere
         for (let i = 0; i < genRoute.verts.length; i++) {
-            const v = genRoute.verts[i];
-            try { const h = L.circleMarker([v.lat, v.lng], { radius: 5, color: '#ffffff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); h.addTo(map); genRouteLayers.push(h); genRoute.handles.push(i); } catch (e) {}
+            const v = genRoute.verts[i], en = !!v._entry;
+            try { const h = L.circleMarker([v.lat, v.lng], { radius: en ? 6 : 5, color: en ? '#5fff5f' : '#ffffff', weight: 2, fillColor: en ? '#0a3d0a' : '#0a2730', fillOpacity: 0.95, interactive: false }); h.addTo(map); genRouteLayers.push(h); genRoute.handles.push(i); } catch (e) {}
         }
         return genRouteLayers.length;
     }
@@ -7257,27 +7310,21 @@
             document.addEventListener('mouseup', genRoute.onUp, true);
         };
         const hitVert = (cp) => { let best = -1, bd = 14; for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } } return best; };
-        const hitEntry = (cp) => { let best = null, bd = 14; for (const r of genRoute.entryHandles) { if (!r.entry) continue; const p = map.latLngToContainerPoint([r.entry.lat, r.entry.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = r; } } return best; };
         genRoute.onDown = (ev) => {
             if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            // 1) drag an FFZ-connection (green) tip
-            const er = hitEntry(cp);
-            if (er) { ev.preventDefault(); ev.stopPropagation(); startDrag({ k: 'e', r: er }); return; }
-            // 2) drag an existing corridor waypoint (white dot within 14 px)
+            // 1) drag an existing waypoint (white path dot OR green FFZ-connection, within 14 px)
             const best = hitVert(cp);
-            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag({ k: 'v', i: best }); return; }
-            // 3) click ON a corridor line (within 8 px) → INSERT a waypoint there + drag it
+            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag(best); return; }
+            // 2) click ON any line (within 8 px) → INSERT a waypoint there + drag it
             let bestSeg = -1, bsd = 8, bsp = null;
             for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
-            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag({ k: 'v', i: ni }); }
+            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag(ni); }
         };
-        // right-click: delete a corridor waypoint (bridge the gap) OR drop a branch
+        // right-click a waypoint → delete it (bridges the gap; an FFZ tip drops the branch)
         genRoute.onContext = (ev) => {
             if (genDraw.active || !genRoute.verts.length) return;
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            const er = hitEntry(cp);
-            if (er) { ev.preventDefault(); ev.stopPropagation(); er._noBranch = true; drawGenRoute(); return; }
             const best = hitVert(cp);
             if (best < 0) return;
             ev.preventDefault(); ev.stopPropagation();
@@ -7286,15 +7333,12 @@
         genRoute.onMove = (ev) => {
             if (genRoute.drag == null) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            if (genRoute.drag.k === 'e') {
-                const r = genRoute.drag.r;
-                // keep the FFZ connection ON the FFZ edge (snap to its ring) if we have it
-                if (r._ffzRing) { const np = nearestPointOnRing(ll, r._ffzRing); r.entry = (np && np.pt) ? { lat: np.pt.lat, lng: np.pt.lng } : { lat: ll.lat, lng: ll.lng }; }
-                else r.entry = { lat: ll.lat, lng: ll.lng };
-            } else {
-                const v = genRoute.verts[genRoute.drag.i]; v.lat = ll.lat; v.lng = ll.lng;
-                for (const s of genRoute.segs) if (s.a === genRoute.drag.i || s.b === genRoute.drag.i) reflagSeg(s);
-            }
+            const v = genRoute.verts[genRoute.drag];
+            // FFZ-connection vert SOFT-snaps to the FFZ edge only when within ~25 ft —
+            // otherwise it drags free (no more hard lock).
+            if (v._entry && v._ffzRing) { const np = nearestPointOnRing(ll, v._ffzRing); const dft = np && np.pt ? approxMeters(ll.lat, ll.lng, np.pt.lat, np.pt.lng) / GEN_FT_TO_M : 1e9; if (np && np.pt && dft < 25) { v.lat = np.pt.lat; v.lng = np.pt.lng; } else { v.lat = ll.lat; v.lng = ll.lng; } }
+            else { v.lat = ll.lat; v.lng = ll.lng; }
+            for (const s of genRoute.segs) if (s.a === genRoute.drag || s.b === genRoute.drag) reflagSeg(s);
             drawGenRoute();
         };
         genRoute.onUp = () => {
