@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.28
+// @version      0.29
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.28';
+    const SCRIPT_VERSION = '0.29';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -774,9 +774,10 @@
     // (ported from Asset Inspector's bridgeArcContinuity) — raises ONLY the lower
     // neighbour's ceiling so every floor keeps its true AGL; the band just fattens
     // at a terrain step (up to ~36.6 ft when floors differ by the full band width).
-    function bridgeArcContinuity(arcs, overlapM) {
+    function bridgeArcContinuity(arcs, overlapM, skip) {
         if (!Array.isArray(arcs) || arcs.length < 2) return [];
         const OVERLAP_M = (typeof overlapM === 'number' && overlapM > 0) ? overlapM : 2;
+        const skipSet = skip instanceof Set ? skip : new Set();
         const vkey = (p) => (p && num(p.lat)) ? `${p.lat.toFixed(6)},${p.lng.toFixed(6)}` : null;
         const origMax = arcs.map(a => (a && num(a.max_alt)) ? a.max_alt : null);
         const byVertex = new Map();
@@ -787,6 +788,7 @@
         for (let pass = 0; pass < 8; pass++) {
             let changed = false;
             for (const [i, j] of edgeList) {
+                if (skipSet.has(i) || skipSet.has(j)) continue; // never touch an un-banded segment (its default band is bogus)
                 const A = arcs[i], B = arcs[j];
                 if (!A || !B || !num(A.min_alt) || !num(A.max_alt) || !num(B.min_alt) || !num(B.max_alt)) continue;
                 if (A.max_alt > B.min_alt && B.max_alt > A.min_alt) continue; // already strictly overlap
@@ -873,7 +875,13 @@
                 }
             } else newArcs.push(a);
         });
-        const bridges = bridgeArcContinuity(newArcs, settings.overlapM);
+        // Don't bridge segments we couldn't band — their default band is bogus, and
+        // half-bridging produces the "min default / max raised" state. Leave them fully
+        // at default until a retry bands them properly.
+        const unresolvedSet = new Set(unresolved);
+        const skipIdx = new Set();
+        newArcs.forEach((a, i) => { if (unresolvedSet.has(arcSig(a))) skipIdx.add(i); });
+        const bridges = bridgeArcContinuity(newArcs, settings.overlapM, skipIdx);
         // SAFETY GATE — the result must introduce no NEW integrity problem vs before.
         const preIssues = checkFlightPath(st);
         const post = checkFlightPath({ arcs: newArcs, coords: newCoords });
@@ -910,7 +918,7 @@
     }
 
     // ---- AUTO mode: smart-fill segments added since we last looked (debounced on drop) ----
-    let smartTimer = null, autoBusy = false;
+    let smartTimer = null, autoBusy = false, smartRetryTimer = null;
     function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, 320); }
     async function smartAutoPass() {
         if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || pendingPreview) return;
@@ -945,7 +953,14 @@
                     procState.set(wc.id, { count: arcs.length, sigs });
                 }
             } finally { autoBusy = false; }
-            if (elevRateLimited) toast('⛰ Percepto’s elevation quota is exhausted — paused ~60s. Some segments unfilled; hit ⛰ Smart-fill again shortly (or run the Asset Inspector’s elevation pass to pre-cache).', '#ffb14e');
+            if (elevRateLimited) {
+                toast('⛰ Percepto’s elevation quota is exhausted — paused ~60s. Unfilled segments will auto-retry once it recovers (no need to nudge them).', '#ffb14e');
+                // Auto-retry once the breaker expires so un-banded segments finish themselves.
+                if (!smartRetryTimer) {
+                    const wait = Math.max(2000, elevBreakerUntil - Date.now() + 800);
+                    smartRetryTimer = setTimeout(() => { smartRetryTimer = null; if (editingFP()) scheduleSmartPass(); }, wait);
+                }
+            }
             break; // one path per pass — the next drop re-checks
         }
     }
