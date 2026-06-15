@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.55
+// @version      4.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.55';
+    const SCRIPT_VERSION = '4.56';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -70,11 +70,13 @@
         nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
         bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
         gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
+        fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
     };
     const SOP_ENABLE_DEFAULTS = {
         ffzAsset: true, fpAsset: true, ffzFfz: true,
         fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
         bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
+        fpFfzAngle: true,
     };
     let sopValidatorChannel = null;
     let sopMasterEnabled = true;
@@ -1265,6 +1267,19 @@
         }
         return false;
     }
+    // Acute angle (0–90°) between segment a1-a2 and segment b1-b2. Computed
+    // in a cos(lat)-corrected meter frame so lng/lat scaling doesn't skew it.
+    // 0° = parallel (grazing), 90° = perpendicular. Null for a zero-length seg.
+    function segAngleDeg(a1, a2, b1, b2) {
+        const cos = Math.cos(((a1.lat + a2.lat + b1.lat + b2.lat) / 4) * Math.PI / 180) || 1e-6;
+        const ux = (a2.lng - a1.lng) * cos, uy = a2.lat - a1.lat;
+        const vx = (b2.lng - b1.lng) * cos, vy = b2.lat - b1.lat;
+        const du = Math.hypot(ux, uy), dv = Math.hypot(vx, vy);
+        if (du === 0 || dv === 0) return null;
+        let c = Math.abs(ux * vx + uy * vy) / (du * dv);  // |·| → acute angle
+        c = Math.max(-1, Math.min(1, c));
+        return Math.acos(c) * 180 / Math.PI;
+    }
     // Ground elevation (m) under a point from the DEM cache, or null.
     // drawSopIssues prefetches these before the AGL check runs.
     function groundAtCached(lat, lng) {
@@ -1639,6 +1654,35 @@
                         distFt: Math.min(ffzN ? ffzFt : Infinity, fpN ? fpFt : Infinity), threshFt: th,
                         note: `violation: Tower GM "${nameOf(gm)}" within ${th} ft — ${parts.join('; ')}`,
                         polygon: boxAt(lat, lng) });
+                }
+            });
+        }
+
+        // 12. FP → FFZ connection angle — where an FP segment crosses an FFZ
+        //     boundary, the angle between the segment and that edge must be ≥
+        //     the threshold (ideal 45°). A near-parallel/grazing crossing
+        //     (< 15°) is "too sharp". One finding per arc-FFZ crossing (the
+        //     sharpest edge), drawn at the entry point.
+        if (sopEnabled.fpFfzAngle && allArcs.length && ffzs.length) {
+            const th = sopThresholds.fpFfzAngleDeg;
+            allArcs.forEach(rec => {
+                const a1 = rec.arc.point_a, a2 = rec.arc.point_b;
+                for (const ffz of ffzs) {
+                    const ring = getRing(ffz); if (!ring) continue;
+                    let sharpest = null;
+                    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                        if (!segmentsCross(a1, a2, ring[j], ring[i])) continue;
+                        const deg = segAngleDeg(a1, a2, ring[j], ring[i]);
+                        if (deg == null) continue;
+                        if (sharpest == null || deg < sharpest) sharpest = deg;
+                    }
+                    if (sharpest != null && Math.round(sharpest) < th) {
+                        const anchor = pointInPolygon(a2.lat, a2.lng, ring) ? a2
+                            : (pointInPolygon(a1.lat, a1.lng, ring) ? a1 : arcMid(rec.arc));
+                        out.push({ check: 'FP↔FFZ angle', severity: 'high', distFt: Math.round(sharpest), threshFt: th,
+                            note: `violation: ${segRef(rec)} crosses FFZ "${nameOf(ffz)}" boundary at ${Math.round(sharpest)}° (min ${th}°, ideal 45°)`,
+                            polygon: boxAt(anchor.lat, anchor.lng) });
+                    }
                 }
             });
         }
@@ -2773,6 +2817,8 @@
                 { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
                 { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
                 { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
+                { id: 'fpFfzAngle', label: 'Check · FP→FFZ crossing angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
+                { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
             ],
@@ -7372,6 +7418,111 @@
         return n;
     }
 
+    // ============================================================
+    // A2 — DRAW-FP MODE: you sketch rough waypoints; each snaps to ~50 ft parallel
+    // off the NEAREST power line (on the side you drew toward) when within range,
+    // else stays free (a crossing / connector). Double-click finishes → the path
+    // becomes the editable corridor (drag/insert/delete). Altitudes come next.
+    // ============================================================
+    // Snap a point to `offM` perpendicular off the nearest power line, on the side
+    // the point is on. Returns { pt, snapped } — unchanged if no line within rangeM.
+    function a2SnapToLineOffset(ll, segs, offM, rangeM) {
+        let best = null;
+        for (const s of segs) { const d = pointToSegMeters(ll.lat, ll.lng, s[0], s[1]); if (!best || d < best.d) best = { d, s }; }
+        if (!best || best.d > rangeM) return { pt: { lat: ll.lat, lng: ll.lng }, snapped: false };
+        const proj = genProjector(ll.lat, ll.lng);                 // origin = ll
+        const A = proj.fwd(best.s[0]), B = proj.fwd(best.s[1]);
+        const dx = B.x - A.x, dy = B.y - A.y, L2 = dx * dx + dy * dy;
+        let t = L2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+        const fx = A.x + t * dx, fy = A.y + t * dy;                // foot on the line
+        let nx = -fx, ny = -fy; const NL = Math.hypot(nx, ny) || 1; nx /= NL; ny /= NL; // foot→ll (the drawn side)
+        return { pt: proj.inv({ x: fx + nx * offM, y: fy + ny * offM }), snapped: true };
+    }
+    // Gather the re-flag context for a site (power-line segs + pad/FFZ obstacles).
+    function routeCtxForSite(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const segs = powerLineSegments(siteID);
+        const padObs = [], ffzObs = [];
+        for (const a of ents) { if (a.type === 3) { const r = entityCoords(a); if (r && r.length >= 3) { const buf = assetOffsetRing(simplifyPolygon(r), A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObs.push(buf); } } }
+        for (const e of ents) { if (e.type === 16) { const r = entityCoords(e); if (r && r.length >= 3) ffzObs.push(simplifyPolygon(r)); } }
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) for (const f of genState.lastResult.ffzs) if (f.points && f.points.length >= 3) ffzObs.push(f.points);
+        return { segs, avoidObs: padObs.concat(ffzObs) };
+    }
+    // Turn a drawn polyline into the editable corridor (genRoute) + wire editing.
+    function buildRouteFromDrawnPath(pts, siteID) {
+        const map = getLeafletMap();
+        clearRoutePreview();                                          // resets genRoute.verts/segs
+        genRoute.ctx = routeCtxForSite(siteID); genRoute.assets = []; genRoute.base = null;
+        genRoute.verts = pts.map(p => ({ lat: p.lat, lng: p.lng }));
+        genRoute.segs = [];
+        for (let i = 0; i < genRoute.verts.length - 1; i++) { const seg = { a: i, b: i + 1, flag: false }; reflagSeg(seg); genRoute.segs.push(seg); }
+        genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx };  // so export/sync work
+        syncRouteToResult();
+        drawGenRoute();
+        if (map) wireRouteEdit(map);
+    }
+    let genFpDraw = { active: false, pts: [], tentative: null, ctx: null, layers: [], container: null, onDown: null, onMove: null, onDbl: null };
+    function clearFpDrawLayers() { const map = getLeafletMap(); genFpDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genFpDraw.layers = []; }
+    function renderFpDraw() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
+        clearFpDrawLayers();
+        const pts = genFpDraw.pts.concat(genFpDraw.tentative ? [genFpDraw.tentative] : []);
+        if (pts.length >= 2) { try { const pl = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#00e5ff', weight: 3, opacity: 0.9, dashArray: genFpDraw.tentative ? '5,4' : null, interactive: false }); pl.addTo(map); genFpDraw.layers.push(pl); } catch (e) {} }
+        for (const p of genFpDraw.pts) { try { const d = L.circleMarker([p.lat, p.lng], { radius: 4, color: '#fff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); d.addTo(map); genFpDraw.layers.push(d); } catch (e) {} }
+    }
+    function snapFpPoint(ll) {
+        const segs = (genFpDraw.ctx && genFpDraw.ctx.segs) || [];
+        const r = a2SnapToLineOffset(ll, segs, A2.offsetFt * GEN_FT_TO_M, 150 * GEN_FT_TO_M);
+        return r.pt;
+    }
+    function setFpDraw(on, siteID) {
+        const map = getLeafletMap();
+        genFpDraw.active = on;
+        if (on) {
+            genFpDraw.pts = []; genFpDraw.tentative = null; genFpDraw.ctx = routeCtxForSite(siteID);
+            if (map) { try { map.doubleClickZoom.disable(); } catch (e) {} map.getContainer().style.cursor = 'crosshair'; }
+            wireFpDraw(map);
+        } else {
+            clearFpDrawLayers(); genFpDraw.pts = []; genFpDraw.tentative = null;
+            unwireFpDraw();
+            if (map) { try { map.doubleClickZoom.enable(); } catch (e) {} map.getContainer().style.cursor = ''; }
+        }
+    }
+    function wireFpDraw(map) {
+        if (!map || genFpDraw.onDown) return;
+        genFpDraw.container = map.getContainer();
+        genFpDraw.onDown = (ev) => {
+            if (!genFpDraw.active || ev.button !== 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            genFpDraw.pts.push(snapFpPoint(ll)); genFpDraw.tentative = null; renderFpDraw();
+        };
+        genFpDraw.onMove = (ev) => {
+            if (!genFpDraw.active) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            genFpDraw.tentative = snapFpPoint(ll); renderFpDraw();
+        };
+        genFpDraw.onDbl = (ev) => {
+            if (!genFpDraw.active) return;
+            ev.preventDefault(); ev.stopPropagation();
+            const pts = genFpDraw.pts.slice();
+            // dedupe the finishing double-click's near-duplicate point
+            while (pts.length >= 2 && approxMeters(pts[pts.length - 1].lat, pts[pts.length - 1].lng, pts[pts.length - 2].lat, pts[pts.length - 2].lng) < 4 * GEN_FT_TO_M) pts.pop();
+            const sid = genState.siteID;
+            setFpDraw(false);
+            if (pts.length >= 2) buildRouteFromDrawnPath(pts, sid);
+        };
+        genFpDraw.container.addEventListener('mousedown', genFpDraw.onDown, true);
+        genFpDraw.container.addEventListener('mousemove', genFpDraw.onMove, true);
+        genFpDraw.container.addEventListener('dblclick', genFpDraw.onDbl, true);
+    }
+    function unwireFpDraw() {
+        const c = genFpDraw.container;
+        if (c) { if (genFpDraw.onDown) try { c.removeEventListener('mousedown', genFpDraw.onDown, true); } catch (e) {} if (genFpDraw.onMove) try { c.removeEventListener('mousemove', genFpDraw.onMove, true); } catch (e) {} if (genFpDraw.onDbl) try { c.removeEventListener('dblclick', genFpDraw.onDbl, true); } catch (e) {} }
+        genFpDraw.onDown = genFpDraw.onMove = genFpDraw.onDbl = null;
+    }
+
     // ---- shared FFZ preview styling ----
     function ffzColor(f) {
         return f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
@@ -8624,6 +8775,7 @@
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
+        try { setFpDraw(false); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -8690,6 +8842,7 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-fpdraw" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩✏️ Draw FP</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
@@ -8754,6 +8907,15 @@
             clearGenPreview();
             clearRoutePreview(); genRouteResult = null;
             statsEl.textContent = 'Preview cleared.';
+        };
+        const fpDrawBtn = box.querySelector('#aim-gen-fpdraw');
+        fpDrawBtn.onclick = () => {
+            if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
+            const on = !genFpDraw.active;
+            setFpDraw(on, siteID);
+            fpDrawBtn.style.background = on ? 'rgba(0,229,255,0.32)' : 'rgba(0,229,255,0.12)';
+            fpDrawBtn.textContent = on ? '🛩 Drawing — click waypoints · dbl-click finish' : '🛩✏️ Draw FP';
+            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Click rough waypoints</span> — each snaps to ~50 ft parallel off the nearest power line (draw away from a line = stays free). <b>Double-click</b> to finish → editable path.`;
         };
         const routesBtn = box.querySelector('#aim-gen-routes');
         routesBtn.onclick = () => {
