@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.67
+// @version      4.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.67';
+    const SCRIPT_VERSION = '4.68';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -306,7 +306,7 @@
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
-    const ELEV_CONCURRENCY = 4;
+    const ELEV_CONCURRENCY = 8; // v4.68 — raised 4→8: small/medium batches finish ~2× faster (the throttle caps the worst case anyway). Shared by the Flight Path Editor too.
     let elevationCache = null;      // per-site cache for elevCacheSiteID
     let elevCacheSiteID = null;     // which site elevationCache holds
     let legacyElevCache = null;     // lazy-loaded old global blob — READ-ONLY fallback
