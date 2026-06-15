@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.61
+// @version      4.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.61';
+    const SCRIPT_VERSION = '4.62';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7458,7 +7458,7 @@
         };
         const hitVert = (cp) => { let best = -1, bd = 14; for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } } return best; };
         genRoute.onDown = (ev) => {
-            if (ev.button !== 0 || genDraw.active || genFpDraw.active || !genRoute.verts.length) return; // not during FFZ/FP draw
+            if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
             // 1) drag an existing waypoint (white path dot OR green FFZ-connection, within 14 px)
             const best = hitVert(cp);
@@ -7470,7 +7470,7 @@
         };
         // right-click a waypoint → delete it (bridges the gap; an FFZ tip drops the branch)
         genRoute.onContext = (ev) => {
-            if (genDraw.active || genFpDraw.active || !genRoute.verts.length) return;
+            if (genDraw.active || !genRoute.verts.length) return;
             let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
             const best = hitVert(cp);
             if (best < 0) return;
@@ -7550,35 +7550,52 @@
         if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) for (const f of genState.lastResult.ffzs) if (f.points && f.points.length >= 3) ffzObs.push(f.points);
         return { segs, avoidObs: padObs.concat(ffzObs) };
     }
-    // Turn a drawn polyline into the editable corridor (genRoute) + wire editing.
-    // APPEND a drawn polyline to the editable graph (so you can draw MULTIPLE FPs and
-    // BRANCH off existing ones). Each drawn point is mapped to a vert index: reuse an
-    // existing waypoint (vIdx, from snapping onto one), split an existing segment
-    // (onPath → T-junction), or add a new vert. insertVertOnSeg only APPENDS verts,
-    // so captured vIdx stay valid through the splits.
-    function buildRouteFromDrawnPath(pts, siteID) {
-        const map = getLeafletMap();
-        if (!genRoute.ctx) genRoute.ctx = routeCtxForSite(siteID);
-        if (!genRouteResult || !genRouteResult.ok) genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx };
-        const idxs = pts.map(dp => {
-            if (dp.vIdx != null && dp.vIdx < genRoute.verts.length) return dp.vIdx;
-            if (dp.onPath) { const ni = splitAtNearest(dp, true); if (ni >= 0) return ni; }
-            const ni = genRoute.verts.length; genRoute.verts.push({ lat: dp.lat, lng: dp.lng }); return ni;
-        });
-        for (let i = 0; i < idxs.length - 1; i++) { if (idxs[i] !== idxs[i + 1]) { const seg = { a: idxs[i], b: idxs[i + 1], flag: false }; reflagSeg(seg); genRoute.segs.push(seg); } }
-        drawGenRoute();
-        if (map) wireRouteEdit(map);
+    // 📥 Load existing flight paths into the editable graph for CLEANUP. The workflow
+    // is: draw FPs natively in Percepto → save them → load them here → ✨ Snap & Clean →
+    // (elevation) → save back. Each type-15 FP arc carries full {lat,lng} endpoints
+    // (not indices), and each FP entity is one connected component. We dedup endpoints
+    // by coordinate into shared verts (junctions collapse) and tag every seg with its
+    // source entity id/name so a later save can group segs back per FP and rebuild
+    // that entity's arcs in place (preserving id/name/other fields).
+    function loadExistingFpsToRoute(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        if (!fps.length) return { ok: false, msg: 'No flight paths on this site — draw them natively in Percepto and save first, then Load.' };
+        genRoute.ctx = routeCtxForSite(siteID);
+        genRoute.assets = []; genRoute.base = null;
+        genRoute.verts = []; genRoute.segs = [];
+        const idx = new Map();
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = genRoute.verts.length; genRoute.verts.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        let arcCount = 0;
+        for (const fp of fps) {
+            for (const arc of fp.arcs) {
+                if (!arc.point_a || !arc.point_b) continue;
+                if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') continue;
+                const a = vi(arc.point_a), b = vi(arc.point_b);
+                if (a === b) continue; // degenerate zero-length arc
+                const seg = { a, b, flag: false, _fpId: fp.id, _fpName: fp.name };
+                reflagSeg(seg); genRoute.segs.push(seg);
+                arcCount++;
+            }
+        }
+        // synthetic result so export/sync work; stash sources for the save-back step.
+        genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx, _sourceFps: fps, _loadedFromEntities: true, stats: {} };
         syncRouteToResult();
+        drawGenRoute();
+        const map = getLeafletMap(); if (map) wireRouteEdit(map);
+        return { ok: true, fps: fps.length, arcs: arcCount, verts: genRoute.verts.length };
     }
-    // ✨ Snap & Clean — batch pass over the WHOLE drawn network: densify each segment,
+    // ✨ Snap & Clean — batch pass over the WHOLE loaded network: densify each segment,
     // snap every sample ~50 ft parallel off the nearest power line (within approachMax),
     // then Douglas-Peucker simplify so the path follows line bends with few clean
     // verts. Shared junction/branch verts are snapped ONCE (deterministic) so
-    // connectivity survives the rebuild. Points farther than approachMax from any line
-    // stay where drawn (open-ground / base connectors). Re-flags + redraws + re-wires
-    // editing so you can still drag/insert/delete after cleaning.
+    // connectivity survives the rebuild. Each sub-seg inherits its source seg's _fpId/
+    // _fpName so a save-back can regroup per FP. Points farther than approachMax from
+    // any line stay where drawn (open-ground / base connectors). Re-flags + redraws +
+    // re-wires editing so you can still drag/insert/delete after cleaning.
     function snapCleanRoute() {
-        if (!genRoute.segs.length) return { ok: false, msg: 'Nothing drawn yet — sketch some flight paths first.' };
+        if (!genRoute.segs.length) return { ok: false, msg: 'Nothing loaded yet — Load site FPs first.' };
         const ctx = genRoute.ctx || (genState.siteID ? routeCtxForSite(genState.siteID) : null);
         const segsPL = (ctx && ctx.segs) || [];
         if (!segsPL.length) return { ok: false, msg: 'No power lines loaded for this site.' };
@@ -7600,7 +7617,7 @@
             for (let i = 1; i < n; i++) { const p = a2Interp(oa, ob, i / n); const r = a2SnapToLineOffset(p, segsPL, offM, rangeM); if (r.snapped) snappedCount++; chain.push({ lat: r.pt.lat, lng: r.pt.lng }); }
             chain.push(sb);
             const simp = simplifyPath(chain, tolM);
-            for (let i = 0; i < simp.length - 1; i++) { const ai = vi(simp[i]), bi = vi(simp[i + 1]); if (ai !== bi) nseg.push({ a: ai, b: bi, flag: false, branch: !!s.branch }); }
+            for (let i = 0; i < simp.length - 1; i++) { const ai = vi(simp[i]), bi = vi(simp[i + 1]); if (ai !== bi) nseg.push({ a: ai, b: bi, flag: false, branch: !!s.branch, _fpId: s._fpId, _fpName: s._fpName }); }
         }
         genRoute.verts = nv; genRoute.segs = nseg;
         for (const seg of genRoute.segs) reflagSeg(seg);
@@ -7608,82 +7625,6 @@
         syncRouteToResult();
         const map = getLeafletMap(); if (map) wireRouteEdit(map);
         return { ok: true, snapped: snappedCount, verts: nv.length, segs: nseg.length };
-    }
-    let genFpDraw = { active: false, pts: [], tentative: null, ctx: null, layers: [], container: null, onDown: null, onMove: null, onDbl: null };
-    function clearFpDrawLayers() { const map = getLeafletMap(); genFpDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genFpDraw.layers = []; }
-    function renderFpDraw() {
-        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return;
-        clearFpDrawLayers();
-        const pts = genFpDraw.pts.concat(genFpDraw.tentative ? [genFpDraw.tentative] : []);
-        if (pts.length >= 2) { try { const pl = L.polyline(pts.map(p => [p.lat, p.lng]), { color: '#00e5ff', weight: 3, opacity: 0.9, dashArray: genFpDraw.tentative ? '5,4' : null, interactive: false }); pl.addTo(map); genFpDraw.layers.push(pl); } catch (e) {} }
-        for (const p of genFpDraw.pts) { try { const d = L.circleMarker([p.lat, p.lng], { radius: 4, color: '#fff', weight: 2, fillColor: '#0a2730', fillOpacity: 0.95, interactive: false }); d.addTo(map); genFpDraw.layers.push(d); } catch (e) {} }
-    }
-    // Snap a drawn point for BRANCHING ONLY: (1) onto an existing FP waypoint
-    // (≤12 px → branch/join), (2) onto an existing FP segment (≤8 px → T-junction).
-    // Otherwise the point is FREE (no power-line snap while drawing) — sketch roughly,
-    // then ✨ Snap & Clean snaps the whole network. Returns {lat,lng,vIdx?,onPath?}.
-    function snapFpPoint(ll, cp, map) {
-        if (cp && map && genRoute.verts.length) {
-            let best = -1, bd = 12;
-            for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } }
-            if (best >= 0) { const v = genRoute.verts[best]; return { lat: v.lat, lng: v.lng, vIdx: best }; }
-        }
-        if (cp && map && genRoute.segs.length) {
-            let bestSeg = -1, bsd = 8, bsp = null;
-            for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
-            if (bestSeg >= 0) { const l2 = map.containerPointToLatLng(bsp); return { lat: l2.lat, lng: l2.lng, onPath: true }; }
-        }
-        // Free sketch: NO per-click power-line snap. Draw roughly where you want the
-        // path; the ✨ Snap & Clean pass snaps the whole network to the power lines
-        // afterward. Only branch-to-existing-FP (verts/segs above) snaps while drawing.
-        return { lat: ll.lat, lng: ll.lng };
-    }
-    function setFpDraw(on, siteID) {
-        const map = getLeafletMap();
-        genFpDraw.active = on;
-        if (on) {
-            genFpDraw.pts = []; genFpDraw.tentative = null; genFpDraw.ctx = routeCtxForSite(siteID);
-            if (map) { try { map.doubleClickZoom.disable(); } catch (e) {} map.getContainer().style.cursor = 'crosshair'; }
-            wireFpDraw(map);
-        } else {
-            clearFpDrawLayers(); genFpDraw.pts = []; genFpDraw.tentative = null;
-            unwireFpDraw();
-            if (map) { try { map.doubleClickZoom.enable(); } catch (e) {} map.getContainer().style.cursor = ''; }
-        }
-    }
-    function wireFpDraw(map) {
-        if (!map || genFpDraw.onDown) return;
-        genFpDraw.container = map.getContainer();
-        genFpDraw.onDown = (ev) => {
-            if (!genFpDraw.active || ev.button !== 0) return;
-            ev.preventDefault(); ev.stopPropagation();
-            let ll, cp; try { ll = map.mouseEventToLatLng(ev); cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            genFpDraw.pts.push(snapFpPoint(ll, cp, map)); genFpDraw.tentative = null; renderFpDraw();
-        };
-        genFpDraw.onMove = (ev) => {
-            if (!genFpDraw.active) return;
-            let ll, cp; try { ll = map.mouseEventToLatLng(ev); cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
-            genFpDraw.tentative = snapFpPoint(ll, cp, map); renderFpDraw();
-        };
-        genFpDraw.onDbl = (ev) => {
-            if (!genFpDraw.active) return;
-            ev.preventDefault(); ev.stopPropagation();
-            const pts = genFpDraw.pts.slice();
-            // dedupe the finishing double-click's near-duplicate point
-            while (pts.length >= 2 && approxMeters(pts[pts.length - 1].lat, pts[pts.length - 1].lng, pts[pts.length - 2].lat, pts[pts.length - 2].lng) < 4 * GEN_FT_TO_M) pts.pop();
-            // commit this path, but STAY in draw mode so you can sketch the next FP /
-            // branch right away (toggle the button off when done).
-            genFpDraw.pts = []; genFpDraw.tentative = null; clearFpDrawLayers();
-            if (pts.length >= 2) buildRouteFromDrawnPath(pts, genState.siteID);
-        };
-        genFpDraw.container.addEventListener('mousedown', genFpDraw.onDown, true);
-        genFpDraw.container.addEventListener('mousemove', genFpDraw.onMove, true);
-        genFpDraw.container.addEventListener('dblclick', genFpDraw.onDbl, true);
-    }
-    function unwireFpDraw() {
-        const c = genFpDraw.container;
-        if (c) { if (genFpDraw.onDown) try { c.removeEventListener('mousedown', genFpDraw.onDown, true); } catch (e) {} if (genFpDraw.onMove) try { c.removeEventListener('mousemove', genFpDraw.onMove, true); } catch (e) {} if (genFpDraw.onDbl) try { c.removeEventListener('dblclick', genFpDraw.onDbl, true); } catch (e) {} }
-        genFpDraw.onDown = genFpDraw.onMove = genFpDraw.onDbl = null;
     }
 
     // ---- shared FFZ preview styling ----
@@ -8938,7 +8879,6 @@
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
-        try { setFpDraw(false); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -9005,8 +8945,8 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
-                <button id="aim-gen-fpdraw" title="Sketch flight paths roughly (free draw). Double-click to finish a path; click an existing waypoint/line to branch. Then hit Snap & Clean." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩✏️ Draw FP</button>
-                <button id="aim-gen-snapclean" title="Snap the whole drawn network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
+                <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
+                <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
@@ -9072,18 +9012,25 @@
             clearRoutePreview(); genRouteResult = null;
             statsEl.textContent = 'Preview cleared.';
         };
-        const fpDrawBtn = box.querySelector('#aim-gen-fpdraw');
-        fpDrawBtn.onclick = () => {
+        const loadFpBtn = box.querySelector('#aim-gen-loadfp');
+        loadFpBtn.onclick = () => {
             if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
-            const on = !genFpDraw.active;
-            setFpDraw(on, siteID);
-            fpDrawBtn.style.background = on ? 'rgba(0,229,255,0.32)' : 'rgba(0,229,255,0.12)';
-            fpDrawBtn.textContent = on ? '🛩 Drawing — dbl-click ends a path · click button to stop' : '🛩✏️ Draw FP';
-            if (on) statsEl.innerHTML = `<span style="color:#00e5ff">Sketch rough waypoints</span> — <b>free draw</b>, no snapping (draw roughly where you want paths). <b>Double-click</b> ends a path; start clicking again for the <b>next FP</b>. <b>Click an existing path/dot</b> to <b>branch</b> off it. Click <b>🛩 Drawing</b> again when done, then hit <b style="color:#ba8cff">✨ Snap &amp; Clean</b>.`;
+            loadFpBtn.disabled = true; const restore = loadFpBtn.textContent; loadFpBtn.textContent = 'Loading…';
+            try {
+                const r = loadExistingFpsToRoute(siteID);
+                if (!r.ok) { statsEl.innerHTML = `<span style="color:#ffb347">${r.msg}</span>`; return; }
+                const flagged = genRoute.segs.filter(s => s.flag).length;
+                statsEl.innerHTML = `Loaded <b style="color:#00e5ff">${r.fps}</b> flight path${r.fps === 1 ? '' : 's'} (${r.arcs} arcs → ${r.verts} verts). <span style="color:#ff9a3d">${flagged}</span> seg${flagged === 1 ? '' : 's'} out of the 40–65 ft band (<span style="color:#ff9a3d">orange</span>).<br><span style="color:#888">Hit <b style="color:#ba8cff">✨ Snap &amp; Clean</b> to pull them onto the power lines, or <b style="color:#fff">drag</b> a dot / <b style="color:#fff">right-click</b> to fix by hand.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} load FPs failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Load error: ${String(e.message || e)}</span>`;
+            } finally {
+                loadFpBtn.disabled = false; loadFpBtn.textContent = restore;
+            }
         };
         const snapCleanBtn = box.querySelector('#aim-gen-snapclean');
         snapCleanBtn.onclick = () => {
-            if (genFpDraw.active) { statsEl.innerHTML = `<span style="color:#ffb347">Finish drawing first — click <b>🛩 Drawing</b> to stop, then Snap &amp; Clean.</span>`; return; }
+            if (!genRoute.segs.length) { statsEl.innerHTML = `<span style="color:#ffb347">Nothing loaded — hit <b>📥 Load site FPs</b> first.</span>`; return; }
             if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
             snapCleanBtn.disabled = true; const restore = snapCleanBtn.textContent; snapCleanBtn.textContent = 'Snapping…';
             try {

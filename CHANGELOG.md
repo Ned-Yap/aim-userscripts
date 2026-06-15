@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-15 — Site Setup Generator — clean up natively-drawn FPs (dev-only) — Asset Inspector v4.62
+
+Pivoted the flight-path workflow: **draw FPs natively in Percepto, then clean them up here**. New **📥 Load site FPs** button pulls the site's existing flight-path entities into the editable preview — out-of-band segments show **orange** immediately so you can see what's off the shielding band. Then **✨ Snap & Clean** snaps the whole network ~50 ft parallel to the power lines + simplifies (segs keep their source-FP id so a later save can write back per entity). Removed the in-script Draw FP tool (you draw natively now). *(Save-back + elevation pass next. Dev/latest only.)*
+
 ## 2026-06-15 — Site Setup Generator — free-draw FP + ✨ Snap & Clean (dev-only) — Asset Inspector v4.61
 
 Split drawing from cleanup so sketching stops fighting you. **Draw FP is now a free sketch** — no per-click power-line snapping; draw roughly where you want paths (clicking an existing waypoint/segment still snaps so you can **branch**). Then the new **✨ Snap & Clean** button does a batch pass over the whole drawn network: densifies every segment, snaps each sample ~50 ft parallel off the nearest power line (following line bends), and Douglas-Peucker-simplifies to a few clean verts. Shared junction/branch verts snap once so connectivity survives; points farther than ~220 ft from any line stay where drawn (open-ground / base connectors). Result stays fully editable (drag/insert/delete). *(Elevation points next. Dev/latest only.)*
