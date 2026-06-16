@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.74
+// @version      4.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.74';
+    const SCRIPT_VERSION = '4.75';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5871,8 +5871,11 @@
             container = doc.createElement('div');
             container.id = 'aim-automation-container';
             Object.assign(container.style, {
-                width: '100%', display: 'flex', justifyContent: 'flex-start',
-                padding: '4px 0 8px 16px', borderBottom: '1px solid #f0f0f0',
+                // v4.75: center the SUM button (was left-aligned with a 16px
+                // left pad back when ALT/VAL sat beside it). Symmetric padding
+                // so center is true center.
+                width: '100%', display: 'flex', justifyContent: 'center',
+                padding: '4px 8px 8px 8px', borderBottom: '1px solid #f0f0f0',
                 marginTop: '-4px', gap: '10px',
             });
             header.after(container);

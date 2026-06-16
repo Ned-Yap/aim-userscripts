@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-16 — Asset Inspector — SUM button restyle: "Site Setup Summary" neon-green pill (dev-only) — Asset Inspector v4.72–v4.74
+## 2026-06-16 — Asset Inspector — SUM button restyle: "Site Setup Summary" neon-green pill (dev-only) — Asset Inspector v4.72–v4.75
 
-With the old ALT/VAL buttons gone there's room to spell it out: the **SUM** button now reads **Site Setup Summary**, styled **neon green with black bold text** and a **subtle pulsing glow** (the same breathing box-shadow effect AIM Issues uses for unseen activity, recolored green; glow only, no bounce). Same click behavior. **v4.73–v4.74:** force the text truly black — Percepto sets the white text with `!important`, so plain `color` (even inline) lost; now set with an inline `!important` priority (`setProperty('-webkit-text-fill-color','#000','important')`), which is the strongest author declaration and wins. *(Dev/latest only — ships to prod at the next Asset Inspector promotion.)*
+With the old ALT/VAL buttons gone there's room to spell it out: the **SUM** button now reads **Site Setup Summary**, styled **neon green with black bold text** and a **subtle pulsing glow** (the same breathing box-shadow effect AIM Issues uses for unseen activity, recolored green; glow only, no bounce). Same click behavior. **v4.73–v4.74:** force the text truly black — Percepto sets the white text with `!important`, so plain `color` (even inline) lost; now set with an inline `!important` priority (`setProperty('-webkit-text-fill-color','#000','important')`), which is the strongest author declaration and wins. **v4.75:** center the button in its toolbar row (was left-aligned from when ALT/VAL sat beside it). *(Dev/latest only — ships to prod at the next Asset Inspector promotion.)*
 
 ---
 
