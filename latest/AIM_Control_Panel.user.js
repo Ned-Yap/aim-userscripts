@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.25
+// @version      1.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.25';
+    const VERSION = '1.26';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -112,7 +112,7 @@
         return 'other';
     }
 
-    // Site Setup Macros scripts (scope:'site-setup') also appear on
+    // Site-Setup-scoped scripts (scope:'site-setup') also appear on
     // admin-merge so the workflow stays coherent — Bulk Mission Adder's
     // admin page is part of the Site Setup mental model even though the
     // URL shape is different. Mission Bank scope stays strict.
@@ -1411,12 +1411,55 @@
         // Groups whose members all get filtered out simply won't be created,
         // so their section header doesn't render either.
         const visibleScripts = scripts.filter(s => scopeMatches(s.scope));
+
+        // v1.26 — CENTRAL TAXONOMY. One source of truth for how the panel is
+        // organized, keyed by scriptId so we can re-group everything WITHOUT
+        // editing the other scripts. SCRIPT_GROUP overrides each script's
+        // self-declared `group`; SCRIPT_ORDER sets within-group order. A
+        // script not listed here falls back to its own `group` (or standalone),
+        // so new/unknown scripts still appear (at the bottom). Edit THIS to
+        // rearrange the Control Panel.
+        const SCRIPT_GROUP = {
+            // Map Display — what's drawn on the map + display performance.
+            'aim-defaults': 'Map Display',
+            'aim-styler': 'Map Display',
+            'aim-perf-shield': 'Map Display',
+            'aim-map-nav': 'Map Display',
+            // Power Lines — distro/trans styling (Map Styler power-line card,
+            // added in Phase 2) + the power-line editor.
+            'aim-power-line-editor': 'Power Lines',
+            'aim-styler-powerlines': 'Power Lines',
+            // Site Setup — entity inspection, validation, creation.
+            'aim-copy-asset': 'Site Setup',
+            'aim-sop-validators': 'Site Setup',
+            'aim-new-entity-macro': 'Site Setup',
+            'aim-site-setup-generator': 'Site Setup',
+            // Map Tools — quick one-shot map utilities.
+            'aim-altitude': 'Map Tools',
+            'aim-ruler': 'Map Tools',
+            'aim-clear-all': 'Map Tools',
+            // Missions — the Mission Bank side.
+            'aim-mission-bank-tools': 'Missions',
+            'aim-bulk-mission-adder': 'Missions',
+            'aim-quick-mission-editor': 'Missions',
+            // Issues — single-member group (renders without a redundant sub-header).
+            'aim-issues': 'Issues',
+        };
+        const SCRIPT_ORDER = {
+            'aim-defaults': 10, 'aim-styler': 20, 'aim-perf-shield': 30, 'aim-map-nav': 40,
+            'aim-styler-powerlines': 10, 'aim-power-line-editor': 20,
+            'aim-copy-asset': 10, 'aim-sop-validators': 20, 'aim-new-entity-macro': 30, 'aim-site-setup-generator': 40,
+            'aim-altitude': 10, 'aim-ruler': 20, 'aim-clear-all': 30,
+            'aim-mission-bank-tools': 10, 'aim-bulk-mission-adder': 20, 'aim-quick-mission-editor': 30,
+        };
+
         const standalone = [];
         const groups = new Map(); // groupName -> [scripts]
         visibleScripts.forEach(s => {
-            if (s.group) {
-                if (!groups.has(s.group)) groups.set(s.group, []);
-                groups.get(s.group).push(s);
+            const g = SCRIPT_GROUP[s.scriptId] || s.group;
+            if (g) {
+                if (!groups.has(g)) groups.set(g, []);
+                groups.get(g).push(s);
             } else {
                 standalone.push(s);
             }
@@ -1431,11 +1474,14 @@
         // section keys: `script:<scriptId>` for standalone, `group:<name>`
         // for groups. Edit this map to change the order.
         const SECTION_PRIORITY = {
-            'script:aim-styler': 10,            // Outlines (primary feature)
-            'script:aim-perf-shield': 20,       // Performance
-            'group:Hotkeys': 30,                // Universal hotkeys (Altitude, Ruler, Clear All)
-            'group:Site Setup Macros': 40,      // v1.22 — site-setup-scoped macros
-            'group:Mission Bank Macros': 50,    // v1.23 — first member: Quick Mission Editor (v0.1)
+            // v1.26 — top-level group order (lower = higher up). Mirrors the
+            // SCRIPT_GROUP taxonomy above. Anything not listed → 999 (bottom).
+            'group:Map Display': 10,
+            'group:Power Lines': 20,
+            'group:Site Setup': 30,
+            'group:Map Tools': 40,
+            'group:Missions': 50,
+            'group:Issues': 60,
         };
         const sectionEntries = [];
         standalone.forEach(s => {
@@ -1460,21 +1506,23 @@
             // of pure alphabetical. Scripts that don't set priority just
             // fall back to alphabetical ordering with everything else at 100.
             const sortedMembers = [...members].sort((a, b) => {
-                const pa = (typeof a.priority === 'number') ? a.priority : 100;
-                const pb = (typeof b.priority === 'number') ? b.priority : 100;
+                const pa = SCRIPT_ORDER[a.scriptId] !== undefined ? SCRIPT_ORDER[a.scriptId] : (typeof a.priority === 'number' ? a.priority : 100);
+                const pb = SCRIPT_ORDER[b.scriptId] !== undefined ? SCRIPT_ORDER[b.scriptId] : (typeof b.priority === 'number' ? b.priority : 100);
                 if (pa !== pb) return pa - pb;
                 return (a.name || a.scriptId).localeCompare(b.name || b.scriptId);
             });
+            // Single-member group → render the member directly under the group
+            // name (no redundant "Issues / Issues" sub-header or "1 script" meta).
+            const single = sortedMembers.length === 1;
+            const meta = single ? `v${sortedMembers[0].version || '?'}` : `${sortedMembers.length} scripts`;
+            const bodyHtml = single
+                ? renderScriptInner(sortedMembers[0], false)
+                : sortedMembers.map(s => renderScriptInner(s, true)).join('');
             sectionEntries.push({
                 key,
                 priority: SECTION_PRIORITY[key] !== undefined ? SECTION_PRIORITY[key] : 999,
                 sortName: name,
-                renderFn: () => renderSection(
-                    key,
-                    name,
-                    `${sortedMembers.length} script${sortedMembers.length === 1 ? '' : 's'}`,
-                    sortedMembers.map(s => renderScriptInner(s, true)).join(''),
-                ),
+                renderFn: () => renderSection(key, name, meta, bodyHtml),
             });
         });
         sectionEntries.sort((a, b) => {

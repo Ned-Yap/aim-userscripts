@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Control Panel — reorganized into intuitive groups (Phase 1, PROD) — Control Panel v1.26
+
+The ⚙ panel is now organized into clear, task-themed sections instead of scattering related controls: **Map Display** (outlines/buffers, performance, defaults, map nav) · **Power Lines** · **Site Setup** (the Site Setup Tools, validators, New Entity macro) · **Map Tools** (altitude, ruler, clear all) · **Missions** · **Issues**. Each control still works exactly as before — only where it *appears* changed — and sections still hide on pages they don't apply to. The whole layout is now driven by one central map in the Control Panel, so it's easy to keep tidy. *(Phase 2 will move the distro/trans line styling out of "Outlines" to sit with the Power Line Editor under "Power Lines.")*
+
+---
+
 ## 2026-06-16 — Power Line Editor — convert + merge **promoted to PROD** — Power Line Editor v0.15 · Map Styler v34.70
 
 The ⇄ Convert and ⛓ Merge tools (below) are now in **prod** — coworkers on the Power Line Editor get them on the next Tampermonkey check. **Only** these two features shipped: the dev-only "color/hide assets by state" Map Styler work stays in `latest/`. Prod Power Line Editor jumps v0.14 → v0.15, prod Map Styler v34.69 → v34.70.
