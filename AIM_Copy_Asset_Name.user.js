@@ -2022,10 +2022,10 @@
     // Reuses the same /map_objects cache the right-click inspector
     // already builds, so no duplicate fetches.
     //
-    // Triggered by a SUM button injected next to Percepto's native
-    // entity-header toolbar (alongside the existing ALT button from
-    // AIM_Bulk_Altitude_Updater, which already injects into
-    // #aim-automation-container — we just append).
+    // Triggered by a SUM button injected into Percepto's native
+    // entity-header toolbar. We own the #aim-automation-container now
+    // (the old ALT/VAL buttons from AIM_Bulk_Altitude_Updater /
+    // AIM_Bulk_Validator were removed) — create it if absent, else append.
     // ============================================================
     const SUM_BTN_ID = 'aim-sum-trigger-btn';
     const SUM_PANEL_ID = 'aim-sum-panel';
@@ -2657,8 +2657,8 @@
     //      failure all log + skip to next instead of stalling. Final
     //      report shows successes / skipped / errors.
     //
-    // Patterns lifted from AIM_Bulk_Altitude_Updater.user.js — that
-    // script proves this DOM approach works on Percepto's current UI.
+    // Patterns originally lifted from the (now-removed) AIM_Bulk_Altitude_Updater
+    // userscript, which proved this DOM approach works on Percepto's UI.
     // ============================================================
 
     // Scan TOP + iframe(s) for elements matching a selector. Returns
@@ -4599,8 +4599,8 @@
         const header = doc.querySelector('.site-setup-header--all-entities');
         if (!header) return;
         let container = doc.getElementById('aim-automation-container');
-        // If neither ALT nor VAL ran first, create the container. Use
-        // the same styling they use so layout stays consistent.
+        // We own this container now (ALT/VAL scripts removed) — create it
+        // if it's not already there. Keep the original styling for layout.
         if (!container) {
             container = doc.createElement('div');
             container.id = 'aim-automation-container';

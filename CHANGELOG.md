@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Removed: AIM Bulk Altitude Updater (replaced by Asset Inspector's SUM bulk altitude tools)
+
+**AIM Bulk Altitude Updater** (the `Shift+E` prep-pass → pause → final-pass altitude tool) has been **retired**. Its job is now done from the **Asset Inspector SUM panel** — **Bulk → AGL**, **Bulk → Delta**, **Bulk → Min**, **Bulk → Max** — which set altitudes across FP segments + FFZs from the live entity table with a preview, dry-run, rollback file, and per-write verify, via the fast Direct-API path. Those buttons already shipped to prod in Asset Inspector v4.0, so there's no gap. The script is removed from prod + `latest/` and from the install guides. **If you have it installed, remove "AIM Bulk Altitude Updater" from your Tampermonkey dashboard** — it won't auto-uninstall, and its `Shift+E` hotkey keeps working off the copy you already have until you do.
+
+---
+
 ## 2026-06-16 — Removed: AIM Bulk Validator (replaced by Asset Inspector's SUM **Bulk → Valid**)
 
 **AIM Bulk Validator** (the `VAL` toolbar button + `Shift+V` paste-a-list modal) has been **retired**. Its job — bulk validate/unvalidate FFZs + FPs — is now done from the **Asset Inspector SUM panel → Bulk → Valid**, which works off the live entity table (scope, type filter, preview) and saves via the fast Direct-API path instead of clicking through Percepto's editor one entity at a time. The script is removed from prod + `latest/` and from the install guides. **If you have it installed, remove "AIM Bulk Validator" from your Tampermonkey dashboard** — it won't auto-uninstall, and its `Shift+V` / `VAL` button keep working off the copy you already have until you do.

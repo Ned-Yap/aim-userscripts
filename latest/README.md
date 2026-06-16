@@ -25,7 +25,6 @@ Visit each raw URL and Tampermonkey will prompt to install. Each script's `@name
 - [Latest - AIM Clear All](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Clear_All_Tampermonkey.user.js)
 - [Latest - AIM New Entity Macro](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_New_Entity_Macro.user.js)
 - [Latest - AIM Bulk Mission Adder](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Bulk_Mission_Adder.user.js)
-- [Latest - AIM Bulk Altitude Updater](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Bulk_Altitude_Updater.user.js)
 - [Latest - AIM Sidebar Resizer](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Sidebar_Resizer.user.js)
 
 After installing, every `Latest - ...` script will auto-update from this folder whenever a new commit lands here.
