@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — fix stuck row-hover highlights in the Summary table (dev-only) — Asset Inspector v4.80
+
+Fixed the Summary table leaving **multiple rows stuck highlighted** when hovering. Row hover was per-row JS `mouseenter`/`mouseleave`; when the table redrew mid-hover (e.g. while DEM elevations stream in) the `mouseleave` never fired on the replaced row, stranding the highlight. Hover is now **CSS `:hover`** (browser-managed, can't get stuck), with the frozen Name column getting the opaque hover tint via its `data-frozen-key`. *(Dev/latest only. The same bug exists in prod v4.0 — can backport if you want it out to coworkers now.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — Summary panel: remember position/size/dock across reloads (dev-only) — Asset Inspector v4.79
 
 The Site Setup Summary panel now **remembers its position, size, and dock across page reloads** (was reset every refresh). Saved on drag-end / resize-end / dock / float to Tampermonkey storage. A restored dock **re-fits the current map size** on open, and a restored floating position is clamped on-screen in case the window shrank since last session. *(Completes the panel-ergonomics batch: any-edge resize → on-screen clamp → snap docks → persistence. Dev/latest only.)*

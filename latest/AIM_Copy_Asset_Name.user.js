@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.79
+// @version      4.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.79';
+    const SCRIPT_VERSION = '4.80';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10021,6 +10021,18 @@
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
             color:#e6e6e6;
         `;
+        // v4.80: row hover is CSS-driven (was per-row JS mouseenter/leave,
+        // which got stranded when the table redrew mid-hover during DEM loads
+        // — leaving several rows stuck-highlighted). CSS :hover is managed by
+        // the browser and can't get stuck. Frozen (sticky) cells need the
+        // OPAQUE hover bg so scrolled content doesn't show through; they're
+        // targeted by their data-frozen-key attribute. Scoped to this panel.
+        const hoverStyle = document.createElement('style');
+        hoverStyle.textContent = `
+            #${SUM_PANEL_ID} tbody tr:hover > td { background: rgba(20,210,220,0.10) !important; }
+            #${SUM_PANEL_ID} tbody tr:hover > td[data-frozen-key] { background: #1e333a !important; }
+        `;
+        panel.appendChild(hoverStyle);
 
         // --- Header (draggable) ---
         const head = document.createElement('div');
@@ -12559,11 +12571,11 @@
                 tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
                 // Frozen (sticky-left) cells need an OPAQUE background or the
-                // scrolling columns show through them; collect them so the
-                // row-hover tint stays in sync across the whole row.
+                // scrolling columns show through them. Base bg is set inline by
+                // applyFrozen; the hover bg is handled by the CSS :hover rule
+                // injected at panel build (v4.80) — no JS mouseenter/leave, so
+                // it can't get stranded when the table redraws mid-hover.
                 const frozenTds = [];
-                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_HOVER); };
-                tr.onmouseleave = () => { tr.style.background = 'transparent'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_BG); };
 
                 // Checkbox cell — clicks here don't trigger row navigation.
                 const tdSel = document.createElement('td');
