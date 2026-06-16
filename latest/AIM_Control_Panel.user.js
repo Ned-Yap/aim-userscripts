@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.27
+// @version      1.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.27';
+    const VERSION = '1.28';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -1065,6 +1065,33 @@
                        title="Reset to default${defStr ? ` (${escapeAttr(defStr)})` : ''}">↺</button>`;
     }
 
+    // v1.28 — search helpers. isSearching() force-expands categories so a
+    // matching child is visible. filterTogglesForSearch returns a PRUNED
+    // toggle tree containing only controls (or whole categories) whose label
+    // matches — so searching "Flight" shows only flight controls, not the
+    // whole Outlines section. Recurses into category/advanced children; drops
+    // 'header' dividers (they'd be orphaned).
+    function isSearching() { return !!(state.search && state.search.trim()); }
+    function filterTogglesForSearch(toggles, q) {
+        const out = [];
+        (toggles || []).forEach(t => {
+            if (!t) return;
+            if (t.type === 'header') return;
+            const label = (t.label || '').toLowerCase();
+            if (t.type === 'category' || t.type === 'advanced') {
+                if (label.includes(q)) { out.push(t); return; }   // whole category matches
+                const kids = filterTogglesForSearch(t.children || [], q);
+                if (kids.length) out.push({ ...t, children: kids }); // keep category, matching kids only
+                return;
+            }
+            if (label.includes(q)) out.push(t);
+        });
+        return out;
+    }
+    function filterHotkeysForSearch(hotkeys, q) {
+        return (hotkeys || []).filter(h => h && (h.label || '').toLowerCase().includes(q));
+    }
+
     function renderControl(scriptId, t) {
         if (!t) return '';
         const type = t.type || 'boolean';
@@ -1089,7 +1116,7 @@
             // Clicking the checkbox toggles its boolean; clicking anywhere else
             // on the row expands/collapses the body.
             const expandKey = `cat:${scriptId}:${t.id}`;
-            const expanded = state.expanded && state.expanded[expandKey];
+            const expanded = isSearching() || (state.expanded && state.expanded[expandKey]);
             const childrenHtml = (t.children || []).map(c => renderControl(scriptId, c)).join('');
             let headerCheckbox = '';
             if (t.master && t.master.id) {
@@ -1115,7 +1142,7 @@
 
         if (type === 'advanced') {
             const expandKey = `adv:${scriptId}:${t.id || 'group'}`;
-            const expanded = state.expanded && state.expanded[expandKey];
+            const expanded = isSearching() || (state.expanded && state.expanded[expandKey]);
             const childrenHtml = (t.children || []).map(c => renderControl(scriptId, c)).join('');
             return `
                 <div style="border-top:1px dashed rgba(255,255,255,0.10);margin-top:4px;padding-top:2px">
@@ -1505,28 +1532,30 @@
             'aim-mission-bank-tools': 10, 'aim-bulk-mission-adder': 20, 'aim-quick-mission-editor': 30,
         };
 
-        // v1.27 — a script matches the search if the query hits its name, its
-        // group, or any toggle/hotkey label. Matching scripts render fully
-        // (and force-expanded) so the user can see the matching control.
-        const scriptMatchesSearch = (s, g) => {
-            if (!searching) return true;
-            if ((s.name || '').toLowerCase().includes(q)) return true;
-            if (g && g.toLowerCase().includes(q)) return true;
-            if ((Array.isArray(s.toggles) ? s.toggles : []).some(t => (t.label || '').toLowerCase().includes(q))) return true;
-            if ((Array.isArray(s.hotkeys) ? s.hotkeys : []).some(h => (h.label || '').toLowerCase().includes(q))) return true;
-            return false;
+        // v1.28 — return the script to RENDER for the current search, or null
+        // to exclude it. If the query hits the tool's NAME or GROUP, show the
+        // whole tool; otherwise prune to just the matching controls (so
+        // searching "Flight" shows only flight controls, not all of Outlines).
+        const searchScript = (s, g) => {
+            if (!searching) return s;
+            if ((s.name || '').toLowerCase().includes(q) || (g && g.toLowerCase().includes(q))) return s;
+            const ft = filterTogglesForSearch(s.toggles, q);
+            const fh = filterHotkeysForSearch(s.hotkeys, q);
+            if (ft.length || fh.length) return { ...s, toggles: ft, hotkeys: fh };
+            return null;
         };
 
         const standalone = [];
         const groups = new Map(); // groupName -> [scripts]
         visibleScripts.forEach(s => {
             const g = SCRIPT_GROUP[s.scriptId] || s.group;
-            if (!scriptMatchesSearch(s, g)) return;
+            const sv = searchScript(s, g);
+            if (!sv) return;
             if (g) {
                 if (!groups.has(g)) groups.set(g, []);
-                groups.get(g).push(s);
+                groups.get(g).push(sv);
             } else {
-                standalone.push(s);
+                standalone.push(sv);
             }
         });
 
