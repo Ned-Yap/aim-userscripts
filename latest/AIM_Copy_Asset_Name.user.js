@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.70
+// @version      4.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.70';
+    const SCRIPT_VERSION = '4.71';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4429,6 +4429,16 @@
         const rollbackBtn = (!dryRun && window.__aim_ai_directApiRollback)
             ? `<button id="aim-ai-report-rollback" style="background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">↩ Roll back this run</button>`
             : '';
+        // v4.71: Direct-API writes hit the server + our SUM cache, but
+        // Percepto's native sidebar + map render from their own React store,
+        // which only re-reads on a full page load. Offer a one-click reload
+        // (+ a note) so changes show up in the native UI without a manual F5.
+        const reloadNote = (!dryRun && ok > 0)
+            ? `<div style="margin-top:12px;padding:8px 12px;background:rgba(122,223,230,0.08);border:1px solid rgba(122,223,230,0.40);border-radius:4px;color:#7adfe6;font-size:11px;line-height:1.5">Saved to the server + the SUM table. Percepto's <strong>native sidebar + map</strong> still show the old values — reload to sync them.</div>`
+            : '';
+        const reloadBtn = (!dryRun && ok > 0)
+            ? `<button id="aim-ai-report-reload" style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔄 Reload page</button>`
+            : '';
         box.innerHTML = `
             <div style="color:${accent};font-weight:700;font-size:16px;margin-bottom:4px">⚡ ${dryRun ? 'Dry run preview' : 'Direct-API apply'} — ${dryRun ? 'no data written' : 'complete'}</div>
             <div style="color:#cfd6dc;font-size:13px;margin-top:8px">
@@ -4437,14 +4447,18 @@
             ${errHtml}
             ${bridgeHtml}
             ${overlapHtml}
+            ${reloadNote}
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 ${rollbackBtn}
+                ${reloadBtn}
                 <button id="aim-ai-report-close" style="background:rgba(95,255,95,0.16);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">Close</button>
             </div>
         `;
         m.appendChild(box);
         document.body.appendChild(m);
         box.querySelector('#aim-ai-report-close').onclick = () => m.remove();
+        const reloadEl = box.querySelector('#aim-ai-report-reload');
+        if (reloadEl) reloadEl.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
         const rb = box.querySelector('#aim-ai-report-rollback');
         if (rb) {
             rb.onclick = async () => {

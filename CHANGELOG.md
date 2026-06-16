@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Direct-API apply: one-click Reload to sync the native view (dev-only) — Asset Inspector v4.71
+
+The **⚡ Direct-API apply report** now offers a **🔄 Reload page** button + a note. Direct-API writes save to the server and the SUM table instantly, but Percepto's **native sidebar + map** render from their own React store, which only re-reads on a full page load — so the change didn't show in the native UI until you refreshed. The reload button does that in one click. Applies to every Direct-API bulk apply (AGL/Delta/Min/Max/Valid), not just validation. *(Dev/latest only.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — Bulk → Valid: bulk pilot validation flag (dev-only) — Asset Inspector v4.70
 
 New **Bulk → Valid** button in the SUM bulk row flips the **pilot Validation flag** (✓/✗) across every **FFZ + FP** in scope in one shot — the pilot's post-flight sign-off ("flew it, no airspace obstacles, cleared for autonomous flight"), so it's a plain manual ON/OFF, fully separate from the SOP Validators. Pick ✓ Valid / ✗ Invalid, scope (all or selected), and an FFZ/FP type filter; the preview counts how many will flip (already-correct entities are skipped). Rides the same **⚡ Direct-API** upsert as the altitude bulk tools — same rollback file, and the verify rail now confirms the server actually **persisted** the flag (fails loudly if not). Queued flips show the target in yellow in the Valid column until Apply. *(Requires ⚡ Direct API; the editor path can't toggle the flag. Dev/latest only.)*
