@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Summary panel: resize from any edge (dev-only) — Asset Inspector v4.76
+
+The Site Setup Summary panel can now be **resized from any edge or corner**, not just the bottom-right grip. Dragging the left or top edge resizes inward (the opposite edge stays put) instead of sliding the panel. Same 480×300 min / 96vw×90vh max. *(First of a small panel-ergonomics batch — snap-to-side/bottom buttons + reload-persistence coming next. Dev/latest only.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — SUM button restyle: "Site Setup Summary" neon-green pill (dev-only) — Asset Inspector v4.72–v4.75
 
 With the old ALT/VAL buttons gone there's room to spell it out: the **SUM** button now reads **Site Setup Summary**, styled **neon green with black bold text** and a **subtle pulsing glow** (the same breathing box-shadow effect AIM Issues uses for unseen activity, recolored green; glow only, no bounce). Same click behavior. **v4.73–v4.74:** force the text truly black — Percepto sets the white text with `!important`, so plain `color` (even inline) lost; now set with an inline `!important` priority (`setProperty('-webkit-text-fill-color','#000','important')`), which is the strongest author declaration and wins. **v4.75:** center the button in its toolbar row (was left-aligned from when ALT/VAL sat beside it). *(Dev/latest only — ships to prod at the next Asset Inspector promotion.)*
