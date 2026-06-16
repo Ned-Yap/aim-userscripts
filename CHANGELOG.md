@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Power Line Editor — convert + merge **promoted to PROD** — Power Line Editor v0.15 · Map Styler v34.70
+
+The ⇄ Convert and ⛓ Merge tools (below) are now in **prod** — coworkers on the Power Line Editor get them on the next Tampermonkey check. **Only** these two features shipped: the dev-only "color/hide assets by state" Map Styler work stays in `latest/`. Prod Power Line Editor jumps v0.14 → v0.15, prod Map Styler v34.69 → v34.70.
+
+(Note for maintainers: prod Map Styler v34.70 = convert/merge only. The `latest/` v34.70–34.72 are a *different* set of changes — color-assets-by-state — still dev-only. The two version histories are independent installs.)
+
+---
+
 ## 2026-06-16 — Power Line Editor — convert distro↔trans + merge segments (dev/latest) — PLE v0.15 · Map Styler v34.73
 
 Two new tools in the ⚡ Power Lines strip (dev-only, not promoted):

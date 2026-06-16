@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js
-// @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.44+ over AIM_POWER_LINE_EDIT channel.
+// @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, 🗑 delete, ⇄ convert distro↔trans, ⛓ merge segments, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.70+ over AIM_POWER_LINE_EDIT channel.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -24,8 +24,14 @@
 // Small icon strip below ⚡ (M1 toggles open/close):
 //   +D  Add distribution line   (yellow border)
 //   +T  Add transmission line   (red border)
+//   🗑  Delete-line mode        (M1 a line → mark whole line for deletion)
+//   ⇄   Convert mode            (M1 a line → flip distro↔trans; v0.15)
+//   ⛓   Merge mode              (M1 connected file lines → select; v0.15)
+//   ⛓✓  Confirm merge           (stitch ≥2 selected lines into one)
 //   ✓   Commit all              (green, only when any dirty count > 0)
 //   ✗   Discard all             (red, only when any dirty count > 0)
+// 🗑/⇄/⛓ are MUTUALLY EXCLUSIVE line-action modes (one armed at a time via
+// setLineMode); when none is armed, M1 a line = enter vertex edit.
 // Each button is 30x30 with a hover tooltip carrying full help text.
 // Strip is persistent (localStorage) — stays open across reloads until
 // user M1 ⚡ to close.
@@ -43,7 +49,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.14';
+    const SCRIPT_VERSION = '0.15';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -127,13 +133,16 @@
     let masterEnabled = true;
     let editEnabled = readBool(EDIT_STORAGE_KEY);
     let stripOpen = readBool(STRIP_STORAGE_KEY);
-    // v0.12: delete-line-mode is session-only (not localStorage). When ON,
-    // M1 on a power line marks the WHOLE LINE for deletion via
-    // MARK_LINE_FOR_DELETE instead of entering vertex edit. Persisting
-    // this across reloads would be dangerous — the user might forget
-    // it's armed and accidentally mark lines for deletion. Always
-    // resets to OFF on page load.
-    let deleteLineMode = false;
+    // Line-action mode is session-only (not localStorage) — null = normal
+    // (M1 a line → vertex edit). One armed mode at a time, mutually
+    // exclusive, so the user can never have e.g. delete AND convert both hot:
+    //   'delete'  — M1 a line marks the WHOLE line for deletion
+    //   'convert' — M1 a line converts it to the OTHER power-line type
+    //   'merge'   — M1 lines builds a selection set; ⛓✓ stitches them into one
+    // Persisting any of these across reloads would be dangerous (user forgets
+    // it's armed → accidental edit), so it always resets to null on load.
+    // v0.15: replaces the v0.12 `deleteLineMode` boolean.
+    let lineMode = null;
 
     function setEditEnabled(on, opts) {
         opts = opts || {};
@@ -167,14 +176,21 @@
         renderUI();
     }
 
-    function setDeleteLineMode(on) {
-        if (on === deleteLineMode) return;
-        deleteLineMode = on;
+    // Arm a line-action mode, or pass the currently-armed mode to disarm it
+    // (toggle). Clicking a different mode switches directly. Leaving 'merge'
+    // tells the styler to drop any in-progress selection + its highlights.
+    function setLineMode(mode) {
+        const next = (mode === lineMode) ? null : mode;
+        if (next === lineMode) return;
+        const leavingMerge = lineMode === 'merge' && next !== 'merge';
+        lineMode = next;
+        if (leavingMerge) sendPle({ type: 'CLEAR_MERGE_SELECTION' });
         renderUI();
-        // Body class so the line cursor changes when armed (CSS in injectStyles).
+        // Body class drives the crosshair cursor over power lines when any
+        // action mode is armed (CSS in injectStyles).
         try {
-            if (on) document.body.classList.add('aim-ple-delete-mode');
-            else document.body.classList.remove('aim-ple-delete-mode');
+            if (lineMode) document.body.classList.add('aim-ple-action-mode');
+            else document.body.classList.remove('aim-ple-action-mode');
         } catch (e) {}
     }
 
@@ -267,15 +283,19 @@
         if (addedIdxAttr !== null) {
             const addedIdx = parseInt(addedIdxAttr, 10);
             if (!Number.isFinite(addedIdx)) return;
-            // v0.14: in delete-mode, discard the pending-add line outright
-            // (it doesn't exist on disk yet — no "mark for deletion" stage
-            // makes sense). Previously this branch ignored deleteLineMode
-            // and routed every green-line click to vertex-edit, which
-            // re-rendered handles at the saved coords and looked like a
-            // revert when the user expected delete.
-            if (deleteLineMode) {
+            // Pending-add (green) lines exist only in commitOps, not on disk.
+            if (lineMode === 'delete') {
+                // v0.14: discard outright — no "mark for deletion" stage makes
+                // sense for a line that isn't committed yet.
                 console.log(`${TAG} onLineClick → DISCARD_ADDED_LINE kmlType=${kmlType} addedIdx=${addedIdx}`);
                 sendPle({ type: 'DISCARD_ADDED_LINE', kmlType, addedIdx });
+            } else if (lineMode === 'convert') {
+                console.log(`${TAG} onLineClick → CONVERT_LINE (added) kmlType=${kmlType} addedIdx=${addedIdx}`);
+                sendPle({ type: 'CONVERT_LINE', kmlType, addedIdx });
+            } else if (lineMode === 'merge') {
+                // Merge stitches FILE lines (identified by pmIdx). A pending-add
+                // has no stable on-disk identity yet — commit it first.
+                console.log(`${TAG} onLineClick: merge ignores pending-add lines (commit it first) kmlType=${kmlType} addedIdx=${addedIdx}`);
             } else {
                 console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT (added) kmlType=${kmlType} addedIdx=${addedIdx}`);
                 sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, addedIdx });
@@ -283,9 +303,15 @@
         } else {
             const pmIdx = parseInt(pmIdxAttr, 10);
             if (!Number.isFinite(pmIdx)) return;
-            if (deleteLineMode) {
+            if (lineMode === 'delete') {
                 console.log(`${TAG} onLineClick → MARK_LINE_FOR_DELETE kmlType=${kmlType} pmIdx=${pmIdx}`);
                 sendPle({ type: 'MARK_LINE_FOR_DELETE', kmlType, pmIdx });
+            } else if (lineMode === 'convert') {
+                console.log(`${TAG} onLineClick → CONVERT_LINE kmlType=${kmlType} pmIdx=${pmIdx}`);
+                sendPle({ type: 'CONVERT_LINE', kmlType, pmIdx });
+            } else if (lineMode === 'merge') {
+                console.log(`${TAG} onLineClick → TOGGLE_MERGE_SELECT kmlType=${kmlType} pmIdx=${pmIdx}`);
+                sendPle({ type: 'TOGGLE_MERGE_SELECT', kmlType, pmIdx });
             } else {
                 console.log(`${TAG} onLineClick → ENTER_VERTEX_EDIT kmlType=${kmlType} pmIdx=${pmIdx}`);
                 sendPle({ type: 'ENTER_VERTEX_EDIT', kmlType, pmIdx });
@@ -518,20 +544,56 @@
             { border: 'rgba(255,133,133,0.55)' }
         ));
 
-        // 🗑 Delete-line mode toggle. When armed, M1 on a power line marks
-        // it for deletion instead of entering vertex edit. Session-only —
-        // never persists across reloads (dangerous if forgotten on).
-        const deleteBtnTitle = deleteLineMode
-            ? 'Delete-line mode ARMED — M1 on any line marks it for deletion. Click again to disarm. ✓ commit to push deletes to GitHub.'
-            : 'Toggle Delete-line mode — when ON, M1 on a line marks the whole line for deletion (instead of editing its vertices). Right-click a line still works too.';
+        // --- Line-action mode toggles (mutually exclusive) ---
+        // Each arms a mode where M1 on a power line does something OTHER than
+        // enter vertex edit. The armed one shows lit; clicking it (or another)
+        // toggles/switches. Session-only — never persists across reloads.
+
+        // 🗑 Delete-line mode — M1 a line marks the whole line for deletion.
         stripEl.appendChild(iconBtn(
             '🗑',
-            deleteBtnTitle,
-            () => setDeleteLineMode(!deleteLineMode),
-            deleteLineMode
+            lineMode === 'delete'
+                ? 'Delete-line mode ARMED — M1 on any line marks it for deletion. Click again to disarm. ✓ to commit.'
+                : 'Delete-line mode — when ON, M1 on a line marks the whole line for deletion (instead of editing its vertices).',
+            () => setLineMode('delete'),
+            lineMode === 'delete'
                 ? { bg: 'rgba(120,40,40,0.95)', hoverBg: 'rgba(160,60,60,0.95)', border: '#ff5050', color: '#fff' }
                 : { border: 'rgba(255,133,133,0.35)' }
         ));
+
+        // ⇄ Convert mode — M1 a line flips it to the OTHER type (distro↔trans).
+        stripEl.appendChild(iconBtn(
+            '⇄',
+            lineMode === 'convert'
+                ? 'Convert mode ARMED — M1 a distro line → transmission, or a trans line → distribution. Click again to disarm. ✓ commits BOTH files.'
+                : 'Convert mode — when ON, M1 a line converts it to the other power-line type (distro ⇄ trans). Commits as a delete on one file + an add on the other.',
+            () => setLineMode('convert'),
+            lineMode === 'convert'
+                ? { bg: 'rgba(40,70,120,0.95)', hoverBg: 'rgba(60,100,160,0.95)', border: '#5aa0ff', color: '#fff' }
+                : { border: 'rgba(120,170,255,0.45)' }
+        ));
+
+        // ⛓ Merge mode — M1 lines builds a selection; ⛓✓ stitches them.
+        stripEl.appendChild(iconBtn(
+            '⛓',
+            lineMode === 'merge'
+                ? `Merge mode ARMED — M1 connected file lines to select them (magenta). ${status.mergeSelCount || 0} selected. Click ⛓✓ to combine into one line. Click ⛓ again to disarm.`
+                : 'Merge mode — when ON, M1 connected file segments to select them, then click ⛓✓ to combine them into a single line. Only lines that join end-to-end can merge.',
+            () => setLineMode('merge'),
+            lineMode === 'merge'
+                ? { bg: 'rgba(90,30,110,0.95)', hoverBg: 'rgba(130,50,160,0.95)', border: '#ff5cf0', color: '#fff' }
+                : { border: 'rgba(255,120,235,0.45)' }
+        ));
+
+        // ⛓✓ Confirm merge — only while merge mode is armed with ≥2 selected.
+        if (lineMode === 'merge' && (status.mergeSelCount || 0) >= 2) {
+            stripEl.appendChild(iconBtn(
+                '<span style="font-size:12px">⛓</span><span style="font-size:11px;margin-left:1px">✓</span>',
+                `Combine the ${status.mergeSelCount} selected ${status.mergeSelType || ''} lines into one. They must connect end-to-end.`,
+                () => sendPle({ type: 'PERFORM_MERGE' }),
+                { bg: 'rgba(90,30,110,0.95)', hoverBg: 'rgba(130,50,160,0.95)', border: '#ff5cf0', color: '#ff5cf0' }
+            ));
+        }
 
         // ✓ Commit all and ✗ Discard all — ONLY when there's something pending
         if (totalDirty > 0) {
@@ -560,15 +622,15 @@
         }
     }
 
-    // v0.12: visual cue when delete-line-mode is armed — change cursor to
-    // crosshair over power-line paths so the user sees "this click will
-    // delete this line". Class is toggled on body by setDeleteLineMode.
+    // Visual cue when any line-action mode (delete/convert/merge) is armed —
+    // crosshair over power-line paths so the user sees "this click acts on
+    // this line". Class is toggled on body by setLineMode.
     function injectStyles() {
         if (document.getElementById('aim-ple-styles')) return;
         const style = document.createElement('style');
         style.id = 'aim-ple-styles';
         style.textContent = `
-            body.aim-ple-delete-mode path[data-buffer-kind^="kml-"] {
+            body.aim-ple-action-mode path[data-buffer-kind^="kml-"] {
                 cursor: crosshair !important;
             }
         `;

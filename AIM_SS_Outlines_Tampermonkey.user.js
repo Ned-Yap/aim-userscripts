@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.69
+// @version      34.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.69';
+    const SCRIPT_VERSION = '34.70';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1855,6 +1855,198 @@
         const co = getCommitOps(siteID, type);
         delete co.ops[String(pmIdx)];
         setCommitOps(siteID, type, co);
+    }
+
+    // ============================================================
+    // CONVERT (distro ↔ trans) + MERGE (combine segments)
+    //
+    // Both reduce to the existing commit-ops model — no new commit-pipeline
+    // code is needed (applyCommitOpsToKML already does modify → delete →
+    // append-added):
+    //   convert = delete op on the source type + an `added` line on the
+    //             OTHER type (cross-file; the strip's ✓ commits both because
+    //             each type's dirty count > 0; a missing target KML is
+    //             create-on-save'd by commitPendingOps).
+    //   merge   = N delete ops + 1 `added` line, all within ONE type.
+    //
+    // parseKML keeps only lat/lng (drops per-vertex altitude), so both emit
+    // 2D [[lng,lat],…] lines — consistent with how draw mode + modify ops
+    // already store coords.
+    // ============================================================
+    function otherType(type) { return type === 'distro' ? 'trans' : 'distro'; }
+
+    // Effective (post-modify) coords for a FILE line as KML-order
+    // [[lng,lat],…]. null if the pmIdx has no line feature (polygon, or a
+    // stale index after the file changed underneath us).
+    function lineCoordsKmlOrder(siteID, type, pmIdx) {
+        const features = kmlFeatures[kmlKey(siteID, type)] || [];
+        const f = features.find(ff => ff && ff.type === 'line' && ff.pmIdx === pmIdx);
+        if (!f) return null;
+        const eff = effectiveCoordsForFeature(siteID, type, pmIdx, f.coords);
+        if (!Array.isArray(eff) || eff.length < 2) return null;
+        return eff.map(c => [c.lng, c.lat]);
+    }
+
+    // ref = { pmIdx } for a file line, or { addedIdx } for a pending-add line.
+    function convertLine(fromType, ref) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        const toType = otherType(fromType);
+
+        // Pending-add (green) line → just move the entry between the two
+        // added arrays; it never existed on disk so no delete op is needed.
+        if (ref && Number.isFinite(ref.addedIdx)) {
+            // Tear down any active edit on this added line first — the splice
+            // shifts indices and a stale vertexEditState would point wrong.
+            if (vertexEditState && vertexEditState.isAdded && vertexEditState.type === fromType) {
+                exitVertexEdit({ save: false, silent: true });
+            }
+            const coFrom = getCommitOps(siteID, fromType);
+            const item = coFrom.added && coFrom.added[ref.addedIdx];
+            if (!item) { showKMLToast(`Pending ${fromType} line not found — may have changed.`, 4000); return; }
+            coFrom.added.splice(ref.addedIdx, 1);
+            setCommitOps(siteID, fromType, coFrom);
+            const coTo = getCommitOps(siteID, toType);
+            coTo.added.push({ name: item.name, coords: item.coords });
+            setCommitOps(siteID, toType, coTo);
+            showKMLToast(`Converted pending line "${item.name || '(unnamed)'}" ${fromType} → ${toType}. Commit both with ✓.`, 5500);
+            if (isActive) runUpdate();
+            try { broadcastPowerLineStatus(); } catch (e) {}
+            return;
+        }
+
+        // File line → delete on source, add (same geometry) on target.
+        const pmIdx = ref && ref.pmIdx;
+        if (!Number.isFinite(pmIdx)) return;
+        const coords = lineCoordsKmlOrder(siteID, fromType, pmIdx);
+        if (!coords) { showKMLToast(`Couldn't read ${fromType} line #${pmIdx} geometry — convert aborted.`, 5000); return; }
+        markPlacemarkForDelete(siteID, fromType, pmIdx);
+        const coTo = getCommitOps(siteID, toType);
+        const name = `Converted from ${fromType} #${pmIdx} (${new Date().toISOString().substring(0, 10)})`;
+        coTo.added.push({ name, coords });
+        setCommitOps(siteID, toType, coTo);
+        const extra = kmlExistenceState(siteID, toType) === 'missing'
+            ? ` (a ${toType} KML will be created on commit)` : '';
+        showKMLToast(`Converting ${fromType} #${pmIdx} → ${toType}${extra}. Commit both with ✓.`, 6000);
+        if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
+    }
+
+    // --- Merge selection state (session-only, single type, file lines only) ---
+    // { type:'distro'|'trans', pms:[pmIdx,…] }
+    let mergeSelection = null;
+
+    function isMergeSelected(type, pmIdx) {
+        return !!(mergeSelection && mergeSelection.type === type && mergeSelection.pms.indexOf(pmIdx) !== -1);
+    }
+
+    function clearMergeSelection(opts) {
+        if (!mergeSelection) return;
+        mergeSelection = null;
+        if (!(opts && opts.silent) && isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
+    }
+
+    function toggleMergeSelect(type, pmIdx) {
+        const siteID = getCurrentSiteID();
+        if (!siteID) return;
+        if (!Number.isFinite(pmIdx)) return;
+        // Can't merge across types — they live in separate files.
+        if (mergeSelection && mergeSelection.type !== type) {
+            showKMLToast(`Merge works within ONE type. Finish or clear the ${mergeSelection.type} selection first.`, 5000);
+            return;
+        }
+        // A line already marked for deletion can't be a merge source.
+        const op = getOpForPlacemark(siteID, type, pmIdx);
+        if (op && op.op === 'delete') {
+            showKMLToast(`${type} #${pmIdx} is marked for deletion — unmark it before merging.`, 5000);
+            return;
+        }
+        if (!mergeSelection) mergeSelection = { type, pms: [] };
+        const i = mergeSelection.pms.indexOf(pmIdx);
+        if (i === -1) mergeSelection.pms.push(pmIdx);
+        else mergeSelection.pms.splice(i, 1);
+        if (mergeSelection.pms.length === 0) mergeSelection = null;
+        const n = mergeSelection ? mergeSelection.pms.length : 0;
+        showKMLToast(
+            n >= 2 ? `${n} ${type} lines selected — click ⛓✓ in the strip to merge.`
+            : (n === 1 ? `1 ${type} line selected — pick at least one more connected line.` : 'Merge selection cleared.'),
+            3000
+        );
+        if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
+    }
+
+    // Two [lng,lat] points within ~1 m? Snapped/split-shared endpoints are
+    // byte-identical; this tolerance only forgives floating dust.
+    function llClose(a, b) {
+        const dLat = (a[1] - b[1]) * 111320;
+        const dLng = (a[0] - b[0]) * 111320 * Math.cos(a[1] * Math.PI / 180);
+        return (dLat * dLat + dLng * dLng) < 1.0; // < 1 m
+    }
+
+    // Chain segments end-to-end into one ordered polyline. Returns the merged
+    // [[lng,lat],…] or null if they don't form ONE connected path (gap or
+    // branch leaves a segment unattached). Reverses segments as needed and
+    // dedupes the shared vertex at each join.
+    function chainSegments(segs) {
+        if (!segs.length) return null;
+        const used = new Array(segs.length).fill(false);
+        let chain = segs[0].slice();
+        used[0] = true;
+        let remaining = segs.length - 1;
+        let progress = true;
+        while (remaining > 0 && progress) {
+            progress = false;
+            for (let i = 0; i < segs.length; i++) {
+                if (used[i]) continue;
+                const s = segs[i];
+                const sHead = s[0], sTail = s[s.length - 1];
+                const cHead = chain[0], cTail = chain[chain.length - 1];
+                if (llClose(cTail, sHead)) chain = chain.concat(s.slice(1));
+                else if (llClose(cTail, sTail)) chain = chain.concat(s.slice().reverse().slice(1));
+                else if (llClose(cHead, sTail)) chain = s.slice(0, -1).concat(chain);
+                else if (llClose(cHead, sHead)) chain = s.slice().reverse().slice(0, -1).concat(chain);
+                else continue;
+                used[i] = true;
+                remaining--;
+                progress = true;
+            }
+        }
+        return remaining === 0 ? chain : null;
+    }
+
+    function performMerge() {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded.', 3000); return; }
+        if (!mergeSelection || mergeSelection.pms.length < 2) {
+            showKMLToast('Select at least two connected lines first.', 3500);
+            return;
+        }
+        const type = mergeSelection.type;
+        const pms = mergeSelection.pms.slice();
+        const segs = [];
+        for (let j = 0; j < pms.length; j++) {
+            const c = lineCoordsKmlOrder(siteID, type, pms[j]);
+            if (!c) { showKMLToast(`Couldn't read ${type} line #${pms[j]} — merge aborted.`, 5000); return; }
+            segs.push(c);
+        }
+        const merged = chainSegments(segs);
+        if (!merged) {
+            showKMLToast(`These ${pms.length} ${type} lines don't connect end-to-end into a single line (gap or branch). Select only segments that join.`, 8000);
+            return;
+        }
+        // Tear down any vertex edit on this type before queuing deletes.
+        if (vertexEditState && vertexEditState.type === type) exitVertexEdit({ save: false, silent: true });
+        const co = getCommitOps(siteID, type);
+        pms.forEach(pmIdx => { co.ops[String(pmIdx)] = { op: 'delete' }; });
+        const name = `Merged ${type} line (${pms.length} segments, ${new Date().toISOString().substring(0, 10)})`;
+        co.added.push({ name, coords: merged });
+        setCommitOps(siteID, type, co);
+        clearMergeSelection({ silent: true });
+        showKMLToast(`Merged ${pms.length} ${type} lines into one (${merged.length} vertices). Commit with ✓.`, 6000);
+        if (isActive) runUpdate();
+        try { broadcastPowerLineStatus(); } catch (e) {}
     }
 
     function clearAllCommitOps(siteID, type) {
@@ -3824,6 +4016,15 @@
                 p.setAttribute('stroke-opacity', opStr);
                 p.setAttribute('stroke-width', String(thickness));
             }
+            // Merge selection wins over every other state — bright magenta,
+            // thick, solid — so the user can see exactly which lines will be
+            // stitched together when they hit ⛓✓.
+            if (isMergeSelected(type, f.pmIdx)) {
+                p.setAttribute('stroke', '#ff5cf0');
+                p.setAttribute('stroke-opacity', '1');
+                p.setAttribute('stroke-width', String(thickness + 3));
+                p.removeAttribute('stroke-dasharray');
+            }
             p.setAttribute('stroke-linejoin', 'round');
             p.setAttribute('stroke-linecap', 'round');
             // Leaflet sets `pointer-events: none` on the overlay-pane SVG by
@@ -5093,6 +5294,8 @@
             vertexEditPmIdx: vertexEditState ? vertexEditState.pmIdx : null,
             drawModeActive: !!drawingState,
             drawModeType: drawingState ? drawingState.type : null,
+            mergeSelCount: mergeSelection ? mergeSelection.pms.length : 0,
+            mergeSelType: mergeSelection ? mergeSelection.type : null,
         });
     }
     // Reports whether the canonical KML for this site+type exists in the
@@ -5299,11 +5502,27 @@
                     // this site+type, warn + offer to create a blank one to
                     // draw into (so committing drawn lines doesn't later 404).
                     enterDrawModeChecked(m.kmlType, m.seedCoord || null);
+                } else if (m.type === 'CONVERT_LINE' && m.kmlType) {
+                    // Convert one line to the OTHER power-line type. File line
+                    // (pmIdx) → delete on source + added on target. Pending-add
+                    // line (addedIdx) → move between added arrays.
+                    convertLine(m.kmlType, Number.isFinite(m.addedIdx)
+                        ? { addedIdx: m.addedIdx } : { pmIdx: m.pmIdx });
+                } else if (m.type === 'TOGGLE_MERGE_SELECT' && m.kmlType && Number.isFinite(m.pmIdx)) {
+                    toggleMergeSelect(m.kmlType, m.pmIdx);
+                } else if (m.type === 'PERFORM_MERGE') {
+                    performMerge();
+                } else if (m.type === 'CLEAR_MERGE_SELECTION') {
+                    clearMergeSelection();
                 } else if (m.type === 'COMMIT_KML' && m.kmlType) {
                     // v34.46: was commitKMLChanges (legacy hide-only path);
                     // commitPendingOps is the ops-aware fn that handles
                     // modify/delete/added. Was silently saying "no pending
                     // changes" for newly-added lines.
+                    // A commit may shift pmIdx (structural delete/add), so any
+                    // lingering merge selection on this type is now ambiguous —
+                    // clear it so highlights can't point at the wrong line.
+                    if (mergeSelection && mergeSelection.type === m.kmlType) clearMergeSelection({ silent: true });
                     commitPendingOps(m.kmlType);
                 } else if (m.type === 'DISCARD_OPS' && m.kmlType) {
                     discardCommitOps(m.kmlType);
@@ -5416,6 +5635,8 @@
         // new site.
         if (vertexEditState) exitVertexEdit({ save: false, silent: true });
         if (drawingState) exitDrawMode({ silent: true });
+        // Merge selection holds pmIdx values for the OLD site — drop it.
+        if (mergeSelection) clearMergeSelection({ silent: true });
         // v34.49: invalidate the SHA cache — it's keyed by siteID|type,
         // so technically it's safe to keep, but better to drop on site
         // nav so a stale entry can never apply to the wrong site.
