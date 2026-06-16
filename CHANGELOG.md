@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Removed: AIM Bulk Validator (replaced by Asset Inspector's SUM **Bulk → Valid**)
+
+**AIM Bulk Validator** (the `VAL` toolbar button + `Shift+V` paste-a-list modal) has been **retired**. Its job — bulk validate/unvalidate FFZs + FPs — is now done from the **Asset Inspector SUM panel → Bulk → Valid**, which works off the live entity table (scope, type filter, preview) and saves via the fast Direct-API path instead of clicking through Percepto's editor one entity at a time. The script is removed from prod + `latest/` and from the install guides. **If you have it installed, remove "AIM Bulk Validator" from your Tampermonkey dashboard** — it won't auto-uninstall, and its `Shift+V` / `VAL` button keep working off the copy you already have until you do.
+
+---
+
 ## 2026-06-16 — Asset Inspector — Direct-API apply: one-click Reload to sync the native view (dev-only) — Asset Inspector v4.71
 
 The **⚡ Direct-API apply report** now offers a **🔄 Reload page** button + a note. Direct-API writes save to the server and the SUM table instantly, but Percepto's **native sidebar + map** render from their own React store, which only re-reads on a full page load — so the change didn't show in the native UI until you refreshed. The reload button does that in one click. Applies to every Direct-API bulk apply (AGL/Delta/Min/Max/Valid), not just validation. *(Dev/latest only.)*

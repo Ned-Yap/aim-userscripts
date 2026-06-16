@@ -3148,9 +3148,9 @@
     // already builds, so no duplicate fetches.
     //
     // Triggered by a SUM button injected next to Percepto's native
-    // entity-header toolbar (alongside the existing ALT and VAL buttons
-    // from AIM_Bulk_Altitude_Updater and AIM_Bulk_Validator, which
-    // already inject into #aim-automation-container — we just append).
+    // entity-header toolbar (alongside the existing ALT button from
+    // AIM_Bulk_Altitude_Updater, which already injects into
+    // #aim-automation-container — we just append).
     // ============================================================
     const SUM_BTN_ID = 'aim-sum-trigger-btn';
     const SUM_PANEL_ID = 'aim-sum-panel';
