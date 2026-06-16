@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.72
+// @version      4.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.72';
+    const SCRIPT_VERSION = '4.73';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5825,15 +5825,21 @@
                 #${SUM_BTN_ID}.aim-sum-neon-btn {
                     animation: aim-sum-pulse-glow 1.8s ease-in-out infinite;
                     background: #39ff14 !important;
-                    color: #000 !important;
                     border-color: #39ff14 !important;
                     text-shadow: none !important;
+                }
+                /* Ant/Percepto set -webkit-text-fill-color (white) on the button
+                   text, which beats plain color. Override both, and cover any
+                   child span Ant may wrap the label in. */
+                #${SUM_BTN_ID}.aim-sum-neon-btn,
+                #${SUM_BTN_ID}.aim-sum-neon-btn * {
+                    color: #000 !important;
+                    -webkit-text-fill-color: #000 !important;
                 }
                 #${SUM_BTN_ID}.aim-sum-neon-btn:hover,
                 #${SUM_BTN_ID}.aim-sum-neon-btn:focus {
                     background: #5cff43 !important;
                     border-color: #5cff43 !important;
-                    color: #000 !important;
                 }
                 @media (prefers-reduced-motion: reduce) {
                     #${SUM_BTN_ID}.aim-sum-neon-btn { animation: none; }
@@ -5844,8 +5850,9 @@
     }
 
     function injectSumButton(doc) {
-        // Don't inject in edit mode — Bulk Validator hides the whole
-        // toolbar then, and SUM should follow the same convention.
+        // Don't inject in edit mode — Percepto hides the all-entities
+        // toolbar while an entity editor (.upsert-entity) is open, so SUM
+        // hides too and reappears when the editor closes.
         if (doc.querySelector('.upsert-entity')) {
             const existing = doc.getElementById(SUM_BTN_ID);
             if (existing) existing.style.display = 'none';
@@ -5885,6 +5892,9 @@
             fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
             background: '#39ff14', color: '#000', border: '1px solid #39ff14',
             borderRadius: '4px', textShadow: 'none',
+            // Ant/Percepto's button CSS sets -webkit-text-fill-color (white),
+            // which overrides `color` for text rendering — must override it too.
+            WebkitTextFillColor: '#000',
         });
         btn.innerHTML = 'Site Setup Summary';
         btn.title = 'Open Site Setup Summary (AIM Asset Inspector)';
