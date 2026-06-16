@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.76
+// @version      4.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.76';
+    const SCRIPT_VERSION = '4.77';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10022,8 +10022,13 @@
         const onMove = (e) => {
             if (!dragging) return;
             let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
-            nx = Math.max(0, Math.min(window.innerWidth - 80, nx));
-            ny = Math.max(0, Math.min(window.innerHeight - 40, ny));
+            // v4.77: clamp by the panel's actual size so the WHOLE panel stays
+            // on screen on every edge (was leaving only an 80/40px sliver off
+            // the right/bottom). If the panel is bigger than the viewport, pin
+            // its top-left at 0 (the max() wins over the negative min()).
+            const r = panel.getBoundingClientRect();
+            nx = Math.max(0, Math.min(window.innerWidth - r.width, nx));
+            ny = Math.max(0, Math.min(window.innerHeight - r.height, ny));
             panel.style.left = nx + 'px';
             panel.style.top = ny + 'px';
             sumPanelState.x = nx; sumPanelState.y = ny;

@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-16 — Asset Inspector — Summary panel: resize from any edge (dev-only) — Asset Inspector v4.76
+## 2026-06-16 — Asset Inspector — Summary panel: resize from any edge + keep fully on-screen (dev-only) — Asset Inspector v4.76–v4.77
 
-The Site Setup Summary panel can now be **resized from any edge or corner**, not just the bottom-right grip. Dragging the left or top edge resizes inward (the opposite edge stays put) instead of sliding the panel. Same 480×300 min / 96vw×90vh max. *(First of a small panel-ergonomics batch — snap-to-side/bottom buttons + reload-persistence coming next. Dev/latest only.)*
+The Site Setup Summary panel can now be **resized from any edge or corner**, not just the bottom-right grip. Dragging the left or top edge resizes inward (the opposite edge stays put) instead of sliding the panel. Same 480×300 min / 96vw×90vh max. **v4.77:** dragging now keeps the **whole** panel on-screen on every edge — it used to let the panel slide off the right/bottom leaving only a thin sliver (the top/left already locked). *(Panel-ergonomics batch — snap-to-side/bottom buttons + reload-persistence coming next. Dev/latest only.)*
 
 ---
 
