@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Summary panel: remember position/size/dock across reloads (dev-only) — Asset Inspector v4.79
+
+The Site Setup Summary panel now **remembers its position, size, and dock across page reloads** (was reset every refresh). Saved on drag-end / resize-end / dock / float to Tampermonkey storage. A restored dock **re-fits the current map size** on open, and a restored floating position is clamped on-screen in case the window shrank since last session. *(Completes the panel-ergonomics batch: any-edge resize → on-screen clamp → snap docks → persistence. Dev/latest only.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — Summary panel: snap-to-dock buttons (dev-only) — Asset Inspector v4.78
 
 The Site Setup Summary header now has **dock buttons** — **◧ left**, **◨ right**, **⬓ bottom**, **❐ float/restore**. Click one to snap the panel to fill that edge of the **map** (it docks to the `.leaflet-container`, so it lines up with the imagery, not the sidebar): sides fill full map height at your current width (capped at 70%), bottom fills full width at ~45% height. Docked panels **re-fit automatically** when the window/sidebar resizes; dragging or resizing the panel pops it back to floating, and **❐** restores the pre-dock size/position. *(Next: persistence so dock + size survive reloads. Dev/latest only.)*

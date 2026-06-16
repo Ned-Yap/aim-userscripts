@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.78
+// @version      4.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.78';
+    const SCRIPT_VERSION = '4.79';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5807,6 +5807,30 @@
         showSamples: elevGmGet(CACHE_KEY_SHOW_SAMPLES, false),
     };
 
+    // v4.79: persist the panel's geometry + dock across page reloads (was
+    // session-only). Saved on drag-end / resize-end / dock / float; loaded
+    // once before the first render. Re-fit happens after restore so a docked
+    // panel re-fits the current map size.
+    const SUM_GEOM_KEY = 'aim-ai-sum-panel-geom';
+    let sumGeomLoaded = false;
+    function saveSumPanelGeom() {
+        elevGmSet(SUM_GEOM_KEY, {
+            x: sumPanelState.x, y: sumPanelState.y,
+            w: sumPanelState.w, h: sumPanelState.h,
+            snap: sumPanelState.snap, floatRect: sumPanelState.floatRect,
+        });
+    }
+    function loadSumPanelGeom() {
+        const g = elevGmGet(SUM_GEOM_KEY, null);
+        if (!g || typeof g !== 'object') return;
+        if (typeof g.x === 'number') sumPanelState.x = g.x;
+        if (typeof g.y === 'number') sumPanelState.y = g.y;
+        if (typeof g.w === 'number') sumPanelState.w = g.w;
+        if (g.h === null || typeof g.h === 'number') sumPanelState.h = g.h;
+        if (g.snap === 'left' || g.snap === 'right' || g.snap === 'bottom' || g.snap === null) sumPanelState.snap = g.snap;
+        if (g.floatRect && typeof g.floatRect === 'object') sumPanelState.floatRect = g.floatRect;
+    }
+
     // v4.72: inject the SUM button's neon-green + pulsing-glow styles into
     // the target document (the button lives in the map iframe, so the <style>
     // must go in the SAME doc). Glow technique mirrors AIM Issues' unseen-
@@ -9975,12 +9999,19 @@
         };
         kickOffDemFetch(siteID, allRows);
 
+        // Restore persisted geometry/dock on the first render of the session.
+        if (!sumGeomLoaded) { loadSumPanelGeom(); sumGeomLoaded = true; }
+
         const panel = document.createElement('div');
         panel.id = SUM_PANEL_ID;
         const startW = sumPanelState.w || 720;
         const startH = sumPanelState.h; // null = use max-height: 80vh
-        const startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - startW - 40);
-        const startY = sumPanelState.y != null ? sumPanelState.y : 80;
+        let startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - startW - 40);
+        let startY = sumPanelState.y != null ? sumPanelState.y : 80;
+        // Keep a restored position on-screen (the window may have shrunk since
+        // it was saved). A docked panel gets re-fit after append anyway.
+        startX = Math.max(0, Math.min(window.innerWidth - 80, startX));
+        startY = Math.max(0, Math.min(window.innerHeight - 40, startY));
         panel.style.cssText = `
             position:fixed;left:${startX}px;top:${startY}px;z-index:99998;
             width:${startW}px;${startH ? `height:${startH}px;` : 'max-height:80vh;'}
@@ -10082,10 +10113,10 @@
             b.onclick = (e) => { e.stopPropagation(); fn(); };
             return b;
         };
-        snapBtns.appendChild(mkSnapBtn('◧', 'Dock to left of map', () => snapPanel('left')));
-        snapBtns.appendChild(mkSnapBtn('◨', 'Dock to right of map', () => snapPanel('right')));
-        snapBtns.appendChild(mkSnapBtn('⬓', 'Dock to bottom of map', () => snapPanel('bottom')));
-        snapBtns.appendChild(mkSnapBtn('❐', 'Float / restore', floatPanel));
+        snapBtns.appendChild(mkSnapBtn('◧', 'Dock to left of map', () => { snapPanel('left'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('◨', 'Dock to right of map', () => { snapPanel('right'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('⬓', 'Dock to bottom of map', () => { snapPanel('bottom'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('❐', 'Float / restore', () => { floatPanel(); saveSumPanelGeom(); }));
 
         head.appendChild(title);
         head.appendChild(snapBtns);
@@ -10119,7 +10150,7 @@
             sumPanelState.x = nx; sumPanelState.y = ny;
             sumPanelState.snap = null; // manual move un-docks
         };
-        const onUp = () => { dragging = false; };
+        const onUp = () => { if (dragging) { dragging = false; saveSumPanelGeom(); } };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
         // Clean up listeners when panel closes
@@ -12174,7 +12205,7 @@
             sumPanelState.x = L; sumPanelState.y = T; sumPanelState.w = W; sumPanelState.h = H;
             sumPanelState.snap = null; // manual resize un-docks
         };
-        const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; } };
+        const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; saveSumPanelGeom(); } };
         document.addEventListener('mousemove', onResizeMove);
         document.addEventListener('mouseup', onResizeUp);
         const mkHandle = (css, edges) => {
@@ -12211,6 +12242,10 @@
         };
 
         document.body.appendChild(panel);
+        // If we restored a docked state, re-fit it to the CURRENT map size now
+        // that the panel is in the DOM (the saved px geometry was for whatever
+        // window size it had last session).
+        if (sumPanelState.snap) snapPanel(sumPanelState.snap);
 
         // --- Table draw helper (called on filter/sort changes) ---
         // Also exposed on window so kickOffDemFetch's completion callback
