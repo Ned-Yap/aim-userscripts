@@ -15,7 +15,7 @@ Visit each raw URL and Tampermonkey will prompt to install. Each script's `@name
 - [Latest - AIM Map Styler](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js)
 - [Latest - AIM Performance Shield](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js)
 - [Latest - AIM Inspector](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Inspector.user.js)
-- [Latest - AIM Copy Asset Name](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js) (Asset Inspector)
+- [Latest - AIM Copy Asset Name](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js) (AIM Site Setup Tools)
 - [Latest - AIM Mission Bank Tools](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js)
 - [Latest - AIM Power Line Editor](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Power_Line_Editor.user.js) — **NEW (dev-only)**: floating ⚡ toolbar, M1-to-edit power lines. No prod counterpart yet.
 - [Latest - AIM Map Nav](https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Nav.user.js) — **NEW (dev-only)**: WASD pan / Q-E zoom (always-on) / Alt sprint (3x) / Space = zoom-to-fit site. For zoom-into-area use Leaflet's native Shift+drag. Shift + nav key bypasses Map Nav so existing macros (Shift+D Delete etc.) keep working. Ctrl + nav key passes to browser shortcuts. No prod counterpart yet.
@@ -46,10 +46,10 @@ Dev and prod scripts share the same internals (SCRIPT_ID, GM storage keys, Broad
 
 Tampermonkey GM storage is per-`@name`. Latest copies start with an empty GM namespace. Things that **do not carry over** from prod and need to be re-set via the Latest Control Panel:
 
-- **GitHub PAT** (the big one) — open Latest Control Panel → GitHub Connection → Edit → paste PAT → Save & Test. Without this, Map Styler can't fetch KMLs and Asset Inspector can't pull the shared elevation cache.
+- **GitHub PAT** (the big one) — open Latest Control Panel → GitHub Connection → Edit → paste PAT → Save & Test. Without this, Map Styler can't fetch KMLs and Site Setup Tools can't pull the shared elevation cache.
 - **Perf Shield**: hide-satellite, ortho-lowres, suppress-debug-logs, every network-block toggle.
 - **Map Styler**: KML cache (rebuilds on activation, but only after PAT is set).
-- **Asset Inspector**: DEM cache, column order, show-samples toggle.
+- **Site Setup Tools**: DEM cache, column order, show-samples toggle.
 
 Things that **do carry over** (localStorage is shared across @names):
 - Hotkey rebinds

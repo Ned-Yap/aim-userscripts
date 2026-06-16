@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Power Line Editor — convert distro↔trans + merge segments (dev/latest) — PLE v0.15 · Map Styler v34.73
+
+Two new tools in the ⚡ Power Lines strip (dev-only, not promoted):
+- **⇄ Convert mode** — arm it, then M1 a power line to flip it to the OTHER type (a distribution line becomes transmission, or vice versa). Under the hood it's a delete on the source file + an add on the target file, so the ✓ commit pushes both. If the target type has no KML yet, one is created on commit.
+- **⛓ Merge mode** — arm it, then M1 connected file segments to select them (they light up magenta). Click **⛓✓** to stitch them into a single line. They must join end-to-end — if there's a gap or a branch, it refuses and tells you. This is the inverse of the existing “Split multi-segment lines” button: combine a run of short segments back into one editable polyline.
+
+The 🗑/⇄/⛓ modes are mutually exclusive (one armed at a time); with none armed, M1 a line still enters vertex edit as before.
+
+The script formerly shown as **Asset Inspector** (and originally “Copy Asset Name”) is now called **AIM Site Setup Tools** — a better fit now that it does inspection, the site-wide SUM panel, bulk edits, the KML analyzer, and SOP validators. **No reinstall needed:** it's a display-name change only (`@name:en`), so Tampermonkey keeps auto-updating your existing install — you'll just see the new name in your dashboard, the Control Panel, the panel title, and the button tooltip on the next update. Same hotkeys, same settings, same everything.
+
+---
+
 ## 2026-06-16 — Asset Inspector — Summary panel fixes for everyone (PROD) — Asset Inspector v4.1
 
 Backported three self-contained Summary-panel fixes from the dev line to **prod** so coworkers get them now:
