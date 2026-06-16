@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.33
+// @version      0.34
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.33';
+    const SCRIPT_VERSION = '0.34';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -914,6 +914,11 @@
     // ---- commit a plan into the working copy (same write path as the splitter) ----
     function commitPlan(plan, opts) {
         const auto = !!(opts && opts.auto);
+        // Never write into the editor while a vertex is actively held/dragged: Percepto only
+        // commits a drag to React state on release, so a write mid-drag clobbers your live
+        // move (snaps the vertex back) or disrupts an in-progress draw. Defer — the segment
+        // stays an unprocessed candidate and the next release (onUpTrack) / sweep retries it.
+        if (auto && mouseDown) return false;
         const wc = findFpWorkingCopies().find(w => w.id === plan.fpId);
         if (!wc || !wc.dispatch) { toast('Open the flight path editor to apply.', '#ff8a80'); return false; }
         // staleness guard: the path must not have changed since we planned it
@@ -939,8 +944,10 @@
     }
 
     // ---- AUTO mode: smart-fill segments added since we last looked (debounced on drop) ----
+    const SMART_SETTLE_MS = 1000;  // wait this long after the LAST drop/drag before banding — lets you drag-drop-drop freely; the update only lands once you pause
+    const SMART_SWEEP_MS = 4000;   // background heartbeat that catches any segment whose band got missed
     let smartTimer = null, autoBusy = false, smartRetryTimer = null;
-    function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, 320); }
+    function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, SMART_SETTLE_MS); }
     async function smartAutoPass() {
         if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || pendingPreview) return;
         elevRateLimited = false;
@@ -1365,6 +1372,10 @@
     setupControlPanel();
     registerWithControlPanel();
     setInterval(ensureSmartUI, 1500);
+    // Background sweep: catch any segment whose band got missed (elevation wasn't ready on
+    // its one drop-triggered pass and you never dropped near it again). Idle when you're
+    // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.
+    setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
     log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
