@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -29,7 +29,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.0';
+    const SCRIPT_VERSION = '4.1';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6020,6 +6020,17 @@
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
             color:#e6e6e6;
         `;
+        // Row hover is CSS-driven (was per-row JS mouseenter/leave, which got
+        // stranded when the table redrew mid-hover during DEM loads — leaving
+        // several rows stuck-highlighted). CSS :hover is browser-managed and
+        // can't get stuck. Frozen (sticky) cells need the OPAQUE hover bg so
+        // scrolled content doesn't show through; targeted by data-frozen-key.
+        const hoverStyle = document.createElement('style');
+        hoverStyle.textContent = `
+            #${SUM_PANEL_ID} tbody tr:hover > td { background: rgba(20,210,220,0.10) !important; }
+            #${SUM_PANEL_ID} tbody tr:hover > td[data-frozen-key] { background: #1e333a !important; }
+        `;
+        panel.appendChild(hoverStyle);
 
         // --- Header (draggable) ---
         const head = document.createElement('div');
@@ -6054,8 +6065,12 @@
         const onMove = (e) => {
             if (!dragging) return;
             let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
-            nx = Math.max(0, Math.min(window.innerWidth - 80, nx));
-            ny = Math.max(0, Math.min(window.innerHeight - 40, ny));
+            // Clamp by the panel's actual size so the WHOLE panel stays on
+            // screen on every edge (was leaving only an 80/40px sliver off the
+            // right/bottom).
+            const r = panel.getBoundingClientRect();
+            nx = Math.max(0, Math.min(window.innerWidth - r.width, nx));
+            ny = Math.max(0, Math.min(window.innerHeight - r.height, ny));
             panel.style.left = nx + 'px';
             panel.style.top = ny + 'px';
             sumPanelState.x = nx; sumPanelState.y = ny;
@@ -7910,34 +7925,58 @@
         };
         panel.appendChild(footer);
 
-        // Resize handle — small grip in the bottom-right corner. Drag to
-        // change panel width + height. Min 480x300, max 96vw x 90vh.
-        // Final size persists in sumPanelState so it survives close/reopen.
-        const resizeHandle = document.createElement('div');
-        resizeHandle.style.cssText = 'position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,rgba(20,210,220,0.55) 40%,rgba(20,210,220,0.55) 50%,transparent 50%,transparent 65%,rgba(20,210,220,0.45) 65%,rgba(20,210,220,0.45) 75%,transparent 75%);border-bottom-right-radius:8px';
-        let resizing = false, rStartX = 0, rStartY = 0, rStartW = 0, rStartH = 0;
-        resizeHandle.addEventListener('mousedown', (e) => {
-            resizing = true;
-            const r = panel.getBoundingClientRect();
-            rStartX = e.clientX; rStartY = e.clientY;
-            rStartW = r.width; rStartH = r.height;
-            e.preventDefault();
-            e.stopPropagation();
-        });
+        // Resize handles — all four edges + four corners. One handler drives
+        // them all; each handle declares which edges it MOVES, and the opposite
+        // edge stays anchored so dragging the left/top edge resizes inward
+        // instead of sliding the panel. Min 480x300, max 96vw x 90vh. Final
+        // geometry persists in sumPanelState. Bottom-right keeps its grip.
+        const MINW = 480, MINH = 300;
+        let rz = null; // active drag: { edges, startX, startY, L, T, W, H }
         const onResizeMove = (e) => {
-            if (!resizing) return;
-            const nw = Math.max(480, Math.min(window.innerWidth * 0.96, rStartW + (e.clientX - rStartX)));
-            const nh = Math.max(300, Math.min(window.innerHeight * 0.90, rStartH + (e.clientY - rStartY)));
-            panel.style.width = nw + 'px';
-            panel.style.height = nh + 'px';
+            if (!rz) return;
+            const maxW = window.innerWidth * 0.96, maxH = window.innerHeight * 0.90;
+            const dx = e.clientX - rz.startX, dy = e.clientY - rz.startY;
+            const rightX = rz.L + rz.W, bottomY = rz.T + rz.H;
+            let L = rz.L, T = rz.T, W = rz.W, H = rz.H;
+            if (rz.edges.e) W = rz.W + dx;
+            if (rz.edges.w) W = rz.W - dx;
+            if (rz.edges.s) H = rz.H + dy;
+            if (rz.edges.n) H = rz.H - dy;
+            W = Math.max(MINW, Math.min(maxW, W));
+            H = Math.max(MINH, Math.min(maxH, H));
+            if (rz.edges.w) { L = rightX - W; if (L < 0) { L = 0; W = rightX; } }
+            if (rz.edges.n) { T = bottomY - H; if (T < 0) { T = 0; H = bottomY; } }
+            panel.style.left = L + 'px';
+            panel.style.top = T + 'px';
+            panel.style.width = W + 'px';
+            panel.style.height = H + 'px';
             panel.style.maxHeight = 'none'; // override the default cap once user resizes
-            sumPanelState.w = nw;
-            sumPanelState.h = nh;
+            sumPanelState.x = L; sumPanelState.y = T; sumPanelState.w = W; sumPanelState.h = H;
         };
-        const onResizeUp = () => { resizing = false; };
+        const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; } };
         document.addEventListener('mousemove', onResizeMove);
         document.addEventListener('mouseup', onResizeUp);
-        panel.appendChild(resizeHandle);
+        const mkHandle = (css, edges) => {
+            const h = document.createElement('div');
+            h.style.cssText = 'position:absolute;z-index:6;' + css;
+            h.addEventListener('mousedown', (e) => {
+                const r = panel.getBoundingClientRect();
+                rz = { edges, startX: e.clientX, startY: e.clientY, L: r.left, T: r.top, W: r.width, H: r.height };
+                document.body.style.userSelect = 'none';
+                e.preventDefault(); e.stopPropagation();
+            });
+            panel.appendChild(h);
+            return h;
+        };
+        const EDGE = 6, CRN = 14; // edge strip thickness / corner box size
+        mkHandle(`top:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { n: true });
+        mkHandle(`bottom:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { s: true });
+        mkHandle(`left:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { w: true });
+        mkHandle(`right:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { e: true });
+        mkHandle(`top:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nwse-resize`, { n: true, w: true });
+        mkHandle(`top:0;right:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { n: true, e: true });
+        mkHandle(`bottom:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { s: true, w: true });
+        mkHandle(`right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,rgba(20,210,220,0.55) 40%,rgba(20,210,220,0.55) 50%,transparent 50%,transparent 65%,rgba(20,210,220,0.45) 65%,rgba(20,210,220,0.45) 75%,transparent 75%);border-bottom-right-radius:8px`, { s: true, e: true });
         // Extend the cleanup remove() to drop the resize listeners too.
         const prevRemove = panel.remove;
         panel.remove = () => {
@@ -8260,11 +8299,11 @@
                 tr.setAttribute('data-row-key', r._rowKey);
                 tr.style.cssText = 'border-bottom:1px solid rgba(255,255,255,0.05)';
                 // Frozen (sticky-left) cells need an OPAQUE background or the
-                // scrolling columns show through them; collect them so the
-                // row-hover tint stays in sync across the whole row.
+                // scrolling columns show through them. Base bg is set inline by
+                // applyFrozen; the hover bg is handled by the CSS :hover rule
+                // injected at panel build — no JS mouseenter/leave, so it can't
+                // get stranded when the table redraws mid-hover.
                 const frozenTds = [];
-                tr.onmouseenter = () => { tr.style.background = 'rgba(20,210,220,0.10)'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_HOVER); };
-                tr.onmouseleave = () => { tr.style.background = 'transparent'; frozenTds.forEach(td => td.style.background = FROZEN_BODY_BG); };
 
                 // Checkbox cell — clicks here don't trigger row navigation.
                 const tdSel = document.createElement('td');

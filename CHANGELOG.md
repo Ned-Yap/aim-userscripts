@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Summary panel fixes for everyone (PROD) — Asset Inspector v4.1
+
+Backported three self-contained Summary-panel fixes from the dev line to **prod** so coworkers get them now:
+- **Row hover no longer gets stuck** — hovering the table used to leave several rows highlighted (especially while elevations were loading); fixed.
+- **Resize from any edge or corner** — not just the bottom-right grip. Dragging the left/top edge resizes inward instead of sliding the panel.
+- **Panel stays fully on-screen** when you drag it — it could previously slide off the right/bottom edge leaving only a sliver.
+
+Update via Tampermonkey dashboard → *Check for userscript updates*. *(Snap-to-dock buttons, reload-persistence, and the button restyle stay on the dev line for now.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — fix stuck row-hover highlights in the Summary table (dev-only) — Asset Inspector v4.80
 
 Fixed the Summary table leaving **multiple rows stuck highlighted** when hovering. Row hover was per-row JS `mouseenter`/`mouseleave`; when the table redrew mid-hover (e.g. while DEM elevations stream in) the `mouseleave` never fired on the replaced row, stranding the highlight. Hover is now **CSS `:hover`** (browser-managed, can't get stuck), with the frozen Name column getting the opaque hover tint via its `data-frozen-key`. *(Dev/latest only. The same bug exists in prod v4.0 — can backport if you want it out to coworkers now.)*
