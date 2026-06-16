@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Control Panel — collapsible sub-sections + search (PROD) — Control Panel v1.27
+
+Two ergonomics wins on top of the new grouping:
+- **Collapsible sub-sections** — inside a group (e.g. Map Display), each tool is now its own collapsible row. Open a group and you get a tidy list of titles; click one (e.g. Outlines) to expand just it. No more a whole group dumping everything at once.
+- **Search box** — type in the search field at the top to instantly filter to the settings you want; it matches section names, tool names, and individual toggle/hotkey labels, and auto-expands the matches. Clear with the ×.
+
+*(Both apply to the whole panel; nothing about how the controls work changed.)*
+
+---
+
 ## 2026-06-16 — Control Panel — reorganized into intuitive groups (Phase 1, PROD) — Control Panel v1.26
 
 The ⚙ panel is now organized into clear, task-themed sections instead of scattering related controls: **Map Display** (outlines/buffers, performance, defaults, map nav) · **Power Lines** · **Site Setup** (the Site Setup Tools, validators, New Entity macro) · **Map Tools** (altitude, ruler, clear all) · **Missions** · **Issues**. Each control still works exactly as before — only where it *appears* changed — and sections still hide on pages they don't apply to. The whole layout is now driven by one central map in the Control Panel, so it's easy to keep tidy. *(Phase 2 will move the distro/trans line styling out of "Outlines" to sit with the Power Line Editor under "Power Lines.")*

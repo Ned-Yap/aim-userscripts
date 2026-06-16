@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.26
+// @version      1.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.26';
+    const VERSION = '1.27';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -750,6 +750,16 @@
                 renderPanel();
                 return;
             }
+            // v1.27 — clear the search box.
+            const searchClear = t.closest && t.closest('[data-search-clear]');
+            if (searchClear) {
+                e.stopPropagation();
+                state.search = '';
+                renderPanel();
+                const ni = state.panelEl && state.panelEl.querySelector('[data-search]');
+                if (ni) ni.focus();
+                return;
+            }
             const rebindBtn = t.closest && t.closest('[data-rebind]');
             if (rebindBtn) {
                 const now = Date.now();
@@ -837,13 +847,24 @@
         // Pointerdown backup — catches clicks that 'click' loses to Leaflet's
         // intermittent capture (same fix as the validator pins).
         panel.addEventListener('pointerdown', handlePanelInteract, false);
-        // Keep digit keys from triggering script hotkeys while typing in a
-        // number input inside the panel.
+        // v1.27 — live search. Re-render on every keystroke, then restore focus
+        // + caret to the (rebuilt) search box so typing stays smooth.
+        panel.addEventListener('input', (e) => {
+            const t = e.target;
+            if (!t || !t.matches || !t.matches('[data-search]')) return;
+            state.search = t.value;
+            const pos = t.selectionStart;
+            renderPanel();
+            const ni = state.panelEl && state.panelEl.querySelector('[data-search]');
+            if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (e2) {} }
+        }, false);
+        // Keep digit/letter keys from triggering script hotkeys while typing in
+        // a number / token / search input inside the panel.
         panel.addEventListener('keydown', (e) => {
             const t = e.target;
-            if (t && t.dataset && (t.dataset.control === 'number' || t.dataset['tokenInput'] !== undefined || t.matches('[data-token-input]'))) {
-                e.stopPropagation();
-            }
+            const isPanelInput = t && t.matches && (t.matches('[data-search]') || t.matches('[data-token-input]') ||
+                (t.dataset && (t.dataset.control === 'number' || t.dataset['tokenInput'] !== undefined)));
+            if (isPanelInput) e.stopPropagation();
         }, false);
     }
 
@@ -1207,10 +1228,22 @@
         if (!state.panelEl || !state.panelOpen) return;
         const scripts = Array.from(state.registry.values()).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
+        // v1.27 — search filter. When non-empty, only matching sections render
+        // and everything is force-expanded so results are visible.
+        const q = (state.search || '').trim().toLowerCase();
+        const searching = q.length > 0;
+
         const headerHtml = `
-            <div style="padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.10);display:flex;align-items:center;justify-content:space-between;background:rgb(28,28,28);border-radius:6px 6px 0 0;position:sticky;top:0;z-index:2">
-                <strong style="color:rgb(20,210,220)">AIM Controls</strong>
-                <span style="font-size:11px;color:#888">${scripts.length} script${scripts.length === 1 ? '' : 's'}</span>
+            <div style="border-bottom:1px solid rgba(255,255,255,0.10);background:rgb(28,28,28);border-radius:6px 6px 0 0;position:sticky;top:0;z-index:2">
+                <div style="padding:6px 10px;display:flex;align-items:center;justify-content:space-between">
+                    <strong style="color:rgb(20,210,220)">AIM Controls</strong>
+                    <span style="font-size:11px;color:#888">${scripts.length} script${scripts.length === 1 ? '' : 's'}</span>
+                </div>
+                <div style="padding:0 10px 7px;display:flex;align-items:center;gap:6px">
+                    <input data-search type="text" placeholder="Search settings…" value="${escapeAttr(state.search || '')}"
+                           style="flex:1;background:rgb(20,20,20);border:1px solid rgba(255,255,255,0.18);border-radius:4px;color:#e6e6e6;font-size:11px;padding:4px 8px;outline:none" />
+                    ${searching ? `<button data-search-clear title="Clear search" style="background:transparent;border:none;color:#bbb;cursor:pointer;font-size:15px;line-height:1;padding:0 4px">×</button>` : ''}
+                </div>
             </div>
         `;
 
@@ -1389,7 +1422,7 @@
         // groups and standalone scripts. Default state = COLLAPSED. Per
         // user request: the panel always starts tidy each time it opens.
         const renderSection = (key, title, meta, bodyHtml) => {
-            const open = !!(state.sectionsOpen && state.sectionsOpen[key]);
+            const open = searching || !!(state.sectionsOpen && state.sectionsOpen[key]);
             return `
                 <div style="border-bottom:1px solid rgba(255,255,255,0.12)">
                     <div data-sectiontoggle="${escapeAttr(key)}"
@@ -1399,6 +1432,25 @@
                         <span style="color:#bbb;width:14px;text-align:right">${open ? '▾' : '▸'}</span>
                     </div>
                     ${open ? `<div>${bodyHtml}</div>` : ''}
+                </div>
+            `;
+        };
+        // v1.27 — nested, collapsible sub-section for a script INSIDE a group
+        // (indented + subtler than a top-level section). Reuses the generic
+        // data-sectiontoggle handler with a `member:<id>` key. Default closed
+        // (so a big group like Map Display opens to a tidy list of titles);
+        // force-open while searching.
+        const renderSubSection = (key, title, meta, bodyHtml) => {
+            const open = searching || !!(state.sectionsOpen && state.sectionsOpen[key]);
+            return `
+                <div style="border-top:1px solid rgba(255,255,255,0.06)">
+                    <div data-sectiontoggle="${escapeAttr(key)}"
+                         style="display:flex;align-items:center;padding:4px 10px 4px 20px;cursor:pointer;background:rgb(31,31,31);user-select:none">
+                        <span style="flex:1;color:#cdeff3;font-size:11px;font-weight:600">${escapeHtml(title)}</span>
+                        ${meta ? `<span style="color:#777;font-size:9px;margin-right:8px">${escapeHtml(meta)}</span>` : ''}
+                        <span style="color:#999;width:12px;text-align:right;font-size:11px">${open ? '▾' : '▸'}</span>
+                    </div>
+                    ${open ? `<div style="padding-left:8px">${bodyHtml}</div>` : ''}
                 </div>
             `;
         };
@@ -1453,10 +1505,23 @@
             'aim-mission-bank-tools': 10, 'aim-bulk-mission-adder': 20, 'aim-quick-mission-editor': 30,
         };
 
+        // v1.27 — a script matches the search if the query hits its name, its
+        // group, or any toggle/hotkey label. Matching scripts render fully
+        // (and force-expanded) so the user can see the matching control.
+        const scriptMatchesSearch = (s, g) => {
+            if (!searching) return true;
+            if ((s.name || '').toLowerCase().includes(q)) return true;
+            if (g && g.toLowerCase().includes(q)) return true;
+            if ((Array.isArray(s.toggles) ? s.toggles : []).some(t => (t.label || '').toLowerCase().includes(q))) return true;
+            if ((Array.isArray(s.hotkeys) ? s.hotkeys : []).some(h => (h.label || '').toLowerCase().includes(q))) return true;
+            return false;
+        };
+
         const standalone = [];
         const groups = new Map(); // groupName -> [scripts]
         visibleScripts.forEach(s => {
             const g = SCRIPT_GROUP[s.scriptId] || s.group;
+            if (!scriptMatchesSearch(s, g)) return;
             if (g) {
                 if (!groups.has(g)) groups.set(g, []);
                 groups.get(g).push(s);
@@ -1515,7 +1580,7 @@
             const meta = single ? `v${sortedMembers[0].version || '?'}` : `${sortedMembers.length} scripts`;
             const bodyHtml = single
                 ? renderScriptInner(sortedMembers[0], false)
-                : sortedMembers.map(s => renderScriptInner(s, true)).join('');
+                : sortedMembers.map(s => renderSubSection(`member:${s.scriptId}`, s.name || s.scriptId, `v${s.version || '?'}`, renderScriptInner(s, false))).join('');
             sectionEntries.push({
                 key,
                 priority: SECTION_PRIORITY[key] !== undefined ? SECTION_PRIORITY[key] : 999,
@@ -1528,6 +1593,9 @@
             return a.sortName.localeCompare(b.sortName);
         });
         let sectionsHtml = sectionEntries.map(e => e.renderFn()).join('');
+        if (searching && sectionEntries.length === 0) {
+            sectionsHtml = `<div style="padding:16px;text-align:center;color:#888;font-size:11px">No settings match “${escapeHtml(state.search.trim())}”.</div>`;
+        }
 
         // Transient error banner shown after a rebind collision. Auto-clears
         // after ~6s OR when the user clicks the × close button.
