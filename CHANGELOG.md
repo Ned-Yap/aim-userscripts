@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Control Panel — gear button gets the neon-green pulsing glow (PROD) — Control Panel v1.29
+
+The ⚙ Controls button in the map toolbar now has the signature **neon-green pulsing glow** (same effect as the Site Setup Summary button), with a green gear icon — easier to spot in the toolbar. Respects reduced-motion.
+
+---
+
 ## 2026-06-16 — Control Panel — search now filters to the matching CONTROLS (PROD) — Control Panel v1.28
 
 Fixed search showing unrelated settings: it matched at the whole-tool level, so typing "Flight" surfaced all of Outlines (Assets and everything else) because the tool happened to contain a flight-path control. Now it **prunes to just the matching controls** — searching "Flight" shows only flight-path settings, with their category auto-expanded. Searching a tool or group name (e.g. "Outlines", "Power Lines") still shows that whole tool/group.

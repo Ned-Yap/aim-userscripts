@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.28
+// @version      1.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.28';
+    const VERSION = '1.29';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -596,10 +596,31 @@
         });
     }
 
+    // v1.29 — the signature neon-green pulsing glow (same breathing box-shadow
+    // technique as the Site Setup Summary button + AIM Issues activity dot).
+    // Injected once into whichever document holds the gear (the map iframe).
+    function ensureGearStyles(doc) {
+        try {
+            if (!doc || doc.getElementById('aim-gear-styles')) return;
+            const style = doc.createElement('style');
+            style.id = 'aim-gear-styles';
+            style.textContent = `
+                @keyframes aim-gear-pulse-glow {
+                    0%, 100% { box-shadow: 0 0 4px rgba(57,255,20,0.45), 0 0 9px rgba(57,255,20,0.22); }
+                    50%      { box-shadow: 0 0 11px rgba(57,255,20,0.90), 0 0 22px rgba(57,255,20,0.48); }
+                }
+                .aim-control-button { animation: aim-gear-pulse-glow 1.8s ease-in-out infinite; border-radius: 6px; }
+                @media (prefers-reduced-motion: reduce) { .aim-control-button { animation: none; } }
+            `;
+            (doc.head || doc.documentElement).appendChild(style);
+        } catch (e) {}
+    }
+
     function injectButton() {
         const tools = findToolsBar();
         if (!tools) return false;
         if (state.buttonEl && tools.contains(state.buttonEl)) return true;
+        ensureGearStyles(document);
         // Match the existing .map-tools__button look. Use the same classes
         // the host app's other tools use so styling comes for free.
         const wrapper = document.createElement('div');
@@ -607,7 +628,7 @@
             <div class="ant-dropdown-trigger map-tools__button pr-dropdown aim-control-button"
                  title="AIM Controls"
                  style="cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;user-select:none">
-                <span style="font-size:18px;line-height:1;color:#e6e6e6">⚙</span>
+                <span style="font-size:18px;line-height:1;color:#39ff14">⚙</span>
             </div>
         `;
         const btn = wrapper.firstElementChild;
