@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.73
+// @version      4.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.73';
+    const SCRIPT_VERSION = '4.74';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5890,12 +5890,17 @@
         Object.assign(btn.style, {
             minWidth: 'unset', padding: '0 16px', height: '26px',
             fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
-            background: '#39ff14', color: '#000', border: '1px solid #39ff14',
             borderRadius: '4px', textShadow: 'none',
-            // Ant/Percepto's button CSS sets -webkit-text-fill-color (white),
-            // which overrides `color` for text rendering — must override it too.
-            WebkitTextFillColor: '#000',
         });
+        // Inline !important is the strongest author declaration — it beats even
+        // Percepto's stylesheet !important rules. Plain color / Object.assign
+        // kept losing to their white -webkit-text-fill-color, so set the
+        // color-critical props with explicit `important` priority here.
+        const forceStyle = (prop, val) => { try { btn.style.setProperty(prop, val, 'important'); } catch (e) {} };
+        forceStyle('background', '#39ff14');
+        forceStyle('border', '1px solid #39ff14');
+        forceStyle('color', '#000');
+        forceStyle('-webkit-text-fill-color', '#000');
         btn.innerHTML = 'Site Setup Summary';
         btn.title = 'Open Site Setup Summary (AIM Asset Inspector)';
         btn.onclick = (e) => {
