@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — SUM button restyle: "Site Setup Summary" neon-green pill (dev-only) — Asset Inspector v4.72
+
+With the old ALT/VAL buttons gone there's room to spell it out: the **SUM** button now reads **Site Setup Summary**, styled **neon green with black bold text** and a **subtle pulsing glow** (the same breathing box-shadow effect AIM Issues uses for unseen activity, recolored green; glow only, no bounce). Same click behavior. *(Dev/latest only — ships to prod at the next Asset Inspector promotion.)*
+
+---
+
 ## 2026-06-16 — Removed: AIM Bulk Altitude Updater (replaced by Asset Inspector's SUM bulk altitude tools)
 
 **AIM Bulk Altitude Updater** (the `Shift+E` prep-pass → pause → final-pass altitude tool) has been **retired**. Its job is now done from the **Asset Inspector SUM panel** — **Bulk → AGL**, **Bulk → Delta**, **Bulk → Min**, **Bulk → Max** — which set altitudes across FP segments + FFZs from the live entity table with a preview, dry-run, rollback file, and per-write verify, via the fast Direct-API path. Those buttons already shipped to prod in Asset Inspector v4.0, so there's no gap. The script is removed from prod + `latest/` and from the install guides. **If you have it installed, remove "AIM Bulk Altitude Updater" from your Tampermonkey dashboard** — it won't auto-uninstall, and its `Shift+E` hotkey keeps working off the copy you already have until you do.

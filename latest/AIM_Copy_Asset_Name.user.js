@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.71
+// @version      4.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.71';
+    const SCRIPT_VERSION = '4.72';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5805,6 +5805,44 @@
         showSamples: elevGmGet(CACHE_KEY_SHOW_SAMPLES, false),
     };
 
+    // v4.72: inject the SUM button's neon-green + pulsing-glow styles into
+    // the target document (the button lives in the map iframe, so the <style>
+    // must go in the SAME doc). Glow technique mirrors AIM Issues' unseen-
+    // activity pulse (a box-shadow that breathes), recolored to the neon
+    // green. No transform/scale — a bouncing toolbar button reads as janky;
+    // the glow alone is the "subtle pulsating" effect. Guarded so it injects
+    // once per doc.
+    function ensureSumButtonStyles(doc) {
+        try {
+            if (!doc || doc.getElementById('aim-sum-btn-styles')) return;
+            const style = doc.createElement('style');
+            style.id = 'aim-sum-btn-styles';
+            style.textContent = `
+                @keyframes aim-sum-pulse-glow {
+                    0%, 100% { box-shadow: 0 0 4px rgba(57,255,20,0.45), 0 0 9px rgba(57,255,20,0.22); }
+                    50%      { box-shadow: 0 0 11px rgba(57,255,20,0.90), 0 0 22px rgba(57,255,20,0.48); }
+                }
+                #${SUM_BTN_ID}.aim-sum-neon-btn {
+                    animation: aim-sum-pulse-glow 1.8s ease-in-out infinite;
+                    background: #39ff14 !important;
+                    color: #000 !important;
+                    border-color: #39ff14 !important;
+                    text-shadow: none !important;
+                }
+                #${SUM_BTN_ID}.aim-sum-neon-btn:hover,
+                #${SUM_BTN_ID}.aim-sum-neon-btn:focus {
+                    background: #5cff43 !important;
+                    border-color: #5cff43 !important;
+                    color: #000 !important;
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    #${SUM_BTN_ID}.aim-sum-neon-btn { animation: none; }
+                }
+            `;
+            (doc.head || doc.documentElement).appendChild(style);
+        } catch (e) {}
+    }
+
     function injectSumButton(doc) {
         // Don't inject in edit mode — Bulk Validator hides the whole
         // toolbar then, and SUM should follow the same convention.
@@ -5832,17 +5870,24 @@
             });
             header.after(container);
         }
+        ensureSumButtonStyles(doc);
         const newBtnRef = header.querySelector('.site-setup-header__new_entity-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        btn.className = newBtnRef ? newBtnRef.className : 'ant-btn ant-btn-primary ant-btn-sm';
+        // Keep Ant's base shape class for sizing/radius, add our neon class
+        // for the green fill + pulsing glow (the class rules use !important so
+        // Ant's primary-blue + hover styles can't win). v4.72: now that the
+        // old ALT/VAL buttons are gone there's room for the full label.
+        btn.className = (newBtnRef ? newBtnRef.className : 'ant-btn ant-btn-primary ant-btn-sm') + ' aim-sum-neon-btn';
         Object.assign(btn.style, {
-            minWidth: 'unset', padding: '0 12px', height: '24px',
-            fontSize: '10px', fontWeight: 'bold',
+            minWidth: 'unset', padding: '0 16px', height: '26px',
+            fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
+            background: '#39ff14', color: '#000', border: '1px solid #39ff14',
+            borderRadius: '4px', textShadow: 'none',
         });
-        btn.innerHTML = 'SUM';
-        btn.title = 'Open entities summary (AIM Asset Inspector)';
+        btn.innerHTML = 'Site Setup Summary';
+        btn.title = 'Open Site Setup Summary (AIM Asset Inspector)';
         btn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
