@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.69
+// @version      4.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.69';
+    const SCRIPT_VERSION = '4.70';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3683,6 +3683,51 @@
         if (!p) return { value: orig, pending: false, isNew: false };
         return { value: p.newValue, pending: true, isNew: !!p.isNewSubtype, oldValue: orig };
     }
+
+    // v4.70: pilot VALIDATION flag (entity-level boolean) for FFZ + FP.
+    // This is a pilot's post-flight sign-off — "flew it, no airspace
+    // obstacles (trans lines/towers/trees), cleared for autonomous flight"
+    // — NOT a derived SOP verdict. So it's a plain bulk ON/OFF flip, fully
+    // decoupled from the SOP Validators. Queued as an entity-level edit
+    // (arcId=null, field='validated'); for FPs one edit covers the whole
+    // path (the flag lives on the entity, not per-arc).
+    function getPendingValidated(entityId) {
+        return getPendingEdit(entityId, null, 'validated');
+    }
+    function queueValidatedEdit(entity, newVal) {
+        if (!entity) return false;
+        if (entity.type !== 15 && entity.type !== 16) return false; // FP + FFZ only
+        const target = !!newVal;
+        const current = !!entity.validated;
+        if (target === current) {
+            // No-op — clear any prior pending flip back to original.
+            if (getPendingValidated(entity.id)) discardPendingEdit(entity.id, null, 'validated');
+            return false;
+        }
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: entity.type === 16,
+            isAsset: false,
+            field: 'validated',
+            oldValue: current,
+            newValue: target,
+            // Display + sidebar-lookup fields mirror the other edit kinds.
+            fpName: entity.name || '',
+            entityName: entity.name || '',
+            segmentName: entity.name || '',
+        });
+        return true;
+    }
+    function effectiveValidated(entity) {
+        const orig = !!(entity && entity.validated);
+        if (!entity) return { value: orig, pending: false };
+        const p = getPendingValidated(entity.id);
+        if (!p) return { value: orig, pending: false };
+        return { value: !!p.newValue, pending: true, oldValue: orig };
+    }
+
     // Helper: pull the arcId for the queue entry shape (null for FFZ).
     function rowArcId(r) {
         return (r._isSegment && r.arc) ? r.arc.id : null;
@@ -4474,6 +4519,13 @@
                 }
                 return;
             }
+            // v4.70: validation flag is boolean-valued.
+            if (e.field === 'validated') {
+                if (!!ent.validated !== !!e.oldValue) {
+                    result.warnings.push(`${e.entityName} validation: queued from ${e.oldValue ? '✓' : '✗'} but current is ${ent.validated ? '✓' : '✗'} (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
             let currentM = null;
             if (e.isFfz) {
                 if (ent.restrictions) {
@@ -4602,6 +4654,10 @@
     function applyEditsToBody(body, edits) {
         edits.forEach(e => {
             if (e.field === 'name') { body.name = e.newValue; return; }
+            // v4.70: entity-level pilot validation flag (FFZ + FP). Plain
+            // boolean on the entity — set it and the same upsert POST carries
+            // it. The verify rail confirms the server actually persisted it.
+            if (e.field === 'validated') { body.validated = !!e.newValue; return; }
             if (e.isFfz) {
                 if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
                 if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
@@ -4683,7 +4739,12 @@
     // (sentBody), not the raw queue — so auto-bridged ceilings verify
     // correctly. Checks every arc/restriction round-tripped + structure
     // (coord/arc counts) intact; a count change is a STRUCTURAL anomaly.
-    function verifyDirectSave(saved, sentBody, original) {
+    // v4.70: expectValidated (true/false) is passed ONLY when the group
+    // queued a 'validated' edit. We then confirm the server persisted the
+    // flag — Percepto might recompute/ignore it. Left null for every other
+    // run so an altitude-only save isn't failed by a server-side
+    // validated side-effect (e.g. an edit clearing pilot sign-off).
+    function verifyDirectSave(saved, sentBody, original, expectValidated) {
         if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
         const oc = (original.coords || []).length, sc = (saved.coords || []).length;
         if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
@@ -4713,6 +4774,10 @@
                 }
             }
         }
+        // Pilot validation flag — only when this group flipped it.
+        if (expectValidated != null && !!saved.validated !== !!expectValidated) {
+            return { ok: false, reason: `validated: sent ${!!expectValidated}, got ${!!saved.validated} (server didn't persist the flag)`, structural: false };
+        }
         return { ok: true };
     }
 
@@ -4736,10 +4801,13 @@
         }
         const body = buildWriteBody(entity, siteCfg);
         applyEditsToBody(body, group.edits);
+        const hasAltEdit = group.edits.some(e => e.field === 'min_alt' || e.field === 'max_alt');
         // Auto-bridge terrain seams on flight paths so adjacent segments
         // overlap (server rule) — raises ceilings only, AGL floor kept.
+        // v4.70: skip when no altitude edit is in play (validated-only /
+        // name-only saves must never nudge a segment's ceiling).
         let bridges = [];
-        if (!group.isFfz && Array.isArray(body.arcs)) {
+        if (!group.isFfz && hasAltEdit && Array.isArray(body.arcs)) {
             bridges = bridgeArcContinuity(body.arcs);
             if (bridges.length) {
                 const useFt = !!sumPanelState.unitsFt;
@@ -4808,7 +4876,8 @@
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
         const saved = resp.json && resp.json.map_objects;
-        const verify = verifyDirectSave(saved, body, entity);
+        const valEdit = group.edits.find(e => e.field === 'validated');
+        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null);
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
@@ -4977,6 +5046,7 @@
             const ent = byId.get(e.entityId);
             if (!ent) return;
             if (e.field === 'name') { ent.name = e.newValue; return; }
+            if (e.field === 'validated') { ent.validated = !!e.newValue; return; }
             if (e.isFfz) {
                 if (!ent.restrictions) ent.restrictions = {};
                 if (e.field === 'min_alt') ent.restrictions.minAlt = e.newValueM;
@@ -4999,6 +5069,18 @@
     async function runApplyPipeline(onProgress, opts) {
         const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
+        // v4.70: the editor path can't toggle the pilot Validation flag —
+        // it only drives Min/Max/name inputs (+ the asset Type select). So a
+        // queued 'validated' edit REQUIRES ⚡ Direct API. Refuse early with a
+        // clear message rather than silently reporting "no edits applied".
+        const hasValidatedEdit = groups.some(g => g.edits.some(e => e.field === 'validated'));
+        if (hasValidatedEdit && !directApi) {
+            applyState.running = false;
+            applyState.errors = [{ entityName: '(Bulk → Valid)', reason: 'Validation flips need ⚡ Direct API — enable the Direct API checkbox and re-run.' }];
+            showToast('Bulk → Valid needs ⚡ Direct API enabled', 'rgba(255,82,82,0.7)');
+            try { onProgress(applyState); } catch (e) {}
+            return;
+        }
         applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
         applyState.done = 0;
         applyState.errors = [];
@@ -5070,7 +5152,7 @@
                     reason: outcome.reason || '',
                     verified: outcome.verified === true,
                     durationMs,
-                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name') ? ({
+                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name' || e.field === 'validated') ? ({
                         field: e.field,
                         oldValue: e.oldValue,
                         newValue: e.newValue,
@@ -10842,6 +10924,152 @@
         };
         optsRow.appendChild(subBtn);
 
+        // --- v4.70: Bulk → Valid button ---
+        // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
+        // across FFZs + FPs in scope. This flag = a pilot's post-flight
+        // sign-off (flew it, no airspace obstacles, cleared for autonomous
+        // flight), so it's a plain manual flip — NOT derived from the SOP
+        // Validators. Rides the same direct-API upsert + rollback/verify
+        // rails as the altitude bulk tools (verify confirms the server
+        // actually persisted the flag). Uses the shared attachBulkPopover.
+        const validBtn = document.createElement('button');
+        validBtn.type = 'button';
+        validBtn.textContent = 'Bulk → Valid';
+        validBtn.title = 'Set the pilot Validation flag ✓/✗ across FFZs + FPs (selected, or all)';
+        validBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
+        optsRow.appendChild(validBtn);
+
+        // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
+        // type filter, preview the count, then queue one validated edit per
+        // entity. FP rows are per-segment in the table, so we DEDUPE by
+        // entity id and queue once per flight path.
+        function buildBulkValidatePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:320px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🛩  Bulk Set Validation';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = "Flips the pilot Validation flag on every FFZ + FP in scope. This is the pilot's post-flight sign-off — independent of the SOP Validators. Skips entities already at the target.";
+            pop.appendChild(help);
+
+            // Target radio — ✓ Valid / ✗ Invalid.
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:14px;margin-bottom:10px';
+            const mkTarget = (val, label, col) => {
+                const l = document.createElement('label');
+                l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + col + ';font-weight:600';
+                const r = document.createElement('input');
+                r.type = 'radio'; r.name = 'aim-ai-bulk-val-target'; r.value = val;
+                r.style.cssText = 'accent-color:' + col + ';cursor:pointer';
+                l.appendChild(r); l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const tValid = mkTarget('yes', '✓ Valid', '#5fff5f');
+            const tInvalid = mkTarget('no', '✗ Invalid', '#ff5555');
+            tValid.r.checked = true;
+            row1.appendChild(tValid.l); row1.appendChild(tInvalid.l);
+            pop.appendChild(row1);
+
+            // Scope radio (same convention as the other bulk popovers).
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:8px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio'; r.name = 'aim-ai-bulk-val-scope'; r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r); l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All FFZs + FPs on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true; else allScope.r.checked = true;
+            row2.appendChild(allScope.l); row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            // Entity-type filter — FFZs / FPs (both on by default).
+            const row3 = document.createElement('div');
+            row3.style.cssText = 'display:flex;align-items:center;gap:14px;margin-bottom:10px';
+            const mkType = (label, col) => {
+                const l = document.createElement('label');
+                l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + col;
+                const c = document.createElement('input');
+                c.type = 'checkbox'; c.checked = true;
+                c.style.cssText = 'accent-color:' + col + ';cursor:pointer';
+                l.appendChild(c); l.appendChild(document.createTextNode(label));
+                return { l, c };
+            };
+            const ffzType = mkType('FFZs', '#5fff5f');
+            const fpType = mkType('FPs', '#1ca0de');
+            row3.appendChild(ffzType.l); row3.appendChild(fpType.l);
+            pop.appendChild(row3);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            // Collect the UNIQUE target entities (FFZ + FP) honoring scope +
+            // type filter, returning those not already at the target flag.
+            const computeEligible = () => {
+                const target = tInvalid.r.checked ? false : true;
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const wantFfz = ffzType.c.checked, wantFp = fpType.c.checked;
+                const seen = new Set();
+                const entities = [];
+                allRows.forEach(r => {
+                    if (!r.entity) return;
+                    if (r.type !== 15 && r.type !== 16) return;
+                    if (r.type === 16 && !wantFfz) return;
+                    if (r.type === 15 && !wantFp) return;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return;
+                    if (seen.has(r.entity.id)) return;
+                    seen.add(r.entity.id);
+                    entities.push(r.entity);
+                });
+                const eligible = entities.filter(en => !!en.validated !== target);
+                return { eligible, target, total: entities.length };
+            };
+            const refreshPreview = () => {
+                const { eligible, target, total } = computeEligible();
+                if (total === 0) { preview.textContent = '⚠️ No FFZ/FP entities in scope (check the type filter).'; return; }
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> flip${eligible.length === 1 ? '' : 's'} → ${target ? '<span style="color:#5fff5f">✓ Valid</span>' : '<span style="color:#ff5555">✗ Invalid</span>'} · skipping ${total - eligible.length} already there.`;
+            };
+            refreshPreview();
+            [tValid.r, tInvalid.r, allScope.r, selScope.r, ffzType.c, fpType.c].forEach(el => { el.onchange = refreshPreview; });
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue flips';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, target } = computeEligible();
+                if (eligible.length === 0) { showToast('Nothing to queue — all in-scope entities already at target'); return; }
+                let queued = 0;
+                eligible.forEach(en => { if (queueValidatedEdit(en, target)) queued++; });
+                showToast(`Queued ${queued} validation flip${queued === 1 ? '' : 's'} → ${target ? '✓ Valid' : '✗ Invalid'}`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
         function buildBulkSubtypePopover(anchor, onClose) {
             const pop = document.createElement('div');
             pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:340px';
@@ -11644,6 +11872,19 @@
                         'Subtype' + (e.isNewSubtype ? ' (NEW)' : ''),
                         e.oldValue || '',
                         e.newValue || '',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
+                // v4.70: validation flag is boolean — Old/New hold ✓/✗; Δ empty.
+                if (e.field === 'validated') {
+                    lines.push([
+                        e.isFfz ? 'FFZ' : 'FP',
+                        e.entityName || e.fpName || '',
+                        '(entity)',
+                        'Validated',
+                        e.oldValue ? '✓' : '✗',
+                        e.newValue ? '✓' : '✗',
                         '',
                     ].join('\t'));
                     return;
@@ -12456,11 +12697,19 @@
                     } else if (col.key === 'validated') {
                         // null → N/A (Assets/Markers — Percepto hides the toggle for these).
                         // true → green ✓, false → red ✗ for FFZ/FP/NFZ.
-                        let txt = '—', color = '#666';
-                        if (r.validated === true) { txt = '✓'; color = '#5fff5f'; }
+                        // v4.70: a queued Bulk → Valid flip shows the TARGET in
+                        // yellow until Apply, mirroring the Min/Max pending style.
+                        let txt = '—', color = '#666', pending = false, title = '';
+                        if (r.validated !== null && r.entity && (r.type === 15 || r.type === 16)) {
+                            const ev = effectiveValidated(r.entity);
+                            if (ev.pending) { pending = true; title = `Queued: ${ev.oldValue ? '✓' : '✗'} → ${ev.value ? '✓' : '✗'}`; }
+                            if (ev.value === true) { txt = '✓'; color = pending ? '#ffd54f' : '#5fff5f'; }
+                            else { txt = '✗'; color = pending ? '#ffd54f' : '#ff5555'; }
+                        } else if (r.validated === true) { txt = '✓'; color = '#5fff5f'; }
                         else if (r.validated === false) { txt = '✗'; color = '#ff5555'; }
                         td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
                         td.textContent = txt;
+                        if (title) td.title = title;
                     } else if (col.key === 'lat' || col.key === 'long') {
                         // Point coordinate (GMs + Assets only). Click or
                         // right-click copies the raw number. M1-edit to move

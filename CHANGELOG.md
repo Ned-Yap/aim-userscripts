@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Bulk → Valid: bulk pilot validation flag (dev-only) — Asset Inspector v4.70
+
+New **Bulk → Valid** button in the SUM bulk row flips the **pilot Validation flag** (✓/✗) across every **FFZ + FP** in scope in one shot — the pilot's post-flight sign-off ("flew it, no airspace obstacles, cleared for autonomous flight"), so it's a plain manual ON/OFF, fully separate from the SOP Validators. Pick ✓ Valid / ✗ Invalid, scope (all or selected), and an FFZ/FP type filter; the preview counts how many will flip (already-correct entities are skipped). Rides the same **⚡ Direct-API** upsert as the altitude bulk tools — same rollback file, and the verify rail now confirms the server actually **persisted** the flag (fails loudly if not). Queued flips show the target in yellow in the Valid column until Apply. *(Requires ⚡ Direct API; the editor path can't toggle the flag. Dev/latest only.)*
+
+---
+
 ## 2026-06-15 — AIM Issues — stale-issue auto-bump (dev-only) — AIM Issues v1.20
 
 Issues that sit unresolved get a nudge: any issue in **open / pending fix / pending ignore / ready-for-review for more than 7 days** now posts a Slack bump pinging the **assignee + approvers**, re-bumping **weekly** until it's resolved/ignored. It runs **inside AIM Issues** (on site load + hourly while open), threads under the issue (adopting pre-Slack issues into a thread first), and records a `kind:'bump'` history entry so it never double-fires across browsers. Uses the GitHub token the browser already has — no extra setup. *(Dev/latest only. Replaces the planned cloud routine, which was blocked on cloud GitHub authorization.)*
