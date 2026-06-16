@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-16 — Asset Inspector — Summary panel: snap-to-dock buttons (dev-only) — Asset Inspector v4.78
+
+The Site Setup Summary header now has **dock buttons** — **◧ left**, **◨ right**, **⬓ bottom**, **❐ float/restore**. Click one to snap the panel to fill that edge of the **map** (it docks to the `.leaflet-container`, so it lines up with the imagery, not the sidebar): sides fill full map height at your current width (capped at 70%), bottom fills full width at ~45% height. Docked panels **re-fit automatically** when the window/sidebar resizes; dragging or resizing the panel pops it back to floating, and **❐** restores the pre-dock size/position. *(Next: persistence so dock + size survive reloads. Dev/latest only.)*
+
+---
+
 ## 2026-06-16 — Asset Inspector — Summary panel: resize from any edge + keep fully on-screen (dev-only) — Asset Inspector v4.76–v4.77
 
 The Site Setup Summary panel can now be **resized from any edge or corner**, not just the bottom-right grip. Dragging the left or top edge resizes inward (the opposite edge stays put) instead of sliding the panel. Same 480×300 min / 96vw×90vh max. **v4.77:** dragging now keeps the **whole** panel on-screen on every edge — it used to let the panel slide off the right/bottom leaving only a thin sliver (the top/left already locked). *(Panel-ergonomics batch — snap-to-side/bottom buttons + reload-persistence coming next. Dev/latest only.)*

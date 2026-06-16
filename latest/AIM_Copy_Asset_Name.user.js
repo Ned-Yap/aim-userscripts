@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.77
+// @version      4.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -30,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.77';
+    const SCRIPT_VERSION = '4.78';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5785,6 +5785,8 @@
         sortDir: 1,
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
+        snap: null,                // 'left' | 'right' | 'bottom' | null — current dock
+        floatRect: null,           // {x,y,w,h} saved before docking, for float/restore
         selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
         // v3.47: per-entity visibility state we drive via Percepto's
         // sidebar checkboxes. Map<entityId, boolean>. Missing entries
@@ -10003,7 +10005,90 @@
         closeBtn.textContent = '×';
         closeBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:18px;cursor:pointer;padding:0 4px;line-height:1';
         closeBtn.onclick = closeSummaryPanel;
+
+        // --- Snap docking (v4.78) ---
+        // Snap targets come from the MAP region — the .leaflet-container in
+        // this (iframe) document — so "snap left/right" fills the map's edge,
+        // not the sidebar. Coords are viewport-relative, matching the panel's
+        // position:fixed space. Falls back to the full viewport if the map
+        // container isn't found.
+        function getMapRect() {
+            try {
+                const mc = document.querySelector('.leaflet-container');
+                if (mc) {
+                    const r = mc.getBoundingClientRect();
+                    if (r.width > 200 && r.height > 200) {
+                        return { left: r.left, top: r.top, width: r.width, height: r.height };
+                    }
+                }
+            } catch (e) {}
+            return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+        }
+        function applyPanelGeom(L, T, W, H) {
+            panel.style.left = Math.round(L) + 'px';
+            panel.style.top = Math.round(T) + 'px';
+            panel.style.width = Math.round(W) + 'px';
+            panel.style.height = Math.round(H) + 'px';
+            panel.style.maxHeight = 'none';
+            sumPanelState.x = Math.round(L); sumPanelState.y = Math.round(T);
+            sumPanelState.w = Math.round(W); sumPanelState.h = Math.round(H);
+        }
+        function snapPanel(where) {
+            const m = getMapRect();
+            const priorSnap = sumPanelState.snap;
+            // Remember the floating geometry the first time we dock, so the
+            // float/restore button can return to it.
+            if (!priorSnap) {
+                const r = panel.getBoundingClientRect();
+                sumPanelState.floatRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+            }
+            const floatW = (sumPanelState.floatRect && sumPanelState.floatRect.w) || 720;
+            let L, T, W, H;
+            if (where === 'left' || where === 'right') {
+                // Side dock: full map height, width = the floating width (cap
+                // at 70% of the map so a dock never swallows the whole thing).
+                const baseW = priorSnap ? floatW : panel.getBoundingClientRect().width;
+                W = Math.min(Math.max(baseW, 480), Math.round(m.width * 0.7));
+                H = m.height; T = m.top;
+                L = where === 'left' ? m.left : (m.left + m.width - W);
+            } else { // bottom dock: full map width, ~45% height.
+                W = m.width; L = m.left;
+                H = Math.min(Math.max(Math.round(m.height * 0.45), 300), m.height);
+                T = m.top + m.height - H;
+            }
+            applyPanelGeom(L, T, W, H);
+            sumPanelState.snap = where;
+        }
+        function floatPanel() {
+            sumPanelState.snap = null;
+            const f = sumPanelState.floatRect;
+            if (f) applyPanelGeom(f.x, f.y, f.w, f.h);
+        }
+        // Re-fit a docked panel when the window/sidebar size changes.
+        const onWinResize = () => { if (sumPanelState.snap) snapPanel(sumPanelState.snap); };
+        window.addEventListener('resize', onWinResize);
+
+        const snapBtns = document.createElement('div');
+        snapBtns.style.cssText = 'display:flex;align-items:center;gap:1px;margin-right:2px';
+        const mkSnapBtn = (glyph, tip, fn) => {
+            const b = document.createElement('button');
+            b.textContent = glyph;
+            b.title = tip;
+            b.style.cssText = 'background:transparent;border:1px solid transparent;color:#9fb4bb;font-size:13px;line-height:1;cursor:pointer;padding:2px 5px;border-radius:3px';
+            b.onmouseenter = () => { b.style.background = 'rgba(20,210,220,0.18)'; b.style.color = '#cdeff3'; };
+            b.onmouseleave = () => { b.style.background = 'transparent'; b.style.color = '#9fb4bb'; };
+            // Don't let a button press start a header drag.
+            b.onmousedown = (e) => { e.stopPropagation(); };
+            b.onclick = (e) => { e.stopPropagation(); fn(); };
+            return b;
+        };
+        snapBtns.appendChild(mkSnapBtn('◧', 'Dock to left of map', () => snapPanel('left')));
+        snapBtns.appendChild(mkSnapBtn('◨', 'Dock to right of map', () => snapPanel('right')));
+        snapBtns.appendChild(mkSnapBtn('⬓', 'Dock to bottom of map', () => snapPanel('bottom')));
+        snapBtns.appendChild(mkSnapBtn('❐', 'Float / restore', floatPanel));
+
         head.appendChild(title);
+        head.appendChild(snapBtns);
         head.appendChild(closeBtn);
         panel.appendChild(head);
 
@@ -10032,6 +10117,7 @@
             panel.style.left = nx + 'px';
             panel.style.top = ny + 'px';
             sumPanelState.x = nx; sumPanelState.y = ny;
+            sumPanelState.snap = null; // manual move un-docks
         };
         const onUp = () => { dragging = false; };
         document.addEventListener('mousemove', onMove);
@@ -12086,6 +12172,7 @@
             panel.style.height = H + 'px';
             panel.style.maxHeight = 'none'; // override the default cap once user resizes
             sumPanelState.x = L; sumPanelState.y = T; sumPanelState.w = W; sumPanelState.h = H;
+            sumPanelState.snap = null; // manual resize un-docks
         };
         const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; } };
         document.addEventListener('mousemove', onResizeMove);
@@ -12119,6 +12206,7 @@
         panel.remove = () => {
             document.removeEventListener('mousemove', onResizeMove);
             document.removeEventListener('mouseup', onResizeUp);
+            window.removeEventListener('resize', onWinResize);
             prevRemove();
         };
 
