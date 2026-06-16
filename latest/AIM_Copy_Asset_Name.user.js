@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Copy Asset Name
 // @namespace    http://tampermonkey.net/
-// @version      4.68
+// @version      4.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Right-click any entity (asset, FFZ, flight path, marker) to pop up an inspector with name/type/elevation/notes. Each row click-to-copy. "Open in editor" triggers Percepto's native edit dialog. Replaces the old Shift+Ctrl+Q hotkey. Panel display name: "Asset Inspector".
@@ -14,6 +14,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      api.opentopodata.org
 // @run-at       document-end
 // ==/UserScript==
 
@@ -29,7 +30,7 @@
     const TAG = `[AIM INSPECT ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.68';
+    const SCRIPT_VERSION = '4.69';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -411,6 +412,100 @@
     function elevCacheKey(lat, lng) {
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
     }
+
+    // ============================================================
+    // ELEVATION SOURCE (v4.69) — Open-Topo-Data (free, no key, BATCHED
+    // 100 pts/request, US 10 m NED, ≈100k pts/day) is the PRIMARY source;
+    // Percepto's /location_altitude/ stays fully intact as the fallback.
+    //
+    //   • Flip back to Percepto any time: set elevPrimary = 'percepto'
+    //     below, or run __aimAIElevSource('percepto') in the console
+    //     (e.g. if the Percepto limit gets raised). Nothing is deleted.
+    //   • Percepto also auto-backstops: OTD failures + any point outside
+    //     NED coverage fall through to Percepto per-point.
+    //   • Datum guard: first OTD batch is spot-checked against Percepto;
+    //     if they disagree by > OTD_DATUM_TOL_M the OTD source is disabled
+    //     (so we never bake a wrong vertical datum into altitude bands).
+    // ============================================================
+    let elevPrimary = 'opentopodata';        // 'opentopodata' | 'percepto'
+    const OTD_DATASET = 'ned10m';            // US 10 m, NAVD88 ≈ MSL (matches Percepto/Google)
+    const OTD_URL = `https://api.opentopodata.org/v1/${OTD_DATASET}`;
+    const OTD_MAX_BATCH = 100;               // API max locations per request
+    const OTD_MIN_INTERVAL_MS = 1100;        // public limit ≤ 1 req/s
+    const OTD_DATUM_TOL_M = 3;               // OTD vs Percepto disagreement that trips distrust
+    let otdBatch = [];                        // [{lat,lng,key,resolve}]
+    let otdTimer = null, otdLastSend = 0;
+    let otdDisabled = false, otdDatumChecked = false;
+
+    function elevSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    // A single Percepto per-point fetch (the existing queue) — returns meters|null.
+    function perceptoFetchPoint(lat, lng) {
+        const key = elevCacheKey(lat, lng);
+        return new Promise(resolve => { elevQueue.push({ lat, lng, key, resolve }); pumpElevQueue(); });
+    }
+    async function otdFetchBatch(points) {
+        const loc = points.map(p => `${p.lat},${p.lng}`).join('|');
+        try {
+            const r = await elevGmRequest({ method: 'GET', url: `${OTD_URL}?locations=${encodeURIComponent(loc)}`, timeout: 15000 });
+            if (!r.ok) return null;
+            const j = JSON.parse(r.responseText);
+            if (!j || j.status !== 'OK' || !Array.isArray(j.results)) return null;
+            return j.results.map(x => (x && typeof x.elevation === 'number') ? x.elevation : null);
+        } catch (e) { return null; }
+    }
+    function enqueueOTD(lat, lng, key) {
+        return new Promise(resolve => { otdBatch.push({ lat, lng, key, resolve }); scheduleOTDFlush(); });
+    }
+    function scheduleOTDFlush() {
+        if (otdTimer) return;
+        const wait = Math.max(otdBatch.length >= OTD_MAX_BATCH ? 0 : 70, OTD_MIN_INTERVAL_MS - (Date.now() - otdLastSend));
+        otdTimer = setTimeout(() => { otdTimer = null; flushOTD().catch(e => console.warn(`${TAG} OTD flush threw`, e)); }, wait);
+    }
+    async function flushOTD() {
+        if (!otdBatch.length) return;
+        const batch = otdBatch.splice(0, OTD_MAX_BATCH);
+        otdLastSend = Date.now();
+        const elevs = await otdFetchBatch(batch);
+        if (elevs) {
+            const gaps = [];
+            batch.forEach((b, i) => {
+                const m = elevs[i];
+                if (m != null) { loadElevationCache()[b.key] = m; b.resolve(m); }
+                else gaps.push(b); // outside NED coverage → Percepto backstop
+            });
+            saveElevationCache();
+            gaps.forEach(b => perceptoFetchPoint(b.lat, b.lng).then(m => b.resolve(m)));
+            if (!otdDatumChecked) verifyOtdDatum(batch, elevs);
+        } else {
+            // whole request failed (down / rate-limited) → Percepto backstop for the batch
+            console.warn(`${TAG} Open-Topo-Data request failed — backstopping ${batch.length} point(s) via Percepto`);
+            batch.forEach(b => perceptoFetchPoint(b.lat, b.lng).then(m => b.resolve(m)));
+        }
+        if (otdBatch.length) scheduleOTDFlush();
+    }
+    async function verifyOtdDatum(batch, elevs) {
+        otdDatumChecked = true;
+        try {
+            const samples = [];
+            for (let i = 0; i < batch.length && samples.length < 3; i++) if (typeof elevs[i] === 'number') samples.push({ b: batch[i], otd: elevs[i] });
+            if (!samples.length) { otdDatumChecked = false; return; } // try again next batch
+            const diffs = [];
+            for (const s of samples) {
+                const pm = await perceptoFetchPoint(s.b.lat, s.b.lng);
+                if (typeof pm === 'number') diffs.push(Math.abs(pm - s.otd));
+                await elevSleep(150);
+            }
+            if (!diffs.length) { console.log(`${TAG} OTD datum check skipped (Percepto unavailable) — trusting Open-Topo-Data ${OTD_DATASET} (NAVD88 ≈ MSL)`); return; }
+            const maxDiff = Math.max(...diffs);
+            if (maxDiff > OTD_DATUM_TOL_M) {
+                otdDisabled = true;
+                console.warn(`${TAG} ⚠ Open-Topo-Data disagrees with Percepto by ${maxDiff.toFixed(1)} m (> ${OTD_DATUM_TOL_M} m) — DISABLING OTD, falling back to Percepto so altitude bands stay correct. Run __aimAIElevSource('opentopodata') to retry.`);
+            } else {
+                console.log(`${TAG} ✓ Open-Topo-Data datum verified vs Percepto (max Δ ${maxDiff.toFixed(1)} m) — using ${OTD_DATASET} as the primary DEM source`);
+            }
+        } catch (e) { console.warn(`${TAG} OTD datum check threw`, e); }
+    }
+
     function getElevationFromCache(lat, lng) {
         const key = elevCacheKey(lat, lng);
         const cache = loadElevationCache();
@@ -427,10 +522,11 @@
         const cached = getElevationFromCache(lat, lng);
         if (cached != null) return Promise.resolve(cached);
         if (elevInFlight[key]) return elevInFlight[key];
-        const p = new Promise(resolve => {
-            elevQueue.push({ lat, lng, key, resolve });
-            pumpElevQueue();
-        }).then(meters => { delete elevInFlight[key]; return meters; });
+        const useOtd = (elevPrimary === 'opentopodata') && !otdDisabled;
+        const p = (useOtd
+            ? enqueueOTD(lat, lng, key)                                   // batched Open-Topo-Data (primary)
+            : new Promise(resolve => { elevQueue.push({ lat, lng, key, resolve }); pumpElevQueue(); }) // Percepto (fallback / flip-back)
+        ).then(meters => { delete elevInFlight[key]; return meters; });
         elevInFlight[key] = p;
         return p;
     }
@@ -526,7 +622,14 @@
             fetch: (lat, lng) => fetchElevation(lat, lng),
             bulk: (points, onProgress) => bulkFetchElevations(points, onProgress),
         };
-        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (per-site cache + nearest-lookup + queue reuse for sibling scripts)`);
+        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (per-site cache + nearest-lookup + queue reuse for sibling scripts) · primary source: ${elevPrimary}`);
+        // Console switch for the DEM source — e.g. flip back to Percepto if its limit gets raised.
+        unsafeWindow.__aimAIElevSource = (s) => {
+            elevPrimary = (s === 'percepto') ? 'percepto' : 'opentopodata';
+            if (elevPrimary === 'opentopodata') { otdDisabled = false; otdDatumChecked = false; }
+            console.log(`${TAG} elevation source → ${elevPrimary}`);
+            return elevPrimary;
+        };
         // One-shot reclaim: once the per-site caches are warm, drop the old global
         // blob to free ~1.5 MB of GM storage. Safe — per-site + shared files cover it.
         unsafeWindow.__aimAIElevPurgeLegacy = () => {
