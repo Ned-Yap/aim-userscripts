@@ -1,13 +1,113 @@
 {
-  "_README": "Per-tool demo GIFs for the guide. Optional — without this file, the page auto-shows tool-<slug>.gif and tool-<slug>-1.gif, -2.gif, … if present. Use this to control order + add a caption under each clip. Key = tool slug (printed to the browser console on the guide page). Value = array of 'file.gif' strings (file lives in docs/img/) OR {\"file\": \"x.gif\", \"caption\": \"...\"} objects. A slug listed here OVERRIDES the auto-probing for that tool. Files that don't exist yet just hide themselves, so it's safe to list them ahead of recording.",
+  "_README": "Per-tool demo GIFs for the guide. Key = tool slug (printed to the browser console on the guide page). Value = ordered list of files in docs/img/ — either \"file.gif\" or {\"file\": \"x.gif\", \"caption\": \"...\"}. These are STARTER ideas: edit captions, reorder, add, or delete freely. Files that don't exist yet just hide themselves, so it's safe to list them ahead of recording. A slug listed here overrides the auto-numbering for that tool; remove a slug to fall back to auto-detecting tool-<slug>.gif / -1 / -2 …",
+
+  "control-panel": [
+    { "file": "tool-control-panel-1.gif", "caption": "Open the gear panel and flip a tool on or off." },
+    { "file": "tool-control-panel-2.gif", "caption": "Rebind a hotkey that clashes with something else." },
+    { "file": "tool-control-panel-3.gif", "caption": "Paste your GitHub token to enable Map Styler + Issues." }
+  ],
+
+  "map-styler": [
+    { "file": "tool-map-styler-1.gif", "caption": "Shift+O toggles the power-line shielding overlays." },
+    { "file": "tool-map-styler-2.gif", "caption": "Coverage check drops numbered red pins on gaps too far from shielding." },
+    { "file": "tool-map-styler-3.gif", "caption": "Per-category color / opacity / on-off for distribution vs transmission." },
+    { "file": "tool-map-styler-4.gif", "caption": "Right-click a line to hide it (personal view — never changes real data)." }
+  ],
+
+  "measure-ruler": [
+    { "file": "tool-measure-ruler-1.gif", "caption": "Shift+R, then click two points to measure the distance." },
+    { "file": "tool-measure-ruler-2.gif", "caption": "Shift+R again clears it — no stray marks left behind." }
+  ],
+
+  "absolute-altitude": [
+    { "file": "tool-absolute-altitude-1.gif", "caption": "Shift+A, then click the map to drop an altitude pin." },
+    { "file": "tool-absolute-altitude-2.gif", "caption": "Right-click a pin to delete it cleanly." }
+  ],
+
+  "new-entity-macro": [
+    { "file": "tool-new-entity-macro-1.gif", "caption": "Keys 1-6 drop each entity type instantly — no menu clicks." },
+    { "file": "tool-new-entity-macro-2.gif", "caption": "Shift+D twice to safely delete (first press just warns)." },
+    { "file": "tool-new-entity-macro-3.gif", "caption": "Turn individual entity keys on/off in the gear panel." }
+  ],
+
+  "clear-all": [
+    { "file": "tool-clear-all-1.gif", "caption": "Shift+C wipes all your temporary marks at once — real data untouched." }
+  ],
+
+  "site-setup-tools": [
+    { "file": "tool-site-setup-tools-1.gif", "caption": "Right-click any entity for its details — altitudes in ft + m, click to copy." },
+    { "file": "tool-site-setup-tools-2.gif", "caption": "SUM opens a searchable, sortable table of every entity on the site." },
+    { "file": "tool-site-setup-tools-3.gif", "caption": "Click a row to pan the map to it and open its inspector." },
+    { "file": "tool-site-setup-tools-4.gif", "caption": "Site Summary — donut charts + Copy to Sheets for a formatted export." }
+  ],
+
+  "mission-bank-tools": [
+    { "file": "tool-mission-bank-tools-1.gif", "caption": "Summary panel of every mission in the bank." },
+    { "file": "tool-mission-bank-tools-2.gif", "caption": "Batch-edit altitudes across multiple mission steps at once." },
+    { "file": "tool-mission-bank-tools-3.gif", "caption": "Per-step ground elevation + height-above-ground." }
+  ],
+
+  "bulk-mission-adder": [
+    { "file": "tool-bulk-mission-adder-1.gif", "caption": "Shift+B adds a whole batch of missions in one pass." },
+    { "file": "tool-bulk-mission-adder-2.gif", "caption": "Tune how it behaves in the gear panel." }
+  ],
+
+  "quick-mission-editor": [
+    { "file": "tool-quick-mission-editor-1.gif", "caption": "Ctrl+Click several steps, then move them together." },
+    { "file": "tool-quick-mission-editor-2.gif", "caption": "Reorder mission steps fast — no slow drag-and-drop." }
+  ],
+
+  "defaults": [
+    { "file": "tool-defaults-1.gif", "caption": "Open a site and land on your chosen section automatically." },
+    { "file": "tool-defaults-2.gif", "caption": "Switch sites and keep your current section — no more Data Map every time." },
+    { "file": "tool-defaults-3.gif", "caption": "Auto-tidy map layers on every new site." }
+  ],
+
+  "map-nav": [
+    { "file": "tool-map-nav-1.gif", "caption": "Pan the map with W A S D." },
+    { "file": "tool-map-nav-2.gif", "caption": "Zoom with Q / E; hold Alt to sprint." },
+    { "file": "tool-map-nav-3.gif", "caption": "Space fits the whole site back into view." }
+  ],
+
+  "power-line-editor": [
+    { "file": "tool-power-line-editor-1.gif", "caption": "Drag a vertex to move a point on an existing line." },
+    { "file": "tool-power-line-editor-2.gif", "caption": "Add or delete vertices along a line." },
+    { "file": "tool-power-line-editor-3.gif", "caption": "Ctrl+Click a handle to branch a new line off a vertex." },
+    { "file": "tool-power-line-editor-4.gif", "caption": "Save — the corrected line syncs to GitHub for everyone." }
+  ],
+
+  "issues": [
+    { "file": "tool-issues-1.gif", "caption": "Draw an area on the map and attach a note about the problem." },
+    { "file": "tool-issues-2.gif", "caption": "Status workflow: Open to Ready to Resolved, with priority + filter." },
+    { "file": "tool-issues-3.gif", "caption": "Shared with the team via GitHub; affected entities auto-tagged." }
+  ],
+
+  "performance-shield": [
+    { "file": "tool-performance-shield-1.gif", "caption": "Toggle the network blocks (session-replay, chat, weather) in the gear panel." },
+    { "file": "tool-performance-shield-2.gif", "caption": "Hide the satellite / low-res ortho for a snappier map." }
+  ],
+
+  "bulk-user-sites": [
+    { "file": "tool-bulk-user-sites-1.gif", "caption": "Paste lists of users + sites — matches auto-select." },
+    { "file": "tool-bulk-user-sites-2.gif", "caption": "Pin favorites and drag to reorder them." },
+    { "file": "tool-bulk-user-sites-3.gif", "caption": "Save a preset — a named set of people + role for repeat access." }
+  ],
+
+  "inspector": [
+    { "file": "tool-inspector-1.gif", "caption": "Shift+I opens the diagnostic panel showing live map + AIM state." }
+  ],
+
   "flight-path-editor": [
     { "file": "tool-flight-path-editor-1.gif", "caption": "Draw under-vertexed — each segment auto-bands from the terrain underneath." },
     { "file": "tool-flight-path-editor-2.gif", "caption": "Hold Alt to peek the ground + AGL under any point of the path." },
     { "file": "tool-flight-path-editor-3.gif", "caption": "Auto-step adds vertices where the ground varies too much." },
-    { "file": "tool-flight-path-editor-4.gif", "caption": "Click a segment number to insert a vertex mid-segment." }
+    { "file": "tool-flight-path-editor-4.gif", "caption": "Click a segment number to insert a vertex mid-segment." },
+    { "file": "tool-flight-path-editor-5.gif", "caption": "Open Path un-closes a snapped loop (reverses Percepto's Close Path)." }
   ],
+
   "site-setup-generator-ffz-previewer": [
     { "file": "tool-site-setup-generator-ffz-previewer-1.gif", "caption": "Generate auto-builds inspection FFZs + shielded paths and previews them." },
-    { "file": "tool-site-setup-generator-ffz-previewer-2.gif", "caption": "Tune the standoff / size / altitudes, then commit through the Apply queue." }
+    { "file": "tool-site-setup-generator-ffz-previewer-2.gif", "caption": "Tune the standoff / size / altitudes, then commit through the Apply queue." },
+    { "file": "tool-site-setup-generator-ffz-previewer-3.gif", "caption": "Flags out-of-corridor segments + assets it could not reach." }
   ]
 }
