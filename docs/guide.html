@@ -113,6 +113,9 @@
   .card-detail li { margin: 6px 0; font-size: 0.94rem; }
   .card-detail .everything li { color: var(--text); }
   .card-detail .everything li b { color: var(--text); font-weight: 600; }
+  /* Per-tool demo GIF — auto-injected at the top of each card's detail; auto-hides if the file isn't there yet */
+  .card-gif { display: block; width: 100%; max-width: 620px; border-radius: 8px; margin: 2px 0 18px; border: 1px solid var(--border); background: var(--bg-elevated); }
+  .badge-dev { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #ffd479; border: 1px solid #ffd47966; border-radius: 4px; padding: 1px 6px; margin-left: 8px; vertical-align: middle; white-space: nowrap; }
 
   /* Footer */
   footer {
@@ -729,6 +732,78 @@
       </details>
 
     </div>
+
+    <div class="group-head"><span class="group-emoji">🧪</span><h2>In testing (not released yet)</h2></div>
+    <p class="group-sub">Newer tools still in development — not auto-installed for coworkers yet. Here so you can see what's coming.</p>
+    <div class="cards">
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">🛩️</span><span class="card-name">Flight Path Editor<span class="badge-dev">in testing</span></span><span class="card-chev">▾</span></div>
+          <p class="card-what">Smart flight-path drawing — terrain-following altitudes set automatically, step vertices added where the ground changes, plus on-map edits Percepto can't do natively.</p>
+          <div class="card-how"><span class="how-label">Use</span> open a flight path's editor on the map</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Open a flight path's native editor so its segment numbers show on the map.</li>
+            <li>Draw it with <em>fewer</em> vertices than you'd normally need — each segment automatically gets its altitude band from the terrain underneath (min = highest ground under it + 100&nbsp;ft, max = +30&nbsp;ft).</li>
+            <li>Where the ground varies more than 30&nbsp;ft along a segment, it inserts the fewest extra "step" vertices needed to keep the path terrain-safe.</li>
+            <li>Hold <kbd>Alt</kbd> to peek the terrain — yellow dots near your cursor; hover any dot, vertex, or segment number for ground + AGL.</li>
+            <li><strong>⛰ Smart-fill path</strong> re-does a whole existing path; <strong>⤓ Pre-warm terrain</strong> caches a path's elevation so it's instant next time.</li>
+          </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Terrain-following altitude bands</b> set as you draw — floor / band width / step sensitivity all adjustable in the Control Panel.</li>
+            <li><b>Auto-step</b> — splits a segment where the ground varies too much, using the fewest vertices possible (fewer drone stop/starts).</li>
+            <li><b>Insert a vertex mid-segment</b> by clicking a segment number — Percepto can't do this natively (you'd otherwise rebuild the whole downstream branch).</li>
+            <li><b>Open path</b> — un-closes a snapped/closed loop (reverses Percepto's "Close Path," which has no undo).</li>
+            <li><b>Hold-Alt elevation peek</b> — live ground + AGL under any point of the path.</li>
+            <li><b>Safety rails</b> — every edit is validated and auto-reverts if it would break the path; instant undo on anything.</li>
+            <li><b>Fast, free terrain</b> — pulls 10&nbsp;m elevation data that isn't subject to Percepto's rate limits.</li>
+          </ul>
+          <h4>Good for</h4>
+          <ul>
+            <li>Building flight paths with correct, terrain-aware altitudes without hand-typing every band.</li>
+            <li>Adding a vertex mid-path without rebuilding the branch after it.</li>
+            <li>Fixing a closed loop that trapped a segment.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>
+          <div class="card-top"><span class="card-emoji">⊕</span><span class="card-name">Site Setup Generator — FFZ previewer<span class="badge-dev">in testing</span></span><span class="card-chev">▾</span></div>
+          <p class="card-what">Auto-builds a starting site setup — inspection free-fly zones around each asset and shielded flight paths — and previews it on the map for you to fine-tune before anything is committed.</p>
+          <div class="card-how"><span class="how-label">Use</span> the <kbd>⊕ Generate</kbd> button in the Asset Inspector summary panel</div>
+          <div class="tap-hint">Tap for details ▾</div>
+        </summary>
+        <div class="card-detail">
+          <h4>How to use it</h4>
+          <ol>
+            <li>Open the Asset Inspector summary panel and click <strong>⊕ Generate</strong>.</li>
+            <li>It builds a <b>frame of inspection FFZs</b> around each asset (a set standoff off the asset face) plus <b>base→asset flight paths</b> routed along the power-line shielding corridor.</li>
+            <li>The result <b>previews on the map</b> — adjust standoff, box size, and altitudes to taste.</li>
+            <li>Commit through the Apply queue, which has dry-run, rollback, and verify rails. Nothing is written until you confirm.</li>
+          </ol>
+          <h4>Everything it can do</h4>
+          <ul class="everything">
+            <li><b>Per-asset inspection FFZ frames</b> — corner-connected side boxes a set distance off each asset, sized to your minimums.</li>
+            <li><b>Shielded flight paths</b> from the base to each asset, hugging the power-line corridor.</li>
+            <li><b>DEM-based altitudes</b> on everything it generates.</li>
+            <li><b>On-map preview first</b> — you tune it, then commit; it never auto-validates.</li>
+            <li><b>Flags problems</b> — out-of-corridor path segments and assets it couldn't reach.</li>
+          </ul>
+          <h4>Good for</h4>
+          <ul>
+            <li>Standing up a site-setup foundation fast instead of placing every FFZ by hand.</li>
+            <li>Giving yourself a tunable starting point to finetune rather than a blank map.</li>
+          </ul>
+        </div>
+      </details>
+
+    </div>
   </div>
 
 </div>
@@ -756,6 +831,30 @@
   if (col) col.addEventListener("click", function () {
     for (var i = 0; i < cards.length; i++) cards[i].open = false;
   });
+
+  // Per-tool demo GIF: derive img/tool-<slug>.gif from each card's name and drop it at the
+  // top of that card's detail. If the file doesn't exist yet, onerror removes the slot — so
+  // empty cards show nothing broken. Record a clip on the TEST/dummy site, save it with the
+  // matching filename (printed to the console below), commit it, and it appears automatically.
+  var wanted = [];
+  for (var j = 0; j < cards.length; j++) {
+    var nameEl = cards[j].querySelector(".card-name");
+    var detail = cards[j].querySelector(".card-detail");
+    if (!nameEl || !detail) continue;
+    var slug = (nameEl.textContent || "").toLowerCase()
+      .replace(/in testing/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!slug) continue;
+    var file = "img/tool-" + slug + ".gif";
+    var img = document.createElement("img");
+    img.className = "card-gif";
+    img.loading = "lazy";
+    img.alt = (nameEl.textContent || "").replace(/in testing/i, "").trim() + " demo";
+    img.onerror = function () { this.remove(); };
+    img.src = file;
+    detail.insertBefore(img, detail.firstChild);
+    wanted.push(file);
+  }
+  if (window.console) console.log("[AIM guide] drop demo GIFs in docs/ with these names:\n" + wanted.join("\n"));
 })();
 </script>
 
