@@ -1,0 +1,13 @@
+{
+  "_README": "Per-tool demo GIFs for the guide. Optional — without this file, the page auto-shows tool-<slug>.gif and tool-<slug>-1.gif, -2.gif, … if present. Use this to control order + add a caption under each clip. Key = tool slug (printed to the browser console on the guide page). Value = array of 'file.gif' strings (file lives in docs/img/) OR {\"file\": \"x.gif\", \"caption\": \"...\"} objects. A slug listed here OVERRIDES the auto-probing for that tool. Files that don't exist yet just hide themselves, so it's safe to list them ahead of recording.",
+  "flight-path-editor": [
+    { "file": "tool-flight-path-editor-1.gif", "caption": "Draw under-vertexed — each segment auto-bands from the terrain underneath." },
+    { "file": "tool-flight-path-editor-2.gif", "caption": "Hold Alt to peek the ground + AGL under any point of the path." },
+    { "file": "tool-flight-path-editor-3.gif", "caption": "Auto-step adds vertices where the ground varies too much." },
+    { "file": "tool-flight-path-editor-4.gif", "caption": "Click a segment number to insert a vertex mid-segment." }
+  ],
+  "site-setup-generator-ffz-previewer": [
+    { "file": "tool-site-setup-generator-ffz-previewer-1.gif", "caption": "Generate auto-builds inspection FFZs + shielded paths and previews them." },
+    { "file": "tool-site-setup-generator-ffz-previewer-2.gif", "caption": "Tune the standoff / size / altitudes, then commit through the Apply queue." }
+  ]
+}

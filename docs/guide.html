@@ -113,8 +113,11 @@
   .card-detail li { margin: 6px 0; font-size: 0.94rem; }
   .card-detail .everything li { color: var(--text); }
   .card-detail .everything li b { color: var(--text); font-weight: 600; }
-  /* Per-tool demo GIF — auto-injected at the top of each card's detail; auto-hides if the file isn't there yet */
-  .card-gif { display: block; width: 100%; max-width: 620px; border-radius: 8px; margin: 2px 0 18px; border: 1px solid var(--border); background: var(--bg-elevated); }
+  /* Per-tool demo GIFs — auto-injected at the top of each card's detail; each auto-hides if its file isn't there yet */
+  .card-gifs { display: flex; flex-direction: column; gap: 14px; margin: 2px 0 18px; }
+  .card-gif { display: block; width: 100%; max-width: 620px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elevated); }
+  .card-fig { margin: 0; }
+  .card-cap { font-size: 0.82rem; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
   .badge-dev { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #ffd479; border: 1px solid #ffd47966; border-radius: 4px; padding: 1px 6px; margin-left: 8px; vertical-align: middle; white-space: nowrap; }
 
   /* Footer */
@@ -832,29 +835,80 @@
     for (var i = 0; i < cards.length; i++) cards[i].open = false;
   });
 
-  // Per-tool demo GIF: derive img/tool-<slug>.gif from each card's name and drop it at the
-  // top of that card's detail. If the file doesn't exist yet, onerror removes the slot — so
-  // empty cards show nothing broken. Record a clip on the TEST/dummy site, save it with the
-  // matching filename (printed to the console below), commit it, and it appears automatically.
-  var wanted = [];
-  for (var j = 0; j < cards.length; j++) {
-    var nameEl = cards[j].querySelector(".card-name");
-    var detail = cards[j].querySelector(".card-detail");
-    if (!nameEl || !detail) continue;
-    var slug = (nameEl.textContent || "").toLowerCase()
+  // ---- Per-tool demo GIFs (multi-GIF gallery) ----
+  // Two ways to add demos to a tool's card, both auto-rendered at the top of its detail:
+  //   1) ZERO-CONFIG: drop files in docs/img/ named tool-<slug>.gif and/or
+  //      tool-<slug>-1.gif, tool-<slug>-2.gif, … — they stack in order; any that
+  //      don't exist just hide themselves (nothing looks broken).
+  //   2) CAPTIONS: docs/img/gifs.json maps "<slug>" -> ["file.gif", {file,caption}, …]
+  //      to control order + add a caption under each clip. A manifest entry for a slug
+  //      OVERRIDES the zero-config probing for that tool.
+  // Slugs are printed to the console below.
+  var PROBE_MAX = 8; // how many numbered files to look for per tool when there's no manifest entry
+
+  function slugFor(nameEl) {
+    return (nameEl.textContent || "").toLowerCase()
       .replace(/in testing/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!slug) continue;
-    var file = "img/tool-" + slug + ".gif";
+  }
+  function srcOf(f) { return /[\/]/.test(f) ? f : "img/" + f; }
+
+  function addImg(container, src, alt, caption) {
+    var fig = document.createElement("figure");
+    fig.className = "card-fig";
     var img = document.createElement("img");
     img.className = "card-gif";
     img.loading = "lazy";
-    img.alt = (nameEl.textContent || "").replace(/in testing/i, "").trim() + " demo";
-    img.onerror = function () { this.remove(); };
-    img.src = file;
-    detail.insertBefore(img, detail.firstChild);
-    wanted.push(file);
+    img.alt = alt;
+    img.style.display = "none";                 // hidden until it loads (keeps order, no broken icons)
+    img.onload = function () { img.style.display = "block"; };
+    img.onerror = function () { fig.remove(); };
+    img.src = src;
+    fig.appendChild(img);
+    if (caption) {
+      var cap = document.createElement("figcaption");
+      cap.className = "card-cap";
+      cap.textContent = caption;
+      fig.appendChild(cap);
+    }
+    container.appendChild(fig);
   }
-  if (window.console) console.log("[AIM guide] drop demo GIFs in docs/ with these names:\n" + wanted.join("\n"));
+
+  function renderGifs(manifest) {
+    var slugs = [];
+    for (var j = 0; j < cards.length; j++) {
+      var nameEl = cards[j].querySelector(".card-name");
+      var detail = cards[j].querySelector(".card-detail");
+      if (!nameEl || !detail) continue;
+      var slug = slugFor(nameEl);
+      if (!slug) continue;
+      slugs.push(slug);
+      var altBase = (nameEl.textContent || "").replace(/in testing/i, "").trim() + " demo";
+      var box = document.createElement("div");
+      box.className = "card-gifs";
+      detail.insertBefore(box, detail.firstChild);
+
+      var list = manifest && manifest[slug];
+      if (list && list.length) {                // manifest wins (captions / explicit order)
+        for (var k = 0; k < list.length; k++) {
+          var item = list[k];
+          var file = typeof item === "string" ? item : item.file;
+          var cap = (item && typeof item === "object" && item.caption) || "";
+          if (file) addImg(box, srcOf(file), cap || altBase, cap);
+        }
+      } else {                                  // zero-config probing: single + numbered
+        addImg(box, "img/tool-" + slug + ".gif", altBase, "");
+        for (var n = 1; n <= PROBE_MAX; n++) addImg(box, "img/tool-" + slug + "-" + n + ".gif", altBase, "");
+      }
+    }
+    if (window.console) console.log(
+      "[AIM guide] tool slugs (file names = img/tool-<slug>.gif, or -1/-2… for multiple, or list them in img/gifs.json with captions):\n  " +
+      slugs.join("\n  "));
+  }
+
+  fetch("img/gifs.json", { cache: "no-store" })
+    .then(function (r) { return r.ok ? r.json() : {}; })
+    .catch(function () { return {}; })
+    .then(renderGifs);
 })();
 </script>
 
