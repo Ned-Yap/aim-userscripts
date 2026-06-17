@@ -118,6 +118,7 @@
   .card-gif { display: block; width: 100%; max-width: 620px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elevated); }
   .card-fig { margin: 0; }
   .card-cap { font-size: 0.82rem; color: var(--text-faint); margin-top: 6px; line-height: 1.4; }
+  .card-gif-ph { display: flex; align-items: center; justify-content: center; height: 110px; max-width: 620px; border: 1px dashed var(--border); border-radius: 8px; color: var(--text-faint); font-size: 0.85rem; background: var(--bg-elevated); }
   .badge-dev { font-size: 0.6rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #ffd479; border: 1px solid #ffd47966; border-radius: 4px; padding: 1px 6px; margin-left: 8px; vertical-align: middle; white-space: nowrap; }
 
   /* Footer */
@@ -852,16 +853,25 @@
   }
   function srcOf(f) { return /[\/]/.test(f) ? f : "img/" + f; }
 
-  function addImg(container, src, alt, caption) {
+  function addImg(container, src, alt, caption, placeholder) {
     var fig = document.createElement("figure");
     fig.className = "card-fig";
+    var ph = null;
+    if (placeholder) {                          // manifest slot: show the caption + a "demo coming" box now
+      ph = document.createElement("div");
+      ph.className = "card-gif-ph";
+      ph.textContent = "🎬 demo coming";
+      fig.appendChild(ph);
+    }
     var img = document.createElement("img");
     img.className = "card-gif";
     img.loading = "lazy";
     img.alt = alt;
     img.style.display = "none";                 // hidden until it loads (keeps order, no broken icons)
-    img.onload = function () { img.style.display = "block"; };
-    img.onerror = function () { fig.remove(); };
+    img.onload = function () { img.style.display = "block"; if (ph) ph.style.display = "none"; };
+    // If the file isn't there yet: a manifest slot keeps its placeholder + caption (structure stays
+    // visible); a probed (un-captioned) slot just removes itself so empty tiles show nothing.
+    img.onerror = function () { if (placeholder) img.remove(); else fig.remove(); };
     img.src = src;
     fig.appendChild(img);
     if (caption) {
@@ -893,11 +903,11 @@
           var item = list[k];
           var file = typeof item === "string" ? item : item.file;
           var cap = (item && typeof item === "object" && item.caption) || "";
-          if (file) addImg(box, srcOf(file), cap || altBase, cap);
+          if (file) addImg(box, srcOf(file), cap || altBase, cap, true);
         }
-      } else {                                  // zero-config probing: single + numbered
-        addImg(box, "img/tool-" + slug + ".gif", altBase, "");
-        for (var n = 1; n <= PROBE_MAX; n++) addImg(box, "img/tool-" + slug + "-" + n + ".gif", altBase, "");
+      } else {                                  // zero-config probing: single + numbered (no placeholder)
+        addImg(box, "img/tool-" + slug + ".gif", altBase, "", false);
+        for (var n = 1; n <= PROBE_MAX; n++) addImg(box, "img/tool-" + slug + "-" + n + ".gif", altBase, "", false);
       }
     }
     if (window.console) console.log(
