@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.40
+// @version      0.41
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.40';
+    const SCRIPT_VERSION = '0.41';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1477,6 +1477,12 @@
         let maxM = Math.round(maxFt * FT_TO_M); if (maxM <= minM) maxM = minM + 1;
         if (minM === arc.min_alt && maxM === arc.max_alt) return; // no change
         const newArcs = (wc.state.arcs || []).map(a => arcSig(a) !== sig ? a : ({ ...a, min_alt: minM, max_alt: maxM, min_emergency_alt: minM }));
+        // Connected arcs must keep a >0 (server: ≥2 m) overlapping band or the path
+        // 400s on save. Changing one segment's band almost always breaks that overlap
+        // with its neighbours (tight bands) — which is why a raw edit reverted. Auto-
+        // bridge: raise only the lower neighbour's ceiling to reconnect (each segment
+        // keeps its floor) — the same fix smart-altitude uses.
+        try { bridgeArcContinuity(newArcs, settings.overlapM); } catch (e) {}
         const pre = checkFlightPath(wc.state);
         const post = checkFlightPath({ arcs: newArcs, coords: wc.state.coords });
         const fresh = post.filter(p => !pre.includes(p));
@@ -1708,7 +1714,12 @@
     const ALT_TIP_RE = /ALT\s*\(ft\)\s*([\d,]+)\s*[-–]\s*([\d,]+)/i;
     function augmentAltTooltip(el) {
         try {
-            if (!settings.aglHud || !el || el.nodeType !== 1 || (el.getAttribute && el.getAttribute('data-aim-agl'))) return;
+            if (!settings.aglHud || !el || el.nodeType !== 1) return;
+            // ONE augment per tooltip: skip if this element, an ancestor, OR a descendant
+            // is already done (the wrapper AND an inner span both match the text → dup).
+            if ((el.getAttribute && el.getAttribute('data-aim-agl'))
+                || (el.closest && el.closest('[data-aim-agl]'))
+                || (el.querySelector && el.querySelector('[data-aim-agl]'))) return;
             const txt = el.textContent || '';
             if (txt.length > 80 || txt.indexOf('ALT') < 0) return;
             const m = txt.match(ALT_TIP_RE);
@@ -1716,16 +1727,17 @@
             const sid = fpeSiteId(); const mode = sid ? fpeAltModeCache[sid] : null;
             if (mode == null) { fpeSiteAltMode(); return; }
             if (mode !== 'msl') return;            // AGL sites already display AGL
-            el.setAttribute('data-aim-agl', '1');  // claim it so we don't loop
+            el.setAttribute('data-aim-agl', '1');  // claim it so we don't loop / dup
             if (!lastMapLL) return;
             const g = groundAtSync(lastMapLL.lat, lastMapLL.lng);
             if (g == null) { try { fetchElevation(lastMapLL.lat, lastMapLL.lng); } catch (e) {} return; } // warm for next hover
             const gFt = g * 3.28084;
             const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt), hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
+            // AGL on TOP and bigger (what the user cares about); Percepto's MSL line stays below.
             const add = document.createElement('div');
-            add.style.cssText = 'color:#7fd1ff;font-size:11px;margin-top:2px;font-weight:600';
-            add.textContent = `≈ ${lo} – ${hi} ft AGL`;
-            el.appendChild(add);
+            add.style.cssText = 'color:#7fd1ff;font-size:15px;font-weight:700;margin-bottom:3px';
+            add.textContent = `${lo} – ${hi} ft AGL`;
+            el.insertBefore(add, el.firstChild);
         } catch (e) {}
     }
     function watchAltTooltips() {

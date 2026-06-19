@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL edits actually stick + tooltip polish — Flight Path Editor v0.41
+
+Fixes from testing: (1) **editing now sticks** — a band edit was reverting because changing one segment broke the altitude overlap connected segments require; it now auto-bridges the neighbour (raises only its ceiling to reconnect, the same fix smart-altitude uses), so your value holds. (2) **hover tooltip** — no more duplicate AGL line (only the outermost match is augmented), and the **AGL line is now on top and larger** with Percepto's MSL kept smaller below.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view: AGL/Δ/MSL all editable + live-linked, loads every segment — Flight Path Editor v0.40
 
 Round of AGL-view improvements: (1) every segment's ground now **loads top-to-bottom** without scrolling the native list (the per-segment terrain sampling was way too heavy — capped it, so a long path actually finishes); (2) each row now shows **AGL min, AGL max, Δ, MSL min, MSL max — all editable**, and they **cross-update live as you type** (change the AGL and the MSL/Δ move with it, no save needed; it commits to the live path on blur); (3) a **best-effort AGL on Percepto's own hover tooltip** — when you hover an FFZ/FP line and Percepto shows "ALT(ft) … MSL", we append "≈ X – Y ft AGL" (MSL sites only; matched by content since it's Percepto's tooltip, not ours).
