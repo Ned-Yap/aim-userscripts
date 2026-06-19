@@ -1,17 +1,18 @@
 // ==UserScript==
-// @name         Latest - AIM Flight Path Editor
+// @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.45
-// @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.46
+// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Flight_Path_Editor.user.js
-// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Flight_Path_Editor.user.js
+// @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Editor.user.js
+// @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Map_Editor.user.js
 // ==/UserScript==
 //
-// AIM Flight Path Editor — on-map mid-segment vertex insert for Percepto flight paths.
+// AIM Map Editor (formerly Flight Path Editor) — on-map editing of Percepto flight paths + FFZs,
+// incl. the AGL view (Shift+G). Started as mid-segment vertex insert for flight paths.
 //   - Open a flight path's NATIVE editor so its segment-number badges appear.
 //   - Click any segment number → a real vertex is inserted at that segment's midpoint.
 //     No button, no mode — a native segment-number click does nothing, so we always
@@ -64,7 +65,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.45';
+    const SCRIPT_VERSION = '0.46';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1196,7 +1197,7 @@
         if (!controlChannel) return;
         try {
             controlChannel.postMessage({
-                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Flight Path Editor', version: SCRIPT_VERSION, group: 'Site Setup', priority: 60,
+                type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Map Editor', version: SCRIPT_VERSION, group: 'Site Setup', priority: 60,
                 toggles: [
                     { id: 'master', label: 'Smart altitude', type: 'boolean', default: settings.master, master: true },
                     { id: 'aglHud', label: '▲ AGL view (show bands as AGL, Shift+G)', type: 'boolean', default: settings.aglHud },

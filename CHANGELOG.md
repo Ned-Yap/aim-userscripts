@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor → renamed "AIM Map Editor" — Map Editor v0.46
+
+Renamed the script: it started as a flight-path tool but now also edits FFZ altitudes and carries the AGL view, so "Flight Path Editor" was misleading. Now **AIM Map Editor** (file `AIM_Map_Editor.user.js`). Settings + Control Panel customizations carry over (internal ids unchanged); the Control Panel entry now reads "Map Editor". Since it's a dev/personal script, the old install just needs a one-time uninstall + reinstall of the renamed one. No behavior change.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view now works on FFZs too — Flight Path Editor v0.45
 
 The AGL view now appears when you open a **free-fly zone** natively, not just flight paths. Same panel over the native form, same Shift+G toggle, same color-coded AGL / Δ / MSL columns that live-link and write behind the scenes — but a single altitude band (the FFZ's restrictions) instead of per-segment, using the max ground under the zone's polygon. FFZ altitudes allow decimals, so there's no whole-metre snap on these.
