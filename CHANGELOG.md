@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view now covers the native sidebar + loads every segment — Flight Path Editor v0.38
+
+Two fixes to the new AGL view: (1) it now **covers the native FP sidebar** (overlays it, ending just above the SAVE/Cancel bar so those stay clickable) instead of stacking on top of it with two scrollbars; (2) it **loads the ground for every segment**, not just the ones visible in the native list — a rate-limited terrain lookup was getting cached as "no data" and freezing the lower rows on "ground…". Now it retries until quota recovers, fills top-to-bottom on its own (with a "loading ground N/M…" note), and backs off when the quota is paused. Shift+G still flips back to the native MSL view.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view for MSL sites (see + type altitudes as AGL) — Flight Path Editor v0.37
 
 On a Mountain-terrain (MSL) site the native Min/Max altitude fields show absolute MSL (e.g. 2685 ft), which makes it hard to tell your real clearance. New **▲ AGL view** HUD docks beside the editor and shows each flight-path segment's band as **AGL** (= MSL − the max ground under that segment) with the MSL right next to it for verification — and you can **type the band in AGL** and it writes the MSL behind the scenes (backend stays MSL, same safe live-edit path, auto-reverts if it would break the path). Toggle with **Shift+G**, the HUD's "MSL only" button, or the Control Panel — so you can flip back to confirm the MSL values any time. On AGL sites the stored value already is AGL, shown directly with the MSL for reference. (First surface; the SUM panel, FFZ editor, and generator tooltips get the same AGL view next.)

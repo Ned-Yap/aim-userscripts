@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.37
+// @version      0.38
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.37';
+    const SCRIPT_VERSION = '0.38';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1418,6 +1418,7 @@
     const arcGroundCache = new Map(); // arcSig -> max ground (m) under the segment, or null
     let aglHudSig = '';               // last-rendered arc signature set (skip redundant rebuilds)
     let aglHudBusy = false;
+    let aglGroundBackoffUntil = 0;    // pause ground fetches until this time if a pass resolved nothing (quota paused)
     function arcGroundMaxSync(arc) { const v = arcGroundCache.get(arcSig(arc)); return v === undefined ? undefined : v; }
     async function ensureArcGround(arc) {
         const sig = arcSig(arc);
@@ -1428,9 +1429,11 @@
         const n = Math.max(2, Math.min(SMART_MAX_SAMPLES, Math.ceil(distM / (SMART_SAMPLE_SPACING_FT * FT_TO_M)) + 1));
         let gmax = -Infinity, any = false;
         for (let i = 0; i < n; i++) { const t = i / (n - 1); const g = await fetchElevation(A.lat + (B.lat - A.lat) * t, A.lng + (B.lng - A.lng) * t); if (typeof g === 'number') { any = true; if (g > gmax) gmax = g; } }
-        const res = any ? gmax : null;
-        arcGroundCache.set(sig, res);
-        return res;
+        // Only cache a REAL value. A null means the quota breaker is open / rate-
+        // limited (NOT "no terrain") — caching it would freeze that row on "ground…"
+        // forever; leaving it uncached lets the next pass retry once quota recovers.
+        if (any) arcGroundCache.set(sig, gmax);
+        return any ? gmax : null;
     }
     function aglEditable(target) {
         return !!(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
@@ -1476,7 +1479,10 @@
         if (!el) {
             el = document.createElement('div');
             el.id = AGL_HUD_ID;
-            el.style.cssText = 'position:fixed;top:96px;left:18px;width:300px;max-height:70vh;overflow:auto;background:#1a1d23;border:1px solid rgba(127,223,255,0.5);border-radius:8px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.7)';
+            // Geometry (top/left/width/bottom) is set by positionAglHud to COVER the
+            // native sidebar; here we only set the chrome. Opaque bg so the native
+            // list behind it is fully hidden.
+            el.style.cssText = 'position:fixed;overflow:auto;background:#1a1d23;border-right:1px solid rgba(127,223,255,0.5);border-radius:0 8px 8px 0;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:6px 0 22px rgba(0,0,0,0.6)';
             // keep clicks/keys inside the HUD from reaching the map / global hotkeys
             ['mousedown', 'click', 'keydown', 'wheel'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
             el.addEventListener('change', onAglHudChange, true);
@@ -1515,10 +1521,21 @@
         const modeChip = mode === 'detecting' ? '<span style="color:#ffb14e">detecting…</span>'
             : isAgl ? '<span style="color:#5fff5f">AGL site</span>' : mode === 'msl' ? '<span style="color:#7fdfff">MSL site → showing AGL</span>' : '<span style="color:#ff8a80">mode unknown</span>';
         let rows = '';
-        // trigger ground fetches for MSL segments lacking it (re-renders on arrival)
-        if (mode === 'msl' && !aglHudBusy) {
-            const missing = arcs.filter(a => !arcGroundCache.has(arcSig(a)));
-            if (missing.length) { aglHudBusy = true; (async () => { for (const a of missing.slice(0, 40)) await ensureArcGround(a); aglHudBusy = false; aglHudSig = ''; renderAglHud(); })(); }
+        // Warm ground for EVERY segment lacking it (not just the visible ones — the
+        // whole point is you shouldn't have to scroll the native list). Progressive
+        // re-render as values land; back off 4 s if a full pass resolved nothing
+        // (quota paused) so we don't spin. fetchElevation self-throttles via the
+        // shared queue / breaker.
+        const missingCount = mode === 'msl' ? arcs.filter(a => !arcGroundCache.has(arcSig(a))).length : 0;
+        if (mode === 'msl' && missingCount && !aglHudBusy && Date.now() >= aglGroundBackoffUntil) {
+            aglHudBusy = true;
+            (async () => {
+                const missing = arcs.filter(a => !arcGroundCache.has(arcSig(a)));
+                let resolved = 0, n = 0;
+                for (const a of missing) { const g = await ensureArcGround(a); if (g != null) resolved++; if (++n % 8 === 0) { aglHudSig = ''; renderAglHud(); } }
+                if (resolved === 0) aglGroundBackoffUntil = Date.now() + 4000;
+                aglHudBusy = false; aglHudSig = ''; renderAglHud();
+            })();
         }
         arcs.forEach((a, i) => {
             const g = arcGroundMaxSync(a);
@@ -1533,16 +1550,41 @@
             const inMax = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="max" value="${aglMax}" style="width:44px;background:#11151a;border:1px solid #7fdfff55;color:#cfeaff;border-radius:3px;padding:2px 4px;font:inherit;text-align:right">` : `<span style="color:#888">…</span>`;
             rows += `<tr style="border-top:1px solid #2a2f37"><td style="padding:3px 4px;color:#9ad;text-align:center">${i + 1}</td><td style="padding:3px 4px">${inMin}</td><td style="padding:3px 4px">${inMax}</td><td style="padding:3px 4px;color:#7a8794;font-size:10px;white-space:nowrap">${mslNote}</td></tr>`;
         });
+        const loadNote = missingCount ? ` · <span style="color:#ffb14e">loading ground ${arcs.length - missingCount}/${arcs.length}…</span>` : '';
         el.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #2a2f37;position:sticky;top:0;background:#1a1d23">
                 <div style="font-weight:700;color:#7fdfff">▲ AGL view <span style="font-size:10px;font-weight:400">${modeChip}</span></div>
                 <button data-aglact="off" title="Hide (Shift+G) — verify native MSL" style="background:transparent;color:#888;border:1px solid #ffffff22;border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">MSL only</button>
             </div>
-            <div style="padding:4px 8px;color:#7a8794;font-size:10px">${xmlEsc(wc.state.name || 'flight path')} · type AGL ft → writes MSL behind the scenes. Ground = max under each segment.</div>
-            <table style="width:100%;border-collapse:collapse;font:11px -apple-system,sans-serif">
-                <thead><tr style="color:#9ad"><th style="padding:3px 4px;text-align:center">#</th><th style="padding:3px 4px;text-align:right">AGL min</th><th style="padding:3px 4px;text-align:right">AGL max</th><th style="padding:3px 4px;text-align:left">backend</th></tr></thead>
+            <div style="padding:4px 8px;color:#7a8794;font-size:10px">${xmlEsc(wc.state.name || 'flight path')} · type AGL ft → writes MSL behind the scenes. Ground = max under each segment.${loadNote}</div>
+            <table style="width:100%;border-collapse:collapse;font:12px -apple-system,sans-serif">
+                <thead><tr style="color:#9ad"><th style="padding:3px 6px;text-align:center">#</th><th style="padding:3px 6px;text-align:right">AGL min</th><th style="padding:3px 6px;text-align:right">AGL max</th><th style="padding:3px 6px;text-align:left">backend (MSL)</th></tr></thead>
                 <tbody>${rows || '<tr><td colspan="4" style="padding:8px;color:#888;text-align:center">no segments</td></tr>'}</tbody>
             </table>`;
+        positionAglHud(el);
+    }
+    // Cover the native FP sidebar instead of stacking beside it: overlay the panel
+    // area, ending just above the SAVE/Cancel action bar so those stay clickable.
+    // Falls back to a left dock if the SAVE button can't be found.
+    function nativeSaveBtn() {
+        const bs = document.querySelectorAll('button, [role="button"]');
+        for (const b of bs) { const t = (b.textContent || '').trim().toUpperCase(); if (t === 'SAVE') return b; }
+        return null;
+    }
+    function positionAglHud(el) {
+        try {
+            const save = nativeSaveBtn();
+            if (save) {
+                const r = save.getBoundingClientRect();
+                el.style.left = '0px';
+                el.style.top = '0px';
+                el.style.width = Math.max(280, Math.round(r.right + 8)) + 'px';
+                el.style.bottom = Math.max(8, Math.round(window.innerHeight - r.top + 8)) + 'px';
+                el.style.height = 'auto';
+            } else {
+                el.style.left = '0px'; el.style.top = '0px'; el.style.width = '460px'; el.style.bottom = '90px'; el.style.height = 'auto';
+            }
+        } catch (e) {}
     }
     function xmlEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -1579,7 +1621,7 @@
     // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.
     setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
     // AGL HUD: keep it in sync while editing (cheap — skips rebuild when nothing changed).
-    setInterval(() => { try { renderAglHud(); } catch (e) {} }, 900);
+    setInterval(() => { try { renderAglHud(); const el = document.getElementById(AGL_HUD_ID); if (el) positionAglHud(el); } catch (e) {} }, 900);
     // Shift+G toggles the AGL view (quick flip back to native MSL to verify).
     window.addEventListener('keydown', (e) => {
         if (e.defaultPrevented || !e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
