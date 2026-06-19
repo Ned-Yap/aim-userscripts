@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view for MSL sites (see + type altitudes as AGL) — Flight Path Editor v0.37
+
+On a Mountain-terrain (MSL) site the native Min/Max altitude fields show absolute MSL (e.g. 2685 ft), which makes it hard to tell your real clearance. New **▲ AGL view** HUD docks beside the editor and shows each flight-path segment's band as **AGL** (= MSL − the max ground under that segment) with the MSL right next to it for verification — and you can **type the band in AGL** and it writes the MSL behind the scenes (backend stays MSL, same safe live-edit path, auto-reverts if it would break the path). Toggle with **Shift+G**, the HUD's "MSL only" button, or the Control Panel — so you can flip back to confirm the MSL values any time. On AGL sites the stored value already is AGL, shown directly with the MSL for reference. (First surface; the SUM panel, FFZ editor, and generator tooltips get the same AGL view next.)
+
+---
+
 ## 2026-06-18 — Flight Path Editor — Smart Altitude no longer clobbers AGL-site flight paths (latest/ dev only) — Flight Path Editor v0.36
 
 On a non-mountain (AGL) site, moving a flight-path vertex was auto-rewriting that segment's altitude to a ground+100 ft **MSL** value — e.g. a correct **167 ft** band jumped to **~965 ft AGL**. Smart Altitude is terrain-following, which only applies to **Mountain-terrain (MSL)** sites; on AGL sites the stored value is already height-above-ground, so a lateral move must not touch it. The editor now reads the site's Mountain-terrain flag: on AGL sites it **preserves an existing band** on a move and only applies a flat raw-AGL band (floor / floor+band, no ground, no terrain steps) to genuinely new segments; on MSL sites it's unchanged. If the flag can't be read, it leaves altitudes alone. (⛰ Smart-fill button still force-applies the configured band on purpose.)

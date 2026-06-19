@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.36
+// @version      0.37
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,14 +64,14 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.36';
+    const SCRIPT_VERSION = '0.37';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
     const PEEK_RADIUS_PX = 130;           // Alt-peek: reveal terrain dots within this many px of the cursor
     const FT_TO_M = 1 / 3.28084;
     const SETTINGS_KEY = 'aim_fpe_smart_settings';
-    const DEF_SETTINGS = { master: true, autoDraw: true, floorFt: 100, bandFt: 30, maxVarFt: 30, overlapM: 2 };
+    const DEF_SETTINGS = { master: true, autoDraw: true, floorFt: 100, bandFt: 30, maxVarFt: 30, overlapM: 2, aglHud: true };
     let settings = { ...DEF_SETTINGS };
     function loadSettings() {
         try { if (typeof GM_getValue === 'function') { const raw = GM_getValue(SETTINGS_KEY, null); if (raw) settings = { ...DEF_SETTINGS, ...JSON.parse(raw) }; } }
@@ -1192,6 +1192,7 @@
                 type: 'REGISTER', scriptId: SCRIPT_ID, name: 'Flight Path Editor', version: SCRIPT_VERSION, group: 'Site Setup', priority: 60,
                 toggles: [
                     { id: 'master', label: 'Smart altitude', type: 'boolean', default: settings.master, master: true },
+                    { id: 'aglHud', label: '▲ AGL view (show bands as AGL, Shift+G)', type: 'boolean', default: settings.aglHud },
                     { id: 'autoDraw', label: 'Auto-set bands as you draw', type: 'boolean', default: settings.autoDraw },
                     { id: 'floorFt', label: 'AGL floor (ft)', type: 'number', default: settings.floorFt },
                     { id: 'bandFt', label: 'Band width (ft)', type: 'number', default: settings.bandFt },
@@ -1214,6 +1215,7 @@
                 const v = (m.value !== undefined ? m.value : m.enabled);
                 let changed = false;
                 if (m.toggleId === 'master') { const nv = !!v; if (nv !== settings.master) { settings.master = nv; changed = true; } }
+                else if (m.toggleId === 'aglHud') { const nv = !!v; if (nv !== settings.aglHud) { settings.aglHud = nv; saveSettings(); aglHudSig = ''; renderAglHud(); } return; }
                 else if (m.toggleId === 'autoDraw') { const nv = !!v; if (nv !== settings.autoDraw) { settings.autoDraw = nv; changed = true; } }
                 else if (m.toggleId === 'floorFt') { const nv = Number(v) || DEF_SETTINGS.floorFt; if (nv !== settings.floorFt) { settings.floorFt = nv; changed = true; } }
                 else if (m.toggleId === 'bandFt') { const nv = Number(v) || DEF_SETTINGS.bandFt; if (nv !== settings.bandFt) { settings.bandFt = nv; changed = true; } }
@@ -1400,6 +1402,150 @@
         } catch (e) {}
     }
 
+    // ==================================================================
+    // AGL HUD — the native Min/Max alt fields show ABSOLUTE MSL on Mountain-
+    // terrain sites (e.g. 2685 ft), which makes "am I 100 ft AGL?" impossible to
+    // read. This floating panel sits BESIDE the editor and shows each segment's
+    // band as AGL (= MSL − max ground under the segment, the safety-relevant
+    // clearance) with the MSL right next to it for verification, and lets you TYPE
+    // the band in AGL — it converts to MSL behind the scenes and writes the live
+    // working copy (same safe path as the splitter). The backend stays MSL. A
+    // toggle (Shift+G / header button / Control Panel) shows/hides it. On AGL
+    // sites the stored value already IS AGL, so it's shown directly (+ MSL ref).
+    // ==================================================================
+    const AGL_HUD_ID = 'aim-fpe-agl-hud';
+    const FT = 3.28084;
+    const arcGroundCache = new Map(); // arcSig -> max ground (m) under the segment, or null
+    let aglHudSig = '';               // last-rendered arc signature set (skip redundant rebuilds)
+    let aglHudBusy = false;
+    function arcGroundMaxSync(arc) { const v = arcGroundCache.get(arcSig(arc)); return v === undefined ? undefined : v; }
+    async function ensureArcGround(arc) {
+        const sig = arcSig(arc);
+        if (arcGroundCache.has(sig)) return arcGroundCache.get(sig);
+        const A = arc.point_a, B = arc.point_b;
+        if (!finitePt(A) || !finitePt(B)) { arcGroundCache.set(sig, null); return null; }
+        const distM = hav(A, B) || 0;
+        const n = Math.max(2, Math.min(SMART_MAX_SAMPLES, Math.ceil(distM / (SMART_SAMPLE_SPACING_FT * FT_TO_M)) + 1));
+        let gmax = -Infinity, any = false;
+        for (let i = 0; i < n; i++) { const t = i / (n - 1); const g = await fetchElevation(A.lat + (B.lat - A.lat) * t, A.lng + (B.lng - A.lng) * t); if (typeof g === 'number') { any = true; if (g > gmax) gmax = g; } }
+        const res = any ? gmax : null;
+        arcGroundCache.set(sig, res);
+        return res;
+    }
+    function aglEditable(target) {
+        return !!(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+            || (target.closest && target.closest('input,textarea,[contenteditable="true"],.ant-input,.ant-select'))));
+    }
+    function setAglHud(on) {
+        settings.aglHud = !!on; saveSettings();
+        try { controlChannel && controlChannel.postMessage({ type: 'AIM_AGL_VIEW', on: settings.aglHud, from: SCRIPT_ID }); } catch (e) {}
+        aglHudSig = ''; renderAglHud();
+        toast(settings.aglHud ? '▲ AGL view ON — bands shown as height above ground (MSL backend unchanged)' : '△ AGL view OFF — native MSL only', settings.aglHud ? '#7fdfff' : '#888');
+    }
+    // Write one segment's band, entered in AGL, back to the working copy as MSL.
+    async function applyAglEdit(wcId, sig, field, aglFt) {
+        if (!num(aglFt)) return;
+        const wc = findFpWorkingCopies().find(w => w.id === wcId);
+        if (!wc || !wc.dispatch) { toast('Open the flight path editor to apply.', '#ff8a80'); return; }
+        const arc = (wc.state.arcs || []).find(a => arcSig(a) === sig);
+        if (!arc) { toast('Segment changed — reopen the AGL view.', '#ffb14e'); return; }
+        const mode = await fpeSiteAltMode();
+        if (mode === 'unknown') { toast('Site altitude mode unknown — not writing.', '#ff8a80'); return; }
+        let ground = 0;
+        if (mode === 'msl') { ground = await ensureArcGround(arc); if (ground == null) { toast('No terrain data under this segment yet — hover it (Alt-peek) to warm it, then retry.', '#ffb14e'); return; } }
+        const storedM = Math.round((mode === 'agl' ? 0 : ground) + aglFt * FT_TO_M); // MSL site adds ground; AGL stores raw
+        const newArcs = (wc.state.arcs || []).map(a => {
+            if (arcSig(a) !== sig) return a;
+            const na = { ...a };
+            if (field === 'min') { na.min_alt = storedM; if (num(na.max_alt) && na.max_alt <= storedM) na.max_alt = storedM + 1; na.min_emergency_alt = storedM; }
+            else { na.max_alt = Math.max(storedM, (num(a.min_alt) ? a.min_alt : storedM - 1) + 1); }
+            return na;
+        });
+        const pre = checkFlightPath(wc.state);
+        const post = checkFlightPath({ arcs: newArcs, coords: wc.state.coords });
+        const fresh = post.filter(p => !pre.includes(p));
+        if (fresh.length) { toast(`AGL edit blocked: ${fresh[0]}. Segment untouched.`, '#ff8a80'); aglHudSig = ''; renderAglHud(); return; }
+        undoStack.push({ id: wcId, name: wc.state.name, kind: 'agl', arcs: clone(wc.state.arcs), coords: clone(wc.state.coords) });
+        wc.dispatch({ ...wc.state, arcs: newArcs });
+        renderPanel();
+        toast(`Seg band set to ${Math.round(aglFt)} ft AGL → ${Math.round(storedM * FT)} ft ${mode === 'agl' ? 'AGL' : 'MSL'} (stored). Drag/Save as usual.`, '#5fff5f');
+        aglHudSig = ''; renderAglHud();
+    }
+    function buildAglHud() {
+        let el = document.getElementById(AGL_HUD_ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = AGL_HUD_ID;
+            el.style.cssText = 'position:fixed;top:96px;left:18px;width:300px;max-height:70vh;overflow:auto;background:#1a1d23;border:1px solid rgba(127,223,255,0.5);border-radius:8px;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:0 8px 28px rgba(0,0,0,0.7)';
+            // keep clicks/keys inside the HUD from reaching the map / global hotkeys
+            ['mousedown', 'click', 'keydown', 'wheel'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
+            el.addEventListener('change', onAglHudChange, true);
+            el.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target && e.target.classList.contains('aim-agl-in')) e.target.blur(); }, true);
+            el.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-aglact]'); if (b) { if (b.getAttribute('data-aglact') === 'off') setAglHud(false); } });
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+    function onAglHudChange(e) {
+        const inp = e.target;
+        if (!inp || !inp.classList || !inp.classList.contains('aim-agl-in')) return;
+        const v = parseFloat(inp.value);
+        if (!num(v)) { aglHudSig = ''; renderAglHud(); return; }
+        applyAglEdit(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'), inp.getAttribute('data-field'), v).catch(err => warn('applyAglEdit threw', err));
+    }
+    function renderAglHud() {
+        const existing = document.getElementById(AGL_HUD_ID);
+        if (!settings.aglHud || !editingFP()) { if (existing) existing.remove(); aglHudSig = ''; return; }
+        const wcs = findFpWorkingCopies();
+        if (!wcs.length) { if (existing) existing.remove(); aglHudSig = ''; return; }
+        const wc = wcs[0];
+        const arcs = wc.state.arcs || [];
+        const sid = fpeSiteId();
+        let mode = sid ? (fpeAltModeCache[sid] || null) : null;
+        if (mode === null) { fpeSiteAltMode().then(() => { aglHudSig = ''; renderAglHud(); }); mode = 'detecting'; }
+        // signature: which arcs + their bands + known grounds → skip rebuild if unchanged
+        const sig = wc.id + '|' + mode + '|' + arcs.map(a => `${arcSig(a)}:${a.min_alt}:${a.max_alt}:${arcGroundCache.get(arcSig(a))}`).join(',');
+        if (sig === aglHudSig && document.getElementById(AGL_HUD_ID)) return;
+        // Don't rebuild (which would steal focus) while the user is typing in a band input.
+        const ae = document.activeElement;
+        if (ae && ae.classList && ae.classList.contains('aim-agl-in') && document.getElementById(AGL_HUD_ID)) return;
+        aglHudSig = sig;
+        const el = buildAglHud();
+        const isAgl = mode === 'agl';
+        const modeChip = mode === 'detecting' ? '<span style="color:#ffb14e">detecting…</span>'
+            : isAgl ? '<span style="color:#5fff5f">AGL site</span>' : mode === 'msl' ? '<span style="color:#7fdfff">MSL site → showing AGL</span>' : '<span style="color:#ff8a80">mode unknown</span>';
+        let rows = '';
+        // trigger ground fetches for MSL segments lacking it (re-renders on arrival)
+        if (mode === 'msl' && !aglHudBusy) {
+            const missing = arcs.filter(a => !arcGroundCache.has(arcSig(a)));
+            if (missing.length) { aglHudBusy = true; (async () => { for (const a of missing.slice(0, 40)) await ensureArcGround(a); aglHudBusy = false; aglHudSig = ''; renderAglHud(); })(); }
+        }
+        arcs.forEach((a, i) => {
+            const g = arcGroundMaxSync(a);
+            const minM = num(a.min_alt) ? a.min_alt : null, maxM = num(a.max_alt) ? a.max_alt : null;
+            let aglMin = '', aglMax = '', mslNote = '';
+            if (minM != null && maxM != null) {
+                if (isAgl) { aglMin = Math.round(minM * FT); aglMax = Math.round(maxM * FT); mslNote = (g != null) ? `MSL ${Math.round((minM + g) * FT)}–${Math.round((maxM + g) * FT)}` : 'MSL —'; }
+                else if (mode === 'msl') { if (g != null) { aglMin = Math.round((minM - g) * FT); aglMax = Math.round((maxM - g) * FT); mslNote = `MSL ${Math.round(minM * FT)}–${Math.round(maxM * FT)}`; } else { mslNote = 'ground…'; } }
+            }
+            const editable = (isAgl || g != null);
+            const inMin = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="min" value="${aglMin}" style="width:44px;background:#11151a;border:1px solid #7fdfff55;color:#cfeaff;border-radius:3px;padding:2px 4px;font:inherit;text-align:right">` : `<span style="color:#888">…</span>`;
+            const inMax = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="max" value="${aglMax}" style="width:44px;background:#11151a;border:1px solid #7fdfff55;color:#cfeaff;border-radius:3px;padding:2px 4px;font:inherit;text-align:right">` : `<span style="color:#888">…</span>`;
+            rows += `<tr style="border-top:1px solid #2a2f37"><td style="padding:3px 4px;color:#9ad;text-align:center">${i + 1}</td><td style="padding:3px 4px">${inMin}</td><td style="padding:3px 4px">${inMax}</td><td style="padding:3px 4px;color:#7a8794;font-size:10px;white-space:nowrap">${mslNote}</td></tr>`;
+        });
+        el.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #2a2f37;position:sticky;top:0;background:#1a1d23">
+                <div style="font-weight:700;color:#7fdfff">▲ AGL view <span style="font-size:10px;font-weight:400">${modeChip}</span></div>
+                <button data-aglact="off" title="Hide (Shift+G) — verify native MSL" style="background:transparent;color:#888;border:1px solid #ffffff22;border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">MSL only</button>
+            </div>
+            <div style="padding:4px 8px;color:#7a8794;font-size:10px">${xmlEsc(wc.state.name || 'flight path')} · type AGL ft → writes MSL behind the scenes. Ground = max under each segment.</div>
+            <table style="width:100%;border-collapse:collapse;font:11px -apple-system,sans-serif">
+                <thead><tr style="color:#9ad"><th style="padding:3px 4px;text-align:center">#</th><th style="padding:3px 4px;text-align:right">AGL min</th><th style="padding:3px 4px;text-align:right">AGL max</th><th style="padding:3px 4px;text-align:left">backend</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="4" style="padding:8px;color:#888;text-align:center">no segments</td></tr>'}</tbody>
+            </table>`;
+    }
+    function xmlEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
     // No button, no mode: splitting is just a click on a segment number while editing.
     // The only persistent UI is a small Undo chip, shown after a split so a mistaken
     // one is one click to revert. renderPanel() is the chip updater (name kept so the
@@ -1432,6 +1578,16 @@
     // its one drop-triggered pass and you never dropped near it again). Idle when you're
     // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.
     setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
+    // AGL HUD: keep it in sync while editing (cheap — skips rebuild when nothing changed).
+    setInterval(() => { try { renderAglHud(); } catch (e) {} }, 900);
+    // Shift+G toggles the AGL view (quick flip back to native MSL to verify).
+    window.addEventListener('keydown', (e) => {
+        if (e.defaultPrevented || !e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.key !== 'g' && e.key !== 'G') return;
+        if (aglEditable(e.target)) return;
+        e.preventDefault(); e.stopPropagation();
+        setAglHud(!settings.aglHud);
+    }, true);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
     log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
