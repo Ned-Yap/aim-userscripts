@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Site Setup Generator — MSL vs AGL site awareness for FFZ altitudes (latest/ dev only) — Asset Inspector v4.84
+
+The generator now knows whether a site stores altitudes as **absolute MSL** or **height-above-ground (AGL)** and writes the right reference — getting this wrong would put a drone thousands of feet off. It reads the site's **Mountain terrain** flag (`mountain_terrain`: on = MSL, off = AGL), shows the detected mode in an **Altitude reference** banner you can override, and converts accordingly: MSL sites store `DEM ground + AGL`, AGL sites store the raw AGL height (no ground). Generating, recompute-on-edit, and the FFZ tooltips are all mode-aware (tooltip shows "ft AGL" vs "ft MSL"). If the flag can't be read, altitude writes are blocked until you pick a mode. Confirmed against live sites 1502 (MSL) and 285 (AGL).
+
+---
+
 ## 2026-06-18 — Site Setup Generator — editing an existing FFZ no longer rewrites its altitude unless asked (latest/ dev only) — Asset Inspector v4.83
 
 Moving/resizing a loaded existing FFZ was silently re-applying the DEM AGL band on every drop. Now it **keeps the zone's saved altitude by default** — a new **"Recompute alt when I edit an existing FFZ"** checkbox (Altitude section) arms re-applying the AGL floor + delta on drop, using the numbers you type. Off by default so a move never changes altitude.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.83
+// @version      4.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -35,7 +35,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.83';
+    const SCRIPT_VERSION = '4.84';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7087,6 +7087,65 @@
     const GEN_TAG = `[AIM GEN ${CONTEXT}]`;
     const GEN_FT_TO_M = 0.3048;
     const GEN_MODAL_ID = 'aim-ai-generator-modal';
+
+    // ===== MSL vs AGL site altitude mode (SAFETY-CRITICAL) =====
+    // Percepto stores entity altitudes (FFZ minAlt/maxAlt, FP arc min/max_alt)
+    // one of two ways, governed by the site-config `mountain_terrain` flag (admin:
+    // "Mountain terrain", "cannot be disabled once enabled"). Confirmed live
+    // 2026-06-18 on site 1502 (MT on) + site 285 (MT off):
+    //   mountain_terrain === true  → MSL site: values are ABSOLUTE MSL meters.
+    //   mountain_terrain === false → AGL site: values are HEIGHT-ABOVE-GROUND meters.
+    // Writing the wrong reference is catastrophic (an MSL ~950 m floor written to
+    // an AGL site is read as ~950 m / ~3100 ft ABOVE GROUND). The flag is
+    // authoritative; we ALSO cross-check against DEM ground and surface the mode
+    // to the CSM for confirmation before any altitude write. mode is 'msl' | 'agl'
+    // | 'unknown' (flag unreadable → block altitude writes).
+    const siteAltModeCache = {};
+    async function siteAltMode(siteID) {
+        if (siteAltModeCache[siteID]) return siteAltModeCache[siteID];
+        let flag = null;
+        try {
+            const cfg = await fetchSiteConfig(siteID);
+            if (cfg && typeof cfg.mountain_terrain === 'boolean') flag = cfg.mountain_terrain;
+        } catch (e) { console.warn(`${GEN_TAG} site-cfg fetch failed for alt-mode:`, e); }
+        const mode = flag === null ? 'unknown' : (flag ? 'msl' : 'agl');
+        const res = { mode, flag };
+        siteAltModeCache[siteID] = res;
+        console.log(`${GEN_TAG} site ${siteID} altitude mode = ${mode.toUpperCase()} (mountain_terrain=${flag})`);
+        return res;
+    }
+    // The mode the CSM has confirmed/overridden for this session (null = use the
+    // detected flag). Set by the modal's mode banner; used by every alt write.
+    let genAltModeOverride = null;
+    function genActiveAltMode() {
+        if (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') return genAltModeOverride;
+        const c = siteAltModeCache[genState && genState.siteID];
+        return (c && c.mode) || 'unknown';
+    }
+    // Mode-aware conversions. MSL sites store absolute MSL (ground + AGL); AGL
+    // sites store the raw height above ground (no ground term).
+    function aglFtToStoredM(aglFt, groundM, mode) {
+        return mode === 'agl' ? (aglFt * GEN_FT_TO_M) : ((groundM || 0) + aglFt * GEN_FT_TO_M);
+    }
+    function storedMToAglFt(storedM, groundM, mode) {
+        return mode === 'agl' ? (storedM / GEN_FT_TO_M) : ((storedM - (groundM || 0)) / GEN_FT_TO_M);
+    }
+    // DEM cross-check: does a stored altitude make sense under `mode` given the
+    // ground there? Returns null if consistent, else a human warning string.
+    // An MSL value must sit at/above ground (drone can't fly underground); an AGL
+    // value must be a sane height (and the MSL reading would be absurd). Catches a
+    // mis-set flag before we bake a wrong reference into new writes.
+    function altModeSanity(storedM, groundM, mode) {
+        if (typeof storedM !== 'number' || typeof groundM !== 'number') return null;
+        const aglIfMsl = (storedM - groundM) / GEN_FT_TO_M; // ft, if value were MSL
+        const aglIfAgl = storedM / GEN_FT_TO_M;              // ft, if value were AGL
+        const SANE_LO = -20, SANE_HI = 2500;                // plausible AGL band (ft)
+        const mslOk = aglIfMsl >= SANE_LO && aglIfMsl <= SANE_HI;
+        const aglOk = aglIfAgl >= SANE_LO && aglIfAgl <= SANE_HI;
+        if (mode === 'msl' && !mslOk && aglOk) return `flag says MSL but a stored ${storedM.toFixed(0)} m reads as ${aglIfMsl.toFixed(0)} ft AGL over ${groundM.toFixed(0)} m ground (impossible) — looks like an AGL site`;
+        if (mode === 'agl' && !aglOk && mslOk) return `flag says AGL but a stored ${storedM.toFixed(0)} m only makes sense as MSL (${aglIfMsl.toFixed(0)} ft AGL) — looks like an MSL site`;
+        return null;
+    }
     const GEN_DEFAULTS = {
         standoffFt: 15,    // inner edge of the box sits this far off the asset face
         depthFt: 30,       // perpendicular flyable depth of the single edge box (≥30)
@@ -7794,19 +7853,27 @@
             try { await bulkFetchElevations(centroids, onProgress); }
             catch (e) { console.warn(`${GEN_TAG} DEM fetch failed:`, e); }
         }
-        const floorM = params.aglFt * GEN_FT_TO_M;
-        const bandM = params.deltaFt * GEN_FT_TO_M;
+        // Resolve the site's altitude reference. AGL sites store the raw height
+        // (no ground term); MSL sites store ground + AGL; unknown blocks the write.
+        const am = await siteAltMode(siteID);
+        const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
         ffzs.forEach(f => {
             const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
-            if (typeof g === 'number') {
-                f.restrictions = { minAlt: g + floorM, maxAlt: g + floorM + bandM };
-                f._groundM = g; demOk++;
+            f._groundM = (typeof g === 'number') ? g : null;
+            f._altMode = mode;
+            if (mode === 'agl') {
+                // Height above ground — DEM not needed for the stored value.
+                f.restrictions = { minAlt: aglFtToStoredM(params.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(params.aglFt + params.deltaFt, 0, 'agl') };
+                demOk++;
+            } else if (mode === 'msl' && typeof g === 'number') {
+                f.restrictions = { minAlt: aglFtToStoredM(params.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(params.aglFt + params.deltaFt, g, 'msl') };
+                demOk++;
             } else {
-                f.restrictions = { minAlt: null, maxAlt: null };
-                f._groundM = null; demMiss++;
+                // MSL with no DEM, or mode unknown → leave altitude unset.
+                f.restrictions = { minAlt: null, maxAlt: null }; demMiss++;
             }
         });
-        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, skippedExisting, overLine, hasExisting, demOk, demMiss, ffzs };
+        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, skippedExisting, overLine, hasExisting, demOk, demMiss, mode, ffzs };
     }
 
     function clearGenPreview() {
@@ -8133,8 +8200,12 @@
     }
     function ffzTooltipHtml(f) {
         const r = f.restrictions || {};
+        // Stored values are meters; the displayed feet are the same conversion
+        // either way — only the reference label differs (AGL height vs MSL).
+        const fMode = f._altMode || genActiveAltMode();
+        const altUnit = fMode === 'agl' ? 'ft AGL' : (fMode === 'msl' ? 'ft MSL' : 'ft');
         const altTip = (typeof r.minAlt === 'number')
-            ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
+            ? `${Math.round(r.minAlt / GEN_FT_TO_M)}–${Math.round(r.maxAlt / GEN_FT_TO_M)} ${altUnit}`
             : '<span style="color:#ffb347">alt: DEM unavailable</span>';
         if (f._existing) {
             const moved = f._dirty ? '<span style="color:#ffe14d">● edited (unsaved)</span>' : '<span style="color:#9ad">unchanged</span>';
@@ -8530,12 +8601,21 @@
         const recompute = f._existing ? genEditRecomputeAlt : true;
         if (!recompute) { restyleFfzPoly(f); return; }
         const p = (genReadParamsLive && genReadParamsLive()) || genState.lastParams || GEN_DEFAULTS;
-        try { await bulkFetchElevations([f._centroid]); } catch (e) {}
-        const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
-        if (typeof g === 'number') {
-            f.restrictions = { minAlt: g + p.aglFt * GEN_FT_TO_M, maxAlt: g + (p.aglFt + p.deltaFt) * GEN_FT_TO_M };
-            f._groundM = g;
+        const am = await siteAltMode(genState.siteID);
+        const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
+        f._altMode = mode;
+        if (mode === 'agl') {
+            // AGL site: stored = raw height above ground; no DEM lookup needed.
+            f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') };
+        } else if (mode === 'msl') {
+            try { await bulkFetchElevations([f._centroid]); } catch (e) {}
+            const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
+            if (typeof g === 'number') {
+                f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') };
+                f._groundM = g;
+            }
         }
+        // mode 'unknown' → leave the band untouched (never guess).
         restyleFfzPoly(f);
     }
 
@@ -9378,6 +9458,8 @@
     // a distinct amber color, and the save path below. =====
     async function loadExistingFfzsToPreview(siteID) {
         try { await fetchMapObjects(siteID, true); } catch (e) {}
+        let loadMode = 'unknown';
+        try { loadMode = (await siteAltMode(siteID)).mode; } catch (e) {}
         const bucket = mapObjectsBySite[siteID];
         const ents = (bucket && bucket.entities) || [];
         // ids already drawn (committed drafts this session OR previously loaded) —
@@ -9407,6 +9489,7 @@
                 _origId: e.id,
                 _origEntity: e,
                 _origValidated: !!e.validated,
+                _altMode: loadMode,
                 _centroid: ringCentroid(points),
                 _dirty: false,
             });
@@ -9499,6 +9582,7 @@
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
         genReadParamsLive = null;
+        genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
@@ -9506,6 +9590,7 @@
 
     function openSiteGenerator(siteID) {
         closeSiteGenerator();
+        genAltModeOverride = null; // never carry an alt-mode override across sites
         const bucket = mapObjectsBySite[siteID];
         if (!bucket || !bucket.entities) {
             showToast('No site data loaded', 'rgba(255,82,82,0.6)');
@@ -9560,6 +9645,7 @@
                     ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
                     ${numField('deltaFt', 'Min/Max delta', '(ceiling = floor + delta)', 5)}
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-top:2px"><input type="checkbox" id="aim-gen-edit-recalc" style="accent-color:#ffe14d"> <span><b style="color:#ffe14d">Recompute alt when I edit an existing FFZ</b><br><span style="color:#888;font-size:10px">off = keep the zone's saved band (move never changes altitude); on = re-apply the AGL floor + delta above on drop</span></span></label>
+                    <div id="aim-gen-altmode" style="margin-top:4px;padding:6px 8px;border-radius:3px;font-size:11px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.3);color:#9ad">Altitude reference: <span id="aim-gen-altmode-status">detecting…</span></div>
                 </div>
             </div>
             <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
@@ -9636,6 +9722,32 @@
         if (editRecalcEl) {
             editRecalcEl.checked = genEditRecomputeAlt;
             editRecalcEl.onchange = () => { genEditRecomputeAlt = !!editRecalcEl.checked; };
+        }
+        // Altitude-reference banner — detect MSL/AGL from the site flag, show it,
+        // and let the CSM confirm/override before any altitude is written.
+        const altModeBox = box.querySelector('#aim-gen-altmode');
+        const altModeStatus = box.querySelector('#aim-gen-altmode-status');
+        if (altModeBox && altModeStatus) {
+            const renderAltMode = (det) => {
+                const active = genActiveAltMode();
+                const overridden = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') && genAltModeOverride !== det;
+                const desc = { msl: 'MSL — values are absolute (DEM ground + AGL)', agl: 'AGL — values are height above ground', unknown: '⚠ UNKNOWN — site flag unreadable; altitude writes blocked' }[active] || active;
+                const col = active === 'unknown' ? '#ff8a80' : '#5fff5f';
+                const btn = (m, lbl) => `<button data-altmode="${m}" style="background:${active === m ? 'rgba(95,255,95,0.22)' : 'transparent'};color:${active === m ? '#5fff5f' : '#9ad'};border:1px solid rgba(122,223,230,0.4);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;margin-left:4px">${lbl}</button>`;
+                const detNote = det !== 'unknown' ? ` <span style="color:#666">· detected ${det.toUpperCase()} from Mountain-terrain flag${overridden ? ', overridden' : ''}</span>` : '';
+                altModeStatus.innerHTML = `<b style="color:${col}">${desc}</b>${detNote}<br><span style="color:#888">set:</span>${btn('msl', 'MSL')}${btn('agl', 'AGL')}${overridden ? btn('', 'use detected') : ''}`;
+            };
+            (async () => {
+                let det = 'unknown';
+                try { det = (await siteAltMode(siteID)).mode; } catch (e) {}
+                renderAltMode(det);
+                altModeBox.addEventListener('click', (e) => {
+                    const b = e.target.closest('[data-altmode]'); if (!b) return;
+                    const m = b.getAttribute('data-altmode');
+                    genAltModeOverride = (m === 'msl' || m === 'agl') ? m : null;
+                    renderAltMode(det);
+                });
+            })();
         }
         const statsEl = box.querySelector('#aim-gen-stats');
         box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
@@ -9790,7 +9902,10 @@
                 if (res.overLine) flagParts.push(`<span style="color:#ff8a80">⚠ ${res.overLine} couldn't clear a power line</span>`);
                 if (res.hasExisting) flagParts.push(`<span style="color:#8ab4ff">ℹ ${res.hasExisting} on a pad with an existing FFZ</span>`);
                 const flagLine = flagParts.length ? `<br>${flagParts.join(' · ')}` : '';
-                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} (unreachable/unshielded/empty) + ${res.skippedFar} farther than ${params.proximityFt} ft${skipExNote}. Red/blue = flagged; green = clean. DRAFT — not saved.</span>${flagLine}`;
+                const modeNote = res.mode === 'unknown'
+                    ? `<br><span style="color:#ff8a80">⚠ altitude reference UNKNOWN — bands left empty; set MSL/AGL above before committing</span>`
+                    : `<br><span style="color:#888">altitudes written as <b>${res.mode.toUpperCase()}</b> (${res.mode === 'agl' ? 'height above ground' : 'absolute MSL'})</span>`;
+                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} (unreachable/unshielded/empty) + ${res.skippedFar} farther than ${params.proximityFt} ft${skipExNote}. Red/blue = flagged; green = clean. DRAFT — not saved.</span>${modeNote}${flagLine}`;
             } catch (e) {
                 console.error(`${GEN_TAG} preview failed:`, e);
                 statsEl.innerHTML = `<span style="color:#ff8a80">Preview failed: ${String(e.message || e)}</span>`;
