@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Site Setup Generator — editing an existing FFZ no longer rewrites its altitude unless asked (latest/ dev only) — Asset Inspector v4.83
+
+Moving/resizing a loaded existing FFZ was silently re-applying the DEM AGL band on every drop. Now it **keeps the zone's saved altitude by default** — a new **"Recompute alt when I edit an existing FFZ"** checkbox (Altitude section) arms re-applying the AGL floor + delta on drop, using the numbers you type. Off by default so a move never changes altitude.
+
+---
+
+## 2026-06-17 — Site Setup Generator — EDIT existing FFZs with the generator's geometry (latest/ dev only, NOT promoted) — Asset Inspector v4.82
+
+New **📥 Load site FFZs** button in the ⊕ Generate modal loads the site's existing FFZs (amber) into the same editable preview the generated drafts use — so an existing FFZ can be **moved (drag), rotated (Q/E), re-snapped to any pad edge auto-sized at the 15 ft standoff (Alt+drag), and resized (drag the yellow ends)**, exactly like a generated draft. Altitude auto-recomputes from DEM on every drop. **💾 Save FFZ edits** writes the changed zones back **in place** (id preserved — an update, not a new DRAFT): a rollback file downloads first, and any pilot-validated zone you moved prompts per-edit whether to reset its validated flag. Dev-only while the generator stays in `latest/`.
+
+---
+
 ## 2026-06-16 — Control Panel — gear button gets the neon-green pulsing glow (PROD) — Control Panel v1.29
 
 The ⚙ Controls button in the map toolbar now has the signature **neon-green pulsing glow** (same effect as the Site Setup Summary button), with a green gear icon — easier to spot in the toolbar. Respects reduced-motion.

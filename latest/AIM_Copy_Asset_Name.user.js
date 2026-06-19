@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.81
+// @version      4.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -35,7 +35,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.81';
+    const SCRIPT_VERSION = '4.83';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -8126,6 +8126,9 @@
 
     // ---- shared FFZ preview styling ----
     function ffzColor(f) {
+        // Existing FFZs loaded for editing are amber (so they read apart from
+        // green generated drafts); they brighten once moved/resized (_dirty).
+        if (f._existing) return f._dirty ? '#ffe14d' : '#ffb347';
         return f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
     }
     function ffzTooltipHtml(f) {
@@ -8133,6 +8136,11 @@
         const altTip = (typeof r.minAlt === 'number')
             ? `${Math.round(r.minAlt * 3.28084)}–${Math.round(r.maxAlt * 3.28084)} ft MSL`
             : '<span style="color:#ffb347">alt: DEM unavailable</span>';
+        if (f._existing) {
+            const moved = f._dirty ? '<span style="color:#ffe14d">● edited (unsaved)</span>' : '<span style="color:#9ad">unchanged</span>';
+            const valTip = f._origValidated ? '<br><span style="color:#ff8a80">⚠ was pilot-validated — saving an edit will ask whether to reset it</span>' : '';
+            return `${xmlEscape(f.name || 'FFZ')} <span style="color:#888">#${f._origId}</span><br><b>EXISTING FFZ</b> · ${moved}<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = re-snap to a pad edge (auto-size) · drag yellow ends = resize · altitude kept unless "Recompute alt" is on</span>${valTip}`;
+        }
         const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
             : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
         const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
@@ -8510,8 +8518,18 @@
     }
     // Full recompute incl. DEM — on drop (centroid moved).
     async function finalizeFfzEdit(f) {
+        // Loaded existing FFZs: any interactive drop (drag / Q-E rotate / Alt-snap
+        // / end-resize) routes through here → mark dirty so Save knows to UPSERT it.
+        if (f._existing) f._dirty = true;
         refreshFfzLineFlag(f);
-        const p = genState.lastParams || GEN_DEFAULTS;
+        // Existing FFZs PRESERVE their saved altitude band by default — moving a
+        // zone must NOT silently rewrite its altitude (some sites run a non-standard
+        // AGL, and AGL-datum sites would get a wrong MSL recompute). Only recompute
+        // from the modal's AGL/Δ numbers when the CSM armed "Recompute alt on edit".
+        // Generated drafts (no saved band) always DEM-recompute on drop.
+        const recompute = f._existing ? genEditRecomputeAlt : true;
+        if (!recompute) { restyleFfzPoly(f); return; }
+        const p = (genReadParamsLive && genReadParamsLive()) || genState.lastParams || GEN_DEFAULTS;
         try { await bulkFetchElevations([f._centroid]); } catch (e) {}
         const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
         if (typeof g === 'number') {
@@ -9242,8 +9260,8 @@
     // hit-testable path) — PREVIEW ONLY, nothing is written. The polygons are
     // hand-editable: drag to move, scroll to rotate 10°, hold Alt to snap to a
     // pad face; DEM + flags recompute on drop. Returns the number drawn.
-    function renderGenPreview(ffzs) {
-        clearGenPreview();
+    function renderGenPreview(ffzs, append) {
+        if (!append) clearGenPreview();
         const L = getLeafletL();
         const map = getLeafletMap();
         if (!L || !map) {
@@ -9353,6 +9371,104 @@
         return res;
     }
 
+    // ===== Edit EXISTING FFZs — load committed type-16 entities into the SAME
+    // editable preview layer (drag / Q-E rotate / Alt-snap auto-size / resize),
+    // then save back as an UPSERT (id preserved) instead of a new DRAFT create.
+    // Reuses every geometry edit fn; the only differences are the _existing tag,
+    // a distinct amber color, and the save path below. =====
+    async function loadExistingFfzsToPreview(siteID) {
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        // ids already drawn (committed drafts this session OR previously loaded) —
+        // don't stack a second editable overlay on the same entity.
+        const drawn = new Set();
+        genPreviewLayers.forEach(pl => {
+            const f = pl && pl._ffz; if (!f) return;
+            if (f._origId != null) drawn.add(f._origId);
+            if (f._committedId != null) drawn.add(f._committedId);
+        });
+        const all = ents.filter(e => e.type === 16);
+        const ffzs = [];
+        let skippedNoGeom = 0, skippedDup = 0;
+        all.forEach(e => {
+            const coords = entityCoords(e);
+            if (!coords || coords.length < 3) { skippedNoGeom++; return; }
+            if (drawn.has(e.id)) { skippedDup++; return; }
+            const r = e.restrictions || {};
+            const points = coords.map(p => ({ lat: p.lat, lng: p.lng }));   // own copy
+            ffzs.push({
+                type: 16,
+                name: e.name || (e.id != null ? `#${e.id}` : 'FFZ'),
+                site_id: e.site != null ? e.site : siteID,
+                points,
+                restrictions: { minAlt: (typeof r.minAlt === 'number' ? r.minAlt : null), maxAlt: (typeof r.maxAlt === 'number' ? r.maxAlt : null) },
+                _existing: true,
+                _origId: e.id,
+                _origEntity: e,
+                _origValidated: !!e.validated,
+                _centroid: ringCentroid(points),
+                _dirty: false,
+            });
+        });
+        const drawnN = renderGenPreview(ffzs, true); // append — keep any generated drafts
+        console.log(`${GEN_TAG} loaded ${ffzs.length} existing FFZ${ffzs.length === 1 ? '' : 's'} for editing (${skippedDup} dup, ${skippedNoGeom} no-geom)`);
+        return { loaded: ffzs.length, drawn: drawnN, skippedDup, skippedNoGeom, total: all.length };
+    }
+
+    // Save edited existing FFZs as in-place UPDATES. Clones the full live write
+    // body (id + every field preserved), overwrites only points + the DEM-
+    // recomputed altitude band; per-edit validated prompt; rollback file first.
+    async function commitExistingFfzEdits(opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { updated: 0, failed: 0, errors: [], dryRun, validatedCount: 0, validatedReset: 0, validatedKept: 0 };
+        const pending = genPreviewLayers.map(pl => pl && pl._ffz).filter(f => f && f._existing && f._dirty && !f._committed);
+        if (!pending.length) return res;
+        res.validatedCount = pending.filter(f => f._origValidated).length;
+        if (dryRun) { res.updated = pending.length; return res; }
+        const csrf = getCsrfToken();
+        if (!csrf) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
+        // Per-edit validated decision (ask BEFORE writing, grouped at the start).
+        pending.forEach(f => {
+            if (!f._origValidated) return;
+            const reset = confirm(`"${f.name}" (#${f._origId}) was pilot-validated and you changed its geometry.\n\nReset it to UNVALIDATED so it re-enters review?\n\nOK = reset to unvalidated (recommended)\nCancel = keep it validated`);
+            f._resetValidated = reset;
+        });
+        // Rollback file = each edited FFZ's PRIOR server write-body. Download
+        // before the first POST so a bad batch can always be re-POSTed.
+        try {
+            const snap = pending.map(f => { try { return buildWriteBody(f._origEntity, siteCfg); } catch (e) { return null; } }).filter(Boolean);
+            downloadKMLFile(`aim-ffz-edit-rollback-${siteID}.json`, JSON.stringify({ site: siteID, savedAt: 'pre-edit', entities: snap }, null, 2));
+        } catch (e) { console.warn(`${GEN_TAG} rollback snapshot failed:`, e); }
+        for (const f of pending) {
+            let body;
+            try { body = buildWriteBody(f._origEntity, siteCfg); }
+            catch (e) { res.failed++; res.errors.push(`${f.name}: build body threw ${e && e.message || e}`); continue; }
+            body.points = f.points;
+            if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+            if (typeof f.restrictions.minAlt === 'number') body.restrictions.minAlt = f.restrictions.minAlt;
+            if (typeof f.restrictions.maxAlt === 'number') body.restrictions.maxAlt = f.restrictions.maxAlt;
+            if (f._origValidated) {
+                if (f._resetValidated === false) { body.validated = true; res.validatedKept++; }
+                else { body.validated = false; res.validatedReset++; }
+            }
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    res.updated++;
+                    f._dirty = false; f._committedId = (saved.id != null ? saved.id : f._origId);
+                    markFfzCommitted(f);
+                } else { res.failed++; res.errors.push(`${f.name} (#${f._origId}): server ${r.status} ${(txt || '').slice(0, 140)}`); }
+            } catch (e) { res.failed++; res.errors.push(`${f.name}: POST threw ${e && e.message || e}`); }
+        }
+        return res;
+    }
+
     // Direct-API writes don't refresh Percepto's live map (it renders from its
     // own React state) — a reload pulls them in. Offer a one-click reload.
     function appendReloadBtn(el) {
@@ -9371,11 +9487,18 @@
         aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
     };
     let genState = { siteID: null, lastResult: null, lastParams: null };
+    // When ON, editing an EXISTING FFZ recomputes its altitude band from the
+    // modal's AGL/Δ fields on drop; OFF (default) preserves the saved band so a
+    // move never silently rewrites altitude. genReadParamsLive = the open modal's
+    // readParams closure (so the recompute uses the CURRENTLY typed numbers).
+    let genEditRecomputeAlt = false;
+    let genReadParamsLive = null;
 
     function closeSiteGenerator() {
         const m = document.getElementById(GEN_MODAL_ID);
         if (m) m.remove();
         try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
+        genReadParamsLive = null;
         try { setFpSnap(false); } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
@@ -9436,6 +9559,7 @@
                 <div style="display:flex;flex-direction:column;gap:8px">
                     ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
                     ${numField('deltaFt', 'Min/Max delta', '(ceiling = floor + delta)', 5)}
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-top:2px"><input type="checkbox" id="aim-gen-edit-recalc" style="accent-color:#ffe14d"> <span><b style="color:#ffe14d">Recompute alt when I edit an existing FFZ</b><br><span style="color:#888;font-size:10px">off = keep the zone's saved band (move never changes altitude); on = re-apply the AGL floor + delta above on drop</span></span></label>
                 </div>
             </div>
             <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
@@ -9445,6 +9569,7 @@
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
+                <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
                 <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
@@ -9456,6 +9581,7 @@
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
                     <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove DRAFT FFZs</button>
+                    <button id="aim-gen-saveffz" title="Save geometry changes made to LOADED existing FFZs (📥 Load site FFZs) back IN PLACE — id preserved (update, not a new DRAFT). Validated zones prompt per-edit; a rollback file downloads first." style="background:rgba(255,225,77,0.14);color:#ffe14d;border:1px solid rgba(255,225,77,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">💾 Save FFZ edits</button>
                 </div>
                 <div id="aim-gen-commit-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Writes the previewed FFZs (named <b>DRAFT …</b>) via the Site Setup save. Dry-run first.</div>
             </div>
@@ -9503,6 +9629,14 @@
             out.skipExisting = !!box.querySelector('#aim-gen-skipexisting').checked;
             return out;
         };
+        // Expose this modal's live param reader so finalizeFfzEdit recomputes
+        // existing-FFZ altitudes from the CURRENTLY typed AGL/Δ numbers.
+        genReadParamsLive = readParams;
+        const editRecalcEl = box.querySelector('#aim-gen-edit-recalc');
+        if (editRecalcEl) {
+            editRecalcEl.checked = genEditRecomputeAlt;
+            editRecalcEl.onchange = () => { genEditRecomputeAlt = !!editRecalcEl.checked; };
+        }
         const statsEl = box.querySelector('#aim-gen-stats');
         box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
         box.querySelector('#aim-gen-x').onclick = () => closeSiteGenerator();
@@ -9536,6 +9670,20 @@
             } finally {
                 loadFpBtn.disabled = false; loadFpBtn.textContent = restore;
             }
+        };
+        const loadFfzBtn = box.querySelector('#aim-gen-loadffz');
+        loadFfzBtn.onclick = async () => {
+            loadFfzBtn.disabled = true; const restore = loadFfzBtn.textContent; loadFfzBtn.textContent = 'Loading…';
+            try {
+                const r = await loadExistingFfzsToPreview(siteID);
+                if (!r.total) { statsEl.innerHTML = `<span style="color:#ffb347">No existing FFZs on this site.</span>`; return; }
+                if (!r.drawn && r.skippedDup) { statsEl.innerHTML = `<span style="color:#9ad">All ${r.skippedDup} existing FFZ${r.skippedDup === 1 ? '' : 's'} already loaded.</span>`; return; }
+                const dupNote = r.skippedDup ? ` · ${r.skippedDup} already shown` : '';
+                statsEl.innerHTML = `Loaded <b style="color:#ffb347">${r.drawn}</b> existing FFZ${r.drawn === 1 ? '' : 's'} for editing (<span style="color:#ffb347">amber</span>)${dupNote}.<br><span style="color:#888"><b style="color:#fff">Drag</b> to move · <b style="color:#fff">Q/E</b> rotate · <b style="color:#fff">Alt+drag</b> re-snap to a pad edge (auto-size) · <b style="color:#fff">drag yellow ends</b> resize. Altitude is <b>kept as saved</b> (tick <b style="color:#ffe14d">Recompute alt</b> above to re-apply AGL) → then <b style="color:#ffe14d">💾 Save FFZ edits</b>.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} load existing FFZs failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Load error: ${String(e.message || e)}</span>`;
+            } finally { loadFfzBtn.disabled = false; loadFfzBtn.textContent = restore; }
         };
         const snapCleanBtn = box.querySelector('#aim-gen-snapclean');
         snapCleanBtn.onclick = () => {
@@ -9734,6 +9882,32 @@
             } catch (e) {
                 commitResult.innerHTML = `<span style="color:#ff8a80">Remove failed: ${xmlEscape(String(e && e.message || e))}</span>`;
             } finally { removeBtn.disabled = false; removeBtn.textContent = t0; }
+        };
+        const saveFfzBtn = box.querySelector('#aim-gen-saveffz');
+        saveFfzBtn.onclick = async () => {
+            const dry = !!dryEl.checked;
+            const pending = genPreviewLayers.map(pl => pl && pl._ffz).filter(f => f && f._existing && f._dirty && !f._committed);
+            if (!pending.length) { commitResult.innerHTML = '<span style="color:#ffb347">No edited existing FFZs — load some with <b>📥 Load site FFZs</b>, then move / rotate / resize.</span>'; return; }
+            const valN = pending.filter(f => f._origValidated).length;
+            if (!dry && !confirm(`Save geometry changes to ${pending.length} existing FFZ${pending.length === 1 ? '' : 's'} in place?${valN ? `\n\n${valN} ${valN === 1 ? 'is' : 'are'} pilot-validated — you'll be asked per-zone whether to reset.` : ''}\n\nA rollback file downloads before the first write.`)) return;
+            saveFfzBtn.disabled = true; const t0 = saveFfzBtn.textContent; saveFfzBtn.textContent = dry ? 'Dry run…' : 'Saving…';
+            try {
+                const r = await commitExistingFfzEdits({ dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
+                if (dry) {
+                    commitResult.innerHTML = `<b style="color:#ffe14d">${r.updated}</b> existing FFZ${r.updated === 1 ? '' : 's'} would be updated in place${r.validatedCount ? ` (${r.validatedCount} validated — prompts per-zone)` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                } else {
+                    const valNote = (r.validatedReset || r.validatedKept) ? `<br><span style="color:#888">validated: ${r.validatedReset} reset · ${r.validatedKept} kept</span>` : '';
+                    commitResult.innerHTML = `Updated <b style="color:#ffe14d">${r.updated}</b> · failed ${r.failed}.${errHtml}${valNote}${r.updated ? '<br><span style="color:#888">Rollback file downloaded · saved zones locked (green). Reload to edit them natively in Percepto.</span>' : ''}`;
+                    if (r.updated) {
+                        clearResizeHandles();
+                        try { await fetchMapObjects(siteID, true); renderSummaryPanel(siteID); } catch (e) {}
+                        showToast(`Saved ${r.updated} FFZ edit${r.updated === 1 ? '' : 's'}`, 'rgba(255,225,77,0.5)');
+                    }
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Save failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { saveFfzBtn.disabled = false; saveFfzBtn.textContent = t0; }
         };
         console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${eligibleCount} eligible)`);
     }
