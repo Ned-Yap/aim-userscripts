@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view sits over the native form + looks native — Flight Path Editor v0.39
+
+The AGL view now positions itself **exactly over Percepto's native entity form** (`.upsert-entity__form`) and is restyled to match the site-setup sidebar (flush dark panel, native labels, Ant-style inputs, a "Path sections — AGL ft" heading) so it reads as the native panel rather than a floating box. SAVE/Cancel sit outside the form, so they stay visible/clickable. Shift+G / the "MSL view" button flips back to the native MSL display.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view now covers the native sidebar + loads every segment — Flight Path Editor v0.38
 
 Two fixes to the new AGL view: (1) it now **covers the native FP sidebar** (overlays it, ending just above the SAVE/Cancel bar so those stay clickable) instead of stacking on top of it with two scrollbars; (2) it **loads the ground for every segment**, not just the ones visible in the native list — a rate-limited terrain lookup was getting cached as "no data" and freezing the lower rows on "ground…". Now it retries until quota recovers, fills top-to-bottom on its own (with a "loading ground N/M…" note), and backs off when the quota is paused. Shift+G still flips back to the native MSL view.

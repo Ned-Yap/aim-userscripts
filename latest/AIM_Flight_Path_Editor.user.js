@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.38
+// @version      0.39
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.38';
+    const SCRIPT_VERSION = '0.39';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1479,10 +1479,11 @@
         if (!el) {
             el = document.createElement('div');
             el.id = AGL_HUD_ID;
-            // Geometry (top/left/width/bottom) is set by positionAglHud to COVER the
-            // native sidebar; here we only set the chrome. Opaque bg so the native
-            // list behind it is fully hidden.
-            el.style.cssText = 'position:fixed;overflow:auto;background:#1a1d23;border-right:1px solid rgba(127,223,255,0.5);border-radius:0 8px 8px 0;color:#e6e6e6;font:12px -apple-system,sans-serif;z-index:100001;box-shadow:6px 0 22px rgba(0,0,0,0.6)';
+            // Geometry (left/top/width/height) is set by positionAglHud to sit EXACTLY
+            // over Percepto's native form so it reads as native. Flush dark panel (no
+            // rounded corners / shadow) matching the site-setup sidebar; opaque so the
+            // native MSL list behind it is hidden.
+            el.style.cssText = 'position:fixed;overflow:auto;background:#15181d;color:rgb(232,230,227);font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;z-index:100001';
             // keep clicks/keys inside the HUD from reaching the map / global hotkeys
             ['mousedown', 'click', 'keydown', 'wheel'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
             el.addEventListener('change', onAglHudChange, true);
@@ -1546,26 +1547,32 @@
                 else if (mode === 'msl') { if (g != null) { aglMin = Math.round((minM - g) * FT); aglMax = Math.round((maxM - g) * FT); mslNote = `MSL ${Math.round(minM * FT)}–${Math.round(maxM * FT)}`; } else { mslNote = 'ground…'; } }
             }
             const editable = (isAgl || g != null);
-            const inMin = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="min" value="${aglMin}" style="width:44px;background:#11151a;border:1px solid #7fdfff55;color:#cfeaff;border-radius:3px;padding:2px 4px;font:inherit;text-align:right">` : `<span style="color:#888">…</span>`;
-            const inMax = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="max" value="${aglMax}" style="width:44px;background:#11151a;border:1px solid #7fdfff55;color:#cfeaff;border-radius:3px;padding:2px 4px;font:inherit;text-align:right">` : `<span style="color:#888">…</span>`;
-            rows += `<tr style="border-top:1px solid #2a2f37"><td style="padding:3px 4px;color:#9ad;text-align:center">${i + 1}</td><td style="padding:3px 4px">${inMin}</td><td style="padding:3px 4px">${inMax}</td><td style="padding:3px 4px;color:#7a8794;font-size:10px;white-space:nowrap">${mslNote}</td></tr>`;
+            const inStyle = 'width:58px;background:#23272e;border:1px solid #3a3f47;color:rgb(232,230,227);border-radius:6px;padding:5px 8px;font:inherit;font-size:13px;text-align:left';
+            const inMin = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="min" value="${aglMin}" style="${inStyle}">` : `<span style="color:#6b7280">…</span>`;
+            const inMax = editable ? `<input class="aim-agl-in" data-wc="${wc.id}" data-sig="${arcSig(a)}" data-field="max" value="${aglMax}" style="${inStyle}">` : `<span style="color:#6b7280">…</span>`;
+            rows += `<tr><td style="padding:6px 4px;color:#7fd1ff;text-align:center;font-size:12px">${i + 1}</td><td style="padding:6px 6px">${inMin}</td><td style="padding:6px 6px">${inMax}</td><td style="padding:6px 6px;color:#6b7280;font-size:10px;white-space:nowrap">${mslNote}</td></tr>`;
         });
-        const loadNote = missingCount ? ` · <span style="color:#ffb14e">loading ground ${arcs.length - missingCount}/${arcs.length}…</span>` : '';
+        const loadNote = missingCount ? `<span style="color:#ffb14e">loading ground ${arcs.length - missingCount}/${arcs.length}…</span>` : '';
+        // Mirror Percepto's own "PATH SECTIONS" heading + column layout so it reads native.
         el.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #2a2f37;position:sticky;top:0;background:#1a1d23">
-                <div style="font-weight:700;color:#7fdfff">▲ AGL view <span style="font-size:10px;font-weight:400">${modeChip}</span></div>
-                <button data-aglact="off" title="Hide (Shift+G) — verify native MSL" style="background:transparent;color:#888;border:1px solid #ffffff22;border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">MSL only</button>
-            </div>
-            <div style="padding:4px 8px;color:#7a8794;font-size:10px">${xmlEsc(wc.state.name || 'flight path')} · type AGL ft → writes MSL behind the scenes. Ground = max under each segment.${loadNote}</div>
-            <table style="width:100%;border-collapse:collapse;font:12px -apple-system,sans-serif">
-                <thead><tr style="color:#9ad"><th style="padding:3px 6px;text-align:center">#</th><th style="padding:3px 6px;text-align:right">AGL min</th><th style="padding:3px 6px;text-align:right">AGL max</th><th style="padding:3px 6px;text-align:left">backend (MSL)</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="4" style="padding:8px;color:#888;text-align:center">no segments</td></tr>'}</tbody>
-            </table>`;
+            <div style="padding:14px 16px 8px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                    <span style="font-size:13px;letter-spacing:0.4px;color:#9aa4af;text-transform:uppercase">Path sections — <span style="color:#7fd1ff">AGL ft</span></span>
+                    <button data-aglact="off" title="Show native MSL (Shift+G)" style="background:transparent;color:#9aa4af;border:1px solid #3a3f47;border-radius:6px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">MSL view</button>
+                </div>
+                <div style="font-size:11px;color:#6b7280;margin-bottom:10px">${modeChip} · type the band in AGL → writes MSL in the backend. ${loadNote}</div>
+                <table style="width:100%;border-collapse:collapse">
+                    <thead><tr style="color:#9aa4af;font-size:11px;text-align:left"><th style="padding:0 4px 6px;text-align:center;font-weight:500">#</th><th style="padding:0 6px 6px;font-weight:500">Min alt (ft)</th><th style="padding:0 6px 6px;font-weight:500">Max alt (ft)</th><th style="padding:0 6px 6px;font-weight:500">backend</th></tr></thead>
+                    <tbody>${rows || '<tr><td colspan="4" style="padding:10px;color:#6b7280;text-align:center">no segments</td></tr>'}</tbody>
+                </table>
+            </div>`;
         positionAglHud(el);
     }
-    // Cover the native FP sidebar instead of stacking beside it: overlay the panel
-    // area, ending just above the SAVE/Cancel action bar so those stay clickable.
-    // Falls back to a left dock if the SAVE button can't be found.
+    // Sit EXACTLY over Percepto's native entity form (.upsert-entity__form) so it
+    // reads as native, not a floating box. The SAVE/Cancel bar lives OUTSIDE the
+    // form (in .upsert-entity), so it stays visible/clickable below us. Ends above
+    // the SAVE button when present. Falls back to a left dock if the form is gone.
+    function nativeFormEl() { return document.querySelector('.upsert-entity__form'); }
     function nativeSaveBtn() {
         const bs = document.querySelectorAll('button, [role="button"]');
         for (const b of bs) { const t = (b.textContent || '').trim().toUpperCase(); if (t === 'SAVE') return b; }
@@ -1573,16 +1580,23 @@
     }
     function positionAglHud(el) {
         try {
+            const form = nativeFormEl();
             const save = nativeSaveBtn();
-            if (save) {
+            if (form) {
+                const r = form.getBoundingClientRect();
+                const bottomLimit = save ? (save.getBoundingClientRect().top - 8) : (window.innerHeight - 8);
+                el.style.left = Math.round(r.left) + 'px';
+                el.style.top = Math.round(r.top) + 'px';
+                el.style.width = Math.round(r.width) + 'px';
+                el.style.height = Math.max(120, Math.round(bottomLimit - r.top)) + 'px';
+                el.style.bottom = 'auto';
+            } else if (save) {
                 const r = save.getBoundingClientRect();
-                el.style.left = '0px';
-                el.style.top = '0px';
+                el.style.left = '0px'; el.style.top = '0px';
                 el.style.width = Math.max(280, Math.round(r.right + 8)) + 'px';
-                el.style.bottom = Math.max(8, Math.round(window.innerHeight - r.top + 8)) + 'px';
-                el.style.height = 'auto';
+                el.style.height = Math.max(120, Math.round(r.top - 8)) + 'px'; el.style.bottom = 'auto';
             } else {
-                el.style.left = '0px'; el.style.top = '0px'; el.style.width = '460px'; el.style.bottom = '90px'; el.style.height = 'auto';
+                el.style.left = '0px'; el.style.top = '0px'; el.style.width = '320px'; el.style.height = '70vh'; el.style.bottom = 'auto';
             }
         } catch (e) {}
     }
