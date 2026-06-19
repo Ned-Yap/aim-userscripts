@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view: color coding, aligned columns, edit feedback — Flight Path Editor v0.43
+
+The AGL/Δ/MSL columns are now **color-coded** (AGL blue, Δ yellow, MSL orange — titles and boxes) and the **headers line up** with the input boxes (fixed table layout). Editing now gives clear feedback: a small change that's below the **whole-metre storage step** (~3 ft) tells you it snapped back (try ≥3 ft), and a successful edit confirms the stored band — so "it reverted" is never silent. Tooltip AGL also falls back to the nearest segment's ground so it shows up reliably.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL edits actually stick + tooltip polish — Flight Path Editor v0.41
 
 Fixes from testing: (1) **editing now sticks** — a band edit was reverting because changing one segment broke the altitude overlap connected segments require; it now auto-bridges the neighbour (raises only its ceiling to reconnect, the same fix smart-altitude uses), so your value holds. (2) **hover tooltip** — no more duplicate AGL line (only the outermost match is augmented), and the **AGL line is now on top and larger** with Percepto's MSL kept smaller below.

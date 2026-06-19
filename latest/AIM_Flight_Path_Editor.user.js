@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.42
+// @version      0.43
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.42';
+    const SCRIPT_VERSION = '0.43';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1476,7 +1476,7 @@
         const minM = Math.round(minFt * FT_TO_M);
         let maxM = Math.round(maxFt * FT_TO_M); if (maxM <= minM) maxM = minM + 1;
         log(`AGL-edit: ${sig.slice(0, 16)} min_alt ${arc.min_alt}→${minM}m  max_alt ${arc.max_alt}→${maxM}m`);
-        if (minM === arc.min_alt && maxM === arc.max_alt) { log('AGL-edit: no net change (rounded to same meters)'); return; }
+        if (minM === arc.min_alt && maxM === arc.max_alt) { log('AGL-edit: no net change (rounded to same meters)'); toast('Altitudes store in whole metres (~3 ft steps) — that change was below one step, so it snapped back. Try a ≥3 ft change.', '#ffb14e'); return; }
         const newArcs = (wc.state.arcs || []).map(a => arcSig(a) !== sig ? a : ({ ...a, min_alt: minM, max_alt: maxM, min_emergency_alt: minM }));
         // Connected arcs must keep a >0 (server: ≥2 m) overlapping band or the path
         // 400s on save. Changing one segment's band almost always breaks that overlap
@@ -1499,8 +1499,11 @@
             try {
                 const w2 = findFpWorkingCopies().find(w => w.id === wcId);
                 const a2 = w2 && (w2.state.arcs || []).find(a => arcSig(a) === sig);
-                if (a2) log(`AGL-edit VERIFY (+600ms): committed min_alt=${a2.min_alt}m max_alt=${a2.max_alt}m (wanted ${minM}/${maxM}) — ${a2.min_alt === minM ? 'STUCK ✓' : 'REVERTED ✗'}`);
-                else log('AGL-edit VERIFY: segment gone');
+                if (a2) {
+                    const stuck = (a2.min_alt === minM && a2.max_alt === maxM);
+                    log(`AGL-edit VERIFY (+600ms): committed min_alt=${a2.min_alt}m max_alt=${a2.max_alt}m (wanted ${minM}/${maxM}) — ${stuck ? 'STUCK ✓' : 'REVERTED ✗'}`);
+                    toast(stuck ? `✓ Stored: ${Math.round(a2.min_alt * FT)}–${Math.round(a2.max_alt * FT)} ft MSL` : '✗ Percepto reverted the write — tell Claude (it needs the native input path)', stuck ? '#5fff5f' : '#ff8a80');
+                } else log('AGL-edit VERIFY: segment gone');
             } catch (e) {}
         }, 600);
     }
@@ -1611,8 +1614,10 @@
                 aglHudBusy = false; aglHudSig = ''; renderAglHud();
             })();
         }
-        const inStyle = 'width:40px;background:#23272e;border:1px solid #3a3f47;color:rgb(232,230,227);border-radius:5px;padding:4px 5px;font:inherit;font-size:12px;text-align:right';
-        const dash = '<span style="color:#5b6470">…</span>';
+        // Colour code: AGL = blue, Δ = yellow, MSL = orange (titles + boxes).
+        const C = { agl: '#5fb8ff', delta: '#ffd400', msl: '#ff9f43' };
+        const inS = (col) => `width:100%;box-sizing:border-box;background:#23272e;border:1px solid ${col}66;color:${col};border-radius:5px;padding:4px 2px;font:inherit;font-size:12px;text-align:center`;
+        const dashCell = '<div style="text-align:center;color:#5b6470">…</div>';
         arcs.forEach((a, i) => {
             const g = arcGroundMaxSync(a);
             const gFt = (g != null) ? Math.round(g * FT) : null;
@@ -1626,28 +1631,29 @@
                 else if (mode === 'msl') { mslMin = sMin; mslMax = sMax; if (gFt != null) { aglMin = sMin - gFt; aglMax = sMax - gFt; } }
             }
             const da = `data-wc="${wc.id}" data-sig="${arcSig(a)}" data-mode="${mode}" data-gft="${gFt != null ? gFt : ''}"`;
-            const cell = (field, val) => (val == null) ? dash : `<input class="aim-agl-in" data-field="${field}" ${da} value="${val}" style="${inStyle}">`;
+            const cell = (field, val, col) => (val == null) ? dashCell : `<input class="aim-agl-in" data-field="${field}" ${da} value="${val}" style="${inS(col)}">`;
             rows += `<tr>`
-                + `<td style="padding:5px 2px;color:#7fd1ff;text-align:center;font-size:11px">${i + 1}</td>`
-                + `<td style="padding:5px 2px">${cell('aglmin', aglMin)}</td>`
-                + `<td style="padding:5px 2px">${cell('aglmax', aglMax)}</td>`
-                + `<td style="padding:5px 2px">${cell('delta', delta)}</td>`
-                + `<td style="padding:5px 2px">${cell('mslmin', mslMin)}</td>`
-                + `<td style="padding:5px 2px">${cell('mslmax', mslMax)}</td>`
+                + `<td style="padding:4px 2px;color:#9aa4af;text-align:center;font-size:11px">${i + 1}</td>`
+                + `<td style="padding:4px 3px">${cell('aglmin', aglMin, C.agl)}</td>`
+                + `<td style="padding:4px 3px">${cell('aglmax', aglMax, C.agl)}</td>`
+                + `<td style="padding:4px 3px">${cell('delta', delta, C.delta)}</td>`
+                + `<td style="padding:4px 3px">${cell('mslmin', mslMin, C.msl)}</td>`
+                + `<td style="padding:4px 3px">${cell('mslmax', mslMax, C.msl)}</td>`
                 + `</tr>`;
         });
         const loadNote = missingCount ? `<span style="color:#ffb14e">loading ground ${arcs.length - missingCount}/${arcs.length}…</span>` : '';
-        const th = (t) => `<th style="padding:0 2px 6px;font-weight:500">${t}</th>`;
-        // Mirror Percepto's "PATH SECTIONS" heading; AGL | Δ | MSL all editable + live-linked.
+        const th = (t, col) => `<th style="padding:0 3px 6px;font-weight:600;text-align:center;color:${col}">${t}</th>`;
+        // table-layout:fixed + a colgroup makes the headers line up dead-on over the boxes.
         el.innerHTML = `
-            <div style="padding:14px 12px 8px">
+            <div style="padding:14px 10px 8px">
                 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
                     <span style="font-size:13px;letter-spacing:0.4px;color:#9aa4af;text-transform:uppercase">Path sections</span>
                     <button data-aglact="off" title="Show native MSL (Shift+G)" style="background:transparent;color:#9aa4af;border:1px solid #3a3f47;border-radius:6px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">MSL view</button>
                 </div>
-                <div style="font-size:11px;color:#6b7280;margin-bottom:8px">${modeChip} · edit AGL, Δ or MSL — all link live; commits to the live path (Save to persist). ${loadNote}</div>
-                <table style="width:100%;border-collapse:collapse">
-                    <thead><tr style="color:#9aa4af;font-size:10px;text-align:right"><th style="padding:0 2px 6px;text-align:center;font-weight:500">#</th>${th('AGL↓')}${th('AGL↑')}${th('Δ')}${th('MSL↓')}${th('MSL↑')}</tr></thead>
+                <div style="font-size:11px;color:#6b7280;margin-bottom:8px">${modeChip} · <span style="color:${C.agl}">AGL</span> / <span style="color:${C.delta}">Δ</span> / <span style="color:${C.msl}">MSL</span> link live; edits commit to the live path (Save to persist). ${loadNote}</div>
+                <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+                    <colgroup><col style="width:20px"><col><col><col><col><col></colgroup>
+                    <thead><tr style="font-size:10px"><th style="padding:0 2px 6px;text-align:center;font-weight:600;color:#9aa4af">#</th>${th('AGL↓', C.agl)}${th('AGL↑', C.agl)}${th('Δ', C.delta)}${th('MSL↓', C.msl)}${th('MSL↑', C.msl)}</tr></thead>
                     <tbody>${rows || '<tr><td colspan="6" style="padding:10px;color:#6b7280;text-align:center">no segments</td></tr>'}</tbody>
                 </table>
             </div>`;
