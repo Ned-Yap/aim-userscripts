@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view now works on FFZs too — Flight Path Editor v0.45
+
+The AGL view now appears when you open a **free-fly zone** natively, not just flight paths. Same panel over the native form, same Shift+G toggle, same color-coded AGL / Δ / MSL columns that live-link and write behind the scenes — but a single altitude band (the FFZ's restrictions) instead of per-segment, using the max ground under the zone's polygon. FFZ altitudes allow decimals, so there's no whole-metre snap on these.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL editing actually works now (id type bug) — Flight Path Editor v0.44
 
 Editing a band did nothing (no message, value snapped back) because the working-copy lookup compared the flight-path id as a number against the same id read from a DOM attribute as a string — so it never matched and the edit was silently dropped. Coerced both sides; AGL/Δ/MSL edits (and the live cross-update) now commit to the path as intended.

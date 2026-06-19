@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.44
+// @version      0.45
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.44';
+    const SCRIPT_VERSION = '0.45';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -182,7 +182,9 @@
     // (Percepto's `JBe`). Reading it means our matching + splice always agree with what
     // you see on the map (dragged waypoints included). Confirmed via AIM_Editor_Probe8.
     // Returns [{ id, name, state, dispatch }] — usually one (the path being edited).
-    function findFpWorkingCopies() {
+    // Generic working-copy finder: DFS the committed fiber tree for a useState
+    // whose value is the entity object (matched by `pred`) with a live dispatch.
+    function findWorkingCopies(pred) {
         const map = getLeafletMap();
         const container = (map && map.getContainer && map.getContainer()) || document.querySelector('.leaflet-container');
         let f = fiberOf(container);
@@ -200,9 +202,7 @@
                 let h = fb.memoizedState, i = 0;
                 while (h && typeof h === 'object' && 'next' in h && i < 80) {
                     const s = h.memoizedState;
-                    if (s && typeof s === 'object' && !Array.isArray(s) && s.type === 15
-                        && Array.isArray(s.arcs) && s.arcs.length && Array.isArray(s.coords)
-                        && h.queue && h.queue.dispatch) {
+                    if (s && typeof s === 'object' && !Array.isArray(s) && h.queue && h.queue.dispatch && pred(s)) {
                         found.push({ id: s.id, name: s.name, state: s, dispatch: h.queue.dispatch });
                     }
                     h = h.next; i++;
@@ -212,6 +212,13 @@
             if (fb.sibling) stack.push(fb.sibling);
         }
         return found;
+    }
+    function findFpWorkingCopies() {
+        return findWorkingCopies(s => s.type === 15 && Array.isArray(s.arcs) && s.arcs.length && Array.isArray(s.coords));
+    }
+    // FFZ (type 16) editor working copy — single altitude band in `restrictions`.
+    function findFfzWorkingCopies() {
+        return findWorkingCopies(s => s.type === 16 && s.restrictions && typeof s.restrictions === 'object' && !Array.isArray(s.restrictions) && Array.isArray(s.coords));
     }
     const flightPaths = () => findFpWorkingCopies();
 
@@ -1419,7 +1426,23 @@
     let aglHudSig = '';               // last-rendered arc signature set (skip redundant rebuilds)
     let aglHudBusy = false;
     let aglGroundBackoffUntil = 0;    // pause ground fetches until this time if a pass resolved nothing (quota paused)
+    const ffzGroundCache = new Map(); // ffz id -> max ground (m) under the polygon, or undefined
     function arcGroundMaxSync(arc) { const v = arcGroundCache.get(arcSig(arc)); return v === undefined ? undefined : v; }
+    function ffzGroundSync(id) { return ffzGroundCache.has(id) ? ffzGroundCache.get(id) : undefined; }
+    // Max ground (m) under an FFZ polygon — sample its vertices + centroid.
+    async function ensureFfzGround(wc) {
+        const id = wc.id;
+        if (ffzGroundCache.has(id)) return ffzGroundCache.get(id);
+        const coords = (wc.state.coords || []).filter(finitePt);
+        if (!coords.length) return null;
+        const pts = coords.slice(0, 16);
+        let clat = 0, clng = 0; pts.forEach(p => { clat += p.lat; clng += p.lng; });
+        pts.push({ lat: clat / pts.length, lng: clng / pts.length }); // centroid
+        let gmax = -Infinity, any = false;
+        for (const p of pts) { const e = await fetchElevation(p.lat, p.lng); if (typeof e === 'number') { any = true; if (e > gmax) gmax = e; } }
+        if (any) ffzGroundCache.set(id, gmax); // don't cache nulls (quota paused) so it retries
+        return any ? gmax : null;
+    }
     async function ensureArcGround(arc) {
         const sig = arcSig(arc);
         if (arcGroundCache.has(sig)) return arcGroundCache.get(sig);
@@ -1528,7 +1551,14 @@
         return el;
     }
     // Read a row's CURRENT committed stored band (ft) from the working copy.
-    function rowStoredBandFt(wcId, sig) {
+    // kind 'ffz' → the FFZ's single restrictions band; else an FP arc (by sig).
+    function rowStoredBandFt(wcId, sig, kind) {
+        if (kind === 'ffz') {
+            const wc = findFfzWorkingCopies().find(w => String(w.id) === String(wcId));
+            const r = wc && wc.state.restrictions;
+            if (!r || !num(r.minAlt) || !num(r.maxAlt)) return null;
+            return { minFt: r.minAlt * FT, maxFt: r.maxAlt * FT };
+        }
         const wc = findFpWorkingCopies().find(w => String(w.id) === String(wcId));
         const arc = wc && (wc.state.arcs || []).find(a => arcSig(a) === sig);
         if (!arc || !num(arc.min_alt) || !num(arc.max_alt)) return null;
@@ -1539,7 +1569,7 @@
         const mode = inp.getAttribute('data-mode');
         const gFt = parseFloat(inp.getAttribute('data-gft'));
         const x = parseFloat(inp.value);
-        const cur = rowStoredBandFt(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'));
+        const cur = rowStoredBandFt(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'), inp.getAttribute('data-kind'));
         if (!num(x) || !cur) return null;
         const needsGround = (mode === 'msl' && (field === 'aglmin' || field === 'aglmax')) || (mode === 'agl' && (field === 'mslmin' || field === 'mslmax'));
         if (needsGround && !num(gFt)) return null;
@@ -1573,14 +1603,36 @@
         if (!inp || !inp.classList || !inp.classList.contains('aim-agl-in')) return;
         const b = bandFromInput(inp);
         if (!b) { log(`AGL-edit: could not derive a band from field "${inp.getAttribute('data-field')}" (value ${inp.value}, gft ${inp.getAttribute('data-gft')}) — reverting display`); aglHudSig = ''; renderAglHud(); return; }
-        applyBandEdit(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'), b.minFt, b.maxFt).catch(err => warn('applyBandEdit threw', err));
+        if (inp.getAttribute('data-kind') === 'ffz') applyFfzBandEdit(inp.getAttribute('data-wc'), b.minFt, b.maxFt).catch(err => warn('applyFfzBandEdit threw', err));
+        else applyBandEdit(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'), b.minFt, b.maxFt).catch(err => warn('applyBandEdit threw', err));
+    }
+    // Commit a new band (ft) to the open FFZ's restrictions. FFZ altitudes allow
+    // decimals (no whole-metre step) and have no connected-arc overlap rule, so no
+    // bridge/round needed. minEmergencyAlt is left as-is (an unused leftover field).
+    async function applyFfzBandEdit(wcId, minFt, maxFt) {
+        if (!num(minFt) || !num(maxFt)) { log('FFZ-edit: non-numeric'); return; }
+        const wc = findFfzWorkingCopies().find(w => String(w.id) === String(wcId));
+        if (!wc || !wc.dispatch) { toast('Open the FFZ editor to apply.', '#ff8a80'); return; }
+        const r = wc.state.restrictions || {};
+        const minM = minFt * FT_TO_M;
+        let maxM = maxFt * FT_TO_M; if (maxM <= minM) maxM = minM + 0.3;
+        if (Math.abs(minM - (r.minAlt || 0)) < 0.05 && Math.abs(maxM - (r.maxAlt || 0)) < 0.05) return; // no change
+        const newR = { ...r, minAlt: minM, maxAlt: maxM };
+        wc.dispatch({ ...wc.state, restrictions: newR });
+        log(`FFZ-edit: restrictions minAlt ${(r.minAlt || 0).toFixed(1)}→${minM.toFixed(1)}m maxAlt ${(r.maxAlt || 0).toFixed(1)}→${maxM.toFixed(1)}m (dispatched)`);
+        toast(`✓ Stored: ${Math.round(minM * FT)}–${Math.round(maxM * FT)} ft MSL`, '#5fff5f');
+        aglHudSig = ''; renderAglHud();
     }
     function renderAglHud() {
         const existing = document.getElementById(AGL_HUD_ID);
-        if (!settings.aglHud || !editingFP()) { if (existing) existing.remove(); aglHudSig = ''; return; }
-        const wcs = findFpWorkingCopies();
-        if (!wcs.length) { if (existing) existing.remove(); aglHudSig = ''; return; }
-        const wc = wcs[0];
+        if (!settings.aglHud) { if (existing) existing.remove(); aglHudSig = ''; return; }
+        const fp = findFpWorkingCopies()[0];
+        if (fp) { renderFpAglHud(fp); return; }
+        const ffz = findFfzWorkingCopies()[0];
+        if (ffz) { renderFfzAglHud(ffz); return; }
+        if (existing) existing.remove(); aglHudSig = '';
+    }
+    function renderFpAglHud(wc) {
         const arcs = wc.state.arcs || [];
         const sid = fpeSiteId();
         let mode = sid ? (fpeAltModeCache[sid] || null) : null;
@@ -1655,6 +1707,66 @@
                     <colgroup><col style="width:20px"><col><col><col><col><col></colgroup>
                     <thead><tr style="font-size:10px"><th style="padding:0 2px 6px;text-align:center;font-weight:600;color:#9aa4af">#</th>${th('AGL↓', C.agl)}${th('AGL↑', C.agl)}${th('Δ', C.delta)}${th('MSL↓', C.msl)}${th('MSL↑', C.msl)}</tr></thead>
                     <tbody>${rows || '<tr><td colspan="6" style="padding:10px;color:#6b7280;text-align:center">no segments</td></tr>'}</tbody>
+                </table>
+            </div>`;
+        positionAglHud(el);
+    }
+    // FFZ editor: ONE altitude band (restrictions.minAlt/maxAlt). Same AGL/Δ/MSL
+    // live-linked editing as the FP rows, but a single row + the FFZ's polygon ground.
+    function renderFfzAglHud(wc) {
+        const r = wc.state.restrictions || {};
+        const minM = num(r.minAlt) ? r.minAlt : null, maxM = num(r.maxAlt) ? r.maxAlt : null;
+        const sid = fpeSiteId();
+        let mode = sid ? (fpeAltModeCache[sid] || null) : null;
+        if (mode === null) { fpeSiteAltMode().then(() => { aglHudSig = ''; renderAglHud(); }); mode = 'detecting'; }
+        const g = ffzGroundSync(wc.id);     // undefined = not fetched, null = no data
+        const sig = 'ffz|' + wc.id + '|' + mode + '|' + minM + ':' + maxM + ':' + g;
+        if (sig === aglHudSig && document.getElementById(AGL_HUD_ID)) return;
+        const ae = document.activeElement;
+        if (ae && ae.classList && ae.classList.contains('aim-agl-in') && document.getElementById(AGL_HUD_ID)) return;
+        aglHudSig = sig;
+        const el = buildAglHud();
+        const isAgl = mode === 'agl';
+        const modeChip = mode === 'detecting' ? '<span style="color:#ffb14e">detecting…</span>'
+            : isAgl ? '<span style="color:#5fff5f">AGL site</span>' : mode === 'msl' ? '<span style="color:#7fdfff">MSL site → showing AGL</span>' : '<span style="color:#ff8a80">mode unknown</span>';
+        const wantGround = (mode === 'msl' || mode === 'agl');
+        const needGround = wantGround && g === undefined;
+        if (needGround && !aglHudBusy && Date.now() >= aglGroundBackoffUntil) {
+            aglHudBusy = true;
+            (async () => { const got = await ensureFfzGround(wc); if (got == null) aglGroundBackoffUntil = Date.now() + 4000; aglHudBusy = false; aglHudSig = ''; renderAglHud(); })();
+        }
+        const gFt = (typeof g === 'number') ? Math.round(g * FT) : null;
+        const C = { agl: '#5fb8ff', delta: '#ffd400', msl: '#ff9f43' };
+        const inS = (col) => `width:100%;box-sizing:border-box;background:#23272e;border:1px solid ${col}66;color:${col};border-radius:5px;padding:6px 4px;font:inherit;font-size:13px;text-align:center`;
+        const dashCell = '<div style="text-align:center;color:#5b6470">…</div>';
+        let aglMin = null, aglMax = null, mslMin = null, mslMax = null, delta = null;
+        if (minM != null && maxM != null) {
+            const sMin = Math.round(minM * FT), sMax = Math.round(maxM * FT);
+            delta = sMax - sMin;
+            if (isAgl) { aglMin = sMin; aglMax = sMax; if (gFt != null) { mslMin = sMin + gFt; mslMax = sMax + gFt; } }
+            else if (mode === 'msl') { mslMin = sMin; mslMax = sMax; if (gFt != null) { aglMin = sMin - gFt; aglMax = sMax - gFt; } }
+        }
+        const da = `data-wc="${wc.id}" data-kind="ffz" data-sig="" data-mode="${mode}" data-gft="${gFt != null ? gFt : ''}"`;
+        const cell = (field, val, col) => (val == null) ? dashCell : `<input class="aim-agl-in" data-field="${field}" ${da} value="${val}" style="${inS(col)}">`;
+        const th = (t, col) => `<th style="padding:0 3px 8px;font-weight:600;text-align:center;color:${col}">${t}</th>`;
+        const loadNote = needGround ? '<span style="color:#ffb14e">loading ground…</span>' : '';
+        el.innerHTML = `
+            <div style="padding:14px 12px 8px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                    <span style="font-size:13px;letter-spacing:0.4px;color:#9aa4af;text-transform:uppercase">FFZ altitude</span>
+                    <button data-aglact="off" title="Show native MSL (Shift+G)" style="background:transparent;color:#9aa4af;border:1px solid #3a3f47;border-radius:6px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px">MSL view</button>
+                </div>
+                <div style="font-size:11px;color:#6b7280;margin-bottom:10px">${xmlEsc(wc.state.name || 'FFZ')} · ${modeChip} · <span style="color:${C.agl}">AGL</span>/<span style="color:${C.delta}">Δ</span>/<span style="color:${C.msl}">MSL</span> link live. ${loadNote}</div>
+                <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+                    <colgroup><col><col><col><col><col></colgroup>
+                    <thead><tr style="font-size:10px">${th('AGL↓', C.agl)}${th('AGL↑', C.agl)}${th('Δ', C.delta)}${th('MSL↓', C.msl)}${th('MSL↑', C.msl)}</tr></thead>
+                    <tbody><tr>
+                        <td style="padding:5px 4px">${cell('aglmin', aglMin, C.agl)}</td>
+                        <td style="padding:5px 4px">${cell('aglmax', aglMax, C.agl)}</td>
+                        <td style="padding:5px 4px">${cell('delta', delta, C.delta)}</td>
+                        <td style="padding:5px 4px">${cell('mslmin', mslMin, C.msl)}</td>
+                        <td style="padding:5px 4px">${cell('mslmax', mslMax, C.msl)}</td>
+                    </tr></tbody>
                 </table>
             </div>`;
         positionAglHud(el);
