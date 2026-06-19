@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL view: AGL/Δ/MSL all editable + live-linked, loads every segment — Flight Path Editor v0.40
+
+Round of AGL-view improvements: (1) every segment's ground now **loads top-to-bottom** without scrolling the native list (the per-segment terrain sampling was way too heavy — capped it, so a long path actually finishes); (2) each row now shows **AGL min, AGL max, Δ, MSL min, MSL max — all editable**, and they **cross-update live as you type** (change the AGL and the MSL/Δ move with it, no save needed; it commits to the live path on blur); (3) a **best-effort AGL on Percepto's own hover tooltip** — when you hover an FFZ/FP line and Percepto shows "ALT(ft) … MSL", we append "≈ X – Y ft AGL" (MSL sites only; matched by content since it's Percepto's tooltip, not ours).
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view sits over the native form + looks native — Flight Path Editor v0.39
 
 The AGL view now positions itself **exactly over Percepto's native entity form** (`.upsert-entity__form`) and is restyled to match the site-setup sidebar (flush dark panel, native labels, Ant-style inputs, a "Path sections — AGL ft" heading) so it reads as the native panel rather than a floating box. SAVE/Cancel sit outside the form, so they stay visible/clickable. Shift+G / the "MSL view" button flips back to the native MSL display.
