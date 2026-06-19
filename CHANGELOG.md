@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — AGL editing actually works now (id type bug) — Flight Path Editor v0.44
+
+Editing a band did nothing (no message, value snapped back) because the working-copy lookup compared the flight-path id as a number against the same id read from a DOM attribute as a string — so it never matched and the edit was silently dropped. Coerced both sides; AGL/Δ/MSL edits (and the live cross-update) now commit to the path as intended.
+
+---
+
 ## 2026-06-18 — Flight Path Editor — AGL view: color coding, aligned columns, edit feedback — Flight Path Editor v0.43
 
 The AGL/Δ/MSL columns are now **color-coded** (AGL blue, Δ yellow, MSL orange — titles and boxes) and the **headers line up** with the input boxes (fixed table layout). Editing now gives clear feedback: a small change that's below the **whole-metre storage step** (~3 ft) tells you it snapped back (try ≥3 ft), and a successful edit confirms the stored band — so "it reverted" is never silent. Tooltip AGL also falls back to the nearest segment's ground so it shows up reliably.
