@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.35
+// @version      0.36
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.35';
+    const SCRIPT_VERSION = '0.36';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -80,6 +80,41 @@
     function saveSettings() {
         try { if (typeof GM_setValue === 'function') GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); }
         catch (e) { warn('saveSettings failed', e); }
+    }
+
+    // ---- MSL vs AGL site mode (SAFETY-CRITICAL — mirrors the Asset Inspector) ----
+    // Percepto stores FP arc min/max_alt as ABSOLUTE MSL on "Mountain terrain"
+    // sites (mountain_terrain=true) and as HEIGHT-ABOVE-GROUND (AGL) on non-mountain
+    // sites. Smart-altitude is terrain-FOLLOWING: it only makes sense on MSL sites
+    // (band = ground + floor). On AGL sites the stored value is already terrain-
+    // independent, so a lateral move must NOT change it and no terrain steps are
+    // needed. Writing an MSL-style ground+floor (~ground 290 m) onto an AGL site is
+    // read as ~950 ft ABOVE GROUND — catastrophic. Confirmed live 2026-06-18 on
+    // site 1502 (MT on=MSL) + 285 (MT off=AGL).
+    const fpeAltModeCache = {};
+    function fpeSiteId() {
+        const h = (unsafeWindow.location && unsafeWindow.location.hash) || location.hash || '';
+        const m = h.match(/#\/site\/(\d+)\//);
+        return m ? m[1] : null;
+    }
+    async function fpeSiteAltMode() {
+        const sid = fpeSiteId();
+        if (!sid) return 'unknown';
+        if (fpeAltModeCache[sid]) return fpeAltModeCache[sid];
+        let mode = 'unknown';
+        try {
+            const r = await fetch(`https://percepto.app/sites/${sid}/`, { credentials: 'same-origin' });
+            if (r.ok) { const j = await r.json(); if (typeof j.mountain_terrain === 'boolean') mode = j.mountain_terrain ? 'msl' : 'agl'; }
+        } catch (e) { warn('alt-mode fetch failed', e); }
+        if (mode !== 'unknown') fpeAltModeCache[sid] = mode; // don't cache a transient fetch failure
+        log(`site ${sid} altitude mode = ${mode.toUpperCase()} (mountain_terrain → ${mode === 'msl' ? 'true' : mode === 'agl' ? 'false' : '?'})`);
+        return mode;
+    }
+    // Raw AGL band (no ground term) — what an AGL site stores for floor/floor+band.
+    function aglBand() {
+        const minM = Math.round(settings.floorFt * FT_TO_M);
+        const maxM = Math.max(minM + 1, Math.round((settings.floorFt + settings.bandFt) * FT_TO_M));
+        return { min_alt: minM, max_alt: maxM, min_emergency_alt: minM };
     }
 
     const log = (...a) => { try { (unsafeWindow.console || console).log(TAG, ...a); } catch (e) {} };
@@ -824,9 +859,18 @@
     }
 
     // ---- plan one segment: returns its replacement sub-arcs (≥1; >1 means steps added) ----
-    async function planArc(arc) {
+    async function planArc(arc, mode) {
         const A = arc.point_a, B = arc.point_b;
         if (!finitePt(A) || !finitePt(B)) return null;
+        if (mode === 'agl') {
+            // AGL site: altitude is height-above-ground (terrain-independent). No
+            // terrain sampling, no step vertices — just the flat raw AGL band. (The
+            // auto-pass also won't even reach here for an already-banded segment; see
+            // computePlan's AGL filter, which preserves a moved segment's band.)
+            const b = aglBand();
+            return [{ ...arc, point_a: clone(A), point_b: clone(B), distance: hav(A, B),
+                min_alt: b.min_alt, max_alt: b.max_alt, min_emergency_alt: b.min_emergency_alt, id: arc.id }];
+        }
         const distM = hav(A, B) || 0;
         const n = Math.max(3, Math.min(SMART_MAX_SAMPLES, Math.ceil(distM / (SMART_SAMPLE_SPACING_FT * FT_TO_M)) + 1));
         const pts = [];
@@ -868,14 +912,23 @@
     }
 
     // ---- build a full plan for a path from a set of target arc signatures ----
-    async function computePlan(fpId, targetSigs) {
+    async function computePlan(fpId, targetSigs, force) {
         const wc0 = findFpWorkingCopies().find(w => w.id === fpId);
         if (!wc0) return null;
-        const targets = (wc0.state.arcs || []).filter(a => targetSigs.has(arcSig(a)));
+        const mode = await fpeSiteAltMode();
+        if (mode === 'unknown') return { error: 'site altitude mode unknown (could not read the Mountain-terrain flag) — not touching altitudes' };
+        let targets = (wc0.state.arcs || []).filter(a => targetSigs.has(arcSig(a)));
+        if (mode === 'agl' && !force) {
+            // AGL: a lateral move never changes height-above-ground, so PRESERVE any
+            // segment that already has a valid band. Only band genuinely unbanded
+            // (freshly drawn) segments. The manual ⛰ Smart-fill button passes force
+            // to deliberately re-apply the AGL band to everything.
+            targets = targets.filter(a => !(num(a.min_alt) && num(a.max_alt) && a.max_alt > a.min_alt));
+        }
         if (!targets.length) return null;
         const planned = [];
         const unresolved = []; // targets we couldn't band (no elevation yet) — keep them retry-able
-        for (const a of targets) { const sub = await planArc(a); if (sub && sub.length) planned.push({ sig: arcSig(a), subArcs: sub }); else unresolved.push(arcSig(a)); }
+        for (const a of targets) { const sub = await planArc(a, mode); if (sub && sub.length) planned.push({ sig: arcSig(a), subArcs: sub }); else unresolved.push(arcSig(a)); }
         if (!planned.length) return unresolved.length ? { error: 'no elevation data yet', unresolved } : null;
         const wc = findFpWorkingCopies().find(w => w.id === fpId);
         if (!wc || !wc.dispatch) return null;
@@ -908,7 +961,7 @@
         const post = checkFlightPath({ arcs: newArcs, coords: newCoords });
         const fresh = post.filter(p => !preIssues.includes(p));
         if (fresh.length) return { error: fresh[0] };
-        return { fpId, name: st.name, origArcs, origCoords, newArcs, newCoords, interiorPts, addedVerts: interiorPts.length, bridges: bridges.length, targets: planned.length, preIssues, unresolved };
+        return { fpId, name: st.name, mode, origArcs, origCoords, newArcs, newCoords, interiorPts, addedVerts: interiorPts.length, bridges: bridges.length, targets: planned.length, preIssues, unresolved };
     }
 
     // ---- commit a plan into the working copy (same write path as the splitter) ----
@@ -938,7 +991,10 @@
         procState.set(plan.fpId, { count: plan.newArcs.length, sigs: resolvedSigs });
         log(`smart altitude on "${plan.name}": ${plan.targets} segment(s) → +${plan.addedVerts} step(s), ${plan.newArcs.length} arcs, ${plan.bridges} seam bridge(s) (validated · live working copy)`);
         renderPanel();
-        toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft). ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
+        const bandNote = plan.mode === 'agl'
+            ? `AGL band +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft (height above ground)`
+            : `bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft)`;
+        toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, ${bandNote}. ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
         verifyEdit(plan.fpId, plan.preIssues, plan.newArcs.length, 'Smart altitude');
         return true;
     }
@@ -1010,7 +1066,7 @@
         const sigs = new Set((wc.state.arcs || []).map(arcSig));
         elevRateLimited = false;
         toast('⛰ Analyzing terrain under the path…', '#7fdfff');
-        const plan = await computePlan(wc.id, sigs);
+        const plan = await computePlan(wc.id, sigs, true); // manual = force re-band (incl. AGL)
         if (!plan) { toast(elevRateLimited ? '⛰ Percepto’s elevation quota is exhausted — paused ~60s. Wait, then try ⛰ Smart-fill again (or pre-cache via the Asset Inspector’s elevation pass).' : 'Smart-fill: no elevation data / nothing to do.', '#ffb14e'); return; }
         if (plan.error) { toast(`⛰ Smart-fill blocked: ${plan.error}. Path untouched.`, '#ff8a80'); return; }
         showPreview(plan);

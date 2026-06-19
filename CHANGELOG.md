@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-18 — Flight Path Editor — Smart Altitude no longer clobbers AGL-site flight paths (latest/ dev only) — Flight Path Editor v0.36
+
+On a non-mountain (AGL) site, moving a flight-path vertex was auto-rewriting that segment's altitude to a ground+100 ft **MSL** value — e.g. a correct **167 ft** band jumped to **~965 ft AGL**. Smart Altitude is terrain-following, which only applies to **Mountain-terrain (MSL)** sites; on AGL sites the stored value is already height-above-ground, so a lateral move must not touch it. The editor now reads the site's Mountain-terrain flag: on AGL sites it **preserves an existing band** on a move and only applies a flat raw-AGL band (floor / floor+band, no ground, no terrain steps) to genuinely new segments; on MSL sites it's unchanged. If the flag can't be read, it leaves altitudes alone. (⛰ Smart-fill button still force-applies the configured band on purpose.)
+
+---
+
 ## 2026-06-18 — Site Setup Generator — MSL vs AGL site awareness for FFZ altitudes (latest/ dev only) — Asset Inspector v4.84
 
 The generator now knows whether a site stores altitudes as **absolute MSL** or **height-above-ground (AGL)** and writes the right reference — getting this wrong would put a drone thousands of feet off. It reads the site's **Mountain terrain** flag (`mountain_terrain`: on = MSL, off = AGL), shows the detected mode in an **Altitude reference** banner you can override, and converts accordingly: MSL sites store `DEM ground + AGL`, AGL sites store the raw AGL height (no ground). Generating, recompute-on-edit, and the FFZ tooltips are all mode-aware (tooltip shows "ft AGL" vs "ft MSL"). If the flag can't be read, altitude writes are blocked until you pick a mode. Confirmed against live sites 1502 (MSL) and 285 (AGL).
