@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Flight Path Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.41
+// @version      0.42
 // @description  Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -64,7 +64,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.41';
+    const SCRIPT_VERSION = '0.42';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1468,14 +1468,15 @@
     // Write a segment's new stored band (ft) into the live working copy — gated by the
     // same integrity check + undo as the splitter. Backend stays in its native unit.
     async function applyBandEdit(wcId, sig, minFt, maxFt) {
-        if (!num(minFt) || !num(maxFt)) return;
+        if (!num(minFt) || !num(maxFt)) { log('AGL-edit: non-numeric band, ignored'); return; }
         const wc = findFpWorkingCopies().find(w => w.id === wcId);
         if (!wc || !wc.dispatch) { toast('Open the flight path editor to apply.', '#ff8a80'); return; }
         const arc = (wc.state.arcs || []).find(a => arcSig(a) === sig);
-        if (!arc) { aglHudSig = ''; renderAglHud(); return; }
+        if (!arc) { log('AGL-edit: segment not found by sig (geometry changed?)'); aglHudSig = ''; renderAglHud(); return; }
         const minM = Math.round(minFt * FT_TO_M);
         let maxM = Math.round(maxFt * FT_TO_M); if (maxM <= minM) maxM = minM + 1;
-        if (minM === arc.min_alt && maxM === arc.max_alt) return; // no change
+        log(`AGL-edit: ${sig.slice(0, 16)} min_alt ${arc.min_alt}→${minM}m  max_alt ${arc.max_alt}→${maxM}m`);
+        if (minM === arc.min_alt && maxM === arc.max_alt) { log('AGL-edit: no net change (rounded to same meters)'); return; }
         const newArcs = (wc.state.arcs || []).map(a => arcSig(a) !== sig ? a : ({ ...a, min_alt: minM, max_alt: maxM, min_emergency_alt: minM }));
         // Connected arcs must keep a >0 (server: ≥2 m) overlapping band or the path
         // 400s on save. Changing one segment's band almost always breaks that overlap
@@ -1486,11 +1487,22 @@
         const pre = checkFlightPath(wc.state);
         const post = checkFlightPath({ arcs: newArcs, coords: wc.state.coords });
         const fresh = post.filter(p => !pre.includes(p));
-        if (fresh.length) { toast(`Edit blocked: ${fresh[0]}. Segment untouched.`, '#ff8a80'); aglHudSig = ''; renderAglHud(); return; }
+        if (fresh.length) { log(`AGL-edit BLOCKED by integrity check: ${fresh[0]}`); toast(`Edit blocked: ${fresh[0]}. Segment untouched.`, '#ff8a80'); aglHudSig = ''; renderAglHud(); return; }
         undoStack.push({ id: wcId, name: wc.state.name, kind: 'agl', arcs: clone(wc.state.arcs), coords: clone(wc.state.coords) });
         wc.dispatch({ ...wc.state, arcs: newArcs });
+        log('AGL-edit: dispatched to working copy');
         renderPanel();
         aglHudSig = ''; renderAglHud();
+        // Verify the write actually stuck in React's committed state (diagnoses the
+        // "reverts back" report — tells us if dispatch is being overwritten on re-render).
+        setTimeout(() => {
+            try {
+                const w2 = findFpWorkingCopies().find(w => w.id === wcId);
+                const a2 = w2 && (w2.state.arcs || []).find(a => arcSig(a) === sig);
+                if (a2) log(`AGL-edit VERIFY (+600ms): committed min_alt=${a2.min_alt}m max_alt=${a2.max_alt}m (wanted ${minM}/${maxM}) — ${a2.min_alt === minM ? 'STUCK ✓' : 'REVERTED ✗'}`);
+                else log('AGL-edit VERIFY: segment gone');
+            } catch (e) {}
+        }, 600);
     }
     function buildAglHud() {
         let el = document.getElementById(AGL_HUD_ID);
@@ -1557,7 +1569,7 @@
         const inp = e.target;
         if (!inp || !inp.classList || !inp.classList.contains('aim-agl-in')) return;
         const b = bandFromInput(inp);
-        if (!b) { aglHudSig = ''; renderAglHud(); return; }
+        if (!b) { log(`AGL-edit: could not derive a band from field "${inp.getAttribute('data-field')}" (value ${inp.value}, gft ${inp.getAttribute('data-gft')}) — reverting display`); aglHudSig = ''; renderAglHud(); return; }
         applyBandEdit(inp.getAttribute('data-wc'), inp.getAttribute('data-sig'), b.minFt, b.maxFt).catch(err => warn('applyBandEdit threw', err));
     }
     function renderAglHud() {
@@ -1727,10 +1739,16 @@
             const sid = fpeSiteId(); const mode = sid ? fpeAltModeCache[sid] : null;
             if (mode == null) { fpeSiteAltMode(); return; }
             if (mode !== 'msl') return;            // AGL sites already display AGL
-            el.setAttribute('data-aim-agl', '1');  // claim it so we don't loop / dup
             if (!lastMapLL) return;
-            const g = groundAtSync(lastMapLL.lat, lastMapLL.lng);
-            if (g == null) { try { fetchElevation(lastMapLL.lat, lastMapLL.lng); } catch (e) {} return; } // warm for next hover
+            let g = groundAtSync(lastMapLL.lat, lastMapLL.lng);
+            if (g == null) {
+                // The tooltip is on an FFZ/FP line — fall back to the nearest FP
+                // segment's already-loaded max-ground (the HUD warms them all).
+                const near = findNearestArc(lastMapLL.lat, lastMapLL.lng);
+                if (near && arcGroundCache.has(arcSig(near.arc))) g = arcGroundCache.get(arcSig(near.arc));
+            }
+            if (g == null) { try { fetchElevation(lastMapLL.lat, lastMapLL.lng); } catch (e) {} return; } // warm; NOT marked → re-hover retries
+            el.setAttribute('data-aim-agl', '1');  // mark only once we actually augment (so a cold spot stays retryable)
             const gFt = g * 3.28084;
             const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt), hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
             // AGL on TOP and bigger (what the user cares about); Percepto's MSL line stays below.
