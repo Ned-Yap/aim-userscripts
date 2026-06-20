@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.74
+// @version      0.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.74';
+    const SCRIPT_VERSION = '0.75';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1665,7 +1665,7 @@
                 #${PANEL_ID} { font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
                 /* Header: green centered title on a subtle dark bar, matching the Site Setup SUM look/feel. */
                 #${PANEL_ID} .aim-mb-header { background: rgba(95,255,95,0.06); color: #5fff5f; padding: 8px 12px; cursor: move; display: flex; align-items: center; gap: 8px; user-select: none; border-bottom: 1px solid rgba(255,255,255,0.08); border-radius: 6px 6px 0 0; flex-shrink: 0; }
-                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; text-align: center; color: #5fff5f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; text-align: left; color: #5fff5f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
                 #${PANEL_ID} .aim-mb-header-btn { background: rgba(95,255,95,0.12); border: 1px solid rgba(95,255,95,0.4); color: #5fff5f; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
                 #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(95,255,95,0.25); }
                 /* Body is a flex column so toolbar + footer stay pinned and only the table scrolls. */
@@ -1786,7 +1786,7 @@
         const header = document.createElement('div');
         header.className = 'aim-mb-header';
         header.innerHTML = `
-            <div class="aim-mb-header-title">📋 Mission Summary — <span data-site></span></div>
+            <div class="aim-mb-header-title">📋 Mission Bank Summary — <span data-site></span></div>
             <button class="aim-mb-header-btn" data-refresh title="Re-fetch missions">Refresh</button>
             <button class="aim-mb-header-btn" data-close>✕</button>
         `;
@@ -1890,7 +1890,7 @@
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
         const site = name || (sid ? `Site ${sid}` : '?');
-        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : '📋 Mission Summary';
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : '📋 Mission Bank Summary';
         if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
