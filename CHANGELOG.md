@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — green SUM header + Mission SOP Validators — Mission Bank Tools v0.73 (dev/latest only)
+
+Two additions to the dev build of Mission Bank Tools:
+
+- **SUM header** recolored to the green-accent, centered-title look on a subtle dark bar, matching the Site Setup SUM's look and feel (was a solid cyan bar).
+- **Mission SOP Validators** — a new Control Panel section ("Mission SOP", scope Mission Bank) with a **site-type preset** selector (OIL · Upstream / OIL · Downstream / T&D), per-check enables + editable thresholds, and a **🚩 Run SOP check** button that lists every violation in a floating report (click a mission to open it). Five checks: Navigate inside an FFZ, Navigate ≥ FFZ floor, Snapshot ≥ min AGL (0 ft default), scan-block balance (one Thermal/GEM/Wait set per snapshot), and Navigate↔Snapshot distance (96–204 ft, Upstream). Upstream ships the live numbers; the other presets inherit them (editable) until their SOPs are defined. Existing bulk altitude editing is unchanged.
+
+---
+
 ## 2026-06-18 — Flight Path Editor → renamed "AIM Map Editor" — Map Editor v0.46
 
 Renamed the script: it started as a flight-path tool but now also edits FFZ altitudes and carries the AGL view, so "Flight Path Editor" was misleading. Now **AIM Map Editor** (file `AIM_Map_Editor.user.js`). Settings + Control Panel customizations carry over (internal ids unchanged); the Control Panel entry now reads "Map Editor". Since it's a dev/personal script, the old install just needs a one-time uninstall + reinstall of the renamed one. No behavior change.

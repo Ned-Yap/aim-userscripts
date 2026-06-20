@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.72
+// @version      0.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.72';
+    const SCRIPT_VERSION = '0.73';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -187,6 +187,7 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') {
                 registerWithControlPanel();
+                registerMissionSop();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -198,6 +199,14 @@
                         runSumInjection();
                     }
                 }
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
+                handleMissionSopToggle(msg);
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
+                // The Mission Bank UI (and its map) live in the IFRAME — run +
+                // render the report there only, so the action fires exactly once.
+                if (CONTEXT !== 'IFRAME') return;
+                if (msg.actionId === 'mission-sop-run') runMissionSopAndReport();
+                else if (msg.actionId === 'mission-sop-close') closeSopReport();
             }
         };
     }
@@ -1618,10 +1627,11 @@
             style.id = 'aim-mb-styles';
             style.textContent = `
                 #${PANEL_ID} { font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
-                #${PANEL_ID} .aim-mb-header { background: #14d2dc; color: #000; padding: 6px 12px; cursor: move; display: flex; align-items: center; gap: 10px; user-select: none; border-radius: 6px 6px 0 0; flex-shrink: 0; }
-                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-                #${PANEL_ID} .aim-mb-header-btn { background: rgba(0,0,0,0.15); border: none; color: #000; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
-                #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(0,0,0,0.3); }
+                /* Header: green centered title on a subtle dark bar, matching the Site Setup SUM look/feel. */
+                #${PANEL_ID} .aim-mb-header { background: rgba(95,255,95,0.06); color: #5fff5f; padding: 8px 12px; cursor: move; display: flex; align-items: center; gap: 8px; user-select: none; border-bottom: 1px solid rgba(255,255,255,0.08); border-radius: 6px 6px 0 0; flex-shrink: 0; }
+                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; text-align: center; color: #5fff5f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-header-btn { background: rgba(95,255,95,0.12); border: 1px solid rgba(95,255,95,0.4); color: #5fff5f; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
+                #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(95,255,95,0.25); }
                 /* Body is a flex column so toolbar + footer stay pinned and only the table scrolls. */
                 #${PANEL_ID} .aim-mb-body { flex: 1; overflow: hidden; background: #0f1216; display: flex; flex-direction: column; }
                 #${PANEL_ID} .aim-mb-toolbar { background: #1a1a1a; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
@@ -4371,6 +4381,347 @@ ${placemarks}
         }[c]));
     }
 
+    // ============================================================
+    // MISSION SOP VALIDATORS  (Phase 1)
+    // ------------------------------------------------------------
+    // Geometric/structural SOP checks over the site's missions, the
+    // mission-side twin of the Site Setup SOP Validators in the Asset
+    // Inspector. Registered as their OWN Control Panel section (second
+    // scriptId, scope 'mission-bank') with a site-type PRESET selector,
+    // per-check enables + editable thresholds, and a "🚩 Run check"
+    // action that lists every violation in a floating report.
+    //
+    // 5 checks (per the SOP spec):
+    //   1. navInFfz     — no Navigate is OUTSIDE an FFZ
+    //   2. navAboveFfz  — no Navigate is lower than the FFZ it sits in
+    //   3. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
+    //   4. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
+    //   5. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
+    //
+    // Presets are pluggable: add a key to MISSION_SOP_PRESETS and it
+    // appears in the selector. Per-preset threshold/enable EDITS persist
+    // separately (MISSION_SOP_OVERRIDES_KEY) so switching presets never
+    // loses a tweak. Only Upstream ships real SOP numbers today; the
+    // others inherit the same defaults until their SOPs are defined.
+    // ============================================================
+    const MISSION_SOP_SCRIPT_ID = 'aim-mission-sop';
+    const MISSION_SOP_PRESET_KEY = 'aim-mb-sop-preset';
+    const MISSION_SOP_OVERRIDES_KEY = 'aim-mb-sop-overrides';
+    const MISSION_SOP_ENABLED_KEY = 'aim-mb-sop-enabled';
+    const SOP_REPORT_ID = 'aim-mb-sop-report';
+
+    // Per-check default enables (shared across presets unless overridden).
+    const MISSION_SOP_ENABLE_DEFAULTS = {
+        navInFfz: true, navAboveFfz: true, snapAgl: true, blockBalance: true, navSnapDist: true,
+    };
+    // Threshold defaults per preset. Upstream = the live SOP numbers.
+    // Downstream / T&D start as copies (editable) until their SOPs land.
+    const UPSTREAM_THRESH = {
+        navSnapMinFt: 96,   // Navigate→Snapshot min standoff
+        navSnapMaxFt: 204,  // Navigate→Snapshot max standoff
+        snapMinAglFt: 0,    // Snapshot must be at/above this AGL
+        navFloorTolFt: 0,   // slack on "Navigate ≥ FFZ min alt"
+    };
+    const MISSION_SOP_PRESETS = {
+        upstream:   { label: 'OIL · Upstream',   thresholds: { ...UPSTREAM_THRESH } },
+        downstream: { label: 'OIL · Downstream', thresholds: { ...UPSTREAM_THRESH } },
+        td:         { label: 'T&D',              thresholds: { ...UPSTREAM_THRESH } },
+    };
+
+    function loadSopPreset() {
+        const k = gmGet(MISSION_SOP_PRESET_KEY, 'upstream');
+        return MISSION_SOP_PRESETS[k] ? k : 'upstream';
+    }
+    let sopPreset = loadSopPreset();
+    function loadSopOverrides() {
+        const o = gmGet(MISSION_SOP_OVERRIDES_KEY, null);
+        return (o && typeof o === 'object') ? o : {};
+    }
+    let sopOverrides = loadSopOverrides();
+    function loadSopEnabled() {
+        const e = gmGet(MISSION_SOP_ENABLED_KEY, null);
+        return Object.assign({}, MISSION_SOP_ENABLE_DEFAULTS, (e && typeof e === 'object') ? e : {});
+    }
+    let sopEnabled = loadSopEnabled();
+    let sopMasterEnabled = true;
+
+    // Effective thresholds = preset defaults with this preset's saved edits applied.
+    function effectiveSopThresholds() {
+        const base = MISSION_SOP_PRESETS[sopPreset].thresholds;
+        const ov = (sopOverrides[sopPreset] && sopOverrides[sopPreset].thresholds) || {};
+        return Object.assign({}, base, ov);
+    }
+    function setSopThreshold(id, value) {
+        if (!sopOverrides[sopPreset]) sopOverrides[sopPreset] = { thresholds: {} };
+        if (!sopOverrides[sopPreset].thresholds) sopOverrides[sopPreset].thresholds = {};
+        sopOverrides[sopPreset].thresholds[id] = value;
+        gmSet(MISSION_SOP_OVERRIDES_KEY, sopOverrides);
+    }
+
+    // --- geometry helpers (self-contained; ring = [{lat,lng}]) -----------
+    function sopPointInPolygon(pt, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i].lat, xi = ring[i].lng;
+            const yj = ring[j].lat, xj = ring[j].lng;
+            const intersect = ((yi > pt.lat) !== (yj > pt.lat)) &&
+                (pt.lng < (xj - xi) * (pt.lat - yi) / ((yj - yi) || 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    function sopHaversineFt(a, b) {
+        const R = 6371000; // m
+        const toRad = d => d * Math.PI / 180;
+        const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+        const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+        return (2 * R * Math.asin(Math.min(1, Math.sqrt(s)))) * 3.28084;
+    }
+
+    // Fetch the site's FFZs (type 16) → [{ring, minAltM}]. Cookie auth,
+    // same endpoint the Asset Inspector uses. Cached per site for the
+    // session so repeat runs don't re-hit the network.
+    const sopFfzCache = {};
+    function fetchSiteFfzs(siteID) {
+        if (sopFfzCache[siteID]) return Promise.resolve(sopFfzCache[siteID]);
+        const url = `https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
+        return fetch(url, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => {
+                const list = Array.isArray(arr) ? arr : (arr && arr.objects) || [];
+                const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({
+                        ring: e.coords.map(c => ({ lat: c.lat, lng: c.lng })),
+                        minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null,
+                        name: e.name || '',
+                    }));
+                sopFfzCache[siteID] = ffzs;
+                return ffzs;
+            });
+    }
+
+    // Core check. Returns { violations:[{missionId,missionName,check,stepIndex,detail,severity}], ffzCount, missionCount }.
+    async function runMissionSop(missions, ffzs) {
+        const th = effectiveSopThresholds();
+        const violations = [];
+
+        // Pre-warm DEM cache for all snapshot points (AGL check).
+        if (sopEnabled.snapAgl) {
+            const pts = [];
+            missions.forEach(m => realSteps(m.instructions).forEach(s => {
+                if (s.type_name === 'snapshot' && s.location) pts.push({ lat: s.location.lat, lng: s.location.lng });
+            }));
+            if (pts.length) { try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} SOP DEM prefetch failed`, e); } }
+        }
+
+        for (const m of missions) {
+            const steps = realSteps(m.instructions);
+            const ctx = { id: m.id, name: m.name || `Mission ${m.id}` };
+            let lastNav = null;                 // governing Navigate for snapshots below it
+            let snapN = 0, camOn = 0, camOff = 0, gemOn = 0, gemOff = 0, waitN = 0;
+
+            steps.forEach((s, i) => {
+                if (s.type_name === 'navigate') {
+                    lastNav = s;
+                    if (!s.location) return;
+                    // 1. Navigate must be inside some FFZ.
+                    const containing = ffzs.find(f => sopPointInPolygon(s.location, f.ring));
+                    if (sopEnabled.navInFfz && ffzs.length && !containing) {
+                        violations.push({ ...ctx, check: 'Navigate outside FFZ', stepIndex: s.index_in_app,
+                            detail: 'Navigate point is not inside any Free-Fly Zone', severity: 'high' });
+                    }
+                    // 2. Navigate altitude ≥ containing FFZ min alt (− tolerance).
+                    if (sopEnabled.navAboveFfz && containing && typeof containing.minAltM === 'number' && typeof s.value1 === 'number') {
+                        const navFt = s.value1 * 3.28084, floorFt = containing.minAltM * 3.28084;
+                        if (Math.round(navFt) < Math.round(floorFt) - th.navFloorTolFt) {
+                            violations.push({ ...ctx, check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
+                                detail: `Navigate ${Math.round(navFt)} ft < FFZ min ${Math.round(floorFt)} ft${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                        }
+                    }
+                } else if (s.type_name === 'snapshot') {
+                    snapN++;
+                    // 3. Snapshot AGL ≥ min (default 0 → not underground).
+                    if (sopEnabled.snapAgl && s.location && typeof s.value1 === 'number') {
+                        const groundM = getElevationFromCache(s.location.lat, s.location.lng);
+                        if (typeof groundM === 'number') {
+                            const aglFt = (s.value1 - groundM) * 3.28084;
+                            if (Math.round(aglFt) < th.snapMinAglFt) {
+                                violations.push({ ...ctx, check: 'Snapshot below min AGL', stepIndex: s.index_in_app,
+                                    detail: `Snapshot AGL ${Math.round(aglFt)} ft < min ${th.snapMinAglFt} ft`, severity: 'high' });
+                            }
+                        }
+                    }
+                    // 5. Navigate→Snapshot distance within band.
+                    if (sopEnabled.navSnapDist && lastNav && lastNav.location && s.location) {
+                        const dFt = sopHaversineFt(lastNav.location, s.location);
+                        if (dFt < th.navSnapMinFt || dFt > th.navSnapMaxFt) {
+                            violations.push({ ...ctx, check: 'Navigate↔Snapshot distance', stepIndex: s.index_in_app,
+                                detail: `${Math.round(dFt)} ft (allowed ${th.navSnapMinFt}–${th.navSnapMaxFt} ft)`, severity: 'warn' });
+                        }
+                    }
+                } else if (s.type_name === 'cameraSelect') {
+                    if (s.value1) camOn++; else camOff++;
+                } else if (s.type_name === 'gemMode') {
+                    if (Number(s.value1) === 1) gemOn++; else gemOff++;
+                } else if (s.type_name === 'wait') {
+                    waitN++;
+                }
+            });
+
+            // 4. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
+            if (sopEnabled.blockBalance) {
+                const parts = [];
+                if (camOn !== snapN) parts.push(`Thermal-on ${camOn}`);
+                if (camOff !== snapN) parts.push(`Thermal-off ${camOff}`);
+                if (gemOn !== snapN) parts.push(`GEM-on ${gemOn}`);
+                if (gemOff !== snapN) parts.push(`GEM-off ${gemOff}`);
+                if (waitN !== snapN) parts.push(`Wait ${waitN}`);
+                if (parts.length) {
+                    violations.push({ ...ctx, check: 'Scan-block mismatch', stepIndex: null,
+                        detail: `${snapN} snapshot${snapN === 1 ? '' : 's'} but ${parts.join(', ')}`, severity: 'high' });
+                }
+            }
+        }
+        return { violations, ffzCount: ffzs.length, missionCount: missions.length };
+    }
+
+    // Run over the current site's missions (fetch if cold) and show report.
+    function runMissionSopAndReport() {
+        if (!sopMasterEnabled) { renderSopReport({ error: 'Mission SOP validators are disabled in the Control Panel.' }); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { renderSopReport({ error: 'No site loaded' }); return; }
+        renderSopReport({ loading: 'Loading missions…' });
+        const go = (missions) => {
+            renderSopReport({ loading: 'Fetching FFZs + ground elevations…' });
+            fetchSiteFfzs(sid)
+                .then(ffzs => runMissionSop(missions, ffzs))
+                .then(res => renderSopReport(res))
+                .catch(e => { console.warn(`${TAG} SOP run failed`, e); renderSopReport({ error: e.message || String(e) }); });
+        };
+        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
+        if (Array.isArray(cached) && cached.length) go(cached);
+        else fetchMissions(sid, go, (err) => renderSopReport({ error: err }));
+    }
+
+    // --- floating report popup -------------------------------------------
+    function closeSopReport() {
+        const el = document.getElementById(SOP_REPORT_ID);
+        if (el) el.remove();
+    }
+    function renderSopReport(state) {
+        closeSopReport();
+        const pop = document.createElement('div');
+        pop.id = SOP_REPORT_ID;
+        pop.style.cssText = 'position:fixed;top:80px;right:24px;width:440px;max-height:72vh;z-index:2147483600;' +
+            'background:#0f1216;border:1px solid rgba(95,255,95,0.4);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6);' +
+            "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
+        const presetLabel = MISSION_SOP_PRESETS[sopPreset].label;
+        let body;
+        if (state.error) {
+            body = `<div style="padding:16px;color:#ff8a80">⚠ ${escapeHtml(state.error)}</div>`;
+        } else if (state.loading) {
+            body = `<div style="padding:16px;color:#9ad">${escapeHtml(state.loading)}</div>`;
+        } else {
+            const v = state.violations || [];
+            // Group by mission.
+            const byMission = {};
+            v.forEach(x => { (byMission[x.id] = byMission[x.id] || { name: x.name, items: [] }).items.push(x); });
+            const missionsWith = Object.keys(byMission).length;
+            const clean = state.missionCount - missionsWith;
+            const highN = v.filter(x => x.severity === 'high').length;
+            const sevColor = s => s === 'high' ? '#ff5252' : '#ffd54f';
+            const rows = Object.keys(byMission).map(mid => {
+                const g = byMission[mid];
+                const items = g.items.map(it => `
+                    <div style="display:flex;gap:8px;padding:3px 0;font-size:11px;border-top:1px solid rgba(255,255,255,0.05)">
+                        <span style="color:${sevColor(it.severity)};font-weight:700;flex-shrink:0">${it.severity === 'high' ? '●' : '▲'}</span>
+                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${escapeHtml(it.detail)}</span></span>
+                    </div>`).join('');
+                return `
+                    <div class="aim-sop-mrow" data-mid="${mid}" style="padding:7px 12px;border-bottom:1px solid #1f2430;cursor:pointer">
+                        <div style="font-weight:700;font-size:12px;color:#5fff5f">${escapeHtml(g.name)} <span style="color:#888;font-weight:400">· ${g.items.length} issue${g.items.length === 1 ? '' : 's'}</span></div>
+                        ${items}
+                    </div>`;
+            }).join('');
+            const summary = v.length === 0
+                ? `<span style="color:#5fff5f">✓ All ${state.missionCount} mission${state.missionCount === 1 ? '' : 's'} pass.</span>`
+                : `<strong style="color:#ff5252">${v.length}</strong> issue${v.length === 1 ? '' : 's'} (${highN} hard) across <strong>${missionsWith}</strong> mission${missionsWith === 1 ? '' : 's'} · <span style="color:#5fff5f">${clean} clean</span>`;
+            body = `
+                <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">
+                    ${summary}<br><span style="color:#777">${state.ffzCount} FFZ${state.ffzCount === 1 ? '' : 's'} · preset ${escapeHtml(presetLabel)} · click a mission to open it</span>
+                </div>
+                <div style="overflow:auto">${rows || '<div style="padding:16px;color:#5fff5f">No violations 🎉</div>'}</div>`;
+        }
+        pop.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
+                <div style="flex:1;text-align:center;font-weight:700;color:#5fff5f;font-size:13px">🚩 Mission SOP Check</div>
+                <button data-sop-rerun style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">Re-run</button>
+                <button data-sop-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
+            </div>
+            ${body}`;
+        document.body.appendChild(pop);
+        pop.querySelector('[data-sop-x]').onclick = closeSopReport;
+        pop.querySelector('[data-sop-rerun]').onclick = runMissionSopAndReport;
+        pop.querySelectorAll('.aim-sop-mrow').forEach(r => {
+            r.onclick = () => { try { openPanelAndDrill(Number(r.dataset.mid)); } catch (e) { console.warn(`${TAG} drill failed`, e); } };
+        });
+    }
+
+    // --- Control Panel: SOP section --------------------------------------
+    function handleMissionSopToggle(msg) {
+        const id = msg.toggleId;
+        const val = msg.value !== undefined ? msg.value : msg.enabled;
+        if (id === 'sop-master') { sopMasterEnabled = !!val; return; }
+        if (id === 'preset') {
+            if (MISSION_SOP_PRESETS[val] && val !== sopPreset) {
+                sopPreset = val;
+                gmSet(MISSION_SOP_PRESET_KEY, sopPreset);
+                registerMissionSop(); // re-publish so CP shows this preset's thresholds
+            }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopEnabled, id)) {
+            const v = !!val;
+            if (v === sopEnabled[id]) return;
+            sopEnabled[id] = v;
+            gmSet(MISSION_SOP_ENABLED_KEY, sopEnabled);
+            return;
+        }
+        if (typeof msg.value === 'number') {
+            const cur = effectiveSopThresholds();
+            if (Object.prototype.hasOwnProperty.call(cur, id) && msg.value !== cur[id]) {
+                setSopThreshold(id, msg.value);
+            }
+        }
+    }
+    function registerMissionSop() {
+        if (!controlChannel) return;
+        const th = effectiveSopThresholds();
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: MISSION_SOP_SCRIPT_ID, name: 'Mission SOP Validators',
+            description: 'Structural/geometric SOP checks over the site’s missions. Pick a site-type preset, then "Run check" to list every violation.',
+            version: SCRIPT_VERSION, group: 'Mission SOP', scope: 'mission-bank', priority: 30,
+            toggles: [
+                { id: 'sop-master', label: 'Enable mission SOP validators', type: 'boolean', default: true, master: true },
+                { id: 'preset', label: 'Site-type preset', type: 'select', default: sopPreset,
+                    options: Object.keys(MISSION_SOP_PRESETS).map(k => ({ value: k, label: MISSION_SOP_PRESETS[k].label })) },
+                { id: 'navInFfz', label: 'Check · Navigate inside an FFZ', type: 'boolean', default: sopEnabled.navInFfz },
+                { id: 'navAboveFfz', label: 'Check · Navigate ≥ FFZ floor', type: 'boolean', default: sopEnabled.navAboveFfz },
+                { id: 'navFloorTolFt', label: 'Navigate-vs-floor slack', type: 'number', min: 0, max: 100, step: 1, default: th.navFloorTolFt, unit: 'ft' },
+                { id: 'snapAgl', label: 'Check · Snapshot ≥ min AGL', type: 'boolean', default: sopEnabled.snapAgl },
+                { id: 'snapMinAglFt', label: 'Snapshot min AGL', type: 'number', min: -50, max: 200, step: 1, default: th.snapMinAglFt, unit: 'ft' },
+                { id: 'blockBalance', label: 'Check · Scan-block balance per snapshot', type: 'boolean', default: sopEnabled.blockBalance },
+                { id: 'navSnapDist', label: 'Check · Navigate↔Snapshot distance', type: 'boolean', default: sopEnabled.navSnapDist },
+                { id: 'navSnapMinFt', label: 'Navigate↔Snapshot min', type: 'number', min: 0, max: 1000, step: 1, default: th.navSnapMinFt, unit: 'ft' },
+                { id: 'navSnapMaxFt', label: 'Navigate↔Snapshot max', type: 'number', min: 0, max: 2000, step: 1, default: th.navSnapMaxFt, unit: 'ft' },
+                { id: 'mission-sop-run', label: '🚩 Run SOP check', type: 'button', action: 'mission-sop-run' },
+                { id: 'mission-sop-close', label: 'Close report', type: 'button', action: 'mission-sop-close' },
+            ],
+            hotkeys: [],
+        });
+    }
+
     // ========================================================
     // Init
     // ========================================================
@@ -4378,6 +4729,7 @@ ${placemarks}
         console.log(`${TAG} v${SCRIPT_VERSION} init (${CONTEXT})`);
         setupControlPanel();
         registerWithControlPanel();
+        registerMissionSop();
         // Inject the force-show-dots CSS rule into the iframe head.
         // We use a class instead of inline !important styles so cleanup
         // is just removing the class — survives Percepto DOM reuse.
