@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.84
+// @version      0.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.84';
+    const SCRIPT_VERSION = '0.85';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1418,6 +1418,9 @@
     const COMPOSER_PANEL_ID = 'aim-mb-composer';
     const COMPOSER_BTN_ID = 'aim-mb-composer-btn';
     const composerSel = new Set(); // selected instruction ids (strings)
+    let composerMission = null;    // the matched mission (id→data source; order read from DOM)
+    let composerRows = [];         // current grouped rows (for move handlers)
+    let composerBusy = false;      // guard against concurrent reorders
 
     function injectComposerButton() {
         if (CONTEXT !== 'IFRAME') return;
@@ -1491,10 +1494,92 @@
     function openComposer() {
         identifyOpenMission((data) => {
             if (!data) { showToast('Composer: could not match the open mission to the cache. Open the SUM once to load it.', '#ff9800', 4000); return; }
-            const byId = {}; (data.mission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
-            const ordered = data.domIds.map(id => byId[id]).filter(Boolean);
-            renderComposer(data.mission, composerGroup(ordered));
+            composerMission = data.mission;
+            rerenderComposer();
         });
+    }
+
+    // Re-read the LIVE editor order and regroup (the cached mission supplies
+    // each step's data by id; the order comes from the DOM, so this stays
+    // correct after a reorder).
+    function rerenderComposer() {
+        if (!composerMission) return;
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        composerRows = composerGroup(ordered);
+        renderComposer(composerMission, composerRows);
+    }
+
+    // ── Reorder engine (ports the Quick Mission Editor's fiber reorder) ──
+    function composerGetFiber(el) {
+        const k = Object.keys(el).find(kk => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'));
+        return k ? el[k] : null;
+    }
+    const COMPOSER_REORDER_CANDIDATES = [
+        n => n && n.memoizedProps && n.memoizedProps.value && n.memoizedProps.value.reorderInstructions,
+        n => n && n.memoizedProps && n.memoizedProps.reorderInstructions,
+        n => n && n.stateNode && n.stateNode.props && n.stateNode.props.reorderInstructions,
+        n => n && n.stateNode && n.stateNode.reorderInstructions,
+    ];
+    function composerFindReorderFn() {
+        const d = document.querySelector('[data-rfd-draggable-id]');
+        if (!d) return null;
+        let node = composerGetFiber(d), depth = 0;
+        while (node && depth < 80) {
+            for (const p of COMPOSER_REORDER_CANDIDATES) { let fn; try { fn = p(node); } catch (e) {} if (typeof fn === 'function') return fn; }
+            node = node.return; depth++;
+        }
+        console.warn(`${TAG} [composer] reorderInstructions not found after ${depth} fiber levels — Percepto may have refactored.`);
+        return null;
+    }
+    function composerIndexById(id) {
+        return [...document.querySelectorAll('[data-rfd-draggable-id]')].findIndex(el => el.getAttribute('data-rfd-draggable-id') === String(id));
+    }
+    // Wait until the moved item actually lands at expectedIdx (DOM reorder),
+    // or time out. Mirrors the Quick Mission Editor's completion signal.
+    function composerWaitForReorder(movedId, expectedIdx, ms = 3000) {
+        return new Promise(resolve => {
+            let done = false, obs = null, timer = null;
+            const finish = (ok) => { if (done) return; done = true; if (obs) obs.disconnect(); if (timer) clearTimeout(timer); resolve(ok); };
+            const target = document.querySelector('[data-rfd-droppable-id]') || document.querySelector('.mission-edit__content');
+            if (target) {
+                obs = new MutationObserver(() => { if (composerIndexById(movedId) === expectedIdx) finish(true); });
+                obs.observe(target, { childList: true, subtree: true });
+            }
+            timer = setTimeout(() => finish(composerIndexById(movedId) === expectedIdx), ms);
+        });
+    }
+    // Move a set of ids (in order) so they land starting at targetIndex.
+    async function composerMoveIdsToIndex(reorderFn, orderedIds, targetIndex) {
+        let placement = targetIndex;
+        for (const id of orderedIds) {
+            const from = composerIndexById(id);
+            if (from < 0) continue;
+            const to = from < placement ? placement - 1 : placement;
+            if (from === to) { placement = to + 1; continue; }
+            const p = composerWaitForReorder(id, to, 3000);
+            try { reorderFn(from, to); } catch (e) { console.warn(`${TAG} [composer] reorder error`, e); }
+            await p;
+            placement = to + 1;
+        }
+    }
+    // Move composer row i up one row (down = move the row below up). Moves the
+    // whole block (snapshot + its 5 steps) as a unit; persists in Percepto's
+    // live state — the user then hits native SAVE.
+    async function composerMoveRow(i, dir) {
+        if (composerBusy) return;
+        if (dir === 'down') return composerMoveRow(i + 1, 'up');
+        if (i <= 0 || i >= composerRows.length) return;
+        const fn = composerFindReorderFn();
+        if (!fn) { showToast('Composer: reorder unavailable (Percepto changed). Tell me and I’ll re-point it.', '#ff5252', 5000); return; }
+        composerBusy = true;
+        try {
+            const dest = composerIndexById(composerRows[i - 1].ids[0]);
+            if (dest >= 0) await composerMoveIdsToIndex(fn, composerRows[i].ids, dest);
+        } catch (e) { console.warn(`${TAG} [composer] move failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast('Reordered — hit SAVE in the editor to persist.', '#5fff5f', 3500);
     }
 
     function renderComposer(mission, rows) {
@@ -1511,28 +1596,42 @@
             "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
         const navCount = rows.filter(r => r.kind === 'nav').length;
         const blkCount = rows.filter(r => r.kind === 'block').length;
-        const rowHtml = rows.map((r) => {
+        // Index of the first/last MOVABLE row (skip struct rows so the arrows
+        // disable correctly at the real ends).
+        const movable = rows.map((r, idx) => (r.kind === 'nav' || r.kind === 'block') ? idx : -1).filter(i => i >= 0);
+        const firstMov = movable.length ? movable[0] : -1;
+        const lastMov = movable.length ? movable[movable.length - 1] : -1;
+        const moveBtns = (idx) => {
+            const upDis = idx <= firstMov ? 'opacity:0.25;pointer-events:none;' : '';
+            const dnDis = idx >= lastMov ? 'opacity:0.25;pointer-events:none;' : '';
+            const b = 'background:rgba(95,255,95,0.10);border:1px solid rgba(95,255,95,0.35);color:#5fff5f;width:20px;height:18px;line-height:1;border-radius:3px;cursor:pointer;font-size:10px;padding:0;';
+            return `<span style="display:flex;flex-direction:column;gap:1px;margin-left:6px">
+                <button data-cmp-move="up" data-row="${idx}" title="Move up" style="${b}${upDis}">▲</button>
+                <button data-cmp-move="down" data-row="${idx}" title="Move down" style="${b}${dnDis}">▼</button>
+            </span>`;
+        };
+        const rowHtml = rows.map((r, idx) => {
             const idsAttr = r.ids.join(',');
             const checked = r.ids.every(id => composerSel.has(id)) ? 'checked' : '';
             if (r.kind === 'nav') {
                 const altM = typeof r.step.value1 === 'number' ? r.step.value1 : null;
                 const v = r.step.value2;
-                return `<div class="aim-cmp-row" style="padding:6px 10px;border-bottom:1px solid #1f2430;background:rgba(20,210,220,0.06)">
-                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                return `<div class="aim-cmp-row" style="padding:6px 10px;border-bottom:1px solid #1f2430;background:rgba(20,210,220,0.06);display:flex;align-items:center;gap:8px">
                       <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
                       <span style="color:#7adfe6;font-weight:700">▸ Navigate</span>
                       <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}${v != null ? ` · ${Math.round(v * 2.23694)} mph` : ''}</span>
-                    </label></div>`;
+                      ${moveBtns(idx)}
+                    </div>`;
             }
             if (r.kind === 'block') {
                 const altM = typeof r.snapshot.value1 === 'number' ? r.snapshot.value1 : null;
-                return `<div class="aim-cmp-row" style="padding:6px 10px 6px 22px;border-bottom:1px solid #1f2430">
-                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                return `<div class="aim-cmp-row" style="padding:6px 10px 6px 22px;border-bottom:1px solid #1f2430;display:flex;align-items:center;gap:8px">
                       <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
                       <span style="color:#fff;font-weight:600">📷 Snapshot</span>
                       <span style="color:#666;font-size:10px">+${r.steps.length} scan</span>
                       <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}</span>
-                    </label></div>`;
+                      ${moveBtns(idx)}
+                    </div>`;
             }
             if (r.kind === 'struct') return '';
             return `<div class="aim-cmp-row" style="padding:5px 10px;border-bottom:1px solid #1f2430;color:#888;font-size:11px">${escapeHtml(r.step.type_name)}</div>`;
@@ -1542,13 +1641,19 @@
                 <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
                 <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
-            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· select blocks — reorder + bulk-edit + GPS coming next</span></div>
+            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· ▲▼ moves a block (snapshot + its 5 steps) as a unit — then SAVE in the editor</span></div>
             <div style="overflow:auto">${rowHtml}</div>`;
         document.body.appendChild(panel);
         panel.querySelector('[data-cmp-x]').onclick = closeComposer;
         panel.querySelectorAll('[data-cmp-cb]').forEach(cb => {
             cb.onchange = () => {
                 cb.getAttribute('data-ids').split(',').forEach(id => { if (cb.checked) composerSel.add(id); else composerSel.delete(id); });
+            };
+        });
+        panel.querySelectorAll('[data-cmp-move]').forEach(btn => {
+            btn.onclick = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                composerMoveRow(Number(btn.dataset.row), btn.dataset.move);
             };
         });
     }

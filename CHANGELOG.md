@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-20 — Mission Bank Tools — Composer block reorder — Mission Bank Tools v0.85 (dev/latest only)
+
+Composer Increment 2: **move a whole inspection block** (a Snapshot + its 5 Thermal/GEM/Wait steps) or a Navigate **as a unit** with ▲▼ buttons on each row. It drives Percepto's own `reorderInstructions` (ported from the Quick Mission Editor — fiber walk + completion wait), so the native list reorders live; then you hit the editor's **SAVE** to persist. Arrows disable at the real ends. (v0.84: docked the Composer to the right edge, locked, so it sits beside the left native editor.) Bulk param edit + GPS-pick are the next increments.
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — Mission Composer (Increment 1: grouped view) — Mission Bank Tools v0.83 (dev/latest only)
 
 First piece of the Mission Composer — a better editor that groups the redundant steps and (next) lets you reorder/bulk-edit them. A "🧩 Composer" button in Percepto's editor sidebar opens a docked panel that identifies your open mission (by matching the on-screen instruction-card ids to the cached mission — no fiber, no guessing) and shows it as **inspection blocks**: Navigate rows and Snapshot blocks (each snapshot + its Thermal/GEM/Wait steps as one unit), with multi-select checkboxes. Read-only for now; block **reorder** (move a snapshot + its 5 steps together), **bulk param edit**, and **GPS pick-on-map** build on this next. No mission-save capture needed — the write paths (reorderInstructions + the POST body-splice) already exist in the codebase.
