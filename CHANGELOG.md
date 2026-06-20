@@ -24,6 +24,12 @@ The weekly stale-issue auto-bump (open/pending >7 days → ping assignee + appro
 
 ---
 
+## 2026-06-20 — Mission Bank Tools — Composer map order badges — Mission Bank Tools v0.86 (dev/latest only)
+
+Reordering from a list was hard to follow, so the Composer now puts **order-number badges on the map** (the real source of truth for flight order): each **Navigate** gets a blue **N1, N2…** badge and each **Snapshot** a pink **S1, S2…** badge, numbered in flight order, drawn at each instruction's location as real Leaflet markers (so they ride zoom/pan and re-number after a reorder). Display-only this version — next, click a Navigate badge to retype its number and have the whole stop (snapshot + scan steps) move there, cascading the rest. Ports the Map Styler's Leaflet-map access.
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — Composer block reorder — Mission Bank Tools v0.85 (dev/latest only)
 
 Composer Increment 2: **move a whole inspection block** (a Snapshot + its 5 Thermal/GEM/Wait steps) or a Navigate **as a unit** with ▲▼ buttons on each row. It drives Percepto's own `reorderInstructions` (ported from the Quick Mission Editor — fiber walk + completion wait), so the native list reorders live; then you hit the editor's **SAVE** to persist. Arrows disable at the real ends. (v0.84: docked the Composer to the right edge, locked, so it sits beside the left native editor.) Bulk param edit + GPS-pick are the next increments.

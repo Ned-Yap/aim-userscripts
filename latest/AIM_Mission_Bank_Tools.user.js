@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.85
+// @version      0.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.85';
+    const SCRIPT_VERSION = '0.86';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1446,6 +1446,7 @@
     function closeComposer() {
         const el = document.getElementById(COMPOSER_PANEL_ID);
         if (el) el.remove();
+        try { composerClearBadges(); } catch (e) {}
     }
 
     // The on-screen instruction ids, in current editor order.
@@ -1508,6 +1509,7 @@
         const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
         composerRows = composerGroup(ordered);
         renderComposer(composerMission, composerRows);
+        try { composerDrawBadges(); } catch (e) { console.warn(`${TAG} [composer] badge draw failed`, e); }
     }
 
     // ── Reorder engine (ports the Quick Mission Editor's fiber reorder) ──
@@ -1580,6 +1582,89 @@
         composerBusy = false;
         rerenderComposer();
         showToast('Reordered — hit SAVE in the editor to persist.', '#5fff5f', 3500);
+    }
+
+    // ── Leaflet access (ported from Map Styler) ──────────────────────────
+    let leafletMapRef = null, leafletPatched = false;
+    function composerGetL() { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; return w.L || null; }
+    function composerLooksLikeMap(v) {
+        return v && typeof v === 'object'
+            && typeof v.latLngToContainerPoint === 'function'
+            && typeof v.layerPointToLatLng === 'function'
+            && typeof v.addLayer === 'function'
+            && typeof v.removeLayer === 'function'
+            && typeof v.getContainer === 'function';
+    }
+    function patchLeafletMap() {
+        if (leafletPatched) return;
+        const L = composerGetL();
+        if (!L || !L.Map) return;
+        try {
+            ['initialize', 'getPane', 'addLayer', 'setView', '_animateZoom'].forEach(m => {
+                if (typeof L.Map.prototype[m] !== 'function') return;
+                const orig = L.Map.prototype[m];
+                L.Map.prototype[m] = function(...a) {
+                    try { if (this && this._container && !this._container.__aim_map__) this._container.__aim_map__ = this; } catch (e) {}
+                    return orig.apply(this, a);
+                };
+            });
+            leafletPatched = true;
+        } catch (e) {}
+    }
+    function getLeafletMap() {
+        if (leafletMapRef && leafletMapRef._container && document.body.contains(leafletMapRef._container)) return leafletMapRef;
+        leafletMapRef = null;
+        for (const c of document.querySelectorAll('.leaflet-container')) {
+            if (composerLooksLikeMap(c.__aim_map__)) { leafletMapRef = c.__aim_map__; return leafletMapRef; }
+            try { for (const k of Object.getOwnPropertyNames(c)) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} } } catch (e) {}
+            for (const k in c) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} }
+        }
+        return null;
+    }
+
+    // ── Map order badges (Nav blue / Snap pink, numbered in flight order) ──
+    let composerBadgeLayer = null;
+    function composerBadgeIcon(n, kind) {
+        const L = composerGetL(); if (!L) return null;
+        const bg = kind === 'nav' ? '#2f6bff' : '#ec4899';
+        const cur = kind === 'nav' ? 'pointer' : 'default';
+        const html = `<div data-cmp-badge="${kind}" style="min-width:20px;height:20px;padding:0 4px;border-radius:10px;background:${bg};color:#fff;font:700 11px/20px 'Lato',sans-serif;text-align:center;border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.6);cursor:${cur};white-space:nowrap">${kind === 'nav' ? 'N' : 'S'}${n}</div>`;
+        return L.divIcon({ className: 'aim-cmp-badge', html, iconSize: [22, 20], iconAnchor: [11, 30] });
+    }
+    function composerClearBadges() {
+        const map = getLeafletMap();
+        if (composerBadgeLayer && map) { try { map.removeLayer(composerBadgeLayer); } catch (e) {} }
+        composerBadgeLayer = null;
+    }
+    let loggedBadgeFail = false;
+    function composerDrawBadges() {
+        patchLeafletMap();
+        const map = getLeafletMap();
+        const L = composerGetL();
+        if (!map || !L || !composerMission) {
+            if (!loggedBadgeFail && composerMission) {
+                loggedBadgeFail = true;
+                console.warn(`${TAG} [composer] badges not drawn — leafletMap=${!!map} L=${!!L}. (If L is false, Percepto doesn't expose window.L here — tell me and I'll source the marker constructor differently.)`);
+            }
+            return;
+        }
+        composerClearBadges();
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        const group = L.layerGroup();
+        let navN = 0, snapN = 0;
+        ordered.forEach(s => {
+            if (!s.location || s.location.lat == null) return;
+            if (s.type_name === 'navigate') {
+                navN++;
+                group.addLayer(L.marker([s.location.lat, s.location.lng], { icon: composerBadgeIcon(navN, 'nav'), zIndexOffset: 2000, keyboard: false }));
+            } else if (s.type_name === 'snapshot') {
+                snapN++;
+                group.addLayer(L.marker([s.location.lat, s.location.lng], { icon: composerBadgeIcon(snapN, 'snap'), zIndexOffset: 2000, interactive: false, keyboard: false }));
+            }
+        });
+        group.addTo(map);
+        composerBadgeLayer = group;
     }
 
     function renderComposer(mission, rows) {
@@ -5417,6 +5502,7 @@ ${placemarks}
             // to fire 30 times a minute.
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
+            try { patchLeafletMap(); } catch (e) {}
             // Re-apply the native-editor collapse promptly as the instruction
             // list mounts / virtualizes on scroll (the 4s interval is too slow
             // to feel responsive). Debounced so a burst of mutations = 1 pass.
