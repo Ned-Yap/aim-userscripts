@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.82
+// @version      0.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.82';
+    const SCRIPT_VERSION = '0.83';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1368,6 +1368,7 @@
         try { applyMapIconDeclutter(document); } catch (e) {}
         try { applyNativeEditorCollapse(); } catch (e) {}
         try { injectEditorCollapseButton(); } catch (e) {}
+        try { injectComposerButton(); } catch (e) {}
     }
 
     // A collapse/expand toggle button in Percepto's native mission-edit
@@ -1402,6 +1403,151 @@
         if (addBtn && addBtn.parentNode) addBtn.parentNode.insertBefore(btn, addBtn.nextSibling);
         else content.insertBefore(btn, content.firstChild);
         updateEditorCollapseBtn();
+    }
+
+    // ============================================================
+    // MISSION COMPOSER — Increment 1 (read-only grouped view + multi-select)
+    // ------------------------------------------------------------
+    // Identifies the mission open in Percepto's native editor by matching the
+    // on-screen instruction-card ids (data-rfd-draggable-id === instruction id)
+    // to the cached /available_app/ mission — no fiber, no name guessing — then
+    // groups its steps into INSPECTION BLOCKS (Navigate-group → Snapshot-block,
+    // a snapshot + its trailing Thermal/GEM/Wait steps) in a docked panel.
+    // Block reorder / bulk param edit / GPS-pick build on this next.
+    // ============================================================
+    const COMPOSER_PANEL_ID = 'aim-mb-composer';
+    const COMPOSER_BTN_ID = 'aim-mb-composer-btn';
+    const composerSel = new Set(); // selected instruction ids (strings)
+
+    function injectComposerButton() {
+        if (CONTEXT !== 'IFRAME') return;
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        if (document.getElementById(COMPOSER_BTN_ID)) return;
+        const btn = document.createElement('button');
+        btn.id = COMPOSER_BTN_ID;
+        btn.type = 'button';
+        btn.textContent = '🧩 Composer';
+        btn.style.cssText = 'display:block;width:100%;margin:0 0 8px;padding:6px 10px;background:rgba(95,255,95,0.12);' +
+            'border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleComposer(); };
+        const anchor = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+        else content.insertBefore(btn, content.firstChild);
+    }
+
+    function toggleComposer() {
+        if (document.getElementById(COMPOSER_PANEL_ID)) closeComposer();
+        else openComposer();
+    }
+    function closeComposer() {
+        const el = document.getElementById(COMPOSER_PANEL_ID);
+        if (el) el.remove();
+    }
+
+    // The on-screen instruction ids, in current editor order.
+    function composerDomIds() {
+        return [...document.querySelectorAll('[data-rfd-draggable-id]')].map(el => el.getAttribute('data-rfd-draggable-id'));
+    }
+    // Match the open editor's cards to a cached mission by shared instruction ids.
+    function identifyOpenMission(cb) {
+        const domIds = composerDomIds();
+        if (!domIds.length) { cb(null); return; }
+        const sid = getCurrentSiteID();
+        const match = (missions) => {
+            if (!Array.isArray(missions)) { cb(null); return; }
+            let best = null, bestHits = 0;
+            for (const m of missions) {
+                const idset = new Set((m.instructions || []).map(x => String(x.id)));
+                let hits = 0; for (const d of domIds) if (idset.has(d)) hits++;
+                if (hits > bestHits) { bestHits = hits; best = m; }
+            }
+            cb(best && bestHits >= Math.min(domIds.length, 3) ? { mission: best, domIds } : null);
+        };
+        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
+        if (Array.isArray(cached)) match(cached);
+        else fetchMissions(sid, match, () => cb(null));
+    }
+
+    // Group ordered instructions into rows: nav | block (snapshot + scan) | struct | other.
+    function composerGroup(ordered) {
+        const isBlk = t => t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
+        const rows = []; let i = 0;
+        while (i < ordered.length) {
+            const s = ordered[i];
+            if (!s) { i++; continue; }
+            if (s.type_name === 'snapshot') {
+                const row = { kind: 'block', snapshot: s, steps: [], ids: [String(s.id)] };
+                i++;
+                while (i < ordered.length && ordered[i] && isBlk(ordered[i].type_name)) { row.steps.push(ordered[i]); row.ids.push(String(ordered[i].id)); i++; }
+                rows.push(row);
+            } else if (s.type_name === 'navigate') { rows.push({ kind: 'nav', step: s, ids: [String(s.id)] }); i++; }
+            else if (s.type_name === 'takeoff' || s.type_name === 'returnHome') { rows.push({ kind: 'struct', step: s, ids: [String(s.id)] }); i++; }
+            else { rows.push({ kind: 'other', step: s, ids: [String(s.id)] }); i++; }
+        }
+        return rows;
+    }
+
+    function openComposer() {
+        identifyOpenMission((data) => {
+            if (!data) { showToast('Composer: could not match the open mission to the cache. Open the SUM once to load it.', '#ff9800', 4000); return; }
+            const byId = {}; (data.mission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+            const ordered = data.domIds.map(id => byId[id]).filter(Boolean);
+            renderComposer(data.mission, composerGroup(ordered));
+        });
+    }
+
+    function renderComposer(mission, rows) {
+        closeComposer();
+        const unit = getDistanceUnit();
+        const ft = (m) => unit === 'imperial' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : `${Math.round(m)} m`;
+        const panel = document.createElement('div');
+        panel.id = COMPOSER_PANEL_ID;
+        panel.style.cssText = 'position:fixed;top:60px;right:20px;width:340px;max-height:80vh;z-index:2147483600;' +
+            'background:#0f1216;border:1px solid rgba(95,255,95,0.45);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6);' +
+            "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
+        const navCount = rows.filter(r => r.kind === 'nav').length;
+        const blkCount = rows.filter(r => r.kind === 'block').length;
+        const rowHtml = rows.map((r) => {
+            const idsAttr = r.ids.join(',');
+            const checked = r.ids.every(id => composerSel.has(id)) ? 'checked' : '';
+            if (r.kind === 'nav') {
+                const altM = typeof r.step.value1 === 'number' ? r.step.value1 : null;
+                const v = r.step.value2;
+                return `<div class="aim-cmp-row" style="padding:6px 10px;border-bottom:1px solid #1f2430;background:rgba(20,210,220,0.06)">
+                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                      <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
+                      <span style="color:#7adfe6;font-weight:700">▸ Navigate</span>
+                      <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}${v != null ? ` · ${Math.round(v * 2.23694)} mph` : ''}</span>
+                    </label></div>`;
+            }
+            if (r.kind === 'block') {
+                const altM = typeof r.snapshot.value1 === 'number' ? r.snapshot.value1 : null;
+                return `<div class="aim-cmp-row" style="padding:6px 10px 6px 22px;border-bottom:1px solid #1f2430">
+                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+                      <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
+                      <span style="color:#fff;font-weight:600">📷 Snapshot</span>
+                      <span style="color:#666;font-size:10px">+${r.steps.length} scan</span>
+                      <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}</span>
+                    </label></div>`;
+            }
+            if (r.kind === 'struct') return '';
+            return `<div class="aim-cmp-row" style="padding:5px 10px;border-bottom:1px solid #1f2430;color:#888;font-size:11px">${escapeHtml(r.step.type_name)}</div>`;
+        }).join('');
+        panel.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
+                <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
+                <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
+            </div>
+            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· select blocks — reorder + bulk-edit + GPS coming next</span></div>
+            <div style="overflow:auto">${rowHtml}</div>`;
+        document.body.appendChild(panel);
+        panel.querySelector('[data-cmp-x]').onclick = closeComposer;
+        panel.querySelectorAll('[data-cmp-cb]').forEach(cb => {
+            cb.onchange = () => {
+                cb.getAttribute('data-ids').split(',').forEach(id => { if (cb.checked) composerSel.add(id); else composerSel.delete(id); });
+            };
+        });
     }
 
     function ensureEditorCollapseStyle(on) {
