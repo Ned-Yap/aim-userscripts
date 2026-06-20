@@ -6,11 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-19 — Mission Bank Tools — green SUM header + Mission SOP Validators — Mission Bank Tools v0.74 (dev/latest only)
+## 2026-06-19 — Mission Bank Tools — green SUM button + Mission SOP Validators — Mission Bank Tools v0.76 (dev/latest only)
 
 Two additions to the dev build of Mission Bank Tools:
 
-- **SUM button + panel header** recolored to match the Site Setup SUM. The **SUM button** is now neon green (#39ff14) with the same pulse-glow as the Site Setup SUM button (was Ant teal), and the floating panel header is a green-accent centered title on a subtle dark bar (was a solid cyan bar). The "📋 LOG SUM" launcher stays cyan to keep the execution-log summary visually distinct from the mission summary.
+- **SUM button + panel header** rebuilt to match the Site Setup SUM button exactly: neon green (#39ff14) fill, **black label**, pulse-glow, full label **"Mission Bank Summary"** (was a teal "SUM"). Black text is forced with inline `!important` (Percepto's white `-webkit-text-fill-color` beat a CSS-rule override). The panel header reads "Mission Bank Summary", left-justified (room on the right for the upcoming generator button). The "📋 LOG SUM" launcher stays cyan to keep the execution-log summary visually distinct.
 - **Mission SOP Validators** — a new Control Panel section ("Mission SOP", scope Mission Bank) with a **site-type preset** selector (OIL · Upstream / OIL · Downstream / T&D), per-check enables + editable thresholds, and a **🚩 Run SOP check** button that lists every violation in a floating report (click a mission to open it). Five checks: Navigate inside an FFZ, Navigate ≥ FFZ floor, Snapshot ≥ min AGL (0 ft default), scan-block balance (one Thermal/GEM/Wait set per snapshot), and Navigate↔Snapshot distance (96–204 ft, Upstream). Upstream ships the live numbers; the other presets inherit them (editable) until their SOPs are defined. Existing bulk altitude editing is unchanged.
 
 ---

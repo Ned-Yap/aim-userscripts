@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.75
+// @version      0.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.75';
+    const SCRIPT_VERSION = '0.76';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1279,9 +1279,26 @@
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
+        // Keep Ant's base shape class for sizing/radius, add our neon class
+        // for the pulsing glow. Built the SAME way as the Site Setup SUM
+        // button so the two launchers are identical.
         btn.className = (newBtn ? newBtn.className : 'ant-btn ant-btn-primary') + ' aim-mb-sum-neon-btn';
-        btn.innerHTML = '<span>SUM</span>';
-        btn.title = 'Open mission summary (AIM Mission Bank Tools)';
+        Object.assign(btn.style, {
+            minWidth: 'unset', padding: '0 16px', height: '26px',
+            fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
+            borderRadius: '4px', textShadow: 'none',
+        });
+        // Inline !important is the strongest author declaration — it beats
+        // even Percepto's stylesheet !important. Their white
+        // -webkit-text-fill-color kept winning over a CSS-rule override, so
+        // set the color-critical props inline with explicit priority.
+        const forceStyle = (prop, val) => { try { btn.style.setProperty(prop, val, 'important'); } catch (e) {} };
+        forceStyle('background', '#39ff14');
+        forceStyle('border', '1px solid #39ff14');
+        forceStyle('color', '#000');
+        forceStyle('-webkit-text-fill-color', '#000');
+        btn.innerHTML = 'Mission Bank Summary';
+        btn.title = 'Open Mission Bank Summary (AIM Mission Bank Tools)';
         btn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
