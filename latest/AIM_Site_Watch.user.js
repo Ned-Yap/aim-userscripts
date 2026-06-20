@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -9,7 +9,7 @@
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @connect      api.github.com
-// @connect      hooks.slack.com
+// @connect      slack.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
@@ -29,6 +29,12 @@
 //   - ON CHANGE: pulls the previous snapshot from GitHub, computes a field-level
 //     diff, appends rows to site-watch/changes.csv (the audit log), and stores
 //     the new JSON as latest.json.gz + a 10-deep rotating snap-NNN.json.gz ring.
+//   - DAILY SLACK DIGEST: once per PT day at digestHourPT (default 6pm PT) the
+//     leader tab reads changes.csv back and posts ONE message to the
+//     CSM-Site-Issues channel — a parent listing which sites were touched, with
+//     a threaded per-site rollup table of what changed. Uses the bot token in
+//     DATA_REPO/slack-config.json (same bot/channel as AIM Issues). Silent on a
+//     day with zero changes. Catches up a missed day if no tab was open at 6pm.
 //   - Robustness: AUTH-LOSS FREEZE (weekend logout / login redirect → never
 //     hashes a login page as data, just pauses and resumes Monday); timestamp
 //     scheduler with wake catch-up (sleep just delays, never corrupts);
@@ -56,7 +62,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.9';
+    const SCRIPT_VERSION = '0.10';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -73,8 +79,16 @@
     const META_KEY = 'aim-site-watch-meta';
     const CONFIG_KEY = 'aim-site-watch-config';
     const MASTER_KEY = 'aim-site-watch-master';
-    const SLACK_KEY = 'aim-site-watch-slack-webhook';
     const LEADER_KEY = 'aim-site-watch-leader';
+    // ---- daily Slack digest (bot token, reused from AIM Issues' slack-config.json) ----
+    // The bot (csmissues) + channel (CSM-Site-Issues) live in the SAME private
+    // repo Site Watch already reads (DATA_REPO). chat.postMessage returns a
+    // message ts so the per-site detail can thread under one daily parent.
+    const SLACK_CONFIG_PATH = 'slack-config.json';
+    const SLACK_POST_URL = 'https://slack.com/api/chat.postMessage';
+    const SLACK_CONFIG_KEY = 'aim-site-watch-slack-config';   // cached {botToken,channelId}
+    const DIGEST_DAY_KEY = 'aim-site-watch-digest-day';       // PT day (YYYY-MM-DD) already posted
+    const DIGEST_AT_KEY = 'aim-site-watch-digest-at';         // ISO cutoff of the last digest
 
     // ---- tunables ----
     const DEFAULTS = {
@@ -84,6 +98,7 @@
         throttleMs: 1000,       // delay between sites — gentle on Percepto + GitHub secondary write limits
         maxPerCycle: 25,        // sites processed per wake — bounds burst + first-run baselining
         siteListRefreshHours: 24,
+        digestHourPT: 18,       // local-PT hour the daily Slack digest fires at (18 = 6pm PT)
     };
     const WAKE_MS = 15 * 60 * 1000;     // scheduler wake interval
     const LEASE_TTL_MS = 90 * 1000;     // leader lease validity — short, so a vanished tab frees it fast
@@ -96,7 +111,11 @@
     let masterEnabled = false;
     let controlChannel = null;
     let cachedToken = gmGet(TOKEN_KEY, '') || '';
-    let slackWebhook = gmGet(SLACK_KEY, '') || '';
+    let slackConfig = (function () {
+        try { const s = gmGet(SLACK_CONFIG_KEY, ''); return s ? JSON.parse(s) : null; }
+        catch (e) { return null; }
+    })();
+    let digestRunning = false;
     const tabId = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now();
     let amLeader = false;
     let pausedForAuth = false;
@@ -125,7 +144,7 @@
     function persistState() { gmSet(STATE_KEY, state); }
     function persistMeta() { gmSet(META_KEY, { siteListFetchedAt, siteList }); }
     function saveConfig() {
-        gmSet(CONFIG_KEY, { coldHours: cfg.coldHours, hotHours: cfg.hotHours, hotWindowHours: cfg.hotWindowHours });
+        gmSet(CONFIG_KEY, { coldHours: cfg.coldHours, hotHours: cfg.hotHours, hotWindowHours: cfg.hotWindowHours, digestHourPT: cfg.digestHourPT });
     }
     function loadConfig() { const c = gmGet(CONFIG_KEY, null); if (c) Object.assign(cfg, c); }
 
@@ -515,17 +534,240 @@
         amLeader = false;
     }
 
-    function notifySlack(id, name) {
-        if (!slackWebhook) return;
+    // =====================================================================
+    // Slack daily digest
+    // -----
+    // Posting goes through the Slack Web API (chat.postMessage) using the bot
+    // token in DATA_REPO/slack-config.json — the SAME bot + CSM-Site-Issues
+    // channel AIM Issues already uses. chat.postMessage returns the message ts,
+    // so the per-site detail threads under one daily parent (incoming webhooks
+    // can't thread, which is why the old webhook path was dropped).
+    //
+    // Cadence: once per PT day, fired on the first leader tick at/after
+    // `digestHourPT` (default 18 = 6pm PT). Browser-only, so if no tab was open
+    // at 6pm the next tab to open that catches up posts the missed day. The
+    // changes.csv (durable audit log) is the source of truth — we read it back
+    // and report every row since the last digest's cutoff, so nothing is lost
+    // across browser restarts. Silent on a day with zero changes.
+    // =====================================================================
+    function slackEnabled() { return !!(slackConfig && slackConfig.botToken && slackConfig.channelId); }
+    function slackEsc(s) { return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    // Pull the Slack bot config from DATA_REPO/slack-config.json (cookie-less,
+    // PAT-authed GitHub read) and cache in GM so a refresh keeps Slack working.
+    async function fetchSlackConfig() {
+        if (!cachedToken) return;
         try {
-            const txt = `:satellite: Site setup changed — ${name ? name + ' ' : ''}(site ${id}). See ${CSV_PATH}.`;
-            GM_xmlhttpRequest({
-                method: 'POST', url: slackWebhook,
-                headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify({ text: txt }),
-                onload: () => {}, onerror: (e) => console.warn(TAG, 'slack notify failed', e),
+            const meta = await ghGetMeta(SLACK_CONFIG_PATH);
+            if (!meta) { console.warn(TAG, 'slack-config.json missing — digest disabled'); slackConfig = null; gmSet(SLACK_CONFIG_KEY, ''); return; }
+            const cfgObj = JSON.parse(b64ToText(meta.base64 || ''));
+            if (cfgObj && cfgObj.botToken && cfgObj.channelId) {
+                slackConfig = { botToken: cfgObj.botToken, channelId: cfgObj.channelId };
+                gmSet(SLACK_CONFIG_KEY, JSON.stringify(slackConfig));
+                console.log(`${TAG} Slack config loaded — channel ${slackConfig.channelId}`);
+            } else {
+                console.warn(TAG, 'slack-config.json present but missing botToken/channelId — digest disabled');
+                slackConfig = null; gmSet(SLACK_CONFIG_KEY, '');
+            }
+        } catch (e) { console.warn(TAG, 'fetchSlackConfig threw', e); }
+    }
+
+    // POST a message (optionally threaded). Resolves to the message ts on
+    // success, null on any failure. Never throws.
+    async function slackPost(text, threadTs) {
+        if (!slackEnabled()) return null;
+        try {
+            const body = { channel: slackConfig.channelId, text };
+            if (threadTs) body.thread_ts = threadTs;
+            const resp = await ghRequest({
+                method: 'POST', url: SLACK_POST_URL,
+                headers: { 'Authorization': `Bearer ${slackConfig.botToken}`, 'Content-Type': 'application/json; charset=utf-8' },
+                data: JSON.stringify(body), timeout: 15000,
             });
-        } catch (e) { console.warn(TAG, 'slack notify error', e); }
+            let parsed = null; try { parsed = JSON.parse(resp.responseText); } catch (e) {}
+            if (resp.status === 200 && parsed && parsed.ok) return parsed.ts || null;
+            console.warn(`${TAG} Slack post failed: HTTP ${resp.status} ${parsed ? parsed.error : (resp.responseText || '').slice(0, 200)}`);
+            return null;
+        } catch (e) { console.warn(TAG, 'slackPost threw', e); return null; }
+    }
+
+    // ---- PT clock (DST-correct via Intl) ----
+    function ptParts() {
+        const now = new Date();
+        const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+        let hour = parseInt(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hour12: false }).format(now), 10);
+        if (hour === 24) hour = 0;       // some engines render midnight as 24
+        return { day, hour };
+    }
+    function prevDay(ymd) { const d = new Date(ymd + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+    // The most recent PT day whose digest boundary (digestHourPT) has passed.
+    function targetDigestDay() {
+        const { day, hour } = ptParts();
+        return (hour >= cfg.digestHourPT) ? day : prevDay(day);
+    }
+
+    // ---- CSV read-back (the durable log is the source of truth) ----
+    // Proper parser: was/is cells are quoted and can contain commas, quotes, and
+    // newlines — split(',') would shred them.
+    function parseCsv(text) {
+        const rows = [];
+        let row = [], cell = '', inQ = false;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (inQ) {
+                if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else inQ = false; }
+                else cell += ch;
+            } else {
+                if (ch === '"') inQ = true;
+                else if (ch === ',') { row.push(cell); cell = ''; }
+                else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+                else if (ch === '\r') { /* skip */ }
+                else cell += ch;
+            }
+        }
+        if (cell.length || row.length) { row.push(cell); rows.push(row); }
+        return rows;
+    }
+    async function fetchChangesSince(sinceISO) {
+        const meta = await ghGetMeta(CSV_PATH);
+        if (!meta) return [];
+        const rows = parseCsv(b64ToText(meta.base64));
+        if (!rows.length) return [];
+        const header = rows[0];
+        const idx = {};
+        header.forEach((h, i) => idx[h] = i);
+        const out = [];
+        for (let r = 1; r < rows.length; r++) {
+            const row = rows[r];
+            if (!row.length || row.every(c => c === '')) continue;
+            const ts = row[idx.timestamp_utc] || '';
+            if (sinceISO && ts <= sinceISO) continue;   // ISO Zulu strings sort lexically
+            out.push({
+                ts, siteId: row[idx.site_id] || '', siteName: row[idx.site_name] || '',
+                change: row[idx.change] || '', etype: row[idx.entity_type] || '', ename: row[idx.entity_name] || '',
+                objectId: row[idx.object_id] || '', field: row[idx.field] || '',
+            });
+        }
+        return out;
+    }
+
+    // Collapse a field path to a readable label; geometry churn → "geometry".
+    function collapseField(path) {
+        if (!path || path === '(entity)') return '';
+        if (path === '(non-structural change)') return 'non-structural';
+        if (path === '(changed; no prior snapshot)') return 'first-diff';
+        if (/^arcs\b/.test(path) || /(^|\.)coords(\.|$)/.test(path) || /point_[ab]/.test(path) || /\.(lat|lng)$/.test(path)) return 'geometry';
+        const seg = path.split('.').pop();
+        return seg || path;
+    }
+    function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length); }
+
+    // Group flat CSV rows → per-site, per-entity rollup.
+    function rollup(changeRows) {
+        const sites = new Map();   // siteId → {name, ents:Map(key→{change,etype,ename,fields:Set})}
+        for (const c of changeRows) {
+            if (!sites.has(c.siteId)) sites.set(c.siteId, { name: c.siteName, ents: new Map() });
+            const site = sites.get(c.siteId);
+            if (c.siteName && !site.name) site.name = c.siteName;
+            const key = c.objectId || ('note:' + c.field);   // site-level notes have no objectId
+            if (!site.ents.has(key)) site.ents.set(key, { change: c.change, etype: c.etype, ename: c.ename || c.objectId, fields: new Set() });
+            const e = site.ents.get(key);
+            const f = collapseField(c.field);
+            if (f) e.fields.add(f);
+        }
+        return sites;
+    }
+
+    function buildParent(sites, dayLabel) {
+        const n = sites.size;
+        const lines = [`:satellite: *Site Watch — daily digest* (${slackEsc(dayLabel)}, 6pm PT)`,
+                       `*${n}* site${n === 1 ? '' : 's'} changed since the last digest.`, ''];
+        const arr = [...sites.entries()].sort((a, b) => b[1].ents.size - a[1].ents.size);
+        const CAP = 50;
+        arr.slice(0, CAP).forEach(([id, s]) => {
+            let a = 0, r = 0, m = 0;
+            for (const e of s.ents.values()) { if (e.change === 'added') a++; else if (e.change === 'removed') r++; else m++; }
+            const url = siteSetupUrl(id);
+            const name = slackEsc(s.name || '(unnamed)').replace(/\|/g, '/');   // | breaks <url|text>
+
+            const cnt = s.ents.size;
+            const tally = [a ? `${a} added` : '', r ? `${r} removed` : '', m ? `${m} modified` : ''].filter(Boolean).join(' · ');
+            lines.push(`• <${url}|${name}> (${id}) — ${cnt} entit${cnt === 1 ? 'y' : 'ies'}: ${tally}`);
+        });
+        if (arr.length > CAP) lines.push(`…and ${arr.length - CAP} more site(s).`);
+        return lines.join('\n');
+    }
+
+    // Per-site monospace detail tables, chunked under Slack's per-message limit.
+    function buildThreadChunks(sites) {
+        const LIMIT = 3500;
+        const ROWCAP = 60;       // cap rows shown per site (full detail always in the CSV)
+        const chunks = [];
+        let buf = '';
+        const flush = () => { if (buf) { chunks.push('```\n' + buf.replace(/\n$/, '') + '\n```'); buf = ''; } };
+        const arr = [...sites.entries()].sort((a, b) => (a[1].name || a[0]).localeCompare(b[1].name || b[0]));
+        for (const [id, s] of arr) {
+            const head = `${s.name || '(unnamed)'} (${id})\n`;
+            const ents = [...s.ents.values()].sort((x, y) => x.change.localeCompare(y.change));
+            const lines = [];
+            ents.slice(0, ROWCAP).forEach(e => {
+                let detail;
+                if (e.change === 'added') detail = '(new entity)';
+                else if (e.change === 'removed') detail = '(removed)';
+                else {
+                    const fl = [...e.fields];
+                    detail = fl.length ? (fl.length + ' field' + (fl.length === 1 ? '' : 's') + ': ' + fl.slice(0, 6).join(', ') + (fl.length > 6 ? ` +${fl.length - 6}` : '')) : '(modified)';
+                }
+                lines.push(`  ${pad(e.change, 9)}${pad(e.etype, 7)}${pad(String(e.ename || '').slice(0, 24), 26)}${detail}`);
+            });
+            if (ents.length > ROWCAP) lines.push(`  …and ${ents.length - ROWCAP} more (see changes.csv)`);
+            const block = head + lines.join('\n') + '\n\n';
+            if (buf.length + block.length > LIMIT) { flush(); }
+            // A single huge site still gets its own (possibly oversized) chunk —
+            // Slack truncates very long code blocks but the rows are capped anyway.
+            buf += block;
+        }
+        flush();
+        return chunks;
+    }
+
+    // Post a digest for all changes since `sinceISO`. Returns true if it posted.
+    async function postDigest(sinceISO, dayLabel) {
+        if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured'); return false; }
+        let rows;
+        try { rows = await fetchChangesSince(sinceISO); }
+        catch (e) { console.warn(TAG, 'digest: changes.csv read failed', e); return false; }
+        if (!rows.length) { console.log(`${TAG} digest: no changes since ${sinceISO || '(start)'} — staying silent`); return false; }
+        const sites = rollup(rows);
+        const parentTs = await slackPost(buildParent(sites, dayLabel));
+        if (!parentTs) { console.warn(TAG, 'digest: parent post failed — skipping thread'); return false; }
+        const chunks = buildThreadChunks(sites);
+        for (const ch of chunks) { await slackPost(ch, parentTs); await sleep(400); }
+        console.log(`%c${TAG} digest posted — ${sites.size} site(s), ${rows.length} change row(s), ${chunks.length} thread message(s)`, 'color:#5fd0ff;font-weight:700');
+        return true;
+    }
+
+    // Fire the daily digest once the PT boundary passes. Cheap when not firing
+    // (pure GM/clock checks); only the leader tab posts. Guarded against reentry.
+    async function maybeDailyDigest(trigger) {
+        if (!masterEnabled || !cachedToken || digestRunning) return;
+        if (!slackEnabled()) return;
+        const target = targetDigestDay();
+        const lastDay = gmGet(DIGEST_DAY_KEY, null);
+        // First ever: baseline silently so we never dump the whole historical CSV.
+        if (!lastDay) { gmSet(DIGEST_DAY_KEY, target); gmSet(DIGEST_AT_KEY, new Date().toISOString()); return; }
+        if (lastDay >= target) return;                 // already posted this boundary
+        digestRunning = true;
+        try {
+            const since = gmGet(DIGEST_AT_KEY, '') || '';
+            const posted = await postDigest(since, target);
+            // Advance the cutoff whether or not we posted (silent days still close
+            // the window) so the next digest doesn't re-report the same span.
+            gmSet(DIGEST_DAY_KEY, target);
+            gmSet(DIGEST_AT_KEY, new Date().toISOString());
+            if (posted) console.log(`${TAG} daily digest complete (${trigger})`);
+        } catch (e) { console.error(TAG, 'maybeDailyDigest error', e); }
+        finally { digestRunning = false; }
     }
 
     // Live status: HOT sites (recently changed) highlighted in orange up top —
@@ -675,7 +917,6 @@
         st.state = 'hot';
         st.lastChangeAt = Date.now();
         scheduleNext(st, 'hot');
-        notifySlack(id, nm);
         return 'changed';
     }
 
@@ -744,6 +985,7 @@
                 ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
                 : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
             console.log(`%c${TAG} cycle done: ${checked} checked, ${changed} changed · ${tail}`, 'color:#5fd0ff;font-weight:600');
+            await maybeDailyDigest('cycle');
         } catch (e) {
             console.error(TAG, 'cycle error', e);
         } finally {
@@ -759,9 +1001,10 @@
         { id: 'coldHours', label: 'Quiet check interval (hours)', type: 'number', default: DEFAULTS.coldHours, min: 1, max: 168, step: 1 },
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
+        { id: 'digestHourPT', label: 'Daily Slack digest hour (PT, 24h)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
-        { id: 'set-slack', label: 'Set Slack webhook…', type: 'button', action: 'set-slack' },
+        { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, test)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
     ];
 
@@ -794,16 +1037,28 @@
             saveConfig();
             console.log(`${TAG} ${id} = ${n}`);
         }
+        if (id === 'digestHourPT') {
+            const n = Number(val);
+            if (!isFinite(n) || n < 0 || n > 23) return;
+            if (cfg.digestHourPT === n) return;     // idempotent
+            cfg.digestHourPT = n;
+            saveConfig();
+            console.log(`${TAG} digestHourPT = ${n} (PT)`);
+        }
     }
     function handleAction(actionId) {
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
         else if (actionId === 'status') { showStatus(); }
-        else if (actionId === 'set-slack') {
-            const v = prompt('Slack incoming-webhook URL (leave blank to clear):', slackWebhook || '');
-            if (v === null) return;
-            slackWebhook = v.trim();
-            gmSet(SLACK_KEY, slackWebhook);
-            console.log(`${TAG} slack webhook ${slackWebhook ? 'set' : 'cleared'}`);
+        else if (actionId === 'post-digest-now') {
+            // Test/preview: post a digest of the last 24h WITHOUT touching the
+            // daily schedule cutoff, so it never interferes with the real 6pm run.
+            (async () => {
+                if (!slackEnabled()) { await fetchSlackConfig(); }
+                if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured (slack-config.json) — cannot post'); return; }
+                const since = new Date(Date.now() - 24 * 3600e3).toISOString();
+                console.log(`${TAG} manual digest preview — changes since ${since}`);
+                await postDigest(since, ptParts().day);
+            })();
         } else if (actionId === 'reset-baselines') {
             if (!confirm('Reset ALL site baselines? Next checks re-learn current state (no diffs until something changes again).')) return;
             doResetBaselines('user');
@@ -822,6 +1077,7 @@
         cachedToken = token || '';
         if (cachedToken === prev) return;
         gmSet(TOKEN_KEY, cachedToken);
+        if (cachedToken) fetchSlackConfig();
         if (cachedToken && masterEnabled) runCycle('token');
     }
     function setupControlChannel() {
@@ -848,6 +1104,7 @@
     })();
     setupControlChannel();
     registerWithControlPanel();
+    if (cachedToken) fetchSlackConfig();        // load bot config for the daily digest
     console.log(`${TAG} v${SCRIPT_VERSION} ready (master ${masterEnabled ? 'ON' : 'OFF'})`);
 
     setInterval(() => runCycle('wake'), WAKE_MS);
@@ -859,6 +1116,10 @@
         if (!masterEnabled || !cachedToken) return;
         if (amLeader) renewLeader();
         else claimLeader();
+        // Only the leader posts; the day-boundary check inside is cheap and
+        // idempotent, so firing it every heartbeat catches the 6pm boundary even
+        // on a quiet day where no sites are due and runCycle returns early.
+        if (amLeader) maybeDailyDigest('heartbeat');
     }, HEARTBEAT_MS);
     // Free the lease on refresh/close so the next load takes over immediately.
     window.addEventListener('pagehide', releaseLeader);
