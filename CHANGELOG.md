@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-20 — AIM Issues — fix existing "site ID" boards on next sweep — AIM Issues v1.24 (dev/latest only)
+
+v1.23's board-refresh was sitting behind the "bumped within 7 days" guard, so the boards already posted with an ID wouldn't have corrected for a week. Moved the name reconciliation ahead of the bump gate (once per browser session) so the existing "site 1595" boards update to the real name on the very next sweep — no need to delete and re-run. chat.update is silent and idempotent, so already-correct boards are untouched.
+
+---
+
 ## 2026-06-20 — AIM Issues — global sweep shows site NAMES, not IDs — AIM Issues v1.23 (dev/latest only)
 
 Follow-up to v1.22: the global sweep posts/adopts issues for sites it never opens, so it had no friendly site name and Slack showed "site 1595" instead of the name. Fixed — the sweep now pulls every site's name from Percepto's own `/sites/` endpoint (one same-origin request per sweep) and threads it through. Also refreshes any parent board that was already posted with an ID so it corrects to the name on the next sweep.

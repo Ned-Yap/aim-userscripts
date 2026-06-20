@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.23
+// @version      1.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.23';
+    const SCRIPT_VERSION = '1.24';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -1263,6 +1263,10 @@
     // bump another browser already wrote this week is seen and skipped. The
     // currently-open site (if any) is skipped here and left to the IFRAME.
     let globalSweepRunning = false;
+    // v1.24: issue ids whose parent board we've already name-reconciled this
+    // browser session — keeps the silent chat.update from re-firing every
+    // hourly sweep. Resets on reload (a fresh session re-checks once, harmless).
+    const sweptBoards = new Set();
     // v1.22: site ID → friendly name map. The sweep runs in the TOP frame
     // without opening any site, so readSiteName() (DOM .site-select) only
     // knows the current site. Pull every site's name from Percepto's own
@@ -1359,6 +1363,18 @@
         for (const issue of remote.issues) {
             if (!issue || issue.deleted || issue.source === 'validator' || issue.createdBy === 'local-only') continue;
             if (!STALE_BUMP_STATUSES.has(issue.status)) continue;
+            // (A) Reconcile the parent board's site name — runs BEFORE the bump
+            // gate so it isn't blocked for 7 days after an issue was just
+            // bumped. v1.22 adopted boards showing "site <id>"; this rewrites
+            // them to the friendly name + current status. chat.update is silent
+            // (no notification) and idempotent — for an already-correct board it
+            // re-sends identical text, invisibly. Gated once per browser session
+            // (sweptBoards) so we don't re-issue the update every hourly sweep.
+            if (issue.slackThreadTs && name && slackPostable(issue) && !sweptBoards.has(issue.id)) {
+                sweptBoards.add(issue.id);
+                slackUpdateRaw(issue.slackThreadTs, slackParentText(issue, null, sid, name));
+            }
+            // (B) Stale bump.
             const since = issueStaleSince(issue);
             if (now - since <= STALE_BUMP_MS) continue;                 // not stale yet
             if (now - issueLastBumpAt(issue) < STALE_BUMP_MS) continue; // bumped within 7d
@@ -1369,12 +1385,7 @@
             // opted-out validator findings (validator never reaches here anyway).
             if (!issue.slackThreadTs && slackPostable(issue)) {
                 const ts = await slackPostRaw(slackParentText(issue, null, sid, name), null);
-                if (ts) issue.slackThreadTs = ts;
-            } else if (issue.slackThreadTs && name && slackPostable(issue)) {
-                // Refresh the parent board with the correct name + current
-                // status — fixes any board that was adopted before we had the
-                // site name (showed "site <id>"). Cheap, only for stale issues.
-                slackUpdateRaw(issue.slackThreadTs, slackParentText(issue, null, sid, name));
+                if (ts) { issue.slackThreadTs = ts; sweptBoards.add(issue.id); }
             }
             const seen = new Set();
             const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
