@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.87
+// @version      0.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.87';
+    const SCRIPT_VERSION = '0.88';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1446,6 +1446,9 @@
     function closeComposer() {
         const el = document.getElementById(COMPOSER_PANEL_ID);
         if (el) el.remove();
+        const ne = document.getElementById('aim-cmp-num-edit');
+        if (ne) ne.remove();
+        composerBusy = false;
         try { composerClearBadges(); } catch (e) {}
     }
 
@@ -1493,8 +1496,14 @@
     }
 
     function openComposer() {
+        composerBusy = false; // never inherit a stuck busy flag from a prior session
         identifyOpenMission((data) => {
-            if (!data) { showToast('Composer: could not match the open mission to the cache. Open the SUM once to load it.', '#ff9800', 4000); return; }
+            if (!data) {
+                const n = composerDomIds().length;
+                console.warn(`${TAG} [composer] open failed — ${n} draggable cards found but no cached mission matched. (Open the SUM once to warm the cache.)`);
+                showToast('Composer: could not match the open mission to the cache. Open the SUM once to load it.', '#ff9800', 4000);
+                return;
+            }
             composerMission = data.mission;
             rerenderComposer();
         });
@@ -1694,14 +1703,42 @@
         const dest = composerIndexById(groups[idx - 1].ids[0]);
         if (dest >= 0) await composerMoveIdsToIndex(fn, groups[idx].ids, dest);
     }
+    // DIAGNOSTIC MODE: while true, a nav-badge edit only LOGS the plan (which
+    // reorderInstructions was found + the computed indices) and does NOT touch
+    // the mission — so a wrong index basis can't scramble a real mission or
+    // crash Percepto's editor (which was forcing a full-page refresh). Flip to
+    // false once the logged plan is verified correct.
+    let composerReorderDebug = true;
     async function composerApplyNavOrder(navId, toNum) {
         if (composerBusy) return;
-        const fn = composerFindReorderFn();
-        if (!fn) { showToast('Composer: reorder unavailable (Percepto changed).', '#ff5252', 4000); return; }
         const groups = composerNavGroups(composerCurrentOrdered());
         let f = groups.findIndex(g => g.navId === String(navId));
         const t = Math.max(1, Math.min(groups.length, toNum)) - 1;
         if (f < 0 || f === t) return;
+        // Resolve the reorder fn + record which fiber path matched (for the log).
+        let fn = null, fnWhy = 'no draggable card';
+        const card = document.querySelector('[data-rfd-draggable-id]');
+        if (card) {
+            let node = composerGetFiber(card), depth = 0, found = false;
+            while (node && depth < 80 && !found) {
+                for (let pi = 0; pi < COMPOSER_REORDER_CANDIDATES.length; pi++) {
+                    let cand; try { cand = COMPOSER_REORDER_CANDIDATES[pi](node); } catch (e) {}
+                    if (typeof cand === 'function') { fn = cand; fnWhy = `candidate#${pi} @depth${depth}`; found = true; break; }
+                }
+                node = node.return; depth++;
+            }
+            if (!fn) fnWhy = `NOT FOUND after ${depth} fiber levels`;
+        }
+        const domIds = composerDomIds();
+        const grpIds = groups[f].ids;
+        const grpDomIdx = grpIds.map(id => composerIndexById(id));
+        console.log(`${TAG} [composer-reorder] PLAN nav=${navId} N${f + 1}→N${t + 1}`,
+            { reorderFn: fnWhy, groups: groups.length, domCards: domIds.length, instrCount: (composerMission.instructions || []).length, groupIds: grpIds, groupDomIndices: grpDomIdx });
+        if (composerReorderDebug) {
+            showToast('Reorder is in DIAGNOSTIC mode — the plan was logged to the console (paste it to me). Paused so it can’t scramble a mission until we confirm it’s safe.', '#ffd54f', 7000);
+            return;
+        }
+        if (!fn) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
         composerBusy = true;
         try {
             while (f > t) { await composerSwapGroupUp(fn, f); f--; }
