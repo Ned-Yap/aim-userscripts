@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-20 — AIM Issues — stale-bump works without opening a site — AIM Issues v1.22 (dev/latest only)
+
+The weekly stale-issue auto-bump (open/pending >7 days → ping assignee + approvers) used to only fire for the **one site you had open** — it lived in the map iframe and only ever scanned that site's issues. Now there's a **global cross-site sweep** that runs in the top frame (which exists everywhere, even the landing page with no site open). It lists every site's issue file on GitHub, finds stale issues across **all** sites, and bumps them — no need to navigate into each site. Approver-gated (so every CSM's browser isn't sweeping every site); the currently-open site is left to the existing iframe path; same 7-day dedup window, so a bump another browser already posted this week is skipped. Kicks ~30s after load, then hourly.
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — Composer block reorder — Mission Bank Tools v0.85 (dev/latest only)
 
 Composer Increment 2: **move a whole inspection block** (a Snapshot + its 5 Thermal/GEM/Wait steps) or a Navigate **as a unit** with ▲▼ buttons on each row. It drives Percepto's own `reorderInstructions` (ported from the Quick Mission Editor — fiber walk + completion wait), so the native list reorders live; then you hit the editor's **SAVE** to persist. Arrows disable at the real ends. (v0.84: docked the Composer to the right edge, locked, so it sits beside the left native editor.) Bulk param edit + GPS-pick are the next increments.

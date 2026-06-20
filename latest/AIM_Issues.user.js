@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.21
+// @version      1.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.21';
+    const SCRIPT_VERSION = '1.22';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -717,7 +717,13 @@
     // success, null on any failure. IFRAME-only (mirrors the sync owner) so
     // a single action fires exactly one post. Never throws.
     async function slackPost(text, threadTs) {
-        if (IS_TOP) return null;
+        if (IS_TOP) return null;     // IFRAME owns the current-site flow
+        return slackPostRaw(text, threadTs);
+    }
+    // v1.22: frame-agnostic post core. slackPost keeps the IS_TOP guard for
+    // the current-site flow; the global stale sweep (TOP frame) calls this
+    // directly because TOP is exactly where the cross-site sweep must run.
+    async function slackPostRaw(text, threadTs) {
         if (!slackEnabled()) return null;
         try {
             const body = { channel: slackConfig.channelId, text };
@@ -762,10 +768,14 @@
     // | or <>, which site names never do. v1.06: when issueId is given, the
     // URL carries ?aim_issue=<id> (before the hash, so SPA routing keeps it)
     // and AIM Issues focuses that issue on load — see maybeFocusIssueFromUrl.
-    function siteLabelForSlack(issueId) {
-        const label = siteName ? slackEsc(siteName) : `site ${siteID}`;
+    // v1.22: sidOverride/nameOverride let the global stale sweep (TOP frame,
+    // no open site) build a label for ANY site, not just the current one.
+    function siteLabelForSlack(issueId, sidOverride, nameOverride) {
+        const sid = sidOverride || siteID;
+        const name = (sidOverride ? nameOverride : siteName);
+        const label = name ? slackEsc(name) : `site ${sid}`;
         const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
-        return `<https://percepto.app/${q}#/site/${siteID}/control-panel/site-setup|${label}>`;
+        return `<https://percepto.app/${q}#/site/${sid}/control-panel/site-setup|${label}>`;
     }
 
     // v1.08: status badge for the parent message — icon + label + whether to
@@ -787,7 +797,7 @@
     // (or an explicit override, e.g. 'deleted' which isn't stored on .status).
     // Rebuilt identically on creation + every chat.update so the parent always
     // reflects live status without losing formatting.
-    function slackParentText(issue, statusOverride) {
+    function slackParentText(issue, statusOverride, sidOverride, nameOverride) {
         const status = statusOverride || issue.status || 'open';
         const b = slackStatusBadge(status);
         const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
@@ -796,7 +806,7 @@
         // so they got notified of every later reply. Real pings are reserved
         // for the cc list + transition/comment recipients.
         const creator = slackPlain(issue.createdBy);
-        const link = siteLabelForSlack(issue.id);
+        const link = siteLabelForSlack(issue.id, sidOverride, nameOverride);
         let note = slackEsc(issue.note || '(no description)');
         if (b.strike) note = `~${note}~`;
         // v1.12: assignee shown as PLAIN @text (not a real <@id> mention) so
@@ -1226,6 +1236,144 @@
             console.warn(`${TAG} runStaleBumpCheck threw:`, e);
         } finally {
             staleBumpRunning = false;
+        }
+    }
+
+    // ---- v1.22: GLOBAL stale sweep (TOP frame, no open site required) ----
+    // runStaleBumpCheck above only sees currentSiteIssues — the ONE site you
+    // have open — so stale issues on every OTHER site never get bumped until
+    // someone navigates into them. This sweep runs in the TOP frame (which
+    // exists everywhere, including the landing page with no map iframe),
+    // enumerates EVERY site's issue file on GitHub, and bumps stale issues
+    // site-by-site. It needs no map/iframe and no open site.
+    //
+    // Scope: APPROVERS only. The per-site IFRAME check stays ungated (any CSM
+    // opening a site still bumps it), but the cross-site sweep is an oversight
+    // function — gating to approvers keeps every CSM's browser from listing +
+    // fetching every site file hourly and racing on the same bumps.
+    //
+    // Dedup is the same kind:'bump' 7-day window as the per-site path: each
+    // site's issues are fetched FRESH from GitHub right before bumping, so a
+    // bump another browser already wrote this week is seen and skipped. The
+    // currently-open site (if any) is skipped here and left to the IFRAME.
+    let globalSweepRunning = false;
+    async function listIssueSites() {
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/issues?ref=${ISSUES_BRANCH}`;
+        const resp = await ghRequest({
+            method: 'GET',
+            url,
+            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 20000,
+        });
+        if (resp.status === 404) return [];           // no issues/ dir yet
+        if (resp.status !== 200) throw new Error(`list issues/ HTTP ${resp.status}`);
+        const arr = JSON.parse(resp.responseText);
+        if (!Array.isArray(arr)) return [];
+        const sids = [];
+        for (const f of arr) {
+            const m = f && f.name && f.name.match(/^(\d+)-issues\.json$/);
+            if (m) sids.push(m[1]);
+        }
+        return sids;
+    }
+    // PUT a site's full issue list back. On 409/422 (someone committed since
+    // our GET) refetch + union-merge + retry once. Returns true on success.
+    async function putIssuesForSite(sid, issues, sha, reason) {
+        const path = ISSUES_PATH(sid);
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(path)}`;
+        const payload = { version: 1, siteID: sid, issues };
+        const body = {
+            message: `[AIM site ${sid}] issues: ${reason}`,
+            content: textToB64(JSON.stringify(payload, null, 2)),
+            branch: ISSUES_BRANCH,
+        };
+        if (sha) body.sha = sha;
+        const resp = await ghRequest({
+            method: 'PUT',
+            url,
+            headers: {
+                'Authorization': `Bearer ${cachedToken}`,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+            },
+            data: JSON.stringify(body),
+            timeout: 25000,
+        });
+        if (resp.status === 200 || resp.status === 201) return true;
+        if (resp.status === 409 || resp.status === 422) {
+            console.warn(`${TAG} sweep PUT conflict on site ${sid} (HTTP ${resp.status}) — refetch + merge + retry`);
+            const remote = await fetchRemoteIssues(sid);
+            if (!remote) return false;
+            const merged = mergeIssueLists(issues, remote.issues);
+            return putIssuesForSite(sid, merged, remote.sha, reason);
+        }
+        console.warn(`${TAG} sweep PUT site ${sid} HTTP ${resp.status}: ${(resp.responseText || '').slice(0, 300)}`);
+        return false;
+    }
+    // Bump stale issues for ONE site off its freshly-fetched remote list.
+    async function sweepSite(sid) {
+        const remote = await fetchRemoteIssues(sid);
+        if (!remote || !remote.issues.length) return 0;
+        const now = Date.now();
+        let bumped = 0;
+        for (const issue of remote.issues) {
+            if (!issue || issue.deleted || issue.source === 'validator' || issue.createdBy === 'local-only') continue;
+            if (!STALE_BUMP_STATUSES.has(issue.status)) continue;
+            const since = issueStaleSince(issue);
+            if (now - since <= STALE_BUMP_MS) continue;                 // not stale yet
+            if (now - issueLastBumpAt(issue) < STALE_BUMP_MS) continue; // bumped within 7d
+            const days = Math.floor((now - since) / 86400000);
+            const label = (STATUS_LABEL[issue.status] || { text: issue.status.toUpperCase() }).text;
+            // Adopt pre-Slack issues into a thread (parent status board) first,
+            // so the bump threads under it. slackPostable filters local-only /
+            // opted-out validator findings (validator never reaches here anyway).
+            if (!issue.slackThreadTs && slackPostable(issue)) {
+                const ts = await slackPostRaw(slackParentText(issue, null, sid, null), null);
+                if (ts) issue.slackThreadTs = ts;
+            }
+            const seen = new Set();
+            const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
+                .map(t => { if (seen.has(t)) return ''; seen.add(t); return slackMention(t); })
+                .filter(Boolean).join(' ');
+            const head = `⏰ *Stale ${days}d* — still *${label}* since ${new Date(since).toISOString().slice(0, 10)}`;
+            const text = issue.slackThreadTs
+                ? `${head}${mentions ? '\ncc ' + mentions : ''}`
+                : `${head} · ${siteLabelForSlack(issue.id, sid, null)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
+            const ts = await slackPostRaw(text, issue.slackThreadTs || null);
+            if (!ts) continue;   // post failed — don't record a bump (retry next run)
+            if (!Array.isArray(issue.history)) issue.history = [];
+            issue.history.push({ at: new Date().toISOString(), by: 'auto-bump', fromStatus: issue.status, toStatus: issue.status, kind: 'bump', note: `Auto-bump: ${days}d in ${label}` });
+            bumped++;
+        }
+        if (bumped) {
+            const ok = await putIssuesForSite(sid, remote.issues, remote.sha, 'stale-issue auto-bump (global sweep)');
+            if (!ok) console.warn(`${TAG} sweep: site ${sid} bumped ${bumped} but PUT failed — will retry next sweep`);
+        }
+        return bumped;
+    }
+    async function runGlobalStaleSweep() {
+        if (!IS_TOP || globalSweepRunning) return;       // TOP owns the cross-site sweep
+        if (!slackEnabled() || !cachedToken) return;     // nothing to post / no auth
+        if (!isApprover()) return;                       // oversight function — approvers only
+        globalSweepRunning = true;
+        try {
+            const sids = await listIssueSites();
+            if (!sids.length) return;
+            let totalBumped = 0, sitesBumped = 0;
+            for (const sid of sids) {
+                if (sid === siteID) continue;            // current site → IFRAME handles it
+                try {
+                    const n = await sweepSite(sid);
+                    if (n) { totalBumped += n; sitesBumped++; }
+                } catch (e) {
+                    console.warn(`${TAG} global sweep: site ${sid} threw:`, e);
+                }
+            }
+            console.log(`${TAG} global stale sweep: scanned ${sids.length} site(s), bumped ${totalBumped} issue(s) across ${sitesBumped} site(s)`);
+        } catch (e) {
+            console.warn(`${TAG} runGlobalStaleSweep threw:`, e);
+        } finally {
+            globalSweepRunning = false;
         }
     }
 
@@ -5338,8 +5486,16 @@
         }
         // v1.20: hourly stale-issue bump check while the page is open
         // (refetchIssues also triggers one on each site load). IFRAME-gated
-        // inside runStaleBumpCheck.
+        // inside runStaleBumpCheck — only ever sees the open site.
         if (!IS_TOP) setInterval(() => { try { runStaleBumpCheck(); } catch (e) {} }, 60 * 60 * 1000);
+        // v1.22: GLOBAL cross-site sweep in the TOP frame — bumps stale issues
+        // on EVERY site without needing one open (approver-gated, see
+        // runGlobalStaleSweep). Kick once shortly after load (let the
+        // Control Panel broadcast a fresh token first), then hourly.
+        if (IS_TOP) {
+            setTimeout(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 30 * 1000);
+            setInterval(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 60 * 60 * 1000);
+        }
         // Always ask the Control Panel for the current token so we get
         // the latest if the user updated it elsewhere.
         try { if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' }); } catch (e) {}
