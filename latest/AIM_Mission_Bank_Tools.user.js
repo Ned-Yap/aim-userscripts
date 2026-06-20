@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.73
+// @version      0.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.73';
+    const SCRIPT_VERSION = '0.74';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1236,14 +1236,50 @@
         injectButtonIntoRow(doc, row, header);
     }
 
+    // Neon-green SUM button styling — matches the Site Setup SUM button
+    // (Asset Inspector) so the two SUM launchers look/feel identical.
+    // Injected into the button's own document (the iframe) so it's green
+    // immediately, independent of whether the panel has ever opened.
+    function ensureSumButtonStyles(doc) {
+        if (doc.getElementById('aim-mb-sum-btn-styles')) return;
+        const st = doc.createElement('style');
+        st.id = 'aim-mb-sum-btn-styles';
+        st.textContent = `
+            @keyframes aim-mb-sum-pulse-glow {
+                0%, 100% { box-shadow: 0 0 4px rgba(57,255,20,0.45), 0 0 9px rgba(57,255,20,0.22); }
+                50%      { box-shadow: 0 0 11px rgba(57,255,20,0.90), 0 0 22px rgba(57,255,20,0.48); }
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn {
+                animation: aim-mb-sum-pulse-glow 1.8s ease-in-out infinite;
+                background: #39ff14 !important;
+                border-color: #39ff14 !important;
+                text-shadow: none !important;
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn,
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn * {
+                color: #000 !important;
+                -webkit-text-fill-color: #000 !important;
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn:hover,
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn:focus {
+                background: #5cff43 !important;
+                border-color: #5cff43 !important;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                #${SUM_BTN_ID}.aim-mb-sum-neon-btn { animation: none; }
+            }`;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
     function injectButtonIntoRow(doc, row, header) {
+        ensureSumButtonStyles(doc);
         // Reuse the className from the existing "New mission" button so
         // SUM picks up Percepto's Ant theme (size, color, hover state).
         const newBtn = header.querySelector('.missions-list__new-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        btn.className = newBtn ? newBtn.className : 'ant-btn ant-btn-primary';
+        btn.className = (newBtn ? newBtn.className : 'ant-btn ant-btn-primary') + ' aim-mb-sum-neon-btn';
         btn.innerHTML = '<span>SUM</span>';
         btn.title = 'Open mission summary (AIM Mission Bank Tools)';
         btn.onclick = (e) => {
