@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — collapse redundant cards in Percepto's editor — Mission Bank Tools v0.80 (dev/latest only)
+
+The redundant Camera Type / GEM Mode / Wait cards in Percepto's **own** mission editor (the 100+-instruction left list) now collapse to thin one-line rows, so the editor is actually scannable. Toggle: Control Panel → Mission Bank Tools → "Collapse scan-block cards in the native editor" (on by default). The cards are matched by instruction id → type (from the open mission) and capped in height — kept in the DOM with a real box so drag-reorder isn't disturbed. A MutationObserver re-applies it as the list mounts/scrolls.
+
+---
+
 ## 2026-06-19 — Mission Bank Tools — hide all redundant map markers — Mission Bank Tools v0.79 (dev/latest only)
 
 The "Hide scan-block map icons" toggle now hides **all three** redundant marker types — GEM (`gem-mode`), Thermal (`camera-type`), and Wait (`wait`) — so the Mission Bank map shows only Navigate + Snapshot. (v0.78 only had the confirmed GEM filename; the Thermal + Wait filenames are now confirmed from the live DOM and safe — the Snapshot icon is a different camera file.)

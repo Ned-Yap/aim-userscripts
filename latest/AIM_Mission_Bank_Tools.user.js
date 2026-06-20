@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.79
+// @version      0.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.79';
+    const SCRIPT_VERSION = '0.80';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -149,6 +149,18 @@
     let hideScanIcons = gmGet(CACHE_KEY_HIDE_SCAN_ICONS, true);
     const REDUNDANT_MARKER_SRCS = ['gem-mode', 'camera-type', 'wait'];
     let loggedMarkerSrcs = false;
+    // Native-editor collapse: shrink the redundant Camera Type / GEM Mode /
+    // Wait instruction CARDS in Percepto's own mission editor (the left list)
+    // to thin rows so the 100+-instruction list is scannable. The cards are
+    // [data-rfd-draggable-id="<instructionId>"] (same handle the commit code
+    // uses); we map each id → type from the open mission and tag the redundant
+    // ones with a class. Capped height (not display:none) keeps a measurable
+    // box so react-beautiful-dnd drag-reorder isn't disturbed.
+    const CACHE_KEY_COLLAPSE_EDITOR = 'aim-mb-collapse-editor';
+    let collapseEditorCards = gmGet(CACHE_KEY_COLLAPSE_EDITOR, true);
+    const COLLAPSED_CARD_TYPES = new Set(['cameraSelect', 'gemMode', 'wait']);
+    let nativeCollapseMap = { missionId: null, ids: new Set() };
+    const EDITOR_COLLAPSE_STYLE_ID = 'aim-mb-editor-collapse-style';
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -223,6 +235,13 @@
                         gmSet(CACHE_KEY_HIDE_SCAN_ICONS, hideScanIcons);
                         if (CONTEXT === 'IFRAME') try { applyMapIconDeclutter(document); } catch (e) {}
                     }
+                } else if (msg.toggleId === 'collapse-editor-cards') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== collapseEditorCards) {
+                        collapseEditorCards = v;
+                        gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
+                        if (CONTEXT === 'IFRAME') try { applyNativeEditorCollapse(); } catch (e) {}
+                    }
                 }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
@@ -246,6 +265,7 @@
             toggles: [
                 { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
                 { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
+                { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
             ],
             hotkeys: [],
         });
@@ -1344,6 +1364,81 @@
         try { injectSumButton(document); } catch (e) {}
         try { injectLogSumButton(document); } catch (e) {}
         try { applyMapIconDeclutter(document); } catch (e) {}
+        try { applyNativeEditorCollapse(); } catch (e) {}
+    }
+
+    // The mission currently open in Percepto's native editor (id in the hash).
+    function getOpenMissionId() {
+        const top = (() => { try { return window.top; } catch (e) { return window; } })();
+        const hash = (top && top.location && top.location.hash) || location.hash || '';
+        const m = hash.match(MISSION_HREF_RE);
+        return m ? Number(m[1]) : null;
+    }
+
+    // Build (and cache) the set of instruction ids whose type is a redundant
+    // scan-block step for the currently-open mission. Uses the missionsBySite
+    // cache when warm, else fetches. cb fires once the map is ready.
+    function ensureNativeCollapseMap(cb) {
+        const mid = getOpenMissionId();
+        if (!mid) { nativeCollapseMap = { missionId: null, ids: new Set() }; cb && cb(); return; }
+        if (nativeCollapseMap.missionId === mid) { cb && cb(); return; }
+        const sid = getCurrentSiteID();
+        const apply = (missions) => {
+            const m = Array.isArray(missions) ? missions.find(x => x.id === mid) : null;
+            const ids = new Set();
+            if (m && Array.isArray(m.instructions)) {
+                m.instructions.forEach(ins => { if (ins && COLLAPSED_CARD_TYPES.has(ins.type_name)) ids.add(String(ins.id)); });
+            }
+            nativeCollapseMap = { missionId: mid, ids };
+            cb && cb();
+        };
+        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
+        if (Array.isArray(cached)) apply(cached);
+        else fetchMissions(sid, apply, () => { cb && cb(); });
+    }
+
+    function ensureEditorCollapseStyle(on) {
+        const existing = document.getElementById(EDITOR_COLLAPSE_STYLE_ID);
+        if (!on) { if (existing) existing.remove(); return; }
+        if (existing) return;
+        const st = document.createElement('style');
+        st.id = EDITOR_COLLAPSE_STYLE_ID;
+        // Cap the card height so only its title row (number + step name) shows,
+        // dim it, and tighten the gap. The card stays in the DOM with a real
+        // box, so drag-reorder still measures correctly.
+        st.textContent = `
+            [data-rfd-draggable-id].aim-mb-collapsed-card {
+                max-height: 38px !important;
+                min-height: 0 !important;
+                overflow: hidden !important;
+                opacity: 0.5;
+                transition: opacity 120ms ease;
+            }
+            [data-rfd-draggable-id].aim-mb-collapsed-card:hover { opacity: 0.9; }
+            [data-rfd-draggable-id].aim-mb-collapsed-card * { margin-top: 0 !important; margin-bottom: 0 !important; }
+        `;
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    // Tag/untag the redundant instruction cards in the native editor.
+    function applyNativeEditorCollapse() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!collapseEditorCards) {
+            ensureEditorCollapseStyle(false);
+            document.querySelectorAll('.aim-mb-collapsed-card').forEach(el => el.classList.remove('aim-mb-collapsed-card'));
+            return;
+        }
+        // Only act on the mission-edit surface (skip the SUM list etc.).
+        if (!document.querySelector('.mission-edit__content')) return;
+        ensureNativeCollapseMap(() => {
+            ensureEditorCollapseStyle(true);
+            const ids = nativeCollapseMap.ids;
+            document.querySelectorAll('[data-rfd-draggable-id]').forEach(card => {
+                const id = card.getAttribute('data-rfd-draggable-id');
+                if (ids.has(id)) card.classList.add('aim-mb-collapsed-card');
+                else card.classList.remove('aim-mb-collapsed-card');
+            });
+        });
     }
 
     // Log the distinct instruction-marker icon filenames once, so we can
@@ -5046,6 +5141,18 @@ ${placemarks}
             // to fire 30 times a minute.
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
+            // Re-apply the native-editor collapse promptly as the instruction
+            // list mounts / virtualizes on scroll (the 4s interval is too slow
+            // to feel responsive). Debounced so a burst of mutations = 1 pass.
+            let collapseDebounce = null;
+            const editorObserver = new MutationObserver(() => {
+                if (collapseDebounce) return;
+                collapseDebounce = setTimeout(() => {
+                    collapseDebounce = null;
+                    try { applyNativeEditorCollapse(); } catch (e) {}
+                }, 150);
+            });
+            try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
             installRightClickHandler();
             // READ-ONLY probe: logs + diffs each mission save vs the cached
             // original (never modifies the save). Tells us whether the form
