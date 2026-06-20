@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.88
+// @version      0.89
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.88';
+    const SCRIPT_VERSION = '0.89';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1732,8 +1732,17 @@
         const domIds = composerDomIds();
         const grpIds = groups[f].ids;
         const grpDomIdx = grpIds.map(id => composerIndexById(id));
-        console.log(`${TAG} [composer-reorder] PLAN nav=${navId} N${f + 1}→N${t + 1}`,
-            { reorderFn: fnWhy, groups: groups.length, domCards: domIds.length, instrCount: (composerMission.instructions || []).length, groupIds: grpIds, groupDomIndices: grpDomIdx });
+        // Flat string (no console expansion needed) + a basis check: the first
+        // few draggable ids vs the mission's first/last instruction ids+types,
+        // which reveals if the card index is offset from the instruction array
+        // (takeoff/returnHome not being cards).
+        const instr = composerMission.instructions || [];
+        console.log(`${TAG} [composer-reorder] PLAN ` + JSON.stringify({
+            nav: navId, fromN: f + 1, toN: t + 1, reorderFn: fnWhy, groups: groups.length,
+            domCards: domIds.length, instrCount: instr.length, groupDomIndices: grpDomIdx,
+            firstCards: domIds.slice(0, 3), firstInstr: instr.slice(0, 3).map(x => `${x.type_name}#${x.id}`),
+            lastInstr: instr.slice(-2).map(x => `${x.type_name}#${x.id}`),
+        }));
         if (composerReorderDebug) {
             showToast('Reorder is in DIAGNOSTIC mode — the plan was logged to the console (paste it to me). Paused so it can’t scramble a mission until we confirm it’s safe.', '#ffd54f', 7000);
             return;
