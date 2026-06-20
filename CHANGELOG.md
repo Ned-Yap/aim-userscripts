@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — fix native-editor collapse (match by title) — Mission Bank Tools v0.81 (dev/latest only)
+
+The v0.80 native-editor collapse no-op'd because it keyed off the mission id in the URL, which Percepto's editor doesn't expose. Switched to matching the redundant cards by their visible title text (Camera Type / GEM Mode / Wait) — no mission-id needed — and added a one-time diagnostic log of the card structure so any remaining selector/height tuning is quick. Same toggle + capped-height collapse as before.
+
+---
+
 ## 2026-06-19 — Mission Bank Tools — collapse redundant cards in Percepto's editor — Mission Bank Tools v0.80 (dev/latest only)
 
 The redundant Camera Type / GEM Mode / Wait cards in Percepto's **own** mission editor (the 100+-instruction left list) now collapse to thin one-line rows, so the editor is actually scannable. Toggle: Control Panel → Mission Bank Tools → "Collapse scan-block cards in the native editor" (on by default). The cards are matched by instruction id → type (from the open mission) and capped in height — kept in the DOM with a real box so drag-reorder isn't disturbed. A MutationObserver re-applies it as the list mounts/scrolls.

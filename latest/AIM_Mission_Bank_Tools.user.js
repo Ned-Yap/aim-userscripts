@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.80
+// @version      0.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.80';
+    const SCRIPT_VERSION = '0.81';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -158,9 +158,8 @@
     // box so react-beautiful-dnd drag-reorder isn't disturbed.
     const CACHE_KEY_COLLAPSE_EDITOR = 'aim-mb-collapse-editor';
     let collapseEditorCards = gmGet(CACHE_KEY_COLLAPSE_EDITOR, true);
-    const COLLAPSED_CARD_TYPES = new Set(['cameraSelect', 'gemMode', 'wait']);
-    let nativeCollapseMap = { missionId: null, ids: new Set() };
     const EDITOR_COLLAPSE_STYLE_ID = 'aim-mb-editor-collapse-style';
+    let loggedEditorCards = false;
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -1367,36 +1366,6 @@
         try { applyNativeEditorCollapse(); } catch (e) {}
     }
 
-    // The mission currently open in Percepto's native editor (id in the hash).
-    function getOpenMissionId() {
-        const top = (() => { try { return window.top; } catch (e) { return window; } })();
-        const hash = (top && top.location && top.location.hash) || location.hash || '';
-        const m = hash.match(MISSION_HREF_RE);
-        return m ? Number(m[1]) : null;
-    }
-
-    // Build (and cache) the set of instruction ids whose type is a redundant
-    // scan-block step for the currently-open mission. Uses the missionsBySite
-    // cache when warm, else fetches. cb fires once the map is ready.
-    function ensureNativeCollapseMap(cb) {
-        const mid = getOpenMissionId();
-        if (!mid) { nativeCollapseMap = { missionId: null, ids: new Set() }; cb && cb(); return; }
-        if (nativeCollapseMap.missionId === mid) { cb && cb(); return; }
-        const sid = getCurrentSiteID();
-        const apply = (missions) => {
-            const m = Array.isArray(missions) ? missions.find(x => x.id === mid) : null;
-            const ids = new Set();
-            if (m && Array.isArray(m.instructions)) {
-                m.instructions.forEach(ins => { if (ins && COLLAPSED_CARD_TYPES.has(ins.type_name)) ids.add(String(ins.id)); });
-            }
-            nativeCollapseMap = { missionId: mid, ids };
-            cb && cb();
-        };
-        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
-        if (Array.isArray(cached)) apply(cached);
-        else fetchMissions(sid, apply, () => { cb && cb(); });
-    }
-
     function ensureEditorCollapseStyle(on) {
         const existing = document.getElementById(EDITOR_COLLAPSE_STYLE_ID);
         if (!on) { if (existing) existing.remove(); return; }
@@ -1420,24 +1389,39 @@
         (document.head || document.documentElement).appendChild(st);
     }
 
+    // Which cards are the redundant scan-block steps — matched by the step
+    // title text Percepto renders ("Camera Type" / "GEM Mode" / "Wait"). Title
+    // matching avoids any dependency on the URL/mission-id (the editor doesn't
+    // put the id in the hash, which is why the id-based v0.80 pass no-op'd).
+    const COLLAPSE_TITLE_RE = /(Camera Type|GEM Mode|Wait)/;
+
     // Tag/untag the redundant instruction cards in the native editor.
     function applyNativeEditorCollapse() {
         if (CONTEXT !== 'IFRAME') return;
+        const cards = document.querySelectorAll('[data-rfd-draggable-id]');
         if (!collapseEditorCards) {
             ensureEditorCollapseStyle(false);
-            document.querySelectorAll('.aim-mb-collapsed-card').forEach(el => el.classList.remove('aim-mb-collapsed-card'));
+            cards.forEach(c => c.classList.remove('aim-mb-collapsed-card'));
             return;
         }
         // Only act on the mission-edit surface (skip the SUM list etc.).
-        if (!document.querySelector('.mission-edit__content')) return;
-        ensureNativeCollapseMap(() => {
-            ensureEditorCollapseStyle(true);
-            const ids = nativeCollapseMap.ids;
-            document.querySelectorAll('[data-rfd-draggable-id]').forEach(card => {
-                const id = card.getAttribute('data-rfd-draggable-id');
-                if (ids.has(id)) card.classList.add('aim-mb-collapsed-card');
-                else card.classList.remove('aim-mb-collapsed-card');
-            });
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        // One-time diagnostic so we can see the real card structure if the
+        // collapse still misbehaves (selector / height tuning).
+        if (!loggedEditorCards) {
+            loggedEditorCards = true;
+            if (cards.length) {
+                console.log(`${TAG} [editor-collapse] ${cards.length} [data-rfd-draggable-id] card(s). First card outerHTML (trimmed):`, cards[0].outerHTML.slice(0, 700));
+            } else {
+                console.log(`${TAG} [editor-collapse] NO [data-rfd-draggable-id] cards. mission-edit__content child classes:`, Array.from(content.children).map(c => c.className), 'innerHTML sample:', content.innerHTML.slice(0, 900));
+            }
+        }
+        if (!cards.length) return;
+        ensureEditorCollapseStyle(true);
+        cards.forEach(card => {
+            if (COLLAPSE_TITLE_RE.test(card.textContent || '')) card.classList.add('aim-mb-collapsed-card');
+            else card.classList.remove('aim-mb-collapsed-card');
         });
     }
 
