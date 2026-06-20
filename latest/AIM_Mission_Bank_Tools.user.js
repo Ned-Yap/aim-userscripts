@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.78
+// @version      0.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.78';
+    const SCRIPT_VERSION = '0.79';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -140,13 +140,14 @@
     // Map declutter: hide the redundant scan-block step markers (GEM/Thermal/
     // Wait) on the Mission Bank map, keeping only Navigate + Snapshot. Matched
     // by icon-filename substring via a CSS :has() rule (survives Leaflet's
-    // marker rebuilds on zoom/pan with no JS observer). 'gem-mode' is the only
-    // confirmed filename; the others are filled once we log the real names
-    // (logMarkerIconSrcs) — we don't guess 'camera' because that's likely the
-    // SNAPSHOT icon we must keep.
+    // marker rebuilds on zoom/pan with no JS observer). Confirmed filenames
+    // from the live DOM: GEM = gem-mode-*.svg, Thermal/Camera-Type =
+    // camera-type-*.svg, Wait = wait-*.svg. The Snapshot icon is a DIFFERENT
+    // camera file (not "camera-type"), so these substrings never hit Navigate
+    // or Snapshot.
     const CACHE_KEY_HIDE_SCAN_ICONS = 'aim-mb-hide-scan-icons';
     let hideScanIcons = gmGet(CACHE_KEY_HIDE_SCAN_ICONS, true);
-    const REDUNDANT_MARKER_SRCS = ['gem-mode'];
+    const REDUNDANT_MARKER_SRCS = ['gem-mode', 'camera-type', 'wait'];
     let loggedMarkerSrcs = false;
 
     // Battery → flights mapping. User's IFS formula:

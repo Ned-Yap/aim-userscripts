@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — hide all redundant map markers — Mission Bank Tools v0.79 (dev/latest only)
+
+The "Hide scan-block map icons" toggle now hides **all three** redundant marker types — GEM (`gem-mode`), Thermal (`camera-type`), and Wait (`wait`) — so the Mission Bank map shows only Navigate + Snapshot. (v0.78 only had the confirmed GEM filename; the Thermal + Wait filenames are now confirmed from the live DOM and safe — the Snapshot icon is a different camera file.)
+
+---
+
 ## 2026-06-19 — Mission Bank Tools — declutter redundant scan-block steps — Mission Bank Tools v0.78 (dev/latest only)
 
 The Thermal-on / GEM-on / Wait / GEM-off / Thermal-off block that every snapshot needs but that clogs the editor and map is now collapsible:
