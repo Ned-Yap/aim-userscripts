@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.83
+// @version      0.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.83';
+    const SCRIPT_VERSION = '0.84';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1503,8 +1503,11 @@
         const ft = (m) => unit === 'imperial' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : `${Math.round(m)} m`;
         const panel = document.createElement('div');
         panel.id = COMPOSER_PANEL_ID;
-        panel.style.cssText = 'position:fixed;top:60px;right:20px;width:340px;max-height:80vh;z-index:2147483600;' +
-            'background:#0f1216;border:1px solid rgba(95,255,95,0.45);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6);' +
+        // Percepto's native editor is a LEFT sidebar, so the Composer docks to
+        // the RIGHT edge and is locked there — it sits beside the editor (both
+        // visible) and can't drift over it. Full height of the map/editor area.
+        panel.style.cssText = 'position:fixed;top:0;right:0;width:360px;height:100vh;z-index:2147483600;' +
+            'background:#0f1216;border-left:1px solid rgba(95,255,95,0.45);box-shadow:-8px 0 30px rgba(0,0,0,0.55);' +
             "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
         const navCount = rows.filter(r => r.kind === 'nav').length;
         const blkCount = rows.filter(r => r.kind === 'block').length;
