@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.81
+// @version      0.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.81';
+    const SCRIPT_VERSION = '0.82';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -239,7 +239,10 @@
                     if (v !== collapseEditorCards) {
                         collapseEditorCards = v;
                         gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
-                        if (CONTEXT === 'IFRAME') try { applyNativeEditorCollapse(); } catch (e) {}
+                        if (CONTEXT === 'IFRAME') {
+                            try { applyNativeEditorCollapse(); } catch (e) {}
+                            try { updateEditorCollapseBtn(); } catch (e) {}
+                        }
                     }
                 }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
@@ -1364,6 +1367,41 @@
         try { injectLogSumButton(document); } catch (e) {}
         try { applyMapIconDeclutter(document); } catch (e) {}
         try { applyNativeEditorCollapse(); } catch (e) {}
+        try { injectEditorCollapseButton(); } catch (e) {}
+    }
+
+    // A collapse/expand toggle button in Percepto's native mission-edit
+    // sidebar (next to "Add instruction"), so the user can flip scan-block
+    // collapse without opening the Control Panel.
+    const EDITOR_COLLAPSE_BTN_ID = 'aim-mb-editor-collapse-btn';
+    function updateEditorCollapseBtn() {
+        const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
+        if (btn) btn.textContent = collapseEditorCards ? '▸ Expand scan steps' : '▾ Collapse scan steps';
+    }
+    function injectEditorCollapseButton() {
+        if (CONTEXT !== 'IFRAME') return;
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        if (document.getElementById(EDITOR_COLLAPSE_BTN_ID)) { updateEditorCollapseBtn(); return; }
+        const btn = document.createElement('button');
+        btn.id = EDITOR_COLLAPSE_BTN_ID;
+        btn.type = 'button';
+        btn.style.cssText = 'display:block;width:100%;margin:4px 0 8px;padding:6px 10px;background:transparent;' +
+            'border:1px solid rgba(20,210,220,0.5);color:#14d2dc;border-radius:6px;cursor:pointer;' +
+            "font-family:inherit;font-size:12px;font-weight:600;";
+        btn.onclick = (e) => {
+            e.preventDefault(); e.stopPropagation();
+            collapseEditorCards = !collapseEditorCards;
+            gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
+            try { applyNativeEditorCollapse(); } catch (er) {}
+            updateEditorCollapseBtn();
+        };
+        // Insert right after the "Add instruction" button when we can find it,
+        // else at the top of the editor content.
+        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
+        if (addBtn && addBtn.parentNode) addBtn.parentNode.insertBefore(btn, addBtn.nextSibling);
+        else content.insertBefore(btn, content.firstChild);
+        updateEditorCollapseBtn();
     }
 
     function ensureEditorCollapseStyle(on) {
@@ -1390,10 +1428,10 @@
     }
 
     // Which cards are the redundant scan-block steps — matched by the step
-    // title text Percepto renders ("Camera Type" / "GEM Mode" / "Wait"). Title
-    // matching avoids any dependency on the URL/mission-id (the editor doesn't
-    // put the id in the hash, which is why the id-based v0.80 pass no-op'd).
-    const COLLAPSE_TITLE_RE = /(Camera Type|GEM Mode|Wait)/;
+    // title text Percepto renders. CASE-INSENSITIVE: the Thermal card's title
+    // is "Camera type" (lowercase t), so a case-sensitive "Camera Type" missed
+    // it (v0.81). Title matching avoids any URL/mission-id dependency.
+    const COLLAPSE_TITLE_RE = /(camera type|gem mode|wait)/i;
 
     // Tag/untag the redundant instruction cards in the native editor.
     function applyNativeEditorCollapse() {
@@ -5134,6 +5172,7 @@ ${placemarks}
                 collapseDebounce = setTimeout(() => {
                     collapseDebounce = null;
                     try { applyNativeEditorCollapse(); } catch (e) {}
+                    try { injectEditorCollapseButton(); } catch (e) {}
                 }, 150);
             });
             try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}

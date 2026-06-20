@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — collapse the Thermal card too + sidebar toggle — Mission Bank Tools v0.82 (dev/latest only)
+
+Two fixes to the native-editor collapse: (1) the Thermal card was the only one not collapsing because its title is "Camera **type**" (lowercase t) and the match was case-sensitive — now case-insensitive, so all three collapse. (2) Added a **collapse/expand toggle button right in Percepto's editor sidebar** (next to "Add instruction") so you can flip it without opening the Control Panel; its label reflects the current state and stays in sync with the Control Panel toggle.
+
+---
+
 ## 2026-06-19 — Mission Bank Tools — fix native-editor collapse (match by title) — Mission Bank Tools v0.81 (dev/latest only)
 
 The v0.80 native-editor collapse no-op'd because it keyed off the mission id in the URL, which Percepto's editor doesn't expose. Switched to matching the redundant cards by their visible title text (Camera Type / GEM Mode / Wait) — no mission-id needed — and added a one-time diagnostic log of the card structure so any remaining selector/height tuning is quick. Same toggle + capped-height collapse as before.
