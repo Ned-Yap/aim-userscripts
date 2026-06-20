@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.86
+// @version      0.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.86';
+    const SCRIPT_VERSION = '0.87';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1657,7 +1657,10 @@
             if (!s.location || s.location.lat == null) return;
             if (s.type_name === 'navigate') {
                 navN++;
-                group.addLayer(L.marker([s.location.lat, s.location.lng], { icon: composerBadgeIcon(navN, 'nav'), zIndexOffset: 2000, keyboard: false }));
+                const navId = String(s.id), num = navN, ll = [s.location.lat, s.location.lng];
+                const mk = L.marker(ll, { icon: composerBadgeIcon(num, 'nav'), zIndexOffset: 2000, keyboard: false });
+                mk.on('click', () => composerEditNavOrder(navId, num, ll));
+                group.addLayer(mk);
             } else if (s.type_name === 'snapshot') {
                 snapN++;
                 group.addLayer(L.marker([s.location.lat, s.location.lng], { icon: composerBadgeIcon(snapN, 'snap'), zIndexOffset: 2000, interactive: false, keyboard: false }));
@@ -1665,6 +1668,69 @@
         });
         group.addTo(map);
         composerBadgeLayer = group;
+    }
+
+    // ── Edit a Navigate's order number → move the whole stop there ──
+    // A "stop" = the navigate + every step until the next navigate (its
+    // snapshots + their scan steps), so snapshots auto-follow.
+    function composerCurrentOrdered() {
+        if (!composerMission) return [];
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        return composerDomIds().map(id => byId[id]).filter(Boolean);
+    }
+    function composerNavGroups(ordered) {
+        const groups = []; let cur = null;
+        ordered.forEach(s => {
+            if (s.type_name === 'navigate') { cur = { navId: String(s.id), ids: [String(s.id)] }; groups.push(cur); }
+            else if (cur) cur.ids.push(String(s.id));
+        });
+        return groups;
+    }
+    // Move nav-group at index idx above the group at idx-1 (one step up).
+    async function composerSwapGroupUp(fn, idx) {
+        if (idx <= 0) return;
+        const groups = composerNavGroups(composerCurrentOrdered());
+        if (idx >= groups.length) return;
+        const dest = composerIndexById(groups[idx - 1].ids[0]);
+        if (dest >= 0) await composerMoveIdsToIndex(fn, groups[idx].ids, dest);
+    }
+    async function composerApplyNavOrder(navId, toNum) {
+        if (composerBusy) return;
+        const fn = composerFindReorderFn();
+        if (!fn) { showToast('Composer: reorder unavailable (Percepto changed).', '#ff5252', 4000); return; }
+        const groups = composerNavGroups(composerCurrentOrdered());
+        let f = groups.findIndex(g => g.navId === String(navId));
+        const t = Math.max(1, Math.min(groups.length, toNum)) - 1;
+        if (f < 0 || f === t) return;
+        composerBusy = true;
+        try {
+            while (f > t) { await composerSwapGroupUp(fn, f); f--; }
+            while (f < t) { await composerSwapGroupUp(fn, f + 1); f++; }
+        } catch (e) { console.warn(`${TAG} [composer] nav reorder failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Moved to N${t + 1} — hit SAVE in the editor.`, '#5fff5f', 3500);
+    }
+    function composerEditNavOrder(navId, currentNum, ll) {
+        if (composerBusy) return;
+        const map = getLeafletMap(); if (!map) return;
+        const old = document.getElementById('aim-cmp-num-edit'); if (old) old.remove();
+        let pt, rect;
+        try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
+        catch (e) { return; }
+        const wrap = document.createElement('div');
+        wrap.id = 'aim-cmp-num-edit';
+        wrap.style.cssText = `position:fixed;left:${rect.left + pt.x}px;top:${rect.top + pt.y - 16}px;z-index:2147483640;` +
+            'transform:translate(-50%,-100%);background:#0f1216;border:1px solid #2f6bff;border-radius:6px;padding:4px 6px;' +
+            'display:flex;gap:5px;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,0.6)';
+        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">N${currentNum}→</span>` +
+            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid #2f6bff;color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
+        document.body.appendChild(wrap);
+        const input = wrap.querySelector('input');
+        input.focus(); input.select();
+        const commit = () => { const v = parseInt(input.value, 10); wrap.remove(); if (!isNaN(v)) composerApplyNavOrder(navId, v); };
+        input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
+        input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
     }
 
     function renderComposer(mission, rows) {
@@ -1726,7 +1792,7 @@
                 <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
                 <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
-            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· ▲▼ moves a block (snapshot + its 5 steps) as a unit — then SAVE in the editor</span></div>
+            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge on the map to renumber a stop (snapshots follow) — then SAVE. ▲▼ also moves a block.</span></div>
             <div style="overflow:auto">${rowHtml}</div>`;
         document.body.appendChild(panel);
         panel.querySelector('[data-cmp-x]').onclick = closeComposer;

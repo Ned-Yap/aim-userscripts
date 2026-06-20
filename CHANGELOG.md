@@ -24,6 +24,12 @@ The weekly stale-issue auto-bump (open/pending >7 days → ping assignee + appro
 
 ---
 
+## 2026-06-20 — Mission Bank Tools — editable Navigate order badges — Mission Bank Tools v0.87 (dev/latest only)
+
+The blue **N#** badges on the map are now **editable**: click one, type a new number, and that whole stop — the navigate plus its snapshots and scan steps — moves to that position, cascading everyone else's numbers. Snapshots auto-follow (you only edit one number). It drives Percepto's reorder via single-step group swaps, so the native list reorders live; then hit SAVE. Snapshot **S#** badges are display-only for now (editable next). The list ▲▼ arrows still work too.
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — Composer map order badges — Mission Bank Tools v0.86 (dev/latest only)
 
 Reordering from a list was hard to follow, so the Composer now puts **order-number badges on the map** (the real source of truth for flight order): each **Navigate** gets a blue **N1, N2…** badge and each **Snapshot** a pink **S1, S2…** badge, numbered in flight order, drawn at each instruction's location as real Leaflet markers (so they ride zoom/pan and re-number after a reorder). Display-only this version — next, click a Navigate badge to retype its number and have the whole stop (snapshot + scan steps) move there, cascading the rest. Ports the Map Styler's Leaflet-map access.
