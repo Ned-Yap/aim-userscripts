@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -62,7 +62,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.11';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -116,6 +116,7 @@
         catch (e) { return null; }
     })();
     let digestRunning = false;
+    let digestRetryAfter = 0;       // backoff timestamp after a failed digest post
     const tabId = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now();
     let amLeader = false;
     let pausedForAuth = false;
@@ -270,6 +271,23 @@
         const meta = JSON.parse(resp.responseText);
         return { sha: meta.sha || null, base64: meta.content || '' };
     }
+    // Raw file content as text. The Contents API blanks base64 `content` to ''
+    // for files over 1 MB (returns encoding:"none", NOT an error) — that would
+    // silently empty the growing changes.csv on read AND make appendCsvRows
+    // rewrite it from scratch (history wipe). The raw media type returns the
+    // body directly and works up to 100 MB. Returns the text, or null on 404.
+    async function ghGetRaw(path) {
+        if (!cachedToken) throw new Error('no token');
+        const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(path)}?ref=${DATA_BRANCH}`;
+        const resp = await ghRequest({
+            method: 'GET', url,
+            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github.raw' },
+            timeout: 30000,
+        });
+        if (resp.status === 404) return null;
+        if (resp.status !== 200) throw new Error(`GET(raw) ${path} HTTP ${resp.status}`);
+        return resp.responseText || '';
+    }
     async function safeGetSha(path) {
         try { const m = await ghGetMeta(path); return m ? m.sha : undefined; }
         catch (e) { console.warn(TAG, `sha lookup ${path}`, e); return undefined; }
@@ -302,17 +320,23 @@
     async function appendCsvRows(rowStrings, message) {
         if (!rowStrings.length) return;
         for (let attempt = 0; attempt < 3; attempt++) {
-            const meta = await ghGetMeta(CSV_PATH);
+            const meta = await ghGetMeta(CSV_PATH);     // sha (present even when >1MB)
             let content;
             if (!meta) {
                 content = CSV_HEADER + '\n';
             } else {
-                const existing = b64ToText(meta.base64);
-                const firstLine = (existing.split('\n', 1)[0] || '');
-                // If the column schema changed (older 8-col header), start a fresh
-                // file with the new header rather than producing ragged rows.
-                if (firstLine === CSV_HEADER) content = existing.endsWith('\n') ? existing : existing + '\n';
-                else content = CSV_HEADER + '\n';
+                // Read the REAL content via raw — base64 `content` is blanked >1MB,
+                // which used to make this branch rewrite the file from scratch.
+                const existing = await ghGetRaw(CSV_PATH);
+                if (existing == null || !existing.length) {
+                    content = CSV_HEADER + '\n';        // vanished/empty → (re)create
+                } else {
+                    const firstLine = (existing.split('\n', 1)[0] || '');
+                    // Only a genuine schema change (real old header) starts fresh;
+                    // never an empty read.
+                    if (firstLine === CSV_HEADER) content = existing.endsWith('\n') ? existing : existing + '\n';
+                    else content = CSV_HEADER + '\n';
+                }
             }
             content += rowStrings.join('\n') + '\n';
             const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(CSV_PATH)}`;
@@ -435,8 +459,12 @@
         return bits.length ? bits.join(' ') : fmtVal(o);
     }
     // Percepto entity type → short label (mirrors Asset Inspector's TYPE_REG).
-    const TYPE_SHORT = { 3: 'Asset', 4: 'NFZ', 15: 'FP', 16: 'FFZ', 19: 'Marker' };
+    const TYPE_SHORT = { 3: 'Asset', 4: 'NFZ', 8: 'Base', 15: 'FP', 16: 'FFZ', 19: 'Marker', 98: 'SafeZone' };
     function typeShort(t) { return TYPE_SHORT[t] != null ? TYPE_SHORT[t] : ('type' + t); }
+    // Display remap for entity_type strings already written to old CSV rows
+    // (those stored "type8"/"type98" before the map above gained 8/98).
+    const TYPE_DISPLAY = { type8: 'Base', type98: 'SafeZone' };
+    function dispType(s) { return TYPE_DISPLAY[s] || s; }
     function entMeta(o) { return { etype: (o && o.type != null) ? typeShort(o.type) : '', ename: (o && (o.name || o.title || o.label)) || '' }; }
     // Derived/internal fields that regenerate on every save (arc ids, recomputed
     // distances) or mirror another field (coords ↔ arc points — arcs is the
@@ -605,6 +633,19 @@
         const { day, hour } = ptParts();
         return (hour >= cfg.digestHourPT) ? day : prevDay(day);
     }
+    // "6pm PT" / "8am PT" from a 24h hour, for the parent header.
+    function hourLabelPT(h) {
+        const ampm = h < 12 ? 'am' : 'pm';
+        let hh = h % 12; if (hh === 0) hh = 12;
+        return `${hh}${ampm} PT`;
+    }
+    // Short PT datetime for the "changes from … to …" window line.
+    function fmtPT(iso) {
+        if (!iso) return '(start)';
+        try {
+            return new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso)) + ' PT';
+        } catch (e) { return iso; }
+    }
 
     // ---- CSV read-back (the durable log is the source of truth) ----
     // Proper parser: was/is cells are quoted and can contain commas, quotes, and
@@ -629,9 +670,9 @@
         return rows;
     }
     async function fetchChangesSince(sinceISO) {
-        const meta = await ghGetMeta(CSV_PATH);
-        if (!meta) return [];
-        const rows = parseCsv(b64ToText(meta.base64));
+        const text = await ghGetRaw(CSV_PATH);      // raw: full content even >1MB
+        if (text == null) return [];
+        const rows = parseCsv(text);
         if (!rows.length) return [];
         const header = rows[0];
         const idx = {};
@@ -678,11 +719,16 @@
         return sites;
     }
 
-    function buildParent(sites, dayLabel) {
+    // Sites ordered most-changed first (shared by parent + thread so row N in
+    // the parent list lines up with block N in the thread).
+    function orderedSites(sites) {
+        return [...sites.entries()].sort((a, b) => (b[1].ents.size - a[1].ents.size) || (a[1].name || a[0]).localeCompare(b[1].name || b[0]));
+    }
+    function buildParent(sites, dayLabel, sinceISO, nowISO) {
         const n = sites.size;
-        const lines = [`:satellite: *Site Watch — daily digest* (${slackEsc(dayLabel)}, 6pm PT)`,
-                       `*${n}* site${n === 1 ? '' : 's'} changed since the last digest.`, ''];
-        const arr = [...sites.entries()].sort((a, b) => b[1].ents.size - a[1].ents.size);
+        const lines = [`:satellite: *Site Watch — daily digest* (${slackEsc(dayLabel)}, ${hourLabelPT(cfg.digestHourPT)})`,
+                       `*${n}* site${n === 1 ? '' : 's'} changed · _${fmtPT(sinceISO)} → ${fmtPT(nowISO)}_`, ''];
+        const arr = orderedSites(sites);
         const CAP = 50;
         arr.slice(0, CAP).forEach(([id, s]) => {
             let a = 0, r = 0, m = 0;
@@ -705,7 +751,7 @@
         const chunks = [];
         let buf = '';
         const flush = () => { if (buf) { chunks.push('```\n' + buf.replace(/\n$/, '') + '\n```'); buf = ''; } };
-        const arr = [...sites.entries()].sort((a, b) => (a[1].name || a[0]).localeCompare(b[1].name || b[0]));
+        const arr = orderedSites(sites);   // same order as the parent list
         for (const [id, s] of arr) {
             const head = `${s.name || '(unnamed)'} (${id})\n`;
             const ents = [...s.ents.values()].sort((x, y) => x.change.localeCompare(y.change));
@@ -718,7 +764,7 @@
                     const fl = [...e.fields];
                     detail = fl.length ? (fl.length + ' field' + (fl.length === 1 ? '' : 's') + ': ' + fl.slice(0, 6).join(', ') + (fl.length > 6 ? ` +${fl.length - 6}` : '')) : '(modified)';
                 }
-                lines.push(`  ${pad(e.change, 9)}${pad(e.etype, 7)}${pad(String(e.ename || '').slice(0, 24), 26)}${detail}`);
+                lines.push(`  ${pad(e.change, 9)}${pad(dispType(e.etype), 9)}${pad(String(e.ename || '').slice(0, 24), 26)}${detail}`);
             });
             if (ents.length > ROWCAP) lines.push(`  …and ${ents.length - ROWCAP} more (see changes.csv)`);
             const block = head + lines.join('\n') + '\n\n';
@@ -731,20 +777,26 @@
         return chunks;
     }
 
-    // Post a digest for all changes since `sinceISO`. Returns true if it posted.
+    // Post a digest for all changes since `sinceISO`. Returns:
+    //   'posted' — parent went out (thread is best-effort after that)
+    //   'empty'  — no changes in the window (silent day; window may still close)
+    //   'failed' — couldn't read the CSV or the parent post failed (do NOT
+    //              advance the cutoff; the caller retries later)
     async function postDigest(sinceISO, dayLabel) {
-        if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured'); return false; }
+        if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured'); return 'failed'; }
         let rows;
         try { rows = await fetchChangesSince(sinceISO); }
-        catch (e) { console.warn(TAG, 'digest: changes.csv read failed', e); return false; }
-        if (!rows.length) { console.log(`${TAG} digest: no changes since ${sinceISO || '(start)'} — staying silent`); return false; }
+        catch (e) { console.warn(TAG, 'digest: changes.csv read failed', e); return 'failed'; }
+        if (!rows.length) { console.log(`${TAG} digest: no changes since ${sinceISO || '(start)'} — staying silent`); return 'empty'; }
         const sites = rollup(rows);
-        const parentTs = await slackPost(buildParent(sites, dayLabel));
-        if (!parentTs) { console.warn(TAG, 'digest: parent post failed — skipping thread'); return false; }
+        const nowISO = new Date().toISOString();
+        const parentTs = await slackPost(buildParent(sites, dayLabel, sinceISO, nowISO));
+        if (!parentTs) { console.warn(TAG, 'digest: parent post failed — not advancing cutoff, will retry'); return 'failed'; }
         const chunks = buildThreadChunks(sites);
-        for (const ch of chunks) { await slackPost(ch, parentTs); await sleep(400); }
-        console.log(`%c${TAG} digest posted — ${sites.size} site(s), ${rows.length} change row(s), ${chunks.length} thread message(s)`, 'color:#5fd0ff;font-weight:700');
-        return true;
+        let chunkFails = 0;
+        for (const ch of chunks) { if (!await slackPost(ch, parentTs)) chunkFails++; await sleep(400); }
+        console.log(`%c${TAG} digest posted — ${sites.size} site(s), ${rows.length} change row(s), ${chunks.length} thread message(s)${chunkFails ? ` · ${chunkFails} thread post(s) failed` : ''}`, 'color:#5fd0ff;font-weight:700');
+        return 'posted';
     }
 
     // Fire the daily digest once the PT boundary passes. Cheap when not firing
@@ -752,6 +804,7 @@
     async function maybeDailyDigest(trigger) {
         if (!masterEnabled || !cachedToken || digestRunning) return;
         if (!slackEnabled()) return;
+        if (Date.now() < digestRetryAfter) return;     // backing off after a failure
         const target = targetDigestDay();
         const lastDay = gmGet(DIGEST_DAY_KEY, null);
         // First ever: baseline silently so we never dump the whole historical CSV.
@@ -760,12 +813,21 @@
         digestRunning = true;
         try {
             const since = gmGet(DIGEST_AT_KEY, '') || '';
-            const posted = await postDigest(since, target);
-            // Advance the cutoff whether or not we posted (silent days still close
-            // the window) so the next digest doesn't re-report the same span.
+            const status = await postDigest(since, target);
+            if (status === 'failed') {
+                // Don't advance the cutoff — that span is unreported. Back off so a
+                // hard failure (Slack down / bad token) retries every ~10 min, not
+                // every 30s heartbeat.
+                digestRetryAfter = Date.now() + 10 * 60 * 1000;
+                console.warn(`${TAG} daily digest failed (${trigger}) — retry in ~10 min`);
+                return;
+            }
+            // 'posted' or 'empty': close the window so the next digest doesn't
+            // re-report the same span (silent days still advance).
+            digestRetryAfter = 0;
             gmSet(DIGEST_DAY_KEY, target);
             gmSet(DIGEST_AT_KEY, new Date().toISOString());
-            if (posted) console.log(`${TAG} daily digest complete (${trigger})`);
+            if (status === 'posted') console.log(`${TAG} daily digest complete (${trigger})`);
         } catch (e) { console.error(TAG, 'maybeDailyDigest error', e); }
         finally { digestRunning = false; }
     }
@@ -1052,12 +1114,17 @@
         else if (actionId === 'post-digest-now') {
             // Test/preview: post a digest of the last 24h WITHOUT touching the
             // daily schedule cutoff, so it never interferes with the real 6pm run.
+            if (digestRunning) { console.warn(TAG, 'a digest is already in progress — ignoring manual request'); return; }
             (async () => {
                 if (!slackEnabled()) { await fetchSlackConfig(); }
                 if (!slackEnabled()) { console.warn(TAG, 'digest: Slack not configured (slack-config.json) — cannot post'); return; }
-                const since = new Date(Date.now() - 24 * 3600e3).toISOString();
-                console.log(`${TAG} manual digest preview — changes since ${since}`);
-                await postDigest(since, ptParts().day);
+                digestRunning = true;
+                try {
+                    const since = new Date(Date.now() - 24 * 3600e3).toISOString();
+                    console.log(`${TAG} manual digest preview — changes since ${since}`);
+                    await postDigest(since, ptParts().day);
+                } catch (e) { console.error(TAG, 'manual digest error', e); }
+                finally { digestRunning = false; }
             })();
         } else if (actionId === 'reset-baselines') {
             if (!confirm('Reset ALL site baselines? Next checks re-learn current state (no diffs until something changes again).')) return;
