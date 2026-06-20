@@ -6,9 +6,11 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-19 — Mission Bank Tools — green SUM button + Mission SOP Validators — Mission Bank Tools v0.76 (dev/latest only)
+## 2026-06-19 — Mission Bank Tools — green SUM button + snap-docking + Mission SOP Validators — Mission Bank Tools v0.77 (dev/latest only)
 
-Two additions to the dev build of Mission Bank Tools:
+Three additions to the dev build of Mission Bank Tools:
+
+- **Snap-docking on the SUM panel** — ported from the Site Setup SUM so the two behave identically. Header now carries ◧ ◨ ⬓ ❐ buttons to dock the panel to the **left / right / bottom of the map** or float/restore. Position, size, and dock state persist across opens; dragging the header un-docks; a docked panel re-fits when the window/sidebar resizes.
 
 - **SUM button + panel header** rebuilt to match the Site Setup SUM button exactly: neon green (#39ff14) fill, **black label**, pulse-glow, full label **"Mission Bank Summary"** (was a teal "SUM"). Black text is forced with inline `!important` (Percepto's white `-webkit-text-fill-color` beat a CSS-rule override). The panel header reads "Mission Bank Summary", left-justified (room on the right for the upcoming generator button). The "📋 LOG SUM" launcher stays cyan to keep the execution-log summary visually distinct.
 - **Mission SOP Validators** — a new Control Panel section ("Mission SOP", scope Mission Bank) with a **site-type preset** selector (OIL · Upstream / OIL · Downstream / T&D), per-check enables + editable thresholds, and a **🚩 Run SOP check** button that lists every violation in a floating report (click a mission to open it). Five checks: Navigate inside an FFZ, Navigate ≥ FFZ floor, Snapshot ≥ min AGL (0 ft default), scan-block balance (one Thermal/GEM/Wait set per snapshot), and Navigate↔Snapshot distance (96–204 ft, Upstream). Upstream ships the live numbers; the other presets inherit them (editable) until their SOPs are defined. Existing bulk altitude editing is unchanged.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.76
+// @version      0.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.76';
+    const SCRIPT_VERSION = '0.77';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1568,6 +1568,7 @@
         if (!panelState) initPanelState();
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
+        if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
         const bucket = missionsBySite[siteID];
         const goDrill = () => {
             // Confirm the mission exists in the loaded set; if not,
@@ -1627,6 +1628,7 @@
         if (!panelState || panelState.mode !== mode) initPanelState(mode);
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
+        if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
         if (mode === 'log') {
             const bucket = logBySite[siteID];
             if (!bucket) {
@@ -1789,24 +1791,36 @@
             document.head.appendChild(style);
         }
 
+        loadPanelGeom();
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
+        const startW = panelGeom.w || 900, startH = panelGeom.h || 600;
         Object.assign(panelEl.style, {
-            position: 'fixed', top: '80px', right: '20px',
-            width: '900px', height: '600px', minWidth: '500px', minHeight: '300px',
+            position: 'fixed',
+            width: startW + 'px', height: startH + 'px', minWidth: '500px', minHeight: '300px',
             background: '#0f1216', border: '1px solid #14d2dc', borderRadius: '6px',
             zIndex: '99999', display: 'flex', flexDirection: 'column',
             boxShadow: '0 8px 28px rgba(0,0,0,0.7)',
         });
+        // Restore a saved float position, else default to top-right.
+        if (typeof panelGeom.x === 'number' && typeof panelGeom.y === 'number') {
+            panelEl.style.left = Math.max(0, Math.min(window.innerWidth - 80, panelGeom.x)) + 'px';
+            panelEl.style.top = Math.max(0, Math.min(window.innerHeight - 40, panelGeom.y)) + 'px';
+        } else {
+            panelEl.style.top = '80px';
+            panelEl.style.right = '20px';
+        }
 
-        // Header (draggable handle)
+        // Header (draggable handle) — title, snap-dock buttons, refresh, close.
         const header = document.createElement('div');
         header.className = 'aim-mb-header';
         header.innerHTML = `
             <div class="aim-mb-header-title">📋 Mission Bank Summary — <span data-site></span></div>
+            <span class="aim-mb-snap" style="display:flex;align-items:center;gap:1px;margin-right:2px"></span>
             <button class="aim-mb-header-btn" data-refresh title="Re-fetch missions">Refresh</button>
             <button class="aim-mb-header-btn" data-close>✕</button>
         `;
+        addSnapButtons(header.querySelector('.aim-mb-snap'));
         panelEl.appendChild(header);
         makeDraggable(panelEl, header);
         header.querySelector('[data-close]').onclick = closePanel;
@@ -1834,6 +1848,16 @@
         makeResizable(panelEl, resize);
 
         document.body.appendChild(panelEl);
+
+        // Re-apply a saved dock (now that the panel is in the DOM and we can
+        // measure the map), and re-fit it when the window/sidebar resizes.
+        if (panelGeom.snap) snapPanel(panelGeom.snap);
+        if (!panelResizeBound) {
+            panelResizeBound = true;
+            window.addEventListener('resize', () => {
+                if (panelGeom.snap && panelEl && panelEl.style.display !== 'none') snapPanel(panelGeom.snap);
+            });
+        }
     }
 
     // Pointer-event drag: setPointerCapture guarantees we keep receiving
@@ -1858,11 +1882,18 @@
             if (!dragging || e.pointerId !== pointerId) return;
             el.style.left = `${startLeft + e.clientX - startX}px`;
             el.style.top = `${startTop + e.clientY - startY}px`;
+            panelGeom.snap = null; // manual move un-docks
         });
         const stop = (e) => {
             if (e && e.pointerId !== pointerId) return;
+            if (!dragging) return;
             dragging = false;
             try { handle.releasePointerCapture(pointerId); } catch (er) {}
+            // Persist the new floating position.
+            const r = el.getBoundingClientRect();
+            panelGeom.x = Math.round(r.left); panelGeom.y = Math.round(r.top);
+            panelGeom.w = Math.round(r.width); panelGeom.h = Math.round(r.height);
+            savePanelGeom();
         };
         handle.addEventListener('pointerup', stop);
         handle.addEventListener('pointercancel', stop);
@@ -1886,11 +1917,109 @@
         });
         const stop = (e) => {
             if (e && e.pointerId !== pointerId) return;
+            if (!resizing) return;
             resizing = false;
             try { handle.releasePointerCapture(pointerId); } catch (er) {}
+            const r = el.getBoundingClientRect();
+            panelGeom.w = Math.round(r.width); panelGeom.h = Math.round(r.height);
+            panelGeom.x = Math.round(r.left); panelGeom.y = Math.round(r.top);
+            savePanelGeom();
         };
         handle.addEventListener('pointerup', stop);
         handle.addEventListener('pointercancel', stop);
+    }
+
+    // ========================================================
+    // Panel geometry + snap docking — ported from the Site Setup SUM
+    // panel so the two SUMs behave identically: dock to the left / right /
+    // bottom of the MAP, float/restore, and persist position+size+snap
+    // across opens. Snap targets come from the .leaflet-container region so
+    // a side-dock fills the map's edge (not the sidebar).
+    // ========================================================
+    const PANEL_GEOM_KEY = 'aim-mb-panel-geom';
+    const panelGeom = { x: null, y: null, w: 900, h: 600, snap: null, floatRect: null };
+    let panelResizeBound = false;
+    function loadPanelGeom() {
+        const g = gmGet(PANEL_GEOM_KEY, null);
+        if (!g || typeof g !== 'object') return;
+        if (typeof g.x === 'number') panelGeom.x = g.x;
+        if (typeof g.y === 'number') panelGeom.y = g.y;
+        if (typeof g.w === 'number') panelGeom.w = g.w;
+        if (typeof g.h === 'number') panelGeom.h = g.h;
+        if (g.snap === 'left' || g.snap === 'right' || g.snap === 'bottom' || g.snap === null) panelGeom.snap = g.snap;
+        if (g.floatRect && typeof g.floatRect === 'object') panelGeom.floatRect = g.floatRect;
+    }
+    function savePanelGeom() {
+        gmSet(PANEL_GEOM_KEY, {
+            x: panelGeom.x, y: panelGeom.y, w: panelGeom.w, h: panelGeom.h,
+            snap: panelGeom.snap, floatRect: panelGeom.floatRect,
+        });
+    }
+    function getMapRect() {
+        try {
+            const mc = document.querySelector('.leaflet-container');
+            if (mc) {
+                const r = mc.getBoundingClientRect();
+                if (r.width > 200 && r.height > 200) return { left: r.left, top: r.top, width: r.width, height: r.height };
+            }
+        } catch (e) {}
+        return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    }
+    function applyPanelGeom(L, T, W, H) {
+        if (!panelEl) return;
+        panelEl.style.right = 'auto';
+        panelEl.style.left = Math.round(L) + 'px';
+        panelEl.style.top = Math.round(T) + 'px';
+        panelEl.style.width = Math.round(W) + 'px';
+        panelEl.style.height = Math.round(H) + 'px';
+        panelGeom.x = Math.round(L); panelGeom.y = Math.round(T);
+        panelGeom.w = Math.round(W); panelGeom.h = Math.round(H);
+    }
+    function snapPanel(where) {
+        if (!panelEl) return;
+        const m = getMapRect();
+        const priorSnap = panelGeom.snap;
+        // Remember the floating geometry the first time we dock so float/restore can return to it.
+        if (!priorSnap) {
+            const r = panelEl.getBoundingClientRect();
+            panelGeom.floatRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        }
+        const floatW = (panelGeom.floatRect && panelGeom.floatRect.w) || 900;
+        let L, T, W, H;
+        if (where === 'left' || where === 'right') {
+            const baseW = priorSnap ? floatW : panelEl.getBoundingClientRect().width;
+            W = Math.min(Math.max(baseW, 480), Math.round(m.width * 0.7));
+            H = m.height; T = m.top;
+            L = where === 'left' ? m.left : (m.left + m.width - W);
+        } else { // bottom dock
+            W = m.width; L = m.left;
+            H = Math.min(Math.max(Math.round(m.height * 0.45), 300), m.height);
+            T = m.top + m.height - H;
+        }
+        applyPanelGeom(L, T, W, H);
+        panelGeom.snap = where;
+    }
+    function floatPanel() {
+        panelGeom.snap = null;
+        const f = panelGeom.floatRect;
+        if (f) applyPanelGeom(f.x, f.y, f.w, f.h);
+    }
+    function makeSnapButton(glyph, tip, fn) {
+        const b = document.createElement('button');
+        b.textContent = glyph;
+        b.title = tip;
+        b.style.cssText = 'background:transparent;border:1px solid transparent;color:#9fb4bb;font-size:13px;line-height:1;cursor:pointer;padding:2px 5px;border-radius:3px';
+        b.onmouseenter = () => { b.style.background = 'rgba(95,255,95,0.18)'; b.style.color = '#cdeff3'; };
+        b.onmouseleave = () => { b.style.background = 'transparent'; b.style.color = '#9fb4bb'; };
+        b.onpointerdown = (e) => { e.stopPropagation(); }; // don't start a header drag
+        b.onclick = (e) => { e.stopPropagation(); fn(); };
+        return b;
+    }
+    function addSnapButtons(container) {
+        container.appendChild(makeSnapButton('◧', 'Dock to left of map', () => { snapPanel('left'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('◨', 'Dock to right of map', () => { snapPanel('right'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('⬓', 'Dock to bottom of map', () => { snapPanel('bottom'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('❐', 'Float / restore', () => { floatPanel(); savePanelGeom(); }));
     }
 
     // ========================================================
