@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-20 — AIM Issues — global sweep shows site NAMES, not IDs — AIM Issues v1.23 (dev/latest only)
+
+Follow-up to v1.22: the global sweep posts/adopts issues for sites it never opens, so it had no friendly site name and Slack showed "site 1595" instead of the name. Fixed — the sweep now pulls every site's name from Percepto's own `/sites/` endpoint (one same-origin request per sweep) and threads it through. Also refreshes any parent board that was already posted with an ID so it corrects to the name on the next sweep.
+
+---
+
 ## 2026-06-20 — AIM Issues — stale-bump works without opening a site — AIM Issues v1.22 (dev/latest only)
 
 The weekly stale-issue auto-bump (open/pending >7 days → ping assignee + approvers) used to only fire for the **one site you had open** — it lived in the map iframe and only ever scanned that site's issues. Now there's a **global cross-site sweep** that runs in the top frame (which exists everywhere, even the landing page with no site open). It lists every site's issue file on GitHub, finds stale issues across **all** sites, and bumps them — no need to navigate into each site. Approver-gated (so every CSM's browser isn't sweeping every site); the currently-open site is left to the existing iframe path; same 7-day dedup window, so a bump another browser already posted this week is skipped. Kicks ~30s after load, then hourly.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.22
+// @version      1.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.22';
+    const SCRIPT_VERSION = '1.23';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -826,7 +826,13 @@
     // Edit an existing message in place (chat.update). Works with chat:write —
     // no extra scope. IFRAME-only, never throws.
     async function slackUpdate(ts, text) {
-        if (IS_TOP || !slackEnabled() || !ts) return false;
+        if (IS_TOP) return false;     // IFRAME owns the current-site flow
+        return slackUpdateRaw(ts, text);
+    }
+    // v1.22: frame-agnostic chat.update core, mirrors slackPostRaw. The global
+    // stale sweep (TOP frame) uses it to refresh parent boards on other sites.
+    async function slackUpdateRaw(ts, text) {
+        if (!slackEnabled() || !ts) return false;
         try {
             const resp = await ghRequest({
                 method: 'POST',
@@ -1257,6 +1263,39 @@
     // bump another browser already wrote this week is seen and skipped. The
     // currently-open site (if any) is skipped here and left to the IFRAME.
     let globalSweepRunning = false;
+    // v1.22: site ID → friendly name map. The sweep runs in the TOP frame
+    // without opening any site, so readSiteName() (DOM .site-select) only
+    // knows the current site. Pull every site's name from Percepto's own
+    // same-origin /sites/ endpoint (cookie auth, no PAT) so adopted parent
+    // boards + bump fallback text show the NAME, not "site <id>". Cached for
+    // the run; rebuilt each sweep (cheap, one request).
+    let siteNamesCache = null;
+    async function fetchSiteNames() {
+        try {
+            const resp = await fetch('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) { console.warn(`${TAG} /sites/ HTTP ${resp.status} — sweep will fall back to site IDs`); return new Map(); }
+            const ct = resp.headers.get('content-type') || '';
+            const map = new Map();
+            if (/json/i.test(ct)) {
+                let data = null; try { data = await resp.json(); } catch (e) {}
+                let list = Array.isArray(data) ? data : null;
+                if (!list && data && typeof data === 'object') {
+                    for (const k of ['results', 'objects', 'data', 'sites', 'items']) {
+                        if (Array.isArray(data[k])) { list = data[k]; break; }
+                    }
+                }
+                (list || []).forEach(s => {
+                    const id = String(s.id != null ? s.id : (s.site_id != null ? s.site_id : (s.pk != null ? s.pk : '')));
+                    const name = String(s.name || s.site_name || s.title || '').trim();
+                    if (id && name) map.set(id, name);
+                });
+            }
+            return map;
+        } catch (e) {
+            console.warn(`${TAG} fetchSiteNames threw — sweep falls back to site IDs:`, e);
+            return new Map();
+        }
+    }
     async function listIssueSites() {
         const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/issues?ref=${ISSUES_BRANCH}`;
         const resp = await ghRequest({
@@ -1311,7 +1350,8 @@
         return false;
     }
     // Bump stale issues for ONE site off its freshly-fetched remote list.
-    async function sweepSite(sid) {
+    // `name` = friendly site name (from /sites/), '' falls back to "site <id>".
+    async function sweepSite(sid, name) {
         const remote = await fetchRemoteIssues(sid);
         if (!remote || !remote.issues.length) return 0;
         const now = Date.now();
@@ -1328,8 +1368,13 @@
             // so the bump threads under it. slackPostable filters local-only /
             // opted-out validator findings (validator never reaches here anyway).
             if (!issue.slackThreadTs && slackPostable(issue)) {
-                const ts = await slackPostRaw(slackParentText(issue, null, sid, null), null);
+                const ts = await slackPostRaw(slackParentText(issue, null, sid, name), null);
                 if (ts) issue.slackThreadTs = ts;
+            } else if (issue.slackThreadTs && name && slackPostable(issue)) {
+                // Refresh the parent board with the correct name + current
+                // status — fixes any board that was adopted before we had the
+                // site name (showed "site <id>"). Cheap, only for stale issues.
+                slackUpdateRaw(issue.slackThreadTs, slackParentText(issue, null, sid, name));
             }
             const seen = new Set();
             const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
@@ -1338,7 +1383,7 @@
             const head = `⏰ *Stale ${days}d* — still *${label}* since ${new Date(since).toISOString().slice(0, 10)}`;
             const text = issue.slackThreadTs
                 ? `${head}${mentions ? '\ncc ' + mentions : ''}`
-                : `${head} · ${siteLabelForSlack(issue.id, sid, null)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
+                : `${head} · ${siteLabelForSlack(issue.id, sid, name)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
             const ts = await slackPostRaw(text, issue.slackThreadTs || null);
             if (!ts) continue;   // post failed — don't record a bump (retry next run)
             if (!Array.isArray(issue.history)) issue.history = [];
@@ -1359,11 +1404,12 @@
         try {
             const sids = await listIssueSites();
             if (!sids.length) return;
+            siteNamesCache = await fetchSiteNames();   // one /sites/ request for the whole sweep
             let totalBumped = 0, sitesBumped = 0;
             for (const sid of sids) {
                 if (sid === siteID) continue;            // current site → IFRAME handles it
                 try {
-                    const n = await sweepSite(sid);
+                    const n = await sweepSite(sid, siteNamesCache.get(sid) || '');
                     if (n) { totalBumped += n; sitesBumped++; }
                 } catch (e) {
                     console.warn(`${TAG} global sweep: site ${sid} threw:`, e);
