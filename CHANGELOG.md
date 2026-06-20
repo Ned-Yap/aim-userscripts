@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-19 — Mission Bank Tools — declutter redundant scan-block steps — Mission Bank Tools v0.78 (dev/latest only)
+
+The Thermal-on / GEM-on / Wait / GEM-off / Thermal-off block that every snapshot needs but that clogs the editor and map is now collapsible:
+
+- **Editor:** a "Collapse scan blocks" toggle (on by default) in the mission detail view replaces each snapshot's 5 redundant rows with one compact summary row (🔥 Scan block · Thermal · GEM · Wait, with a ✓/⚠ on whether it's the canonical block). Data is untouched — pure view filter; turn it off to see every step.
+- **Map:** a "Hide scan-block map icons" Control Panel toggle (on by default) hides the redundant GEM/Thermal/Wait markers on the Mission Bank map (CSS `:has()` so it survives Leaflet redraws), keeping only Navigate + Snapshot. Currently hides the confirmed GEM icon; the Thermal + Wait icon names are being captured from the live map (logged to console) so they can be added without risking the Snapshot/camera icon.
+
+---
+
 ## 2026-06-19 — Mission Bank Tools — green SUM button + snap-docking + Mission SOP Validators — Mission Bank Tools v0.77 (dev/latest only)
 
 Three additions to the dev build of Mission Bank Tools:

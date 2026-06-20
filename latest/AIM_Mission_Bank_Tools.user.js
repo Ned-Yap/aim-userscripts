@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.77
+// @version      0.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.77';
+    const SCRIPT_VERSION = '0.78';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -129,8 +129,25 @@
     const CACHE_KEY_DISTANCE_UNIT = 'aim-mb-distance-unit'; // 'imperial' | 'metric'
     const CACHE_KEY_FLIGHT_THRESHOLDS = 'aim-mb-flight-thresholds';
     const CACHE_KEY_GAP_DAYS = 'aim-mb-log-gap-days';       // coverage-gap threshold (days)
+    const CACHE_KEY_COLLAPSE_BLOCKS = 'aim-mb-collapse-blocks'; // detail view: collapse Thermal/GEM/Wait scan blocks
     const LOG_SUM_BTN_ID = 'aim-mb-log-sum-btn';            // launcher on the Mission Log page
     const DEFAULT_GAP_DAYS = 7;
+    // Detail-view ergonomics: collapse each snapshot's redundant
+    // Thermal-on/GEM-on/Wait/GEM-off/Thermal-off block into ONE summary row.
+    // Default ON — these 5 steps eat the editor. The data is untouched; this
+    // is a pure view filter.
+    let collapseScanBlocks = gmGet(CACHE_KEY_COLLAPSE_BLOCKS, true);
+    // Map declutter: hide the redundant scan-block step markers (GEM/Thermal/
+    // Wait) on the Mission Bank map, keeping only Navigate + Snapshot. Matched
+    // by icon-filename substring via a CSS :has() rule (survives Leaflet's
+    // marker rebuilds on zoom/pan with no JS observer). 'gem-mode' is the only
+    // confirmed filename; the others are filled once we log the real names
+    // (logMarkerIconSrcs) — we don't guess 'camera' because that's likely the
+    // SNAPSHOT icon we must keep.
+    const CACHE_KEY_HIDE_SCAN_ICONS = 'aim-mb-hide-scan-icons';
+    let hideScanIcons = gmGet(CACHE_KEY_HIDE_SCAN_ICONS, true);
+    const REDUNDANT_MARKER_SRCS = ['gem-mode'];
+    let loggedMarkerSrcs = false;
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -198,6 +215,13 @@
                     } else {
                         runSumInjection();
                     }
+                } else if (msg.toggleId === 'hide-scan-icons') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== hideScanIcons) {
+                        hideScanIcons = v;
+                        gmSet(CACHE_KEY_HIDE_SCAN_ICONS, hideScanIcons);
+                        if (CONTEXT === 'IFRAME') try { applyMapIconDeclutter(document); } catch (e) {}
+                    }
                 }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
@@ -218,7 +242,10 @@
             description: 'Mission Summary panel + drill-down on Mission Bank URL.',
             version: SCRIPT_VERSION,
             group: 'Mission Bank Macros', scope: 'mission-bank', priority: 20,
-            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+            toggles: [
+                { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
+                { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
+            ],
             hotkeys: [],
         });
     }
@@ -1315,6 +1342,43 @@
         if (CONTEXT !== 'IFRAME') return;
         try { injectSumButton(document); } catch (e) {}
         try { injectLogSumButton(document); } catch (e) {}
+        try { applyMapIconDeclutter(document); } catch (e) {}
+    }
+
+    // Log the distinct instruction-marker icon filenames once, so we can
+    // extend REDUNDANT_MARKER_SRCS with the exact Thermal + Wait names
+    // without risking the Snapshot (camera) icon.
+    function logMarkerIconSrcs(doc) {
+        if (loggedMarkerSrcs) return;
+        const imgs = doc.querySelectorAll('.instruction-marker img[src]');
+        if (!imgs.length) return;
+        const names = new Set();
+        imgs.forEach(i => {
+            const src = i.getAttribute('src') || '';
+            const file = src.split('/').pop();
+            if (file) names.add(file);
+        });
+        if (names.size) {
+            loggedMarkerSrcs = true;
+            console.log(`${TAG} [map-icons] distinct instruction-marker icons on this map:`, Array.from(names).sort());
+        }
+    }
+
+    // Inject/refresh the CSS that hides redundant scan-block markers. Pure
+    // CSS :has() so it auto-applies to markers Leaflet re-creates on zoom/pan.
+    function applyMapIconDeclutter(doc) {
+        logMarkerIconSrcs(doc);
+        const STYLE_ID = 'aim-mb-map-declutter';
+        const existing = doc.getElementById(STYLE_ID);
+        if (!hideScanIcons) { if (existing) existing.remove(); return; }
+        const css = REDUNDANT_MARKER_SRCS
+            .map(sub => `.instruction-marker:has(img[src*="${sub}"]){display:none!important;}`)
+            .join('\n');
+        if (existing) { if (existing.textContent !== css) existing.textContent = css; return; }
+        const st = doc.createElement('style');
+        st.id = STYLE_ID;
+        st.textContent = css;
+        (doc.head || doc.documentElement).appendChild(st);
     }
 
     function hideSumButton() {
@@ -2617,6 +2681,9 @@
                         ${panelState.detailSelection.size ? `<span class="aim-mb-sel-count">${panelState.detailSelection.size} selected</span>` : ''}
                         <button class="aim-mb-bulk-btn" data-bulk="agl" title="Set a target AGL for the selected steps (or all visible editable steps if none selected) — recomputes each step's altitude from its own ground elevation.">Bulk → AGL</button>
                         <button class="aim-mb-bulk-btn" data-bulk="alt" title="Set an absolute altitude for the selected steps (or all visible editable steps if none selected).">Bulk → ALT</button>
+                        <label class="aim-mb-collapse-toggle" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:#9ad;white-space:nowrap;" title="Collapse each snapshot's Thermal/GEM/Wait block into one summary row. Data is untouched — view only.">
+                            <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
+                        </label>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
                         <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
                     </div>
@@ -2640,10 +2707,7 @@
                                 <tr><th class="aim-mb-sel-cell" style="width:24px;text-align:center;"><input type="checkbox" data-sel-all title="Select all editable visible steps"></th><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Lat</th><th>Long</th><th>GPS</th></tr>
                             </thead>
                             <tbody>
-                                ${filteredSteps.map(s => {
-                                    const origIdx = allSteps.indexOf(s) + 1;
-                                    return renderStepRow(s, origIdx, unit);
-                                }).join('')}
+                                ${renderDetailRows(filteredSteps, allSteps, unit)}
                             </tbody>
                         </table>
                     </div>
@@ -2969,6 +3033,13 @@
         // Export KML
         const kmlBtn = panelEl.querySelector('[data-detail-export="kml"]');
         if (kmlBtn) kmlBtn.onclick = () => exportDetailToKML(row, allSteps, unit);
+        // Collapse scan blocks toggle — persist + re-render the detail view.
+        const collapseCb = panelEl.querySelector('[data-collapse-blocks]');
+        if (collapseCb) collapseCb.onchange = () => {
+            collapseScanBlocks = !!collapseCb.checked;
+            gmSet(CACHE_KEY_COLLAPSE_BLOCKS, collapseScanBlocks);
+            renderDetailView(missionId);
+        };
     }
 
     function startInlineAltEdit(cellSpan, missionId) {
@@ -4359,6 +4430,55 @@ ${placemarks}
         if (!s || !s.location || s.location.lat == null) return null;
         const e = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
         return (e == null) ? null : e;
+    }
+
+    // Is this step one of the redundant "scan-block" toggle/wait steps that
+    // collapse into a single summary row? (Thermal on/off, GEM on/off, Wait.)
+    function isScanBlockStep(s) {
+        const t = s && s.type_name;
+        return t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
+    }
+
+    // Build the detail table body. When collapseScanBlocks is on, each run of
+    // Thermal/GEM/Wait steps collapses into ONE compact summary row; Navigate
+    // and Snapshot rows render normally. Off → every step gets its own row.
+    function renderDetailRows(filteredSteps, allSteps, unit) {
+        if (!collapseScanBlocks) {
+            return filteredSteps.map(s => renderStepRow(s, allSteps.indexOf(s) + 1, unit)).join('');
+        }
+        const out = [];
+        let i = 0;
+        while (i < filteredSteps.length) {
+            const s = filteredSteps[i];
+            if (isScanBlockStep(s)) {
+                const run = [];
+                while (i < filteredSteps.length && isScanBlockStep(filteredSteps[i])) { run.push(filteredSteps[i]); i++; }
+                out.push(renderScanBlockRow(run));
+            } else {
+                out.push(renderStepRow(s, allSteps.indexOf(s) + 1, unit));
+                i++;
+            }
+        }
+        return out.join('');
+    }
+
+    // One collapsed summary row for a run of Thermal/GEM/Wait steps. Shows the
+    // canonical block at a glance + a ✓/⚠ on whether it's the expected
+    // Thermal-on → GEM-on → Wait → GEM-off → Thermal-off shape.
+    function renderScanBlockRow(run) {
+        const camOn = run.filter(s => s.type_name === 'cameraSelect' && s.value1).length;
+        const camOff = run.filter(s => s.type_name === 'cameraSelect' && !s.value1).length;
+        const gemOn = run.filter(s => s.type_name === 'gemMode' && Number(s.value1) === 1).length;
+        const gemOff = run.filter(s => s.type_name === 'gemMode' && Number(s.value1) === 0).length;
+        const waits = run.filter(s => s.type_name === 'wait');
+        const waitTxt = waits.map(w => `${Math.round(Number(w.value1) || 0)}s`).join('+') || '—';
+        const canonical = camOn === 1 && camOff === 1 && gemOn === 1 && gemOff === 1 && waits.length === 1;
+        const mark = canonical ? '<span style="color:#5fff5f">✓</span>' : '<span style="color:#ffd54f" title="Not the canonical Thermal-on→GEM-on→Wait→GEM-off→Thermal-off block">⚠</span>';
+        const summary = `🔥 Scan block ${mark} <span style="color:#9ad">·</span> 🌡️ Thermal ${camOn}/${camOff} <span style="color:#9ad">·</span> 📡 GEM ${gemOn}/${gemOff} <span style="color:#9ad">·</span> ⏱ ${waitTxt}`;
+        return `<tr class="aim-mb-scan-block-row">
+            <td></td><td></td><td></td>
+            <td colspan="8" style="color:#8aa;font-size:11px;font-style:italic;padding:3px 6px;">↳ ${summary} <span style="color:#666">(${run.length} steps collapsed)</span></td>
+        </tr>`;
     }
 
     function renderStepRow(s, idx, unit) {
