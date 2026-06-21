@@ -36,6 +36,16 @@ Editing a Navigate badge to renumber a stop now actually reorders and persists. 
 
 ---
 
+## 2026-06-20 — Mission Bank Tools — map-editing UX + compact card view — Mission Bank Tools v0.94–v0.98 (dev/latest only)
+
+The mission editor got a big workflow upgrade:
+
+- **Edit on the map.** Percepto's own navigate/snapshot markers are recolored in place — blue **N#**, pink **S#** — same spot/size. **Right-click** a badge to renumber/reorder (snapshots follow their navigate); **left-click** opens that step's Edit form. No floating panel, no toggle; a **🔄 Resync** button covers cache refreshes. (Needs Asset Inspector v4.85, which now ignores right-clicks on mission markers so it doesn't double-pop.)
+- **Compact card view** (replaces the old max-height collapse): each instruction card is one line with the key value on the right — Navigate/Snapshot show altitude (blue/pink), Wait shows "10s", and Camera Type / GEM Mode are renamed to **Thermal On/Off** (orange) and **GEM On/Off** (green). Native drag-drop stays intact. Toggle in the sidebar.
+- Reorder no longer flashes the original icons (color is now CSS-driven).
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — editable Navigate order badges — Mission Bank Tools v0.87 (dev/latest only)
 
 The blue **N#** badges on the map are now **editable**: click one, type a new number, and that whole stop — the navigate plus its snapshots and scan steps — moves to that position, cascading everyone else's numbers. Snapshots auto-follow (you only edit one number). It drives Percepto's reorder via single-step group swaps, so the native list reorders live; then hit SAVE. Snapshot **S#** badges are display-only for now (editable next). The list ▲▼ arrows still work too.

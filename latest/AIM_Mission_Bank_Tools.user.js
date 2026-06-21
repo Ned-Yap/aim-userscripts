@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.97
+// @version      0.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.97';
+    const SCRIPT_VERSION = '0.98';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1378,7 +1378,7 @@
     const EDITOR_COLLAPSE_BTN_ID = 'aim-mb-editor-collapse-btn';
     function updateEditorCollapseBtn() {
         const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
-        if (btn) btn.textContent = collapseEditorCards ? '▸ Expand scan steps' : '▾ Collapse scan steps';
+        if (btn) btn.textContent = collapseEditorCards ? '⊟ Compact view: ON' : '⊞ Compact view: OFF';
     }
     function injectEditorCollapseButton() {
         if (CONTEXT !== 'IFRAME') return;
@@ -2088,56 +2088,79 @@
         if (existing) return;
         const st = document.createElement('style');
         st.id = EDITOR_COLLAPSE_STYLE_ID;
-        // Cap the card height so only its title row (number + step name) shows,
-        // dim it, and tighten the gap. The card stays in the DOM with a real
-        // box, so drag-reorder still measures correctly.
+        // COMPACT VIEW: hide each card's detail block (altitude/velocity/GPS
+        // rows) so the card is one line, put the title content-width, and let
+        // our injected value sit on the right. Card stays a real draggable box.
         st.textContent = `
-            [data-rfd-draggable-id].aim-mb-collapsed-card {
-                max-height: 38px !important;
-                min-height: 0 !important;
-                overflow: hidden !important;
-                opacity: 0.5;
-                transition: opacity 120ms ease;
-            }
-            [data-rfd-draggable-id].aim-mb-collapsed-card:hover { opacity: 0.9; }
-            [data-rfd-draggable-id].aim-mb-collapsed-card * { margin-top: 0 !important; margin-bottom: 0 !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__params { display:none !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding-bottom:4px !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
+            [data-rfd-draggable-id].aim-mb-compact-renamed .mission-instruction-item__title__name { display:none !important; }
+            .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; }
+            .aim-mb-cx-val { flex:1; text-align:right; font-weight:800; font-size:13px; white-space:nowrap; padding-right:10px; }
         `;
         (document.head || document.documentElement).appendChild(st);
     }
+    function compactAltFt(m) { return typeof m === 'number' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : ''; }
 
-    // Which cards are the redundant scan-block steps — matched by the step
-    // title text Percepto renders. CASE-INSENSITIVE: the Thermal card's title
-    // is "Camera type" (lowercase t), so a case-sensitive "Camera Type" missed
-    // it (v0.81). Title matching avoids any URL/mission-id dependency.
-    const COLLAPSE_TITLE_RE = /(camera type|gem mode|wait)/i;
+    // Compact ONE card: hide its detail rows (via the class) and inject the key
+    // value inline — Navigate/Snapshot=altitude (blue/pink), Wait=Ns (white),
+    // Camera Type→Thermal On/Off (orange), GEM Mode→GEM On/Off (green).
+    function applyCompactCard(card, instr) {
+        const header = card.querySelector('.mission-instruction-item__header');
+        const titleEl = card.querySelector('.mission-instruction-item__title');
+        if (!header || !titleEl) return;
+        const t = instr.type_name;
+        let valText = null, valColor = '#cfe', renameText = null, renameColor = '#fff';
+        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = '#6f9bff'; }
+        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = '#ff7ac0'; }
+        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = '#ffffff'; }
+        else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? '#ff9d2e' : '#b5651d'; }
+        else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? '#39ff14' : '#2e8b2e'; }
+        else { card.classList.remove('aim-mb-compact-renamed'); return; }
 
-    // Tag/untag the redundant instruction cards in the native editor.
+        if (renameText != null) {
+            card.classList.add('aim-mb-compact-renamed');
+            let r = titleEl.querySelector('.aim-mb-cx-name');
+            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); }
+            if (r.textContent !== renameText) r.textContent = renameText;
+            r.style.color = renameColor;
+            const v = header.querySelector('.aim-mb-cx-val'); if (v) v.remove();
+        } else {
+            card.classList.remove('aim-mb-compact-renamed');
+            let v = header.querySelector('.aim-mb-cx-val');
+            if (!v) {
+                v = document.createElement('div'); v.className = 'aim-mb-cx-val';
+                const opts = header.querySelector('.mission-instruction-item__options');
+                if (opts) header.insertBefore(v, opts); else header.appendChild(v);
+            }
+            if (v.textContent !== (valText || '')) v.textContent = valText || '';
+            v.style.color = valColor;
+            const r = titleEl.querySelector('.aim-mb-cx-name'); if (r) r.remove();
+        }
+    }
+
+    // Apply / remove the compact view across the native editor's instruction
+    // cards. Needs the mission data (composerMission) for the inline values;
+    // when it isn't loaded yet, leave cards full (the interval re-runs once the
+    // map-badge path has loaded the mission). Keeps native drag-drop intact.
     function applyNativeEditorCollapse() {
         if (CONTEXT !== 'IFRAME') return;
         const cards = document.querySelectorAll('[data-rfd-draggable-id]');
-        if (!collapseEditorCards) {
+        const off = () => {
             ensureEditorCollapseStyle(false);
-            cards.forEach(c => c.classList.remove('aim-mb-collapsed-card'));
-            return;
-        }
-        // Only act on the mission-edit surface (skip the SUM list etc.).
-        const content = document.querySelector('.mission-edit__content');
-        if (!content) return;
-        // One-time diagnostic so we can see the real card structure if the
-        // collapse still misbehaves (selector / height tuning).
-        if (!loggedEditorCards) {
-            loggedEditorCards = true;
-            if (cards.length) {
-                console.log(`${TAG} [editor-collapse] ${cards.length} [data-rfd-draggable-id] card(s). First card outerHTML (trimmed):`, cards[0].outerHTML.slice(0, 700));
-            } else {
-                console.log(`${TAG} [editor-collapse] NO [data-rfd-draggable-id] cards. mission-edit__content child classes:`, Array.from(content.children).map(c => c.className), 'innerHTML sample:', content.innerHTML.slice(0, 900));
-            }
-        }
-        if (!cards.length) return;
+            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); });
+        };
+        if (!collapseEditorCards) { off(); return; }
+        if (!document.querySelector('.mission-edit__content') || !cards.length) return;
+        if (!composerMission) { off(); return; } // wait for the mission to load
         ensureEditorCollapseStyle(true);
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
         cards.forEach(card => {
-            if (COLLAPSE_TITLE_RE.test(card.textContent || '')) card.classList.add('aim-mb-collapsed-card');
-            else card.classList.remove('aim-mb-collapsed-card');
+            const instr = byId[card.getAttribute('data-rfd-draggable-id')];
+            if (!instr) return;
+            card.classList.add('aim-mb-compact');
+            applyCompactCard(card, instr);
         });
     }
 
