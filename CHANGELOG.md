@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-21 — Mission Bank Tools v1.14 (dev/latest) — Snapshot AGL (auto-set + underground fix)
+## 2026-06-21 — Mission Bank Tools v1.15 (dev/latest) — Snapshot auto-AGL on save (safety-gated)
 
-New **Snapshot AGL** button in the mission drill-down (next to Bulk → AGL). Snapshot altitude is stored absolute, so dragging a snapshot can drop it underground (its AGL goes negative against the new, higher terrain). This re-floats snapshots to a target AGL (each snapshot's own DEM ground + the AGL you enter, default 8 ft). By default it only touches snapshots **below the target** (so it fixes the dragged-underground ones and leaves good ones alone); a checkbox applies it to **all** snapshots for fast scan building. A live count shows how many will move and how many are currently underground; everything queues through the existing Commit / fast-save pipeline. Dev-only (latest/).
+Replaces the v1.14 manual button with an automatic, opt-in behavior: a **📷 Auto-AGL** toggle in the native-editor button row. While it's **ON**, every mission save re-sets all snapshots to their **DEM ground + a default AGL** (so snapshots you drag can't end up underground) — using each snapshot's current coordinates straight from the save body. **Safety:** it's OFF by default and **resets to OFF every time you (re)enter the Mission Bank**, so you have to arm it deliberately; turning it on shows a warning toast and a bright **on-map banner** while armed. Turn it OFF for the occasional elevated target (e.g. a flare-stack snapshot). The default AGL is set in the Control Panel ("Default snapshot AGL", default 10 ft). Out-of-range snapshots are still flagged by the Mission SOP checker. Dev-only (latest/).
 
 ---
 
