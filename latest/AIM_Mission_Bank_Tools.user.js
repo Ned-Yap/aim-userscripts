@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.18
+// @version      1.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.18';
+    const SCRIPT_VERSION = '1.19';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1445,7 +1445,10 @@
     const EDITOR_COLLAPSE_BTN_ID = 'aim-mb-editor-collapse-btn';
     function updateEditorCollapseBtn() {
         const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
-        if (btn) btn.textContent = collapseEditorCards ? '⊟ Compact view: ON' : '⊞ Compact view: OFF';
+        if (!btn) return;
+        btn.textContent = collapseEditorCards ? '⊟ Compact' : '⊞ Expand';
+        btn.title = collapseEditorCards ? 'Compact view: ON — click to expand the steps' : 'Compact view: OFF — click to compact the steps';
+        btn.style.opacity = collapseEditorCards ? '1' : '0.7';
     }
     // The Compact-view toggle now lives inside injectComposerButton's combined
     // row (kept here as a no-op so existing callers don't need touching).
@@ -1514,8 +1517,8 @@
         const compact = document.createElement('button');
         compact.id = EDITOR_COLLAPSE_BTN_ID;
         compact.type = 'button';
-        compact.style.cssText = 'flex:1;padding:5px 8px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
-            'color:#14d2dc;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;';
+        compact.style.cssText = 'flex:0 0 auto;padding:5px 9px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
+            'color:#14d2dc;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
         compact.onclick = (e) => {
             e.preventDefault(); e.stopPropagation();
             collapseEditorCards = !collapseEditorCards;
