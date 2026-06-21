@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.08
+// @version      1.09
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.08';
+    const SCRIPT_VERSION = '1.09';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1608,8 +1608,10 @@
             const m = badge(e); if (!m) return;
             e.preventDefault(); e.stopImmediatePropagation();
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
-            const iconDiv = m.querySelector('.instruction-marker__icon');
-            const lbl = (iconDiv && iconDiv.getAttribute('data-aim-label')) || '';
+            // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
+            // the v0.99 hover fix moved it here from the inner icon's old
+            // data-aim-label, so read it from `m`, not a child.
+            const lbl = m.getAttribute('data-aim-num') || '';
             const n = parseInt(lbl.replace(/[^0-9]/g, ''), 10) || 1;
             composerEditOrder(kind, id, n, m.__aimLL);
         }, true);
