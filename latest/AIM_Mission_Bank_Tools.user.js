@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.27
+// @version      1.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.27';
+    const SCRIPT_VERSION = '1.28';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2065,15 +2065,15 @@
             console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
             showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
             try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
-            // Navigate the SPA to the new mission's editor URL so it shows without
-            // a page refresh (setCurrentApp sets the data but not the view/route).
+            // Navigate to the new mission's editor URL so it shows without a page
+            // refresh. Use THIS frame's own hash (the editor is in the react-pages
+            // iframe) — the iframe is sandboxed and can't navigate the top window.
             try {
-                const top = window.top || window;
-                const cur = (top.location && top.location.hash) || '';
+                const cur = location.hash || '';
                 const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/);
                 if (mm && saved && saved.id != null) {
                     const target = `${mm[1]}/${saved.id}`;
-                    if (cur !== target) top.location.hash = target;
+                    if (cur !== target) location.hash = target;
                 }
             } catch (e) { console.warn(`${TAG} [gen] open-nav failed`, e); }
         } catch (e) {
@@ -2098,7 +2098,10 @@
         const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
         const pop = document.createElement('div');
         pop.className = 'aim-mb-bp-pop';
-        pop.style.cssText += 'position:fixed;z-index:2147483600;min-width:250px;';
+        // Solid styling INLINE (the .aim-mb-bp-pop CSS is only injected when the
+        // SUM panel renders; this popup can appear without it).
+        pop.style.cssText += 'position:fixed;z-index:2147483600;min-width:250px;background:#1f2228;' +
+            'border:1px solid #14d2dc;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         pop.innerHTML = `
             <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">⊕ Generate mission</span><button class="aim-mb-menu-close" data-gp-close>✕</button></div>
             <div style="padding:10px 12px;font-size:11px;color:#cfe;">
