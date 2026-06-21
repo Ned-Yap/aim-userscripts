@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.11 (dev/latest) — KML colors + true flight path + standoff distances
+
+Refined the KML export: pins + labels now use your **AIM step colors** (blue Navigate / pink Snapshot, following whatever you pick in the Control Panel). Split the path geometry so it's accurate: a **white line** connects nav→nav (the real flight path) and separate **purple sightlines** run from each Navigate to its snapshots (what it's looking at) — no more nav→snap→nav zigzag. Each sightline is labeled with the **nav↔snapshot standoff distance** (e.g. `N2→S2 · 104 ft`) so you can confirm the ~100 ft target, and the distance also shows in the Navigate and Snapshot pin descriptions. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.10 (dev/latest) — richer KML export
 
 Mission KML export is now a full flight-path file instead of loose pins. Adds: a **flight-path LineString** through the navigate+snapshot points in order (3D, at altitude); **N#/S# order labels** on the pins (matching the map badges); and **per-stop step detail in each pin's description** — click a Navigate pin in Google Earth and it lists the stop's altitude/speed plus its bundled snapshots and their Thermal/GEM/Wait scan steps; snapshot pins list their own scan steps. Also added a **⬇ KML button on the native-editor row** (next to 🔄) so you can export the open mission directly (uses the live on-screen order, so an unsaved reorder still exports correctly) — the SUM drill-down's Export KML button uses the same builder. Dev-only (latest/).

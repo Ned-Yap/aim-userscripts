@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.10';
+    const SCRIPT_VERSION = '1.11';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4018,59 +4018,89 @@
     function kmlAltM(s) {
         return (typeof s.value1 === 'number' && s.value1_name === 'm') ? s.value1 : 0;
     }
+    // Hex #rrggbb → KML aabbggrr (KML byte order is reversed). Used so the
+    // pins/labels match the user's AIM step colors (nav blue / snap pink).
+    function hexToKmlColor(hex, alpha) {
+        const c = String(hex || '').replace('#', '');
+        if (c.length < 6) return 'ff00ffff';
+        return `${alpha || 'ff'}${c.slice(4, 6)}${c.slice(2, 4)}${c.slice(0, 2)}`.toLowerCase();
+    }
 
     // Build a Google-Earth KML for an ordered list of mission steps:
-    //   • a Flight Path LineString through the navigate+snapshot points in order,
-    //   • N# pins whose description (shown on click) is the WHOLE stop — nav
-    //     params + its bundled snapshots and their Thermal/GEM/Wait scan steps,
-    //   • S# pins whose description is the snapshot alt + its trailing scan steps.
+    //   • a WHITE Flight Path line nav→nav (the real drone route),
+    //   • PURPLE sightlines nav→each of its snapshots (what it's looking at),
+    //     labeled with the nav↔snapshot standoff distance (ideal ~100 ft),
+    //   • N# pins (blue) whose description is the WHOLE stop — nav params + its
+    //     snapshots (with distances) and their Thermal/GEM/Wait scan steps,
+    //   • S# pins (pink) whose description is alt + distance-from-nav + scans.
     function buildMissionKml(missionName, ordered) {
         let navN = 0, snapN = 0;
-        const labelById = {};
-        const stops = [];      // { nav, navNum, members:[steps until next nav] }
-        const snapBlocks = []; // { snap, snapNum, scans:[trailing scan steps] }
+        const stops = [];      // { nav, navNum, snaps:[snapBlock] }
+        const snapBlocks = []; // { snap, snapNum, scans, parentNav, parentNavNum, distFt }
         let curStop = null, curSnapBlock = null;
         ordered.forEach(s => {
             const t = s.type_name;
             if (t === 'navigate') {
-                navN++; labelById[String(s.id)] = `N${navN}`;
-                curStop = { nav: s, navNum: navN, members: [] };
+                navN++;
+                curStop = { nav: s, navNum: navN, snaps: [] };
                 stops.push(curStop); curSnapBlock = null;
             } else if (t === 'snapshot') {
-                snapN++; labelById[String(s.id)] = `S${snapN}`;
-                curSnapBlock = { snap: s, snapNum: snapN, scans: [] };
+                snapN++;
+                curSnapBlock = {
+                    snap: s, snapNum: snapN, scans: [],
+                    parentNav: curStop ? curStop.nav : null,
+                    parentNavNum: curStop ? curStop.navNum : null, distFt: null,
+                };
+                // Horizontal nav↔snapshot standoff (the ~100 ft the user checks).
+                const pn = curSnapBlock.parentNav;
+                if (pn && pn.location && pn.location.lat != null && s.location && s.location.lat != null) {
+                    curSnapBlock.distFt = Math.round(sopHaversineFt(pn.location, s.location));
+                }
                 snapBlocks.push(curSnapBlock);
-                if (curStop) curStop.members.push(s);
+                if (curStop) curStop.snaps.push(curSnapBlock);
             } else {
                 if (curSnapBlock) curSnapBlock.scans.push(s);
-                if (curStop) curStop.members.push(s);
             }
         });
 
-        const located = ordered.filter(s => s.location && s.location.lat != null
-            && (s.type_name === 'navigate' || s.type_name === 'snapshot'));
-        if (!located.length) return null;
+        const navsLoc = stops.map(st => st.nav).filter(n => n.location && n.location.lat != null);
+        const anySnap = snapBlocks.some(sb => sb.snap.location && sb.snap.location.lat != null);
+        if (!navsLoc.length && !anySnap) return null;
 
-        // Flight-path LineString (in order, absolute altitude per vertex).
-        const lineCoords = located.map(s => `${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}`).join(' ');
-        const pathPlacemark = `    <Placemark>
+        // WHITE flight path: navigates only, in order (the real drone route).
+        const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
+        const pathPlacemark = navsLoc.length >= 2 ? `    <Placemark>
       <name>Flight Path</name>
       <styleUrl>#style-path</styleUrl>
-      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${lineCoords}</coordinates></LineString>
-    </Placemark>`;
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
+    </Placemark>` : '';
 
-        // Navigate pins — description carries the whole stop.
+        // PURPLE sightlines: nav → each of its snapshots, named with distance.
+        const lookPlacemarks = snapBlocks.map(sb => {
+            const n = sb.parentNav, s = sb.snap;
+            if (!n || !n.location || n.location.lat == null || !s.location || s.location.lat == null) return '';
+            const coords = `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)} ${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}`;
+            const dTxt = sb.distFt != null ? ` · ${sb.distFt.toLocaleString()} ft` : '';
+            return `    <Placemark>
+      <name>N${sb.parentNavNum}→S${sb.snapNum}${dTxt}</name>
+      <styleUrl>#style-look</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${coords}</coordinates></LineString>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
+        // Navigate pins — description carries the whole stop (with distances).
         const navPlacemarks = stops.map(st => {
             const s = st.nav;
             if (!s.location || s.location.lat == null) return '';
             const mph = kmlSpeedMph(s);
             let html = `<b>Stop N${st.navNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
             if (mph != null) html += `Speed: ${mph} mph<br/>`;
-            if (st.members.length) {
-                html += `<br/><b>Steps in this stop:</b><br/>`;
-                st.members.forEach(m => {
-                    if (m.type_name === 'snapshot') html += `${labelById[String(m.id)] || 'S?'} Snapshot — ${kmlAltText(m)}<br/>`;
-                    else html += `&nbsp;&nbsp;${kmlBundledLine(m)}<br/>`;
+            if (st.snaps.length) {
+                html += `<br/><b>Snapshots in this stop:</b><br/>`;
+                st.snaps.forEach(sb => {
+                    const d = sb.distFt != null ? ` — ${sb.distFt.toLocaleString()} ft away` : '';
+                    html += `S${sb.snapNum} — ${kmlAltText(sb.snap)}${d}<br/>`;
+                    sb.scans.forEach(sc => { html += `&nbsp;&nbsp;${kmlBundledLine(sc)}<br/>`; });
                 });
             }
             return `    <Placemark>
@@ -4081,11 +4111,12 @@
     </Placemark>`;
         }).filter(Boolean).join('\n');
 
-        // Snapshot pins — description = alt + trailing scan steps.
+        // Snapshot pins — description = alt + distance-from-nav + scan steps.
         const snapPlacemarks = snapBlocks.map(sb => {
             const s = sb.snap;
             if (!s.location || s.location.lat == null) return '';
             let html = `<b>Snapshot S${sb.snapNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
+            if (sb.parentNavNum != null && sb.distFt != null) html += `Distance from N${sb.parentNavNum}: ${sb.distFt.toLocaleString()} ft<br/>`;
             if (sb.scans.length) {
                 html += `<br/><b>Scan steps:</b><br/>`;
                 sb.scans.forEach(sc => { html += `${kmlBundledLine(sc)}<br/>`; });
@@ -4098,16 +4129,25 @@
     </Placemark>`;
         }).filter(Boolean).join('\n');
 
+        // White pushpin icon + color tint = the exact AIM color (tinting the
+        // default colored pin is unreliable; a white pin takes the tint cleanly).
+        const navColor = hexToKmlColor(stepColor('nav'));
+        const snapColor = hexToKmlColor(stepColor('snap'));
+        const PIN = 'http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png';
         const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
     <name>${escapeXml(missionName || 'Mission')} — Flight Path</name>
-    <description>Navigate + Snapshot path with 3D altitude pins and per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
-    <Style id="style-nav"><IconStyle><color>ff5fff5f</color><scale>1.1</scale></IconStyle><LabelStyle><color>ff5fff5f</color></LabelStyle></Style>
-    <Style id="style-snap"><IconStyle><color>ff0098ff</color><scale>1.1</scale></IconStyle><LabelStyle><color>ff0098ff</color></LabelStyle></Style>
-    <Style id="style-path"><LineStyle><color>ff4ad2ff</color><width>2.5</width></LineStyle></Style>
+    <description>White line = flight path (nav→nav). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <Style id="style-nav"><IconStyle><color>${navColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${navColor}</color></LabelStyle></Style>
+    <Style id="style-snap"><IconStyle><color>${snapColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${snapColor}</color></LabelStyle></Style>
+    <Style id="style-path"><LineStyle><color>ffffffff</color><width>3</width></LineStyle></Style>
+    <Style id="style-look"><LineStyle><color>ffe24db0</color><width>1.6</width></LineStyle></Style>
     <Folder><name>Flight Path</name>
 ${pathPlacemark}
+    </Folder>
+    <Folder><name>Sightlines — Nav → Snapshot</name>
+${lookPlacemarks}
     </Folder>
     <Folder><name>Navigates (${stops.length})</name>
 ${navPlacemarks}
