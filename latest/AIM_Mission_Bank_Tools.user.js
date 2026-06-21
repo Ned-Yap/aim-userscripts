@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.02
+// @version      1.03
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.02';
+    const SCRIPT_VERSION = '1.03';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1395,7 +1395,11 @@
         if (!document.getElementById('aim-mb-top-css')) {
             const st = document.createElement('style');
             st.id = 'aim-mb-top-css';
-            st.textContent = '.mission-edit__content .ant-divider { margin:5px 0 !important; }';
+            st.textContent = `
+                .mission-edit__content { padding-top:2px !important; }
+                .mission-edit__stats { margin:0 !important; padding:2px 0 !important; }
+                .mission-edit__content .ant-divider { margin:4px 0 !important; }
+            `;
             (document.head || document.documentElement).appendChild(st);
         }
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
@@ -2109,12 +2113,14 @@
         // rows) so the card is one line, put the title content-width, and let
         // our injected value sit on the right. Card stays a real draggable box.
         st.textContent = `
-            /* Cap the CARD to its title row (kills dead space at top/bottom),
-               but DON'T touch the draggable wrapper's margin — that gap between
-               steps is Percepto's drag-to-insert target. */
-            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item { max-height:42px !important; overflow:hidden !important; padding-top:0 !important; }
+            /* Cap the draggable WRAPPER (the visible tile) to its title row, so
+               there's no dead space inside the tile. The wrapper's MARGIN (the
+               between-step drag-to-insert gap) is outside the box → untouched. */
+            [data-rfd-draggable-id].aim-mb-compact { max-height:38px !important; overflow:hidden !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item { max-height:38px !important; min-height:0 !important; overflow:hidden !important; padding-top:0 !important; padding-bottom:0 !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__params { display:none !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding:0 !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__header { padding-top:6px !important; padding-bottom:6px !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
             [data-rfd-draggable-id].aim-mb-compact-renamed .mission-instruction-item__title__name { display:none !important; }
             .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; }
