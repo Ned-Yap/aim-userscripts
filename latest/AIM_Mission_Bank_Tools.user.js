@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.92
+// @version      0.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.92';
+    const SCRIPT_VERSION = '0.93';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1665,8 +1665,7 @@
     function composerBadgeIcon(n, kind) {
         const L = composerGetL(); if (!L) return null;
         const bg = kind === 'nav' ? '#2f6bff' : '#ec4899';
-        const cur = kind === 'nav' ? 'pointer' : 'default';
-        const html = `<div data-cmp-badge="${kind}" style="min-width:20px;height:20px;padding:0 4px;border-radius:10px;background:${bg};color:#fff;font:700 11px/20px 'Lato',sans-serif;text-align:center;border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.6);cursor:${cur};white-space:nowrap">${kind === 'nav' ? 'N' : 'S'}${n}</div>`;
+        const html = `<div data-cmp-badge="${kind}" style="min-width:20px;height:20px;padding:0 4px;border-radius:10px;background:${bg};color:#fff;font:700 11px/20px 'Lato',sans-serif;text-align:center;border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.6);cursor:pointer;white-space:nowrap">${kind === 'nav' ? 'N' : 'S'}${n}</div>`;
         return L.divIcon({ className: 'aim-cmp-badge', html, iconSize: [22, 20], iconAnchor: [11, 30] });
     }
     function composerClearBadges() {
@@ -1697,11 +1696,14 @@
                 navN++;
                 const navId = String(s.id), num = navN, ll = [s.location.lat, s.location.lng];
                 const mk = L.marker(ll, { icon: composerBadgeIcon(num, 'nav'), zIndexOffset: 2000, keyboard: false });
-                mk.on('click', () => composerEditNavOrder(navId, num, ll));
+                mk.on('click', () => composerEditOrder('nav', navId, num, ll));
                 group.addLayer(mk);
             } else if (s.type_name === 'snapshot') {
                 snapN++;
-                group.addLayer(L.marker([s.location.lat, s.location.lng], { icon: composerBadgeIcon(snapN, 'snap'), zIndexOffset: 2000, interactive: false, keyboard: false }));
+                const snapId = String(s.id), num = snapN, ll = [s.location.lat, s.location.lng];
+                const mk = L.marker(ll, { icon: composerBadgeIcon(num, 'snap'), zIndexOffset: 2000, keyboard: false });
+                mk.on('click', () => composerEditOrder('snap', snapId, num, ll));
+                group.addLayer(mk);
             }
         });
         group.addTo(map);
@@ -1788,24 +1790,71 @@
         rerenderComposer();
         showToast(`Moved to N${t + 1} — hit SAVE in the editor.`, '#5fff5f', 3500);
     }
-    function composerEditNavOrder(navId, currentNum, ll) {
+    // ── Snapshot reorder: move a snapshot block (snapshot + its scan steps) to
+    // a global capture position S#. Within a stop → reorders captures; landing
+    // under a different navigate → re-homes it there (for Nav↔Snap spacing).
+    function composerSnapBlocks(ordered) {
+        const isBlk = t => t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
+        const blocks = []; let i = 0;
+        while (i < ordered.length) {
+            const s = ordered[i];
+            if (s && s.type_name === 'snapshot') {
+                const b = { snapId: String(s.id), ids: [String(s.id)] };
+                i++;
+                while (i < ordered.length && ordered[i] && isBlk(ordered[i].type_name)) { b.ids.push(String(ordered[i].id)); i++; }
+                blocks.push(b);
+            } else i++;
+        }
+        return blocks;
+    }
+    async function composerSwapSnapBlockUp(idx) {
+        if (idx <= 0) return;
+        const blocks = composerSnapBlocks(composerCurrentOrdered());
+        if (idx >= blocks.length) return;
+        const dest = composerIndexById(blocks[idx - 1].ids[0]);
+        if (dest >= 0) await composerMoveIdsToIndex(blocks[idx].ids, dest);
+    }
+    async function composerApplySnapOrder(snapId, toNum) {
+        if (composerBusy) return;
+        const blocks = composerSnapBlocks(composerCurrentOrdered());
+        let f = blocks.findIndex(b => b.snapId === String(snapId));
+        const t = Math.max(1, Math.min(blocks.length, toNum)) - 1;
+        if (f < 0 || f === t) return;
+        if (!composerFindReorderFn()) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
+        composerBusy = true;
+        try {
+            while (f > t) { await composerSwapSnapBlockUp(f); f--; }
+            while (f < t) { await composerSwapSnapBlockUp(f + 1); f++; }
+        } catch (e) { console.warn(`${TAG} [composer] snap reorder failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, '#ec4899', 3500);
+    }
+
+    // Inline number editor for a Nav (blue) or Snapshot (pink) badge.
+    function composerEditOrder(kind, id, currentNum, ll) {
         if (composerBusy) return;
         const map = getLeafletMap(); if (!map) return;
         const old = document.getElementById('aim-cmp-num-edit'); if (old) old.remove();
         let pt, rect;
         try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
         catch (e) { return; }
+        const color = kind === 'nav' ? '#2f6bff' : '#ec4899';
+        const label = kind === 'nav' ? 'N' : 'S';
         const wrap = document.createElement('div');
         wrap.id = 'aim-cmp-num-edit';
         wrap.style.cssText = `position:fixed;left:${rect.left + pt.x}px;top:${rect.top + pt.y - 16}px;z-index:2147483640;` +
-            'transform:translate(-50%,-100%);background:#0f1216;border:1px solid #2f6bff;border-radius:6px;padding:4px 6px;' +
+            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:4px 6px;` +
             'display:flex;gap:5px;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,0.6)';
-        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">N${currentNum}→</span>` +
-            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid #2f6bff;color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
+        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">${label}${currentNum}→</span>` +
+            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid ${color};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
         document.body.appendChild(wrap);
         const input = wrap.querySelector('input');
         input.focus(); input.select();
-        const commit = () => { const v = parseInt(input.value, 10); wrap.remove(); if (!isNaN(v)) composerApplyNavOrder(navId, v); };
+        const commit = () => {
+            const v = parseInt(input.value, 10); wrap.remove();
+            if (!isNaN(v)) { if (kind === 'nav') composerApplyNavOrder(id, v); else composerApplySnapOrder(id, v); }
+        };
         input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
         input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
     }
@@ -1870,7 +1919,7 @@
                 <button data-cmp-refresh title="Re-fetch this mission from the server (resync after editing)" style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">🔄</button>
                 <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
-            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge on the map to renumber a stop (snapshots follow) — then SAVE. ▲▼ also moves a block.</span></div>
+            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge to renumber a stop (snapshots follow), or a pink <b style="color:#ff7ac0">S#</b> to reorder/re-home a snapshot — then SAVE.</span></div>
             <div style="overflow:auto">${rowHtml}</div>`;
         document.body.appendChild(panel);
         panel.querySelector('[data-cmp-x]').onclick = closeComposer;
