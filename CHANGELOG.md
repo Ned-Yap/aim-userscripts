@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.10 (dev/latest) — richer KML export
+
+Mission KML export is now a full flight-path file instead of loose pins. Adds: a **flight-path LineString** through the navigate+snapshot points in order (3D, at altitude); **N#/S# order labels** on the pins (matching the map badges); and **per-stop step detail in each pin's description** — click a Navigate pin in Google Earth and it lists the stop's altitude/speed plus its bundled snapshots and their Thermal/GEM/Wait scan steps; snapshot pins list their own scan steps. Also added a **⬇ KML button on the native-editor row** (next to 🔄) so you can export the open mission directly (uses the live on-screen order, so an unsaved reorder still exports correctly) — the SUM drill-down's Export KML button uses the same builder. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.08 (dev/latest) — dead-code cleanup (no behavior change)
 
 Removed the retired floating-Composer panel and the old separate-badge map path now that map-editing (in-place native-marker badges) is the workflow. Deleted `renderComposer`/`openComposer`/`closeComposer`/`composerGroup`/`composerMoveRow` and the `composerDrawBadges`/`composerBadgeIcon`/`composerClearBadges`/`composerBadgeLayer` cluster plus their unused state (`composerSel`, `composerRows`, `COMPOSER_PANEL_ID`, `COMPOSER_MAPMODE_KEY`). ~200 lines lighter; the live reorder + marker-styling path is unchanged. Dev-only (latest/).

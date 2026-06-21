@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.09
+// @version      1.10
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.09';
+    const SCRIPT_VERSION = '1.10';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1507,7 +1507,14 @@
         refresh.style.cssText = 'flex:0 0 auto;padding:5px 11px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
             'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
-        row.appendChild(compact); row.appendChild(refresh);
+        const kml = document.createElement('button');
+        kml.type = 'button';
+        kml.textContent = '⬇ KML';
+        kml.title = 'Export this mission to a Google-Earth KML — flight path + N#/S# pins, each pin showing its step details';
+        kml.style.cssText = 'flex:0 0 auto;padding:5px 9px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
+            'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
+        row.appendChild(compact); row.appendChild(refresh); row.appendChild(kml);
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
         if (addBtn && addBtn.parentNode) addBtn.parentNode.insertBefore(row, addBtn.nextSibling);
         else content.insertBefore(row, content.firstChild);
@@ -3383,7 +3390,7 @@
                             <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
                         </label>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
-                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
+                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — flight-path line + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
                     </div>
                     ${(() => {
                         const n = countPending(missionId);
@@ -3988,86 +3995,167 @@
         showToast(`Copied ${filteredSteps.length} steps → Sheets`, '#5fff5f');
     }
 
-    function exportDetailToKML(row, allSteps, unit) {
-        const gpsSteps = allSteps.filter(s =>
-            s.location && typeof s.location === 'object' && s.location.lat != null
-            && (s.type_name === 'navigate' || s.type_name === 'snapshot')
-        );
-        if (gpsSteps.length === 0) {
-            showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800');
-            return;
-        }
-        // KML colors are aabbggrr (reversed from hex RGB).
-        // Navigate = #5fff5f → green → KML ff5fff5f
-        // Snapshot = #ff9800 → orange → KML ff0098ff
-        const placemarks = gpsSteps.map((s, i) => {
-            const idx = allSteps.indexOf(s) + 1;
-            const type = displayStepType(s);
-            const altM = (s.value1 != null && s.value1_name === 'm') ? Number(s.value1) : 0;
-            const lat = Number(s.location.lat);
-            const lng = Number(s.location.lng);
-            const styleId = s.type_name === 'navigate' ? 'nav' : 'snap';
-            return `    <Placemark>
-      <name>Step ${idx} — ${escapeXml(type)}</name>
-      <description>Altitude: ${Math.round(altM)} m (${Math.round(altM * 3.28084).toLocaleString()} ft)</description>
-      <styleUrl>#style-${styleId}</styleUrl>
-      <Point>
-        <altitudeMode>absolute</altitudeMode>
-        <coordinates>${lng},${lat},${altM}</coordinates>
-      </Point>
+    // ── KML export (shared by the SUM drill-down + the map-edit row) ──────
+    // value2 on a navigate is ground speed in m/s; ×2.23694 = mph.
+    function kmlSpeedMph(s) {
+        const v = s && s.value2;
+        return (typeof v === 'number' && v > 0) ? Math.round(v * 2.23694) : null;
+    }
+    // One bundled (non-located) step as a description line — mirrors the
+    // editor's compact-card labels (Thermal/GEM On/Off, Wait Ns).
+    function kmlBundledLine(s) {
+        const t = s.type_name;
+        if (t === 'cameraSelect') return s.value1 ? 'Thermal On' : 'Thermal Off';
+        if (t === 'gemMode') return Number(s.value1) === 1 ? 'GEM On' : 'GEM Off';
+        if (t === 'wait') return `Wait ${Math.round(Number(s.value1) || 0)}s`;
+        return displayStepType(s);
+    }
+    // value1 is the stored (absolute MSL) altitude in meters → "X ft (Y m)".
+    function kmlAltText(s) {
+        if (s.value1 == null || s.value1_name !== 'm' || typeof s.value1 !== 'number') return '—';
+        return `${Math.round(s.value1 * 3.28084).toLocaleString()} ft (${Math.round(s.value1)} m)`;
+    }
+    function kmlAltM(s) {
+        return (typeof s.value1 === 'number' && s.value1_name === 'm') ? s.value1 : 0;
+    }
+
+    // Build a Google-Earth KML for an ordered list of mission steps:
+    //   • a Flight Path LineString through the navigate+snapshot points in order,
+    //   • N# pins whose description (shown on click) is the WHOLE stop — nav
+    //     params + its bundled snapshots and their Thermal/GEM/Wait scan steps,
+    //   • S# pins whose description is the snapshot alt + its trailing scan steps.
+    function buildMissionKml(missionName, ordered) {
+        let navN = 0, snapN = 0;
+        const labelById = {};
+        const stops = [];      // { nav, navNum, members:[steps until next nav] }
+        const snapBlocks = []; // { snap, snapNum, scans:[trailing scan steps] }
+        let curStop = null, curSnapBlock = null;
+        ordered.forEach(s => {
+            const t = s.type_name;
+            if (t === 'navigate') {
+                navN++; labelById[String(s.id)] = `N${navN}`;
+                curStop = { nav: s, navNum: navN, members: [] };
+                stops.push(curStop); curSnapBlock = null;
+            } else if (t === 'snapshot') {
+                snapN++; labelById[String(s.id)] = `S${snapN}`;
+                curSnapBlock = { snap: s, snapNum: snapN, scans: [] };
+                snapBlocks.push(curSnapBlock);
+                if (curStop) curStop.members.push(s);
+            } else {
+                if (curSnapBlock) curSnapBlock.scans.push(s);
+                if (curStop) curStop.members.push(s);
+            }
+        });
+
+        const located = ordered.filter(s => s.location && s.location.lat != null
+            && (s.type_name === 'navigate' || s.type_name === 'snapshot'));
+        if (!located.length) return null;
+
+        // Flight-path LineString (in order, absolute altitude per vertex).
+        const lineCoords = located.map(s => `${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}`).join(' ');
+        const pathPlacemark = `    <Placemark>
+      <name>Flight Path</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${lineCoords}</coordinates></LineString>
     </Placemark>`;
-        }).join('\n');
+
+        // Navigate pins — description carries the whole stop.
+        const navPlacemarks = stops.map(st => {
+            const s = st.nav;
+            if (!s.location || s.location.lat == null) return '';
+            const mph = kmlSpeedMph(s);
+            let html = `<b>Stop N${st.navNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
+            if (mph != null) html += `Speed: ${mph} mph<br/>`;
+            if (st.members.length) {
+                html += `<br/><b>Steps in this stop:</b><br/>`;
+                st.members.forEach(m => {
+                    if (m.type_name === 'snapshot') html += `${labelById[String(m.id)] || 'S?'} Snapshot — ${kmlAltText(m)}<br/>`;
+                    else html += `&nbsp;&nbsp;${kmlBundledLine(m)}<br/>`;
+                });
+            }
+            return `    <Placemark>
+      <name>N${st.navNum}</name>
+      <description><![CDATA[${html}]]></description>
+      <styleUrl>#style-nav</styleUrl>
+      <Point><altitudeMode>absolute</altitudeMode><coordinates>${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}</coordinates></Point>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
+        // Snapshot pins — description = alt + trailing scan steps.
+        const snapPlacemarks = snapBlocks.map(sb => {
+            const s = sb.snap;
+            if (!s.location || s.location.lat == null) return '';
+            let html = `<b>Snapshot S${sb.snapNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
+            if (sb.scans.length) {
+                html += `<br/><b>Scan steps:</b><br/>`;
+                sb.scans.forEach(sc => { html += `${kmlBundledLine(sc)}<br/>`; });
+            }
+            return `    <Placemark>
+      <name>S${sb.snapNum}</name>
+      <description><![CDATA[${html}]]></description>
+      <styleUrl>#style-snap</styleUrl>
+      <Point><altitudeMode>absolute</altitudeMode><coordinates>${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}</coordinates></Point>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
         const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>${escapeXml(row.name)} — GPS Steps</name>
-    <description>Navigate + Snapshot steps with 3D altitude pins. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
-    <Style id="style-nav">
-      <IconStyle><color>ff5fff5f</color><scale>1.1</scale></IconStyle>
-      <LabelStyle><color>ff5fff5f</color></LabelStyle>
-    </Style>
-    <Style id="style-snap">
-      <IconStyle><color>ff0098ff</color><scale>1.1</scale></IconStyle>
-      <LabelStyle><color>ff0098ff</color></LabelStyle>
-    </Style>
-${placemarks}
+    <name>${escapeXml(missionName || 'Mission')} — Flight Path</name>
+    <description>Navigate + Snapshot path with 3D altitude pins and per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <Style id="style-nav"><IconStyle><color>ff5fff5f</color><scale>1.1</scale></IconStyle><LabelStyle><color>ff5fff5f</color></LabelStyle></Style>
+    <Style id="style-snap"><IconStyle><color>ff0098ff</color><scale>1.1</scale></IconStyle><LabelStyle><color>ff0098ff</color></LabelStyle></Style>
+    <Style id="style-path"><LineStyle><color>ff4ad2ff</color><width>2.5</width></LineStyle></Style>
+    <Folder><name>Flight Path</name>
+${pathPlacemark}
+    </Folder>
+    <Folder><name>Navigates (${stops.length})</name>
+${navPlacemarks}
+    </Folder>
+    <Folder><name>Snapshots (${snapBlocks.length})</name>
+${snapPlacemarks}
+    </Folder>
   </Document>
 </kml>`;
-        // Download as file. Percepto's iframe sandbox may block the
-        // download attribute, so try from top frame first, then fall
-        // back to clipboard so the user can paste into a .kml file.
+        return { kml, navCount: stops.length, snapCount: snapBlocks.length };
+    }
+
+    // Download the KML (try top frame first to dodge the iframe sandbox, then
+    // this frame, then clipboard as a last resort).
+    function downloadKmlFile(missionName, kml) {
         const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
         const blobUrl = URL.createObjectURL(blob);
-        const safeName = (row.name || 'mission').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
+        const safeName = ((missionName || 'mission').replace(/[^a-zA-Z0-9_\- ]/g, '').trim()) || 'mission';
         let downloaded = false;
-        try {
-            const topDoc = (window.top || window).document;
-            const a = topDoc.createElement('a');
-            a.href = blobUrl;
-            a.download = `${safeName}_steps.kml`;
-            topDoc.body.appendChild(a);
-            a.click();
-            a.remove();
-            downloaded = true;
-        } catch (e) {}
-        if (!downloaded) {
+        for (const doc of [(window.top || window).document, document]) {
+            if (downloaded) break;
             try {
-                const a = document.createElement('a');
-                a.href = blobUrl;
-                a.download = `${safeName}_steps.kml`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
+                const a = doc.createElement('a');
+                a.href = blobUrl; a.download = `${safeName}_flightpath.kml`;
+                (doc.body || document.body).appendChild(a); a.click(); a.remove();
                 downloaded = true;
             } catch (e) {}
         }
-        if (!downloaded) {
-            copyToClipboard(kml);
-            showToast('Download blocked. KML copied to clipboard — paste into a .kml file.', '#ff9800');
-        } else {
-            showToast(`Exported ${gpsSteps.length} GPS steps as KML`, '#5fff5f');
-        }
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+        if (!downloaded) { copyToClipboard(kml); showToast('Download blocked. KML copied to clipboard — paste into a .kml file.', '#ff9800'); }
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+        return downloaded;
+    }
+
+    function exportDetailToKML(row, allSteps) {
+        const built = buildMissionKml(row && row.name, allSteps || []);
+        if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
+        if (downloadKmlFile(row && row.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
+    }
+
+    // Map-edit row: export the mission currently open in the native editor,
+    // using the LIVE on-screen order (so an unsaved reorder still exports right).
+    function exportOpenMissionKml() {
+        if (!composerMission) { showToast('Open a mission first (hit 🔄 to load it).', '#ff9800'); return; }
+        const ordered = composerCurrentOrdered();
+        if (!ordered.length) { showToast('Could not read the open mission steps.', '#ff9800'); return; }
+        const built = buildMissionKml(composerMission.name, ordered);
+        if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
+        if (downloadKmlFile(composerMission.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
     }
 
     // Center the Leaflet map on a lat/lng. The map lives in the same
