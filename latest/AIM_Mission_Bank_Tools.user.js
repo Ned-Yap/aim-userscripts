@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.19
+// @version      1.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.19';
+    const SCRIPT_VERSION = '1.20';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1513,11 +1513,11 @@
         if (document.getElementById(COMPOSER_ROW_ID)) { updateEditorCollapseBtn(); return; }
         const row = document.createElement('div');
         row.id = COMPOSER_ROW_ID;
-        row.style.cssText = 'display:flex;gap:6px;margin:2px 0 2px;';
+        row.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 2px;';
         const compact = document.createElement('button');
         compact.id = EDITOR_COLLAPSE_BTN_ID;
         compact.type = 'button';
-        compact.style.cssText = 'flex:0 0 auto;padding:5px 9px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
+        compact.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
             'color:#14d2dc;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
         compact.onclick = (e) => {
             e.preventDefault(); e.stopPropagation();
@@ -1531,20 +1531,20 @@
         refresh.type = 'button';
         refresh.textContent = '🔄';
         refresh.title = 'Resync map order — re-fetch this mission + re-number the badges (right-click a badge to reorder)';
-        refresh.style.cssText = 'flex:0 0 auto;padding:5px 11px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+        refresh.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
             'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
         const kml = document.createElement('button');
         kml.type = 'button';
         kml.textContent = '⬇ KML';
         kml.title = 'Export this mission to a Google-Earth KML — flight path + N#/S# pins, each pin showing its step details';
-        kml.style.cssText = 'flex:0 0 auto;padding:5px 9px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
+        kml.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
             'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
         const aglv = document.createElement('button');
         aglv.id = AGL_VIEW_BTN_ID;
         aglv.type = 'button';
-        aglv.style.cssText = 'flex:0 0 auto;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        aglv.style.cssText = 'flex:0 0 auto;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         aglv.onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAglView(!showAglInEditor); };
         row.appendChild(compact); row.appendChild(refresh); row.appendChild(kml); row.appendChild(aglv);
         // Second row: the safety-gated Auto snapshot-AGL toggle (full width so
