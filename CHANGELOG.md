@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.04 (dev/latest) — customizable per-step colors
+
+The compact-card text in the native mission editor and the on-map N#/S# order badges now read their colors from a new **Step colors** section in the Control Panel (under Mission Bank Tools). Pick any color for Navigate, Snapshot, Thermal On/Off, GEM On/Off, and Wait — changes apply live to the editor cards, the map badges, and the reorder popup. One color per type, stored per user. Dev-only (latest/); not promoted.
+
+---
+
 ## 2026-06-20 — AIM Issues PROMOTED to PROD v1.24 — Slack notifications + assignees + stale-bump go live for everyone
 
 Coworkers jump **v1.01 → v1.24** on the next Tampermonkey check — the entire Slack-notifications arc that was dev-only is now in prod. What's now reaching everyone: issues post to **#CSM-Site-Issues** (parent = live status board, thread = history), `@`-mention picker, **assignee** field (popup + panel + filter + Sheets export), clickable deep-links that focus the issue on the map, comment tagging, validator findings with per-issue Slack opt-in (off by default), and **weekly stale-issue auto-bump**. The new **global cross-site stale sweep** (bumps stale issues across all sites without opening each one, and shows real site names) ships too but is **approver-gated** — only approvers run it. Requires `slack-config.json` + `approvers.json` in the data repo (already present). No prod-only code was overwritten (verified zero drift beyond the 3 allowed header lines).

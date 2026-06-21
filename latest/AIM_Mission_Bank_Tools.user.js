@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.03
+// @version      1.04
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.03';
+    const SCRIPT_VERSION = '1.04';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -160,6 +160,30 @@
     let collapseEditorCards = gmGet(CACHE_KEY_COLLAPSE_EDITOR, true);
     const EDITOR_COLLAPSE_STYLE_ID = 'aim-mb-editor-collapse-style';
     let loggedEditorCards = false;
+
+    // Per-step-type display colors. One color per type, used for BOTH the
+    // compact-card text (native editor) AND the on-map order badges + reorder
+    // popup. User-customizable via the Control Panel (type:'color' toggles).
+    // Keep this the single source of truth — applyCompactCard,
+    // composerEnsureBadgeCSS and composerEditOrder all read stepColor().
+    const STEP_COLOR_DEFAULTS = {
+        nav: '#6f9bff',
+        snap: '#ff7ac0',
+        thermalOn: '#ff9d2e',
+        thermalOff: '#b5651d',
+        gemOn: '#39ff14',
+        gemOff: '#2e8b2e',
+        wait: '#ffffff',
+    };
+    const CACHE_KEY_STEP_COLORS = 'aim-mb-step-colors';
+    let stepColors = Object.assign({}, STEP_COLOR_DEFAULTS, gmGet(CACHE_KEY_STEP_COLORS, {}) || {});
+    function stepColor(key) { return stepColors[key] || STEP_COLOR_DEFAULTS[key] || '#fff'; }
+    // Re-apply every place a step color is rendered (called after a color change).
+    function refreshStepColors() {
+        if (CONTEXT !== 'IFRAME') return;
+        try { composerEnsureBadgeCSS(true); } catch (e) {}
+        try { applyNativeEditorCollapse(); } catch (e) {}
+    }
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -244,6 +268,16 @@
                             try { updateEditorCollapseBtn(); } catch (e) {}
                         }
                     }
+                } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
+                    const key = msg.toggleId.slice(6);
+                    if (Object.prototype.hasOwnProperty.call(STEP_COLOR_DEFAULTS, key)) {
+                        const v = msg.value !== undefined ? msg.value : msg.enabled;
+                        if (typeof v === 'string' && v && stepColors[key] !== v) {
+                            stepColors[key] = v;
+                            gmSet(CACHE_KEY_STEP_COLORS, stepColors);
+                            try { refreshStepColors(); } catch (e) {}
+                        }
+                    }
                 }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
@@ -268,6 +302,14 @@
                 { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
                 { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
+                { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
+                { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
+                { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
+                { id: 'color-thermalOn', label: 'Thermal On', type: 'color', default: STEP_COLOR_DEFAULTS.thermalOn },
+                { id: 'color-thermalOff', label: 'Thermal Off', type: 'color', default: STEP_COLOR_DEFAULTS.thermalOff },
+                { id: 'color-gemOn', label: 'GEM On', type: 'color', default: STEP_COLOR_DEFAULTS.gemOn },
+                { id: 'color-gemOff', label: 'GEM Off', type: 'color', default: STEP_COLOR_DEFAULTS.gemOff },
+                { id: 'color-wait', label: 'Wait', type: 'color', default: STEP_COLOR_DEFAULTS.wait },
             ],
             hotkeys: [],
         });
@@ -1524,13 +1566,18 @@
     // re-applies the colored circle INSTANTLY — no flash of the original icon.
     // (The number is JS-injected and may blink for a frame; the circle won't.)
     // Keying off the img keeps :has matching even though we keep the img around.
-    function composerEnsureBadgeCSS() {
-        if (document.getElementById('aim-mb-badge-css')) return;
-        const st = document.createElement('style');
-        st.id = 'aim-mb-badge-css';
+    function composerEnsureBadgeCSS(rebuild) {
+        let st = document.getElementById('aim-mb-badge-css');
+        if (st && !rebuild) return;
+        if (!st) {
+            st = document.createElement('style');
+            st.id = 'aim-mb-badge-css';
+            (document.head || document.documentElement).appendChild(st);
+        }
+        const navC = stepColor('nav'), snapC = stepColor('snap');
         st.textContent = `
-            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:#2f6bff !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
-            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:#ec4899 !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
             .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
             .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
             /* Number as ::after on the MARKER el (survives hover — Percepto only
@@ -1539,7 +1586,6 @@
                 display:flex; align-items:center; justify-content:center; color:#fff; -webkit-text-fill-color:#fff;
                 font:800 11px/1 'Lato',sans-serif; pointer-events:none; z-index:2; }
         `;
-        (document.head || document.documentElement).appendChild(st);
     }
     function composerStyleOneMarker(el, info, ll) {
         const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
@@ -1993,7 +2039,7 @@
         } catch (e) { console.warn(`${TAG} [composer] snap reorder failed`, e); }
         composerBusy = false;
         rerenderComposer();
-        showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, '#ec4899', 3500);
+        showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
     }
 
     // Inline number editor for a Nav (blue) or Snapshot (pink) badge.
@@ -2004,7 +2050,7 @@
         let pt, rect;
         try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
         catch (e) { return; }
-        const color = kind === 'nav' ? '#2f6bff' : '#ec4899';
+        const color = kind === 'nav' ? stepColor('nav') : stepColor('snap');
         const label = kind === 'nav' ? 'N' : 'S';
         const wrap = document.createElement('div');
         wrap.id = 'aim-cmp-num-edit';
@@ -2139,11 +2185,11 @@
         if (!header || !titleEl) return;
         const t = instr.type_name;
         let valText = null, valColor = '#cfe', titleColor = null, renameText = null, renameColor = '#fff';
-        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = '#6f9bff'; titleColor = '#6f9bff'; }
-        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = '#ff7ac0'; titleColor = '#ff7ac0'; }
-        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = '#ffffff'; }
-        else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? '#ff9d2e' : '#b5651d'; }
-        else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? '#39ff14' : '#2e8b2e'; }
+        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = stepColor('nav'); titleColor = stepColor('nav'); }
+        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = stepColor('snap'); titleColor = stepColor('snap'); }
+        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = stepColor('wait'); }
+        else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? stepColor('thermalOn') : stepColor('thermalOff'); }
+        else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }
         else { card.classList.remove('aim-mb-compact-renamed'); return; }
 
         // Color the native title name (Navigate=blue, Snapshot=pink).
