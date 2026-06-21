@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.85
+// @version      4.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -35,7 +35,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.85';
+    const SCRIPT_VERSION = '4.86';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2938,6 +2938,10 @@
             // by Mission Bank Tools' Composer — right-click there reorders the
             // step. Don't pop the asset inspector for the entity beneath.
             if (target && target.closest && target.closest('.instruction-marker')) { dbg('bail: mission instruction marker'); return; }
+            // Mission Bank Tools draws the site's assets on the Mission Bank map
+            // for its Generator (class aim-gen-asset) — right-click there belongs
+            // to the Generator, not the asset inspector. Step aside.
+            if (target && target.closest && target.closest('.aim-gen-asset')) { dbg('bail: mission generator asset'); return; }
             const map = getLeafletMap();
             if (!map) { dbg('bail: no map (Map Styler off?)'); return; }
             const container = map.getContainer();
