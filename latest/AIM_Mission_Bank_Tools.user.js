@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.95
+// @version      0.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.95';
+    const SCRIPT_VERSION = '0.96';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1469,6 +1469,7 @@
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         composerBindMapEvents();
+        installComposerMarkerEvents();
         const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
         const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
         const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
@@ -1511,16 +1512,44 @@
         } else {
             iconDiv.style.background = bg;
         }
-        if (!el.__aimCtx) {
-            el.__aimCtx = true;
-            // M2 (right-click) → reorder. M1 (left-click) left alone → native.
-            el.addEventListener('contextmenu', (e) => {
-                e.preventDefault(); e.stopPropagation();
-                const id = el.getAttribute('data-aim-id'), kind = el.getAttribute('data-aim-kind');
-                const n = parseInt((el.querySelector('.instruction-marker__icon')?.getAttribute('data-aim-label') || '').replace(/[^0-9]/g, ''), 10) || 1;
-                composerEditOrder(kind, id, n, el.__aimLL || ll);
-            }, true);
-        }
+        // Click/right-click are handled by ONE window-capture listener (below),
+        // not per-marker — survives Leaflet recreating the marker + beats the
+        // Asset Inspector's window-BUBBLE contextmenu.
+    }
+
+    // ONE window-capture listener pair for all styled markers:
+    //  • right-click (M2) on a badge → our order editor, and stopImmediate so the
+    //    Asset Inspector's window-bubble contextmenu doesn't also fire.
+    //  • left-click (M1) on a badge → open that step's edit form (Percepto's
+    //    native click only scrolls to it; we additionally trigger ⋮ → Edit).
+    let composerMarkerEventsInstalled = false;
+    function installComposerMarkerEvents() {
+        if (composerMarkerEventsInstalled) return;
+        composerMarkerEventsInstalled = true;
+        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id]') : null;
+        window.addEventListener('contextmenu', (e) => {
+            const m = badge(e); if (!m) return;
+            e.preventDefault(); e.stopImmediatePropagation();
+            const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
+            const iconDiv = m.querySelector('.instruction-marker__icon');
+            const lbl = (iconDiv && iconDiv.getAttribute('data-aim-label')) || '';
+            const n = parseInt(lbl.replace(/[^0-9]/g, ''), 10) || 1;
+            composerEditOrder(kind, id, n, m.__aimLL);
+        }, true);
+        window.addEventListener('click', (e) => {
+            const m = badge(e); if (!m) return;
+            // Don't stop native scroll; additionally open the edit form.
+            const id = m.getAttribute('data-aim-id');
+            setTimeout(() => composerOpenStepEdit(id), 320);
+        }, true);
+    }
+    function composerOpenStepEdit(id) {
+        const draggable = document.querySelector(`[data-rfd-draggable-id="${id}"]`);
+        if (!draggable) { showToast('Could not find that step to edit.', '#ff9800', 3000); return; }
+        try {
+            const ok = triggerInstructionAction(draggable, 'edit');
+            if (!ok) forceOpenInstructionEdit(draggable);
+        } catch (e) { try { forceOpenInstructionEdit(draggable); } catch (e2) { console.warn(`${TAG} [composer] open edit failed`, e2); } }
     }
 
     function composerEnsureMapMode(silent) {
