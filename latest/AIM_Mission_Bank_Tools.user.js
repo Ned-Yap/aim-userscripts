@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.24
+// @version      1.25
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.24';
+    const SCRIPT_VERSION = '1.25';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1977,7 +1977,11 @@
     }
     function genUpdateBtn() {
         const b = document.getElementById(GEN_BTN_ID);
-        if (b) { b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate'; b.style.background = genOverlayOn ? 'rgba(122,223,230,0.28)' : 'rgba(122,223,230,0.15)'; }
+        if (!b) return;
+        b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate';
+        // Solid backgrounds so it reads over the satellite imagery.
+        b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
+        b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
     }
     function genEnsureButton() {
         if (CONTEXT !== 'IFRAME') return;
@@ -1987,8 +1991,8 @@
         const btn = document.createElement('button');
         btn.id = GEN_BTN_ID; btn.type = 'button';
         btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to preview its generated scan (Increment 1 — preview only).';
-        btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 10px;border-radius:6px;cursor:pointer;' +
-            'font:700 12px "Lato",sans-serif;background:rgba(122,223,230,0.15);border:1px solid rgba(122,223,230,0.6);color:#7adfe6;';
+        btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #14d2dc;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
         if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
         mapC.appendChild(btn);
