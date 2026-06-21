@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.98
+// @version      0.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.98';
+    const SCRIPT_VERSION = '0.99';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1511,24 +1511,23 @@
             .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:#ec4899 !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
             .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
             .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
-            .instruction-marker__icon > .aim-num { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-                color:#fff !important; -webkit-text-fill-color:#fff; font:800 11px/1 'Lato',sans-serif; pointer-events:none; }
+            /* Number as ::after on the MARKER el (survives hover — Percepto only
+               re-renders the inner icon's contents on hover, wiping a child span). */
+            .instruction-marker[data-aim-num]::after { content: attr(data-aim-num); position:absolute; inset:0;
+                display:flex; align-items:center; justify-content:center; color:#fff; -webkit-text-fill-color:#fff;
+                font:800 11px/1 'Lato',sans-serif; pointer-events:none; z-index:2; }
         `;
         (document.head || document.documentElement).appendChild(st);
     }
     function composerStyleOneMarker(el, info, ll) {
-        const iconDiv = el.querySelector('.instruction-marker__icon');
-        if (!iconDiv) return;
         const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         el.setAttribute('data-aim-id', info.id);
         el.setAttribute('data-aim-kind', info.kind);
         el.__aimLL = ll;
-        // Color + icon-hide is CSS (stable). JS only maintains the number span,
-        // keeping the original img in place so the :has() color rule still matches.
-        let num = iconDiv.querySelector('.aim-num');
-        if (!num) { num = document.createElement('span'); num.className = 'aim-num'; iconDiv.appendChild(num); }
-        if (num.textContent !== label) num.textContent = label;
-        // Click/right-click handled by ONE window-capture listener (below).
+        // Color + icon-hide is CSS (:has). Number is a CSS ::after from this
+        // attr on the MARKER el — survives Percepto's hover re-render of the
+        // inner icon. Click/right-click handled by the window-capture listeners.
+        if (el.getAttribute('data-aim-num') !== label) el.setAttribute('data-aim-num', label);
     }
 
     // ONE window-capture listener pair for all styled markers:
@@ -2092,8 +2091,9 @@
         // rows) so the card is one line, put the title content-width, and let
         // our injected value sit on the right. Card stays a real draggable box.
         st.textContent = `
+            [data-rfd-draggable-id].aim-mb-compact { max-height:44px !important; overflow:hidden !important; margin-bottom:3px !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__params { display:none !important; }
-            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding-bottom:4px !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding:0 !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
             [data-rfd-draggable-id].aim-mb-compact-renamed .mission-instruction-item__title__name { display:none !important; }
             .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; }
@@ -2111,13 +2111,17 @@
         const titleEl = card.querySelector('.mission-instruction-item__title');
         if (!header || !titleEl) return;
         const t = instr.type_name;
-        let valText = null, valColor = '#cfe', renameText = null, renameColor = '#fff';
-        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = '#6f9bff'; }
-        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = '#ff7ac0'; }
+        let valText = null, valColor = '#cfe', titleColor = null, renameText = null, renameColor = '#fff';
+        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = '#6f9bff'; titleColor = '#6f9bff'; }
+        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = '#ff7ac0'; titleColor = '#ff7ac0'; }
         else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = '#ffffff'; }
         else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? '#ff9d2e' : '#b5651d'; }
         else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? '#39ff14' : '#2e8b2e'; }
         else { card.classList.remove('aim-mb-compact-renamed'); return; }
+
+        // Color the native title name (Navigate=blue, Snapshot=pink).
+        const nameEl = titleEl.querySelector('.mission-instruction-item__title__name');
+        if (nameEl) nameEl.style.color = titleColor || '';
 
         if (renameText != null) {
             card.classList.add('aim-mb-compact-renamed');
