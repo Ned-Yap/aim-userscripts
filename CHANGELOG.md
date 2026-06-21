@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.26 (dev/latest) — Mission Generator, Increment 2 (actually creates the mission)
+
+Right-clicking an asset on the Mission Bank map now opens a small **⊕ Generate mission** popup (preview + an **Inspection scan** checkbox), and **Generate** actually builds and creates the mission via the editor's own `saveApp` — then opens it so you can nudge the points. The mission is named **`<section> - <asset>`** (N/E/S/W from the base station) and contains takeoff → Navigate (in the FFZ, "Based on FFZ min alt") → Snapshot (asset center, ground + your AGL) → optional Thermal/GEM/Wait wrap → returnHome — the server computes the flight route. Built as a reusable per-asset function so the future "generate all assets" batch drops on top. Test on a TEST site first. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.23 (dev/latest) — Mission Generator, Increment 1 (asset overlay + scan preview)
 
 First slice of the Mission Generator. A **⊕ Generate** button on the Mission Bank map draws the site's **assets (white) + FFZs (green)**; **right-click an asset** to preview its generated scan — the drone **Navigate** point (closest safe spot inside the FFZ at ~100 ft from the asset, at FFZ-min-alt) and the **Snapshot** point (asset centroid at ground + your default AGL), drawn as a blue→pink line with the standoff distance in a toast. **No mission is written yet** — this proves the data, drawing, hit-testing, and geometry before the save step (Increment 2). Dev-only (latest/).

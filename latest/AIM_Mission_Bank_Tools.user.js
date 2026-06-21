@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.25
+// @version      1.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.25';
+    const SCRIPT_VERSION = '1.26';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1872,7 +1872,7 @@
     const GEN_BTN_ID = 'aim-mb-gen-btn';
     const GEN_TARGET_STANDOFF_FT = 100; // ideal nav↔asset distance
     const genEntCache = {};
-    let genLayer = null, genPreviewLayer = null, genOverlayOn = false;
+    let genLayer = null, genPreviewLayer = null, genOverlayOn = false, genBase = null, genPopupEl = null;
 
     function genFetchEntities(siteID) {
         if (genEntCache[siteID]) return Promise.resolve(genEntCache[siteID]);
@@ -1886,8 +1886,14 @@
                     .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!(e.custom && e.custom.is_unshielded) }));
                 const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
                     .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null }));
-                const data = { assets, ffzs };
-                genEntCache[siteID] = data;
+                // Base station (type 8) → origin for N/E/S/W section naming.
+                // Fallback: centroid of all assets (so naming still works).
+                let base = null;
+                const baseEnt = list.find(e => e && e.type === 8 && (e.location || (Array.isArray(e.coords) && e.coords.length)));
+                if (baseEnt) base = baseEnt.location ? { lat: baseEnt.location.lat, lng: baseEnt.location.lng } : { lat: baseEnt.coords[0].lat, lng: baseEnt.coords[0].lng };
+                if (!base && assets.length) { let la = 0, ln = 0; assets.forEach(a => { const c = genCentroid(a.ring); la += c.lat; ln += c.lng; }); base = { lat: la / assets.length, lng: ln / assets.length }; }
+                const data = { assets, ffzs, base };
+                genEntCache[siteID] = data; genBase = base;
                 return data;
             });
     }
@@ -1938,7 +1944,7 @@
             assets.forEach(a => {
                 try {
                     const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#fff', weight: 1.5, fillColor: '#fff', fillOpacity: 0.08, className: 'aim-gen-asset' });
-                    poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genPreviewAsset(a, ffzs); });
+                    poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genShowGeneratePopup(a, ffzs, ev); });
                     poly.addTo(group); drawn++;
                 } catch (e) {}
             });
@@ -1950,19 +1956,6 @@
     function genToggleOverlay() {
         if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); showToast('Generator overlay off.', '#888', 1500); }
         else genDrawOverlay();
-    }
-    function genPreviewAsset(asset, ffzs) {
-        const aC = genCentroid(asset.ring);
-        const ffz = genAssetFFZ(aC, ffzs);
-        if (!ffz) { showToast(`No FFZ found near ${asset.name || 'asset'} — can't place the drone.`, '#ff9800', 4000); return; }
-        const groundM = getElevationFromCache(aC.lat, aC.lng);
-        if (groundM == null) { fetchElevation(aC.lat, aC.lng); showToast('Fetching ground elevation — right-click again in a moment.', '#9ad', 2500); return; }
-        const nav = genNavPoint(aC, ffz);
-        const snapAltFt = Math.round(groundM * 3.28084) + defaultSnapAglFt;
-        const navAltFt = ffz.minAltM != null ? Math.round(ffz.minAltM * 3.28084) : null;
-        console.log(`${TAG} [gen] PREVIEW "${asset.name}" #${asset.id}`, { assetCentroid: aC, ffz: ffz.name || ffz.id, navPoint: nav.point, standoffFt: Math.round(nav.standoffFt), navAltFt, snapAltFt, groundFt: Math.round(groundM * 3.28084), poi: asset.poi, unshielded: asset.unshielded });
-        showToast(`${asset.name || 'Asset'}: nav ${Math.round(nav.standoffFt)} ft out @ ${navAltFt != null ? navAltFt + ' ft' : 'FFZ-min n/a'} · snap @ ground+${defaultSnapAglFt}=${snapAltFt} ft  (preview only)`, '#7adfe6', 6500);
-        genDrawPreview(aC, nav.point);
     }
     function genDrawPreview(snapPt, navPt) {
         const L = composerGetL(), map = getLeafletMap(); if (!L || !map || !navPt) return;
@@ -1990,13 +1983,140 @@
         if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
         const btn = document.createElement('button');
         btn.id = GEN_BTN_ID; btn.type = 'button';
-        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to preview its generated scan (Increment 1 — preview only).';
+        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to generate its scan mission (preview + Generate).';
         btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #14d2dc;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
         if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
         mapC.appendChild(btn);
         genUpdateBtn();
+    }
+
+    // ── Increment 2: build a mission for an asset + create it via saveApp ──────
+    // N/E/S/W quadrant of a point relative to the base station (dominant axis).
+    function genSection(pt) {
+        if (!genBase) return '?';
+        const dLat = pt.lat - genBase.lat, dLng = pt.lng - genBase.lng;
+        if (Math.abs(dLat) >= Math.abs(dLng)) return dLat >= 0 ? 'N' : 'S';
+        return dLng >= 0 ? 'E' : 'W';
+    }
+    // Pure: build the instruction list + name for one asset. Returns null if the
+    // FFZ or ground elevation isn't available yet. Step shapes match a real solo
+    // mission (types: takeoff 0, navigate 1, snapshot 6, cameraSelect 7, gemMode
+    // 24, wait 5, returnHome 99). saveApp only sends type/location/value1/value2/
+    // extra_options/polygon_points/snapshot_points, so that's all we set.
+    function buildMissionForAsset(asset, ffzs, opts) {
+        opts = opts || {};
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) return null;
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { if (aC.lat != null) try { fetchElevation(aC.lat, aC.lng); } catch (e) {} return null; }
+        const nav = genNavPoint(aC, ffz);
+        const navAltM = ffz.minAltM != null ? ffz.minAltM : (groundM + 40);
+        const snapAltM = groundM + (defaultSnapAglFt / 3.28084);
+        const I = (type, value1, value2, location, extra) => ({ type, value1: value1 === undefined ? null : value1, value2: value2 === undefined ? null : value2, location: location || null, extra_options: extra || {}, polygon_points: null, snapshot_points: null });
+        const instrs = [];
+        instrs.push(I(0, 20, null, null, {}));                                              // takeoff
+        instrs.push(I(1, navAltM, 12, { lat: nav.point.lat, lng: nav.point.lng }, { shouldUseFreezoneMinAlt: true })); // navigate (FFZ min alt)
+        const count = Math.max(1, opts.count || 1);
+        for (let s = 0; s < count; s++) {
+            instrs.push(I(6, snapAltM, 1, { lat: aC.lat, lng: aC.lng }, { pitch: 1001 }));   // snapshot @ asset center
+            if (opts.inspectionScan) {
+                instrs.push(I(7, true, null, null, {}));   // camera (thermal) ON
+                instrs.push(I(24, 1, null, null, {}));     // GEM ON
+                instrs.push(I(5, 10, null, null, {}));     // wait 10s
+                instrs.push(I(24, 0, null, null, {}));     // GEM OFF
+                instrs.push(I(7, false, null, null, {}));  // camera OFF
+            }
+        }
+        instrs.push(I(99, null, null, null, {}));                                           // returnHome
+        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        return { instructions: instrs, name, navStandoffFt: nav.standoffFt };
+    }
+    // Find the mission editor's app context (saveApp + setCurrentApp). Anchors on
+    // stable Mission Bank DOM (works even with NO mission open in the editor).
+    function findMissionAppCtx() {
+        const anchors = ['[data-rfd-draggable-id]', '.mission-bank__map-container', '.mission-bank__content', '.mission-bank'];
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 160) {
+                    let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                    if (v && typeof v === 'object' && typeof v.saveApp === 'function' && typeof v.setCurrentApp === 'function') return v;
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
+    async function genGenerateForAsset(asset, ffzs, opts) {
+        const ctx = findMissionAppCtx();
+        if (!ctx) { showToast('Mission context not found — make sure you\'re on the Mission Bank page.', '#ff5252', 4000); return; }
+        const built = buildMissionForAsset(asset, ffzs, opts);
+        if (!built) { showToast('Could not build mission (no FFZ near asset, or ground elevation still loading — try again).', '#ff9800', 4000); return; }
+        showToast(`Creating "${built.name}"…`, '#9ad', 2500);
+        try {
+            const app = { id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] };
+            const res = await ctx.saveApp(app, built.name);
+            const saved = (res && res.app) ? res.app : res;
+            console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
+            showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
+            try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
+        } catch (e) {
+            console.warn(`${TAG} [gen] saveApp failed`, e);
+            showToast('Generate failed — see console (the mission was NOT created).', '#ff5252', 5000);
+        }
+    }
+    // M2 on an asset → preview line + a small popup to confirm + Generate.
+    function genCloseGenPopup() { if (genPopupEl) { genPopupEl.remove(); genPopupEl = null; } document.removeEventListener('mousedown', genPopupOutside, true); }
+    function genPopupOutside(e) { if (genPopupEl && !genPopupEl.contains(e.target)) genCloseGenPopup(); }
+    function genShowGeneratePopup(asset, ffzs, ev) {
+        genCloseGenPopup();
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) { showToast(`No FFZ near ${asset.name || 'asset'} — can't place the drone.`, '#ff9800', 4000); return; }
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { try { fetchElevation(aC.lat, aC.lng); } catch (e) {} showToast('Loading ground elevation — right-click again in a moment.', '#9ad', 2500); return; }
+        const nav = genNavPoint(aC, ffz);
+        genDrawPreview(aC, nav.point);
+        const snapAltFt = Math.round(groundM * 3.28084) + defaultSnapAglFt;
+        const navAltFt = ffz.minAltM != null ? Math.round(ffz.minAltM * 3.28084) : null;
+        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        const pop = document.createElement('div');
+        pop.className = 'aim-mb-bp-pop';
+        pop.style.cssText += 'position:fixed;z-index:2147483600;min-width:250px;';
+        pop.innerHTML = `
+            <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">⊕ Generate mission</span><button class="aim-mb-menu-close" data-gp-close>✕</button></div>
+            <div style="padding:10px 12px;font-size:11px;color:#cfe;">
+                <div style="font-weight:800;color:#7adfe6;margin-bottom:6px;font-size:12px;">${escapeHtml(name)}</div>
+                <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
+                <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
+                ${asset.unshielded ? '<div style="color:#ff7a00;margin-top:4px;">⚠ asset flagged unshielded</div>' : ''}
+                <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-gp-cancel>Cancel</button>
+                    <button class="aim-mb-bulk-btn" data-gp-go>⊕ Generate</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        genPopupEl = pop;
+        const oe = ev.originalEvent || ev;
+        pop.style.left = ((oe.clientX || 100) + 8) + 'px';
+        pop.style.top = ((oe.clientY || 100) + 8) + 'px';
+        const r = pop.getBoundingClientRect();
+        if (r.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - r.width) + 'px';
+        if (r.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, (oe.clientY || 100) - r.height - 8) + 'px';
+        pop.querySelector('[data-gp-close]').onclick = genCloseGenPopup;
+        pop.querySelector('[data-gp-cancel]').onclick = genCloseGenPopup;
+        pop.querySelector('[data-gp-go]').onclick = () => {
+            const scan = pop.querySelector('[data-gp-scan]').checked;
+            genCloseGenPopup();
+            genGenerateForAsset(asset, ffzs, { inspectionScan: scan });
+        };
+        setTimeout(() => document.addEventListener('mousedown', genPopupOutside, true), 0);
     }
 
     // The on-screen instruction ids, in current editor order.
