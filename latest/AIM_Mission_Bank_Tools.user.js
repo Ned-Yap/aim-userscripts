@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.00
+// @version      1.01
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.00';
+    const SCRIPT_VERSION = '1.01';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1380,31 +1380,9 @@
         const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
         if (btn) btn.textContent = collapseEditorCards ? '⊟ Compact view: ON' : '⊞ Compact view: OFF';
     }
-    function injectEditorCollapseButton() {
-        if (CONTEXT !== 'IFRAME') return;
-        const content = document.querySelector('.mission-edit__content');
-        if (!content) return;
-        if (document.getElementById(EDITOR_COLLAPSE_BTN_ID)) { updateEditorCollapseBtn(); return; }
-        const btn = document.createElement('button');
-        btn.id = EDITOR_COLLAPSE_BTN_ID;
-        btn.type = 'button';
-        btn.style.cssText = 'display:block;width:100%;margin:4px 0 8px;padding:6px 10px;background:transparent;' +
-            'border:1px solid rgba(20,210,220,0.5);color:#14d2dc;border-radius:6px;cursor:pointer;' +
-            "font-family:inherit;font-size:12px;font-weight:600;";
-        btn.onclick = (e) => {
-            e.preventDefault(); e.stopPropagation();
-            collapseEditorCards = !collapseEditorCards;
-            gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
-            try { applyNativeEditorCollapse(); } catch (er) {}
-            updateEditorCollapseBtn();
-        };
-        // Insert right after the "Add instruction" button when we can find it,
-        // else at the top of the editor content.
-        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
-        if (addBtn && addBtn.parentNode) addBtn.parentNode.insertBefore(btn, addBtn.nextSibling);
-        else content.insertBefore(btn, content.firstChild);
-        updateEditorCollapseBtn();
-    }
+    // The Compact-view toggle now lives inside injectComposerButton's combined
+    // row (kept here as a no-op so existing callers don't need touching).
+    function injectEditorCollapseButton() { /* merged into the composer button row */ }
 
     // ============================================================
     // MISSION COMPOSER — Increment 1 (read-only grouped view + multi-select)
@@ -1432,26 +1410,42 @@
     let composerMapEventsBound = false;
     let loggedNoMarkers = false;
 
+    // ONE compact button row (Compact-view toggle + a small 🔄 Resync), side by
+    // side, inserted right under "Add instruction" — keeps the top of the
+    // sidebar tight so more steps show.
     function injectComposerButton() {
         if (CONTEXT !== 'IFRAME') return;
         const content = document.querySelector('.mission-edit__content');
         if (!content) return;
-        if (document.getElementById(COMPOSER_ROW_ID)) return;
+        if (document.getElementById(COMPOSER_ROW_ID)) { updateEditorCollapseBtn(); return; }
         const row = document.createElement('div');
         row.id = COMPOSER_ROW_ID;
-        row.style.cssText = 'display:flex;gap:6px;margin:0 0 8px;';
+        row.style.cssText = 'display:flex;gap:6px;margin:4px 0 6px;';
+        const compact = document.createElement('button');
+        compact.id = EDITOR_COLLAPSE_BTN_ID;
+        compact.type = 'button';
+        compact.style.cssText = 'flex:1;padding:5px 8px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
+            'color:#14d2dc;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;';
+        compact.onclick = (e) => {
+            e.preventDefault(); e.stopPropagation();
+            collapseEditorCards = !collapseEditorCards;
+            gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
+            try { applyNativeEditorCollapse(); } catch (er) {}
+            updateEditorCollapseBtn();
+        };
         const refresh = document.createElement('button');
         refresh.id = COMPOSER_BTN_ID;
         refresh.type = 'button';
-        refresh.textContent = '🔄 Resync map order';
-        refresh.title = 'Re-fetch this mission + re-number the map badges (right-click a badge to reorder)';
-        refresh.style.cssText = 'flex:1;padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
-            'color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
+        refresh.textContent = '🔄';
+        refresh.title = 'Resync map order — re-fetch this mission + re-number the badges (right-click a badge to reorder)';
+        refresh.style.cssText = 'flex:0 0 auto;padding:5px 11px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+            'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
-        row.appendChild(refresh);
-        const anchor = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
-        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(row, anchor.nextSibling);
+        row.appendChild(compact); row.appendChild(refresh);
+        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
+        if (addBtn && addBtn.parentNode) addBtn.parentNode.insertBefore(row, addBtn.nextSibling);
         else content.insertBefore(row, content.firstChild);
+        updateEditorCollapseBtn();
         composerEnsureMapMode(true);
     }
 
