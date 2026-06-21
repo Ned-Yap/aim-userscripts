@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.12';
+    const SCRIPT_VERSION = '1.13';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4104,12 +4104,22 @@
         // export, where the open map may be a different mission).
         let pathPlacemark = '';
         if (opts.routes && opts.routes.length) {
+            // The captured route is 2D (lat/lng only). Raise each vertex to the
+            // altitude of the NEAREST navigate so the line rides up with the nav
+            // pins instead of snapping to the ground.
+            const navAlts = navsLoc.map(n => ({ lat: Number(n.location.lat), lng: Number(n.location.lng), alt: kmlAltM(n) }));
+            const altForPoint = (p) => {
+                let best = 0, bd = Infinity;
+                for (const na of navAlts) { const a = na.lat - p.lat, b = na.lng - p.lng, d = a * a + b * b; if (d < bd) { bd = d; best = na.alt; } }
+                return best;
+            };
+            const mode = navAlts.length ? 'absolute' : 'clampToGround';
             pathPlacemark = opts.routes.map((route, i) => {
-                const coords = route.map(p => `${p.lng},${p.lat},0`).join(' ');
+                const coords = route.map(p => `${p.lng},${p.lat},${altForPoint(p)}`).join(' ');
                 return `    <Placemark>
       <name>Flight Path${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
       <styleUrl>#style-path</styleUrl>
-      <LineString><tessellate>1</tessellate><altitudeMode>clampToGround</altitudeMode><coordinates>${coords}</coordinates></LineString>
+      <LineString><tessellate>1</tessellate><altitudeMode>${mode}</altitudeMode><coordinates>${coords}</coordinates></LineString>
     </Placemark>`;
             }).join('\n');
         } else if (navsLoc.length >= 2) {

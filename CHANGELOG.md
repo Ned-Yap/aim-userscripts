@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.13 (dev/latest) — KML routed path rides at altitude
+
+The captured flight path is 2D, so it was snapping to the ground. Each route vertex now takes the altitude of the nearest navigate (and switches to `absolute` altitude mode), so the white line rides up with the nav pins instead of lying on the terrain. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.12 (dev/latest) — KML uses AIM's real routed path + site name in title
 
 The KML's flight path is now the **actual routed line from AIM** — Percepto's white dashed route that follows the flight paths / FFZs (base → each step → back), captured off the map and converted to lat/lng — instead of a straight nav→nav line. Falls back to the straight line (and says so in the toast) when the routed line can't be read (e.g. exporting from the SUM drill-down). The KML **title now includes the site**: `Site 1502 - <site name> - <mission name>`. Dev-only (latest/).
