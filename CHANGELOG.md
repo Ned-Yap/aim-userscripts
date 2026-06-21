@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-20 — AIM Issues PROMOTED to PROD v1.24 — Slack notifications + assignees + stale-bump go live for everyone
+
+Coworkers jump **v1.01 → v1.24** on the next Tampermonkey check — the entire Slack-notifications arc that was dev-only is now in prod. What's now reaching everyone: issues post to **#CSM-Site-Issues** (parent = live status board, thread = history), `@`-mention picker, **assignee** field (popup + panel + filter + Sheets export), clickable deep-links that focus the issue on the map, comment tagging, validator findings with per-issue Slack opt-in (off by default), and **weekly stale-issue auto-bump**. The new **global cross-site stale sweep** (bumps stale issues across all sites without opening each one, and shows real site names) ships too but is **approver-gated** — only approvers run it. Requires `slack-config.json` + `approvers.json` in the data repo (already present). No prod-only code was overwritten (verified zero drift beyond the 3 allowed header lines).
+
+---
+
 ## 2026-06-20 — AIM Issues — fix existing "site ID" boards on next sweep — AIM Issues v1.24 (dev/latest only)
 
 v1.23's board-refresh was sitting behind the "bumped within 7 days" guard, so the boards already posted with an ID wouldn't have corrected for a week. Moved the name reconciliation ahead of the bump gate (once per browser session) so the existing "site 1595" boards update to the real name on the very next sweep — no need to delete and re-run. chat.update is silent and idempotent, so already-correct boards are untouched.

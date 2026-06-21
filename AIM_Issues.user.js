@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.24
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -12,7 +12,9 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_openInTab
 // @connect      api.github.com
+// @connect      slack.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -55,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.01';
+    const SCRIPT_VERSION = '1.24';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -69,9 +71,18 @@
     const ISSUES_BRANCH = 'main';
     const ISSUES_PATH = (sid) => `issues/${sid}-issues.json`;
     const APPROVERS_PATH = 'approvers.json';
+    // v1.03: Slack notifications. Bot token + channel ID + name→SlackID map
+    // live in aim-userscripts-data/slack-config.json (same private repo +
+    // PAT we already use). Posting goes through the Slack Web API
+    // (chat.postMessage) so we get the message ts back for threading —
+    // an incoming webhook can't thread.
+    const SLACK_CONFIG_PATH = 'slack-config.json';
+    const SLACK_POST_URL = 'https://slack.com/api/chat.postMessage';
+    const SLACK_UPDATE_URL = 'https://slack.com/api/chat.update';
     const TOKEN_KEY = 'aim-github-token';          // shared with Map Styler
     const USERNAME_KEY = 'aim-issues-github-login'; // ours
     const APPROVERS_KEY = 'aim-issues-approvers';   // cached approver list
+    const SLACK_CONFIG_KEY = 'aim-issues-slack-config'; // cached slack-config.json
 
     // ------- v1.00 approver oversight + activity-indicator constants -------
     //
@@ -230,6 +241,7 @@
     let siteName = '';     // v0.20: friendly name from .site-select widget
     let currentSiteIssues = [];                  // Issue[] for current site
     const hiddenIds = new Set();                 // session-only — resets on reload
+    let pendingFocusIssueId = null;              // v1.06: deep-link ?aim_issue=<id> target
 
     // GitHub sync state (v0.5)
     let cachedToken = gmGet(TOKEN_KEY, '') || '';       // recovered after refresh; also via TOKEN_VALUE broadcast
@@ -243,6 +255,15 @@
         catch (e) { return []; }
     })();
     let approversSha = null;                              // for future write-back
+    // v1.03: Slack config. { botToken, channelId, users:{githubLogin:slackId} }.
+    // Loaded from slack-config.json alongside approvers. Mirrored to GM so a
+    // refresh-without-network keeps Slack working. null/empty = Slack off
+    // (everything degrades silently to no-post).
+    let slackConfig = (function() {
+        try { const raw = gmGet(SLACK_CONFIG_KEY, ''); if (!raw) return null;
+              const obj = JSON.parse(raw); return (obj && typeof obj === 'object') ? obj : null; }
+        catch (e) { return null; }
+    })();
     function isApprover() {
         if (!cachedUsername) return false;                // local-only / no token
         return approversList.includes(cachedUsername);
@@ -283,6 +304,7 @@
     // four active by default. M1 toggle, M2 solo (same as status chips).
     const panelPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
     let panelSearch = '';
+    let panelAssignedToMe = false;   // v1.12: "Assigned to me" filter toggle
     // v0.16: persisted size + position. Loaded from localStorage on open,
     // saved on drag/resize release. Use viewport-anchored top/left so the
     // panel sticks wherever the user left it across reloads.
@@ -432,7 +454,14 @@
     function saveIssuesToStorage(id, issues) {
         if (!id) return;
         try {
-            const payload = { version: 1, siteID: id, issues };
+            // v1.02: validator-generated issues (source:'validator', authored
+            // 'Validator') are EPHEMERAL — never persisted, never synced. They
+            // regenerate on demand from the Asset Inspector's SOP validators,
+            // so storing them would just leave stale violations on the map
+            // after the geometry is fixed. Strip them here so no caller can
+            // accidentally persist them, and so they're absent on next load.
+            const persist = (issues || []).filter(i => i.source !== 'validator');
+            const payload = { version: 1, siteID: id, issues: persist };
             localStorage.setItem(storageKeyForSite(id), JSON.stringify(payload));
         } catch (e) {
             console.warn(`${TAG} saveIssuesToStorage threw:`, e);
@@ -442,6 +471,7 @@
     function setCurrentSite(newId) {
         if (newId === siteID) return;
         siteID = newId;
+        readFocusParam();   // v1.06: a deep-link nav may carry ?aim_issue=<id>
         // v0.20: refresh friendly site name. Retries below in case the
         // .site-select widget isn't mounted yet on initial load.
         siteName = readSiteName();
@@ -514,6 +544,8 @@
         fetchGithubUsername().then(() => {
             // v1.00: also fetch approver allowlist alongside username
             fetchApproversList();
+            // v1.03: and the Slack notification config (bot token + map)
+            fetchSlackConfig();
             if (siteID) refetchIssues();
             else { syncStatus = 'ok'; renderButtonState(); }
         });
@@ -589,6 +621,447 @@
             renderButtonState();
         } catch (e) {
             console.warn(`${TAG} fetchApproversList threw:`, e);
+        }
+    }
+
+    // v1.03: pull Slack notification config from
+    // aim-userscripts-data/slack-config.json. Shape:
+    //   { "botToken":"xoxb-…", "channelId":"C0…",
+    //     "users": { "GitHubLogin": "U0…", … } }
+    // Missing file = Slack notifications off (everything degrades to no-post).
+    // Cached in GM so a refresh-without-network keeps it available.
+    async function fetchSlackConfig() {
+        if (IS_TOP) return;            // IFRAME owns sync, same as approvers
+        if (!cachedToken) return;
+        try {
+            const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(SLACK_CONFIG_PATH)}?ref=${ISSUES_BRANCH}`;
+            const resp = await ghRequest({
+                method: 'GET',
+                url,
+                headers: {
+                    'Authorization': `Bearer ${cachedToken}`,
+                    'Accept': 'application/vnd.github+json',
+                },
+                timeout: 15000,
+            });
+            if (resp.status === 404) {
+                console.warn(`${TAG} slack-config.json missing — Slack notifications disabled`);
+                slackConfig = null;
+                gmSet(SLACK_CONFIG_KEY, '');
+                return;
+            }
+            if (resp.status !== 200) {
+                console.warn(`${TAG} GET slack-config.json HTTP ${resp.status}`);
+                return;
+            }
+            const meta = JSON.parse(resp.responseText);
+            const cfg = JSON.parse(b64ToText(meta.content || ''));
+            if (cfg && cfg.botToken && cfg.channelId) {
+                slackConfig = { botToken: cfg.botToken, channelId: cfg.channelId, users: cfg.users || {} };
+                gmSet(SLACK_CONFIG_KEY, JSON.stringify(slackConfig));
+                const n = Object.keys(slackConfig.users).length;
+                console.log(`${TAG} Slack config loaded — channel ${slackConfig.channelId}, ${n} user(s) mapped`);
+            } else {
+                console.warn(`${TAG} slack-config.json present but missing botToken/channelId — Slack off`);
+                slackConfig = null;
+                gmSet(SLACK_CONFIG_KEY, '');
+            }
+        } catch (e) {
+            console.warn(`${TAG} fetchSlackConfig threw:`, e);
+        }
+    }
+
+    // ------- Slack notification helpers (v1.03) -------
+    function slackEnabled() {
+        return !!(slackConfig && slackConfig.botToken && slackConfig.channelId);
+    }
+    // Slack control-char escaping for free text. Mentions (<@id>) are built
+    // separately and must NOT pass through this.
+    function slackEsc(s) {
+        return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    // GitHub login → Slack mention. Falls back to a plain @login (no real
+    // ping) when the user isn't in the map, so the info is never lost.
+    function slackMention(login) {
+        if (!login || login === 'local-only') return '';
+        const id = slackConfig && slackConfig.users ? slackConfig.users[login] : null;
+        return id ? `<@${id}>` : `@${slackEsc(login)}`;
+    }
+    // v1.14: plain @login DISPLAY text — never a real <@id> mention, so it
+    // never pings. Use for the "who did it" actor/creator in message heads;
+    // real slackMention() is reserved for people we actually want to notify.
+    function slackPlain(login) {
+        return login && login !== 'local-only' ? `@${slackEsc(login)}` : '@?';
+    }
+    // v1.10: convert inline @login tokens in free text to real Slack pings
+    // for any mapped user (so typing "@ChristopherD-AIM" in a comment pings
+    // them). Run AFTER slackEsc — the <@id> we insert must not be escaped.
+    function slackifyMentions(text) {
+        if (!slackConfig || !slackConfig.users) return text;
+        return (text || '').replace(/@([A-Za-z0-9._-]+)/g, (m, name) => {
+            const id = slackConfig.users[name];
+            return id ? `<@${id}>` : m;
+        });
+    }
+    // All mapped approvers as a mention string (for review pings). v1.13:
+    // excludes `exceptLogin` so we never ping the person who just acted —
+    // an approver proposing their own find pings the OTHER approvers, not
+    // themselves.
+    function slackMentionApprovers(exceptLogin) {
+        const mentions = (approversList || [])
+            .filter(l => l && l !== exceptLogin)
+            .map(slackMention).filter(Boolean);
+        return mentions.length ? mentions.join(' ') : '';
+    }
+    // POST a message (optionally threaded). Resolves to the message ts on
+    // success, null on any failure. IFRAME-only (mirrors the sync owner) so
+    // a single action fires exactly one post. Never throws.
+    async function slackPost(text, threadTs) {
+        if (IS_TOP) return null;     // IFRAME owns the current-site flow
+        return slackPostRaw(text, threadTs);
+    }
+    // v1.22: frame-agnostic post core. slackPost keeps the IS_TOP guard for
+    // the current-site flow; the global stale sweep (TOP frame) calls this
+    // directly because TOP is exactly where the cross-site sweep must run.
+    async function slackPostRaw(text, threadTs) {
+        if (!slackEnabled()) return null;
+        try {
+            const body = { channel: slackConfig.channelId, text };
+            if (threadTs) body.thread_ts = threadTs;
+            const resp = await ghRequest({
+                method: 'POST',
+                url: SLACK_POST_URL,
+                headers: {
+                    'Authorization': `Bearer ${slackConfig.botToken}`,
+                    'Content-Type': 'application/json; charset=utf-8',
+                },
+                data: JSON.stringify(body),
+                timeout: 15000,
+            });
+            let parsed = null;
+            try { parsed = JSON.parse(resp.responseText); } catch (e) {}
+            if (resp.status === 200 && parsed && parsed.ok) {
+                return parsed.ts || null;
+            }
+            console.warn(`${TAG} Slack post failed: HTTP ${resp.status} ${parsed ? parsed.error : (resp.responseText || '').slice(0, 200)}`);
+            return null;
+        } catch (e) {
+            console.warn(`${TAG} slackPost threw:`, e);
+            return null;
+        }
+    }
+
+    // Should this issue ever generate Slack traffic?
+    //  • local-only issues never sync → never post.
+    //  • validator findings (ephemeral, self-diagnose-and-fix) default OFF —
+    //    they post only when the user opts a specific one in via the
+    //    "🔔 Notify Slack" toggle (v1.19). Field absent/false = off.
+    //  • normal issues are unchanged — auto-ping.
+    function slackPostable(issue) {
+        if (!slackEnabled() || !issue || issue.createdBy === 'local-only') return false;
+        if (issue.source === 'validator') return !!issue.slackNotifyOptIn;   // default OFF
+        return true;
+    }
+
+    // v1.05: linked site label — clickable in Slack, jumps straight to the
+    // site's Site Setup. <url|text> is Slack's link syntax; text can't hold
+    // | or <>, which site names never do. v1.06: when issueId is given, the
+    // URL carries ?aim_issue=<id> (before the hash, so SPA routing keeps it)
+    // and AIM Issues focuses that issue on load — see maybeFocusIssueFromUrl.
+    // v1.22: sidOverride/nameOverride let the global stale sweep (TOP frame,
+    // no open site) build a label for ANY site, not just the current one.
+    function siteLabelForSlack(issueId, sidOverride, nameOverride) {
+        const sid = sidOverride || siteID;
+        const name = (sidOverride ? nameOverride : siteName);
+        const label = name ? slackEsc(name) : `site ${sid}`;
+        const q = issueId ? `?aim_issue=${encodeURIComponent(issueId)}` : '';
+        return `<https://percepto.app/${q}#/site/${sid}/control-panel/site-setup|${label}>`;
+    }
+
+    // v1.08: status badge for the parent message — icon + label + whether to
+    // strike the note (terminal states). The parent is a LIVE status board:
+    // it's chat.update'd on every transition so the channel shows current
+    // state at a glance. The immutable history lives in the thread replies.
+    function slackStatusBadge(status) {
+        switch (status) {
+            case 'pending_fix':      return { icon: '🟡', text: 'PENDING FIX',      strike: false };
+            case 'pending_ignore':   return { icon: '🟣', text: 'PENDING IGNORE',   strike: false };
+            case 'ready-for-review': return { icon: '🟡', text: 'READY FOR REVIEW', strike: false };
+            case 'resolved':         return { icon: '✅', text: 'RESOLVED',          strike: true  };
+            case 'ignored':          return { icon: '⊘', text: 'IGNORED',           strike: true  };
+            case 'deleted':          return { icon: '🗑', text: 'DELETED',           strike: true  };
+            default:                 return { icon: '🚩', text: 'OPEN',              strike: false };
+        }
+    }
+    // Canonical parent-message text, driven by the issue's current status
+    // (or an explicit override, e.g. 'deleted' which isn't stored on .status).
+    // Rebuilt identically on creation + every chat.update so the parent always
+    // reflects live status without losing formatting.
+    function slackParentText(issue, statusOverride, sidOverride, nameOverride) {
+        const status = statusOverride || issue.status || 'open';
+        const b = slackStatusBadge(status);
+        const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
+        // v1.17: PLAIN @text for the filer (no real <@id> mention) — a real
+        // mention here pinged the creator and made them follow the thread,
+        // so they got notified of every later reply. Real pings are reserved
+        // for the cc list + transition/comment recipients.
+        const creator = slackPlain(issue.createdBy);
+        const link = siteLabelForSlack(issue.id, sidOverride, nameOverride);
+        let note = slackEsc(issue.note || '(no description)');
+        if (b.strike) note = `~${note}~`;
+        // v1.12: assignee shown as PLAIN @text (not a real <@id> mention) so
+        // re-rendering the parent on every transition never re-pings them —
+        // the actual ping happens in the assignment thread reply.
+        const assignedSuffix = issue.assignee ? ` · 👤 @${slackEsc(issue.assignee)}` : '';
+        const lines = [
+            `${b.icon} *${b.text}* — issue on ${link}${pri}`,
+            `>${note}`,
+            `_${slackEsc(issue.shape || 'shape')} · filed by ${creator}${assignedSuffix}_`,
+        ];
+        const mentions = (issue.slackNotify || []).map(slackMention).filter(Boolean).join(' ');
+        if (mentions) lines.push(`cc ${mentions}`);
+        return lines.join('\n');
+    }
+
+    // Edit an existing message in place (chat.update). Works with chat:write —
+    // no extra scope. IFRAME-only, never throws.
+    async function slackUpdate(ts, text) {
+        if (IS_TOP) return false;     // IFRAME owns the current-site flow
+        return slackUpdateRaw(ts, text);
+    }
+    // v1.22: frame-agnostic chat.update core, mirrors slackPostRaw. The global
+    // stale sweep (TOP frame) uses it to refresh parent boards on other sites.
+    async function slackUpdateRaw(ts, text) {
+        if (!slackEnabled() || !ts) return false;
+        try {
+            const resp = await ghRequest({
+                method: 'POST',
+                url: SLACK_UPDATE_URL,
+                headers: {
+                    'Authorization': `Bearer ${slackConfig.botToken}`,
+                    'Content-Type': 'application/json; charset=utf-8',
+                },
+                data: JSON.stringify({ channel: slackConfig.channelId, ts, text }),
+                timeout: 15000,
+            });
+            let p = null; try { p = JSON.parse(resp.responseText); } catch (e) {}
+            if (resp.status === 200 && p && p.ok) return true;
+            console.warn(`${TAG} chat.update failed: HTTP ${resp.status} ${p ? p.error : ''}`);
+            return false;
+        } catch (e) {
+            console.warn(`${TAG} slackUpdate threw:`, e);
+            return false;
+        }
+    }
+
+    // New issue → parent message. Stores the returned ts on the issue so
+    // every browser can thread replies under it, then re-commits to sync
+    // the ts. `notifyLogins` = GitHub logins the creator chose to @-mention.
+    // v1.13: no self-ping — we drop the creator from the cc list (they filed
+    // it, they don't need a notification for their own issue), so the picker
+    // only ever pings OTHER people. No more default-tag-the-creator (that was
+    // always a self-ping).
+    async function postSlackNewIssue(issue, notifyLogins) {
+        if (!slackPostable(issue)) return;
+        try {
+            const mentionLogins = (notifyLogins || []).filter(l => l && l !== issue.createdBy);
+            // Stamp the notify list on the live issue first so the parent text
+            // (and any later chat.update) reproduces the same cc line.
+            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            live.slackNotify = mentionLogins;
+            const ts = await slackPost(slackParentText(live, null), null);
+            if (ts) {
+                live.slackThreadTs = ts;
+                saveIssuesToStorage(siteID, currentSiteIssues);
+                commitIssuesToGitHub(`attach slack thread to ${issue.id.slice(0, 14)}`);
+                // v1.08: thread = immutable history. Post sequentially so
+                // order is guaranteed: (1) original report, (2) affected
+                // entities, then transitions append after.
+                await postSlackOriginalRequest(live, ts);
+                await postSlackAffectedEntities(live, ts);
+            }
+        } catch (e) {
+            console.warn(`${TAG} postSlackNewIssue threw:`, e);
+        }
+    }
+
+    // v1.18: adopt-on-first-touch. An issue created before Slack existed has
+    // no parent message. The first time someone acts on it (transition /
+    // comment / assignment), backfill a parent status board + the two seed
+    // replies and stamp the thread ts, so from then on it behaves like a
+    // native issue. Returns the thread ts (or null). No-op if it already has
+    // a thread, isn't postable, or the parent post fails. NOT used on delete
+    // (no point creating a thread just to strike it).
+    async function ensureSlackThread(issue) {
+        if (issue.slackThreadTs) return issue.slackThreadTs;
+        if (!slackPostable(issue)) return null;
+        try {
+            const ts = await slackPost(slackParentText(issue, null), null);
+            if (!ts) return null;
+            const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+            live.slackThreadTs = ts;
+            if (issue !== live) issue.slackThreadTs = ts;   // caller's ref too
+            saveIssuesToStorage(siteID, currentSiteIssues);   // strips validator
+            // v1.19: validator findings are ephemeral — the ts lives in memory
+            // only (session-scoped). Don't churn a GitHub commit for them.
+            if (live.source !== 'validator') {
+                commitIssuesToGitHub(`adopt slack thread for ${issue.id.slice(0, 14)}`);
+            }
+            await postSlackOriginalRequest(live, ts);
+            await postSlackAffectedEntities(live, ts);
+            console.log(`${TAG} adopted pre-Slack issue ${issue.id} → thread ${ts}`);
+            return ts;
+        } catch (e) {
+            console.warn(`${TAG} ensureSlackThread threw:`, e);
+            return null;
+        }
+    }
+
+    // v1.08: original report → first thread reply, preserved verbatim so
+    // editing the parent (live status board) never loses what was filed.
+    async function postSlackOriginalRequest(issue, threadTs) {
+        if (!slackEnabled() || !threadTs) return;
+        try {
+            const creator = slackPlain(issue.createdBy);
+            const pri = issue.priority ? ` \`[${priorityMeta(issue.priority).text}]\`` : '';
+            await slackPost(`📝 *Reported* by ${creator}${pri}\n>${slackEsc(issue.note || '(no description)')}`, threadTs);
+        } catch (e) {
+            console.warn(`${TAG} postSlackOriginalRequest threw:`, e);
+        }
+    }
+
+    // Affected entities → first threaded reply under a new issue. Reuses the
+    // same overlap detection the panel uses.
+    async function postSlackAffectedEntities(issue, threadTs) {
+        if (!slackEnabled() || !threadTs) return;
+        try {
+            const affected = affectedEntitiesFor(issue);
+            if (!affected || !affected.length) return;
+            const CAP = 40;
+            const lines = affected.slice(0, CAP).map(a =>
+                `• *${slackEsc(a.typeLabel || a.typeShort || '?')}*: ${slackEsc(a.name)}${a.subtype ? ' (' + slackEsc(a.subtype) + ')' : ''}`);
+            const more = affected.length > CAP ? `\n_…and ${affected.length - CAP} more_` : '';
+            await slackPost(`📍 *Affected entities (${affected.length}):*\n${lines.join('\n')}${more}`, threadTs);
+        } catch (e) {
+            console.warn(`${TAG} postSlackAffectedEntities threw:`, e);
+        }
+    }
+
+    // Delete → threaded reply, so the thread shows created → … → deleted,
+    // and strike/badge the original parent message (v1.06).
+    async function postSlackDelete(issue, by) {
+        if (!slackPostable(issue) || !issue.slackThreadTs) return;
+        try {
+            const actor = slackPlain(by);
+            await slackPost(`🗑 ${actor} *deleted* this issue`, issue.slackThreadTs);
+            await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'deleted'));
+        } catch (e) {
+            console.warn(`${TAG} postSlackDelete threw:`, e);
+        }
+    }
+
+    // Status transition → threaded reply. Role-aware mention:
+    //  • CSM proposes (→ pending_*)         → ping approvers to review
+    //  • approver approves/rejects pending  → cc the original proposer
+    //  • direct resolve / reopen / un-ignore → no mention
+    async function postSlackTransition(issue, fromStatus, transition, note, by) {
+        if (!slackPostable(issue)) return;
+        try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
+            const actor = slackPlain(by);
+            const toLabel = (STATUS_LABEL[transition.to] || { text: transition.to.toUpperCase() }).text;
+            // v1.13/v1.14: never ping the actor for their own action.
+            //  • propose → ping the OTHER approvers (review needed)
+            //  • approve/reject → ping the ASSIGNED CSM (falls back to the
+            //    proposer if nobody's assigned) so they know the outcome
+            const reviewTarget = issue.assignee || proposerOf(issue);
+            const reviewMention = (reviewTarget && reviewTarget !== by) ? slackMention(reviewTarget) : '';
+            let head, mention = '';
+            if (transition.to === 'pending_fix') {
+                head = `🟡 ${actor} proposed *FIX* — needs review`;
+                mention = slackMentionApprovers(by);
+            } else if (transition.to === 'pending_ignore') {
+                head = `🟣 ${actor} proposed *IGNORE* — needs review`;
+                mention = slackMentionApprovers(by);
+            } else if (transition.approvalCheck && transition.to === 'open') {
+                head = `❌ ${actor} *rejected* → back to OPEN`;
+                mention = reviewMention;
+            } else if (transition.approvalCheck) {
+                head = `✅ ${actor} *approved* → ${toLabel}`;
+                mention = reviewMention;
+            } else if (transition.to === 'open') {
+                head = `↺ ${actor} re-opened → OPEN`;
+            } else {
+                head = `✅ ${actor} → ${toLabel}`;
+            }
+            const lines = [head];
+            if (note) lines.push(`>${slackEsc(note)}`);
+            if (mention) lines.push(`cc ${mention}`);
+            const text = issue.slackThreadTs ? lines.join('\n')
+                       : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+            // v1.08: parent is a live status board — reflect EVERY transition
+            // (pending/resolved/ignored/reopen). issue.status is already the
+            // new status here (applyTransition set it before calling us).
+            if (issue.slackThreadTs) {
+                await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+            }
+        } catch (e) {
+            console.warn(`${TAG} postSlackTransition threw:`, e);
+        }
+    }
+
+    // v1.12: assignment → threaded reply + pings the new assignee. Parent
+    // status board also re-rendered (shows assignee).
+    async function postSlackAssignment(issue, from, to, by) {
+        if (!slackPostable(issue)) return;
+        try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
+            const actor = slackPlain(by);
+            let head;
+            if (!to) {
+                head = `👤 ${actor} *unassigned* this issue`;
+            } else if (to === by) {
+                head = `👤 ${actor} *self-assigned* this issue`;
+            } else {
+                head = `👤 ${actor} *assigned* this to ${slackMention(to) || ('@' + slackEsc(to))}`;
+            }
+            const text = issue.slackThreadTs ? head
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+            if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+        } catch (e) {
+            console.warn(`${TAG} postSlackAssignment threw:`, e);
+        }
+    }
+
+    // Most recent person who moved this issue INTO a pending_* state — the
+    // one whose proposal an approver is now approving/rejecting.
+    function proposerOf(issue) {
+        const h = issue.history || [];
+        for (let i = h.length - 1; i >= 0; i--) {
+            if (h[i].toStatus === 'pending_fix' || h[i].toStatus === 'pending_ignore') return h[i].by;
+        }
+        return null;
+    }
+
+    // Comment → threaded reply. v1.10: inline @login in the text auto-pings
+    // mapped users, and `notifyLogins` (from the chip picker) are cc'd.
+    async function postSlackComment(issue, note, by, notifyLogins) {
+        if (!slackPostable(issue)) return;
+        try {
+            await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
+            const actor = slackPlain(by);
+            const body = slackifyMentions(slackEsc(note));
+            // v1.13: don't ping yourself in your own comment.
+            const cc = (notifyLogins || []).filter(l => l && l !== by).map(slackMention).filter(Boolean).join(' ');
+            let head = `💬 ${actor}: ${body}`;
+            if (cc) head += `\ncc ${cc}`;
+            const text = issue.slackThreadTs ? head
+                       : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
+            await slackPost(text, issue.slackThreadTs || null);
+        } catch (e) {
+            console.warn(`${TAG} postSlackComment threw:`, e);
         }
     }
 
@@ -709,6 +1182,258 @@
         return out;
     }
 
+    // ---- v1.20: stale-issue auto-bump (client-side) -------------------
+    // Pings assignee + approvers when an issue sits in open/pending for >7
+    // days, re-bumping weekly. Runs in the IFRAME (sync owner) after each
+    // refetch + hourly. Dedups across browsers via the synced kind:'bump'
+    // history entry, and adopts pre-Slack issues first. Uses the PAT the
+    // browser already has — no cloud/GitHub-App auth needed.
+    const STALE_BUMP_STATUSES = new Set(['open', 'pending_fix', 'pending_ignore', 'ready-for-review']);
+    const STALE_BUMP_MS = 7 * 24 * 60 * 60 * 1000;
+    let staleBumpRunning = false;
+    function issueStaleSince(issue) {
+        const h = issue.history || [];
+        for (let i = h.length - 1; i >= 0; i--) if (h[i].toStatus === issue.status) return new Date(h[i].at).getTime();
+        return new Date(issue.createdAt).getTime();
+    }
+    function issueLastBumpAt(issue) {
+        const h = issue.history || [];
+        for (let i = h.length - 1; i >= 0; i--) if (h[i].kind === 'bump') return new Date(h[i].at).getTime();
+        return 0;
+    }
+    async function runStaleBumpCheck() {
+        if (IS_TOP || staleBumpRunning) return;
+        if (!slackEnabled() || !cachedToken || !siteID) return;
+        staleBumpRunning = true;
+        try {
+            const now = Date.now();
+            let bumped = 0;
+            for (const issue of currentSiteIssues) {
+                if (!issue || issue.deleted || issue.source === 'validator' || issue.createdBy === 'local-only') continue;
+                if (!STALE_BUMP_STATUSES.has(issue.status)) continue;
+                const since = issueStaleSince(issue);
+                if (now - since <= STALE_BUMP_MS) continue;                 // not stale yet
+                if (now - issueLastBumpAt(issue) < STALE_BUMP_MS) continue; // bumped within 7d
+                const days = Math.floor((now - since) / 86400000);
+                const label = (STATUS_LABEL[issue.status] || { text: issue.status.toUpperCase() }).text;
+                await ensureSlackThread(issue);   // adopt pre-Slack issues into a thread first
+                const seen = new Set();
+                const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
+                    .map(t => { if (seen.has(t)) return ''; seen.add(t); return slackMention(t); })
+                    .filter(Boolean).join(' ');
+                const head = `⏰ *Stale ${days}d* — still *${label}* since ${new Date(since).toISOString().slice(0, 10)}`;
+                const text = issue.slackThreadTs
+                    ? `${head}${mentions ? '\ncc ' + mentions : ''}`
+                    : `${head} · ${siteLabelForSlack(issue.id)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
+                const ts = await slackPost(text, issue.slackThreadTs || null);
+                if (!ts) continue;   // post failed — don't record a bump (retry next run)
+                if (!Array.isArray(issue.history)) issue.history = [];
+                issue.history.push({ at: new Date().toISOString(), by: 'auto-bump', fromStatus: issue.status, toStatus: issue.status, kind: 'bump', note: `Auto-bump: ${days}d in ${label}` });
+                bumped++;
+            }
+            if (bumped) {
+                saveIssuesToStorage(siteID, currentSiteIssues);
+                commitIssuesToGitHub('stale-issue auto-bump');
+                renderButtonState();
+                if (panelEl) renderIssuesPanel();
+                console.log(`${TAG} stale-bump: ${bumped} issue(s) bumped`);
+            }
+        } catch (e) {
+            console.warn(`${TAG} runStaleBumpCheck threw:`, e);
+        } finally {
+            staleBumpRunning = false;
+        }
+    }
+
+    // ---- v1.22: GLOBAL stale sweep (TOP frame, no open site required) ----
+    // runStaleBumpCheck above only sees currentSiteIssues — the ONE site you
+    // have open — so stale issues on every OTHER site never get bumped until
+    // someone navigates into them. This sweep runs in the TOP frame (which
+    // exists everywhere, including the landing page with no map iframe),
+    // enumerates EVERY site's issue file on GitHub, and bumps stale issues
+    // site-by-site. It needs no map/iframe and no open site.
+    //
+    // Scope: APPROVERS only. The per-site IFRAME check stays ungated (any CSM
+    // opening a site still bumps it), but the cross-site sweep is an oversight
+    // function — gating to approvers keeps every CSM's browser from listing +
+    // fetching every site file hourly and racing on the same bumps.
+    //
+    // Dedup is the same kind:'bump' 7-day window as the per-site path: each
+    // site's issues are fetched FRESH from GitHub right before bumping, so a
+    // bump another browser already wrote this week is seen and skipped. The
+    // currently-open site (if any) is skipped here and left to the IFRAME.
+    let globalSweepRunning = false;
+    // v1.24: issue ids whose parent board we've already name-reconciled this
+    // browser session — keeps the silent chat.update from re-firing every
+    // hourly sweep. Resets on reload (a fresh session re-checks once, harmless).
+    const sweptBoards = new Set();
+    // v1.22: site ID → friendly name map. The sweep runs in the TOP frame
+    // without opening any site, so readSiteName() (DOM .site-select) only
+    // knows the current site. Pull every site's name from Percepto's own
+    // same-origin /sites/ endpoint (cookie auth, no PAT) so adopted parent
+    // boards + bump fallback text show the NAME, not "site <id>". Cached for
+    // the run; rebuilt each sweep (cheap, one request).
+    let siteNamesCache = null;
+    async function fetchSiteNames() {
+        try {
+            const resp = await fetch('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) { console.warn(`${TAG} /sites/ HTTP ${resp.status} — sweep will fall back to site IDs`); return new Map(); }
+            const ct = resp.headers.get('content-type') || '';
+            const map = new Map();
+            if (/json/i.test(ct)) {
+                let data = null; try { data = await resp.json(); } catch (e) {}
+                let list = Array.isArray(data) ? data : null;
+                if (!list && data && typeof data === 'object') {
+                    for (const k of ['results', 'objects', 'data', 'sites', 'items']) {
+                        if (Array.isArray(data[k])) { list = data[k]; break; }
+                    }
+                }
+                (list || []).forEach(s => {
+                    const id = String(s.id != null ? s.id : (s.site_id != null ? s.site_id : (s.pk != null ? s.pk : '')));
+                    const name = String(s.name || s.site_name || s.title || '').trim();
+                    if (id && name) map.set(id, name);
+                });
+            }
+            return map;
+        } catch (e) {
+            console.warn(`${TAG} fetchSiteNames threw — sweep falls back to site IDs:`, e);
+            return new Map();
+        }
+    }
+    async function listIssueSites() {
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/issues?ref=${ISSUES_BRANCH}`;
+        const resp = await ghRequest({
+            method: 'GET',
+            url,
+            headers: { 'Authorization': `Bearer ${cachedToken}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 20000,
+        });
+        if (resp.status === 404) return [];           // no issues/ dir yet
+        if (resp.status !== 200) throw new Error(`list issues/ HTTP ${resp.status}`);
+        const arr = JSON.parse(resp.responseText);
+        if (!Array.isArray(arr)) return [];
+        const sids = [];
+        for (const f of arr) {
+            const m = f && f.name && f.name.match(/^(\d+)-issues\.json$/);
+            if (m) sids.push(m[1]);
+        }
+        return sids;
+    }
+    // PUT a site's full issue list back. On 409/422 (someone committed since
+    // our GET) refetch + union-merge + retry once. Returns true on success.
+    async function putIssuesForSite(sid, issues, sha, reason) {
+        const path = ISSUES_PATH(sid);
+        const url = `${GITHUB_API_BASE}/repos/${ISSUES_REPO}/contents/${encodeURIComponent(path)}`;
+        const payload = { version: 1, siteID: sid, issues };
+        const body = {
+            message: `[AIM site ${sid}] issues: ${reason}`,
+            content: textToB64(JSON.stringify(payload, null, 2)),
+            branch: ISSUES_BRANCH,
+        };
+        if (sha) body.sha = sha;
+        const resp = await ghRequest({
+            method: 'PUT',
+            url,
+            headers: {
+                'Authorization': `Bearer ${cachedToken}`,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+            },
+            data: JSON.stringify(body),
+            timeout: 25000,
+        });
+        if (resp.status === 200 || resp.status === 201) return true;
+        if (resp.status === 409 || resp.status === 422) {
+            console.warn(`${TAG} sweep PUT conflict on site ${sid} (HTTP ${resp.status}) — refetch + merge + retry`);
+            const remote = await fetchRemoteIssues(sid);
+            if (!remote) return false;
+            const merged = mergeIssueLists(issues, remote.issues);
+            return putIssuesForSite(sid, merged, remote.sha, reason);
+        }
+        console.warn(`${TAG} sweep PUT site ${sid} HTTP ${resp.status}: ${(resp.responseText || '').slice(0, 300)}`);
+        return false;
+    }
+    // Bump stale issues for ONE site off its freshly-fetched remote list.
+    // `name` = friendly site name (from /sites/), '' falls back to "site <id>".
+    async function sweepSite(sid, name) {
+        const remote = await fetchRemoteIssues(sid);
+        if (!remote || !remote.issues.length) return 0;
+        const now = Date.now();
+        let bumped = 0;
+        for (const issue of remote.issues) {
+            if (!issue || issue.deleted || issue.source === 'validator' || issue.createdBy === 'local-only') continue;
+            if (!STALE_BUMP_STATUSES.has(issue.status)) continue;
+            // (A) Reconcile the parent board's site name — runs BEFORE the bump
+            // gate so it isn't blocked for 7 days after an issue was just
+            // bumped. v1.22 adopted boards showing "site <id>"; this rewrites
+            // them to the friendly name + current status. chat.update is silent
+            // (no notification) and idempotent — for an already-correct board it
+            // re-sends identical text, invisibly. Gated once per browser session
+            // (sweptBoards) so we don't re-issue the update every hourly sweep.
+            if (issue.slackThreadTs && name && slackPostable(issue) && !sweptBoards.has(issue.id)) {
+                sweptBoards.add(issue.id);
+                slackUpdateRaw(issue.slackThreadTs, slackParentText(issue, null, sid, name));
+            }
+            // (B) Stale bump.
+            const since = issueStaleSince(issue);
+            if (now - since <= STALE_BUMP_MS) continue;                 // not stale yet
+            if (now - issueLastBumpAt(issue) < STALE_BUMP_MS) continue; // bumped within 7d
+            const days = Math.floor((now - since) / 86400000);
+            const label = (STATUS_LABEL[issue.status] || { text: issue.status.toUpperCase() }).text;
+            // Adopt pre-Slack issues into a thread (parent status board) first,
+            // so the bump threads under it. slackPostable filters local-only /
+            // opted-out validator findings (validator never reaches here anyway).
+            if (!issue.slackThreadTs && slackPostable(issue)) {
+                const ts = await slackPostRaw(slackParentText(issue, null, sid, name), null);
+                if (ts) { issue.slackThreadTs = ts; sweptBoards.add(issue.id); }
+            }
+            const seen = new Set();
+            const mentions = [issue.assignee, ...(approversList || [])].filter(Boolean)
+                .map(t => { if (seen.has(t)) return ''; seen.add(t); return slackMention(t); })
+                .filter(Boolean).join(' ');
+            const head = `⏰ *Stale ${days}d* — still *${label}* since ${new Date(since).toISOString().slice(0, 10)}`;
+            const text = issue.slackThreadTs
+                ? `${head}${mentions ? '\ncc ' + mentions : ''}`
+                : `${head} · ${siteLabelForSlack(issue.id, sid, name)}\n>${(issue.note || '').slice(0, 120)}${mentions ? '\ncc ' + mentions : ''}`;
+            const ts = await slackPostRaw(text, issue.slackThreadTs || null);
+            if (!ts) continue;   // post failed — don't record a bump (retry next run)
+            if (!Array.isArray(issue.history)) issue.history = [];
+            issue.history.push({ at: new Date().toISOString(), by: 'auto-bump', fromStatus: issue.status, toStatus: issue.status, kind: 'bump', note: `Auto-bump: ${days}d in ${label}` });
+            bumped++;
+        }
+        if (bumped) {
+            const ok = await putIssuesForSite(sid, remote.issues, remote.sha, 'stale-issue auto-bump (global sweep)');
+            if (!ok) console.warn(`${TAG} sweep: site ${sid} bumped ${bumped} but PUT failed — will retry next sweep`);
+        }
+        return bumped;
+    }
+    async function runGlobalStaleSweep() {
+        if (!IS_TOP || globalSweepRunning) return;       // TOP owns the cross-site sweep
+        if (!slackEnabled() || !cachedToken) return;     // nothing to post / no auth
+        if (!isApprover()) return;                       // oversight function — approvers only
+        globalSweepRunning = true;
+        try {
+            const sids = await listIssueSites();
+            if (!sids.length) return;
+            siteNamesCache = await fetchSiteNames();   // one /sites/ request for the whole sweep
+            let totalBumped = 0, sitesBumped = 0;
+            for (const sid of sids) {
+                if (sid === siteID) continue;            // current site → IFRAME handles it
+                try {
+                    const n = await sweepSite(sid, siteNamesCache.get(sid) || '');
+                    if (n) { totalBumped += n; sitesBumped++; }
+                } catch (e) {
+                    console.warn(`${TAG} global sweep: site ${sid} threw:`, e);
+                }
+            }
+            console.log(`${TAG} global stale sweep: scanned ${sids.length} site(s), bumped ${totalBumped} issue(s) across ${sitesBumped} site(s)`);
+        } catch (e) {
+            console.warn(`${TAG} runGlobalStaleSweep threw:`, e);
+        } finally {
+            globalSweepRunning = false;
+        }
+    }
+
     async function refetchIssues() {
         // Sync only runs in the IFRAME — TOP also gets TOKEN_VALUE +
         // hashchange but would fire duplicate API calls otherwise.
@@ -723,7 +1448,7 @@
                 // No file on GitHub yet. Push local issues to create it —
                 // but only authored ones (v0.7: local-only never syncs).
                 delete shaBySite[sid];
-                const authoredCount = currentSiteIssues.filter(i => i.createdBy !== 'local-only').length;
+                const authoredCount = currentSiteIssues.filter(i => i.createdBy !== 'local-only' && i.source !== 'validator').length;
                 if (authoredCount > 0) {
                     console.log(`${TAG} no remote file for site ${sid} but ${authoredCount} authored issue${authoredCount === 1 ? '' : 's'} local — pushing to create file`);
                     await commitIssuesToGitHub('initial push to migrate local issues');
@@ -773,6 +1498,9 @@
                 setSyncStatus('ok');
                 console.log(`${TAG} synced from GitHub: ${remote.issues.length} issue${remote.issues.length === 1 ? '' : 's'} on site ${sid}`);
             }
+            // v1.20: after we have authoritative synced data, check for stale
+            // issues to bump (fire-and-forget).
+            runStaleBumpCheck();
         } catch (e) {
             setSyncStatus('error');
             console.warn(`${TAG} refetchIssues failed:`, e);
@@ -802,7 +1530,7 @@
             // either drop them entirely on next refresh (loadIssuesFromStorage
             // purge) or wait for the user to delete via UI. Either way,
             // commits to GitHub exclude them.
-            const issuesToSync = currentSiteIssues.filter(i => i.createdBy !== 'local-only');
+            const issuesToSync = currentSiteIssues.filter(i => i.createdBy !== 'local-only' && i.source !== 'validator');
             const payload = { version: 1, siteID: sid, issues: issuesToSync };
             const b64 = textToB64(JSON.stringify(payload, null, 2));
             const sha = shaBySite[sid];
@@ -1565,6 +2293,23 @@
                 ${m.text}
             </button>`;
         }).join('');
+        // v1.03: optional "Notify" multi-select — @-mention chosen teammates
+        // in the Slack post on creation. v1.05: includes yourself (tag an
+        // issue for your own follow-up). Empty selection defaults to the
+        // creator in postSlackNewIssue.
+        const notifyLogins = slackEnabled()
+            ? Object.keys(slackConfig.users || {}).sort()
+            : [];
+        const notifyRowHtml = notifyLogins.length ? `
+            <div style="font-size:12px;color:#aaa;margin-top:10px;margin-bottom:6px">
+                Notify on Slack (optional)
+            </div>
+            <div id="aim-issues-notify-row" style="display:flex;gap:6px;flex-wrap:wrap">
+                ${notifyLogins.map(l => `<button type="button" class="aim-issues-notify-chip" data-login="${escHtml(l)}"
+                    style="padding:5px 12px;background:transparent;color:#5fb3ff;border:1.5px solid #5fb3ff;border-radius:14px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                    @${escHtml(l)}
+                </button>`).join('')}
+            </div>` : '';
         card.innerHTML = `
             <div style="font-size:15px;font-weight:600;color:#ff8585;margin-bottom:10px">
                 New issue · ${shape} · ${latlngsObjs.length} vertex${latlngsObjs.length === 1 ? '' : 'es'}
@@ -1584,6 +2329,7 @@
             <div id="aim-issues-pri-row" style="display:flex;gap:6px;flex-wrap:wrap">
                 ${priorityChipsHtml}
             </div>
+            ${notifyRowHtml}
             <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
                 <button id="aim-issues-note-cancel"
                     style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
@@ -1598,6 +2344,13 @@
         overlay.appendChild(card);
         document.body.appendChild(overlay);
         noteModalEl = overlay;
+        // v1.09: stop map/Leaflet from processing pointer/mouse/wheel events
+        // that bubble out of the modal — the status modal already does this;
+        // the note modal didn't, which let every click leak to Percepto's
+        // global handlers and stalled chip feedback by seconds.
+        ['mousedown', 'pointerdown', 'pointerup', 'mouseup', 'wheel', 'click', 'dblclick', 'contextmenu', 'touchstart'].forEach(evt => {
+            card.addEventListener(evt, (e) => e.stopPropagation(), false);
+        });
         const input = card.querySelector('#aim-issues-note-input');
         const err = card.querySelector('#aim-issues-note-err');
         const cancel = card.querySelector('#aim-issues-note-cancel');
@@ -1620,12 +2373,47 @@
                 }
             });
         };
+        // v1.09: pointerdown (with click fallback + debounce) so priority
+        // selection feels instant, matching the notify chips.
+        let lastPriFire = 0;
+        const selectPri = (c) => {
+            const now = Date.now();
+            if (now - lastPriFire < 250) return;   // ignore the paired event
+            lastPriFire = now;
+            selectedPriority = c.dataset.priority || null;
+            paintChips();
+        };
         chips.forEach(c => {
-            c.onclick = () => {
-                const p = c.dataset.priority || null;
-                selectedPriority = p || null;
-                paintChips();
-            };
+            const h = (e) => { e.preventDefault(); e.stopPropagation(); selectPri(c); };
+            c.addEventListener('pointerdown', h, true);
+            c.addEventListener('click', h, true);
+        });
+        // v1.03: notify chips — independent multi-select toggle. Filled = on.
+        // v1.06: Leaflet intermittently swallows `click` on elements inside
+        // the map iframe, so the first 1-2 taps did nothing. Listen on BOTH
+        // pointerdown AND click with a per-chip debounce so whichever event
+        // survives toggles exactly once (the paired event is ignored).
+        const notifySelected = new Set();
+        const lastChipFire = new Map();
+        const toggleNotifyChip = (c) => {
+            const login = c.dataset.login;
+            const now = Date.now();
+            if (now - (lastChipFire.get(login) || 0) < 300) return;  // ignore paired event
+            lastChipFire.set(login, now);
+            if (notifySelected.has(login)) {
+                notifySelected.delete(login);
+                c.style.background = 'transparent';
+                c.style.color = '#5fb3ff';
+            } else {
+                notifySelected.add(login);
+                c.style.background = '#5fb3ff';
+                c.style.color = '#0a1a2a';
+            }
+        };
+        card.querySelectorAll('.aim-issues-notify-chip').forEach(c => {
+            const handler = (e) => { e.preventDefault(); e.stopPropagation(); toggleNotifyChip(c); };
+            c.addEventListener('pointerdown', handler, true);
+            c.addEventListener('click', handler, true);
         });
         cancel.onclick = () => { closeNoteModal(); showToast('Issue discarded.', 1800); };
         save.onclick = () => {
@@ -1646,7 +2434,7 @@
             save.style.cursor = 'not-allowed';
             closeNoteModal();
             try {
-                createIssue({ shape, latlngsObjs, note, priority: selectedPriority });
+                createIssue({ shape, latlngsObjs, note, priority: selectedPriority, notify: Array.from(notifySelected) });
             } catch (e) {
                 console.error(`${TAG} createIssue threw:`, e);
                 showToast('Issue created — render failed, refresh to recover. See console.', 5000);
@@ -1665,7 +2453,7 @@
         noteModalEl = null;
     }
 
-    function createIssue({ shape, latlngsObjs, note, priority }) {
+    function createIssue({ shape, latlngsObjs, note, priority, notify }) {
         if (!siteID) { showToast('No site loaded — issue discarded.', 4000); return; }
         const nowIso = new Date().toISOString();
         const id = `iss_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1698,6 +2486,8 @@
         if (cachedToken) {
             showToast(`Issue created — pushing to GitHub…`, 2500);
             commitIssuesToGitHub(`add issue by @${by}`);
+            // v1.03: announce in Slack + capture thread ts (fire-and-forget).
+            postSlackNewIssue(issue, notify);
         } else {
             showToast(`Issue created locally (no GitHub token, ${localCount} on this site).`, 3500);
         }
@@ -1767,6 +2557,8 @@
         if (cachedToken) {
             showToast('Issue deleted — pushing to GitHub…', 2500);
             commitIssuesToGitHub(`tombstone issue by @${by}`);
+            // v1.05: log the deletion in the issue's Slack thread.
+            postSlackDelete(issue, by);
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
         }
@@ -1803,6 +2595,10 @@
 
     function renderAllIssues() {
         if (renderRetryTimer) { clearTimeout(renderRetryTimer); renderRetryTimer = null; }
+        // The map + issue overlays live in the IFRAME — the TOP frame has no map, so a
+        // render there just retries 60× and dumps a giant async stack on give-up (e.g. on
+        // a ?aim_issue deep-link). Rendering is iframe-owned; bail in TOP.
+        if (IS_TOP) return;
         renderAllIssuesAttempt(0);
     }
 
@@ -1830,6 +2626,9 @@
         live.forEach((issue) => {
             renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
         });
+        // v1.06: if we arrived via a ?aim_issue=<id> deep-link, focus it now
+        // that the issue + map are ready.
+        maybeFocusPendingIssue();
     }
 
     // v0.8: create high-z-index panes so issue shapes + markers sit on top
@@ -2183,7 +2982,7 @@
         // Inline-styled table — Sheets/Excel honor most inline CSS.
         // v0.28: + Priority + Comment Count columns
         const headers = [
-            'Status', 'Priority', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By', 'Assignee',
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
@@ -2222,6 +3021,7 @@
                     trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -2236,6 +3036,7 @@
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${escHtml(issue.note)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(createdWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(createdBy)}</td>`);
+            out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">${issue.assignee ? '@' + escHtml(issue.assignee) : '<i style="color:#999">—</i>'}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;font-weight:bold;color:${meta.color}">${escHtml(lastEventLabel_)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top;white-space:nowrap">${escHtml(lastEventWhen)}</td>`);
             out.push(`<td style="padding:6px 10px;border:1px solid #444;vertical-align:top">@${escHtml(lastEventBy)}</td>`);
@@ -2261,7 +3062,7 @@
 
     function buildIssuesTsv(issues, siteId, siteName_) {
         const headers = [
-            'Status', 'Priority', 'Note', 'Created', 'By',
+            'Status', 'Priority', 'Note', 'Created', 'By', 'Assignee',
             'Last Event', 'Last Event When', 'Last Event By',
             'Comments #', 'Affects #', 'Affected Entities', 'Full History',
             'Issue ID', 'Site ID', 'Site Name',
@@ -2287,6 +3088,7 @@
                     trans = `priority: ${h.fromPriority || 'NONE'} → ${h.toPriority || 'NONE'}`;
                 } else if (!h.fromStatus) trans = `created (${h.toStatus})`;
                 else if (h.toStatus === 'deleted') trans = `deleted`;
+                else if (h.kind === 'assign') trans = h.toAssignee ? `assigned → @${h.toAssignee}` : `unassigned`;
                 else if (h.kind === 'comment' || h.fromStatus === h.toStatus) trans = `comment`;
                 else trans = `${h.fromStatus} → ${h.toStatus}`;
                 return `[${fmtDateTime(h.at)}] @${h.by}: ${trans}${note}`;
@@ -2297,6 +3099,7 @@
                 issue.note,
                 fmtDateTime(issue.createdAt),
                 '@' + (issue.createdBy || '?'),
+                issue.assignee ? '@' + issue.assignee : '',
                 lastEventLabel(issue),
                 lastEventWhen,
                 '@' + lastEventBy,
@@ -2789,13 +3592,15 @@
     // pending_fix in its place.
     const STATUS_TRANSITIONS = {
         'open': [
-            // CSM proposal path
+            // Proposal path. v1.06: approvers can ALSO propose (not just
+            // direct-resolve) so an approver can route their own find through
+            // another approver (e.g. Chris) instead of self-approving.
             { to: 'pending_fix',    label: '→ Propose Fix',     noteRequired: true,  color: '#FFD700', textColor: '#000',
               notePrompt: 'What was fixed? e.g. "Added missing H-Well to Site Setup"',
-              roles: ['csm'] },
+              roles: ['csm', 'approver'] },
             { to: 'pending_ignore', label: '→ Propose Ignore',  noteRequired: true,  color: '#8000FF', textColor: '#fff',
               notePrompt: 'Why should this be ignored? e.g. "Not within our scope" or "Duplicate of #..."',
-              roles: ['csm'] },
+              roles: ['csm', 'approver'] },
             // Approver direct-action (skips pending step)
             { to: 'resolved',       label: '✓ Resolve (direct)',  noteRequired: false, color: '#5fff5f', textColor: '#000',
               notePrompt: 'Optional comment on resolution',
@@ -2891,6 +3696,8 @@
         if (cachedToken && !wasLocalOnly) {
             showToast(`Status → ${targetLabel} — pushing to GitHub…`, 2500);
             commitIssuesToGitHub(`@${by}: ${fromStatus} → ${transition.to}`);
+            // v1.03: threaded Slack reply with role-aware @-mentions.
+            postSlackTransition(issue, fromStatus, transition, trimmedNote, by);
         } else {
             showToast(`Status → ${targetLabel} (local only).`, 2500);
         }
@@ -2904,7 +3711,7 @@
     // v0.28: comments. Don't change status — just append a history entry
     // where fromStatus === toStatus. Required note. Same audit / sync
     // pipeline as transitions.
-    function applyComment(issueId, note) {
+    function applyComment(issueId, note, notifyLogins) {
         const issue = currentSiteIssues.find(i => i.id === issueId);
         if (!issue) return false;
         const trimmedNote = (note || '').trim();
@@ -2927,8 +3734,49 @@
         if (cachedToken && !wasLocalOnly) {
             showToast(`Comment added — pushing to GitHub…`, 2500);
             commitIssuesToGitHub(`@${by}: comment`);
+            // v1.03: threaded Slack reply. v1.10: + @-mentions from picker.
+            postSlackComment(issue, trimmedNote, by, notifyLogins);
         } else {
             showToast('Comment added (local only).', 2500);
+        }
+        return true;
+    }
+
+    // v1.12: assignment. Doesn't change status. Audited via a history entry
+    // with kind='assign' + fromAssignee/toAssignee. Anyone can (re)assign.
+    // null assignee = unassigned. Mirrors applyComment's sync + Slack pattern.
+    function applyAssignment(issueId, newAssignee) {
+        const issue = currentSiteIssues.find(i => i.id === issueId);
+        if (!issue) return false;
+        const from = issue.assignee || null;
+        const to = newAssignee || null;
+        if (from === to) return false;   // no-op
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            fromStatus: issue.status || 'open',
+            toStatus: issue.status || 'open',
+            kind: 'assign',
+            fromAssignee: from,
+            toAssignee: to,
+            note: '',
+        });
+        issue.assignee = to;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        renderOneIssue(issue, { isHidden: isIssueDimmed(issue) });
+        renderButtonState();
+        if (panelEl) renderIssuesPanel();
+        console.log(`${TAG} assign ${issueId}: ${from || '(none)'} → ${to || '(none)'} by @${by}`);
+        const wasLocalOnly = (issue.createdBy === 'local-only');
+        if (cachedToken && !wasLocalOnly) {
+            showToast(to ? `Assigned to @${to} — pushing…` : 'Unassigned — pushing…', 2500);
+            commitIssuesToGitHub(`@${by}: assign → ${to || 'none'}`);
+            postSlackAssignment(issue, from, to, by);
+        } else {
+            showToast(to ? `Assigned to @${to} (local only).` : 'Unassigned (local only).', 2500);
         }
         return true;
     }
@@ -3015,9 +3863,10 @@
         // non-null = note prompt for that transition).
         let armed = null;
         let pendingNote = '';     // preserved across re-renders if user typed something
-        // v0.30: history sort direction. Default: oldest first (false).
+        const pendingCommentNotify = new Set();  // v1.10: logins to @-mention on a comment
+        // v0.30: history sort direction. v1.11: default newest first (true).
         // Click "History" header to toggle.
-        let historySortDesc = false;
+        let historySortDesc = true;
 
         function render() {
             // v0.30: skip re-renders mid-drag so stale handlers don't get
@@ -3052,6 +3901,13 @@
                 if (isNaN(bt)) return -1;
                 return historySortDesc ? bt - at : at - bt;
             });
+            // v1.11: emoji + status colors matching the Slack badges so the
+            // history reads at a glance. slackStatusBadge → icon; STATUS_LABEL
+            // → text + color.
+            const sIcon = (s) => slackStatusBadge(s).icon;
+            const sColor = (s) => (STATUS_LABEL[s] || { color: '#aaa' }).color;
+            const sText = (s) => (STATUS_LABEL[s] || { text: (s || '').toUpperCase() }).text;
+            const statusPill = (s) => `${sIcon(s)} <span style="color:${sColor(s)};font-weight:700">${sText(s)}</span>`;
             const histRows = sortedHistory.map(h => {
                 const safeHistNote = escHtml(h.note);
                 const safeBy = escHtml(h.by || '?');
@@ -3062,15 +3918,18 @@
                     const toMeta = h.toPriority ? priorityMeta(h.toPriority) : { color: '#888' };
                     label = `🎯 priority: ${fromP} → <span style="color:${toMeta.color};font-weight:700">${toP}</span>`;
                 } else if (!h.fromStatus) {
-                    label = `created (${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text})`;
+                    label = `🚩 created → ${statusPill(h.toStatus)}`;
                 } else if (h.toStatus === 'deleted') {
-                    label = `🗑 deleted`;
-                    labelColor = '#ff8585';
+                    label = `🗑 <span style="color:#ff8585;font-weight:700">DELETED</span>`;
+                } else if (h.kind === 'assign') {
+                    label = h.toAssignee
+                        ? `👤 assigned → <span style="color:#5fb3ff;font-weight:700">@${escHtml(h.toAssignee)}</span>`
+                        : `👤 <span style="color:#888;font-weight:700">unassigned</span>`;
                 } else if (h.kind === 'comment' || h.fromStatus === h.toStatus) {
                     label = `💬 commented`;
                     labelColor = '#a8c4ff';
                 } else {
-                    label = `${(STATUS_LABEL[h.fromStatus] || {text:h.fromStatus}).text} → ${(STATUS_LABEL[h.toStatus] || {text:h.toStatus}).text}`;
+                    label = `${statusPill(h.fromStatus)} → ${statusPill(h.toStatus)}`;
                 }
                 return `<div style="padding:6px 8px;border-bottom:1px dotted rgba(255,255,255,0.08);font-size:12px">
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">${fmtDateTime(h.at)} &middot; @${safeBy}</div>
@@ -3096,6 +3955,21 @@
             //   null — show all action buttons (transitions + comment + priority chips)
             let actionSectionHtml = '';
             if (armed && armed.kind === 'comment') {
+                // v1.10: tag teammates on a comment — chip picker (reliable)
+                // plus inline @login in the text auto-converts (see
+                // slackifyMentions). Only shown when Slack is configured.
+                const notifyUsers = slackEnabled() ? Object.keys(slackConfig.users || {}).sort() : [];
+                const notifyRow = notifyUsers.length ? `
+                    <div style="color:#aaa;font-size:11px;margin:8px 0 4px 0">Tag on Slack (optional)</div>
+                    <div id="aim-issues-comment-notify" style="display:flex;gap:5px;flex-wrap:wrap">
+                        ${notifyUsers.map(l => {
+                            const on = pendingCommentNotify.has(l);
+                            return `<button type="button" class="aim-issues-comment-notify-chip" data-login="${escHtml(l)}"
+                                style="padding:4px 10px;background:${on ? '#5fb3ff' : 'transparent'};color:${on ? '#0a1a2a' : '#5fb3ff'};border:1.5px solid #5fb3ff;border-radius:13px;cursor:pointer;font:inherit;font-size:11px;font-weight:700">
+                                @${escHtml(l)}
+                            </button>`;
+                        }).join('')}
+                    </div>` : '';
                 actionSectionHtml = `
                     <div style="margin-top:14px;padding:12px;background:#14171b;border:1px solid rgba(168,196,255,0.30);border-radius:6px">
                         <div style="color:#a8c4ff;font-size:12px;font-weight:600;margin-bottom:6px">
@@ -3103,19 +3977,10 @@
                         </div>
                         <div style="color:#aaa;font-size:11px;margin-bottom:4px">Comment <span style="color:#ff8585">(required)</span></div>
                         <textarea id="aim-issues-modal-note"
-                            placeholder="Add a comment without changing status"
+                            placeholder="Add a comment without changing status. Tip: @TeammateLogin pings them."
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:#a8c4ff;color:#000;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm comment
-                            </button>
-                        </div>
+                        ${notifyRow}
                     </div>
                 `;
             } else if (armed && armed.kind === 'priority') {
@@ -3130,16 +3995,6 @@
                             placeholder="Why are you changing the priority? (optional)"
                             style="width:100%;min-height:60px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:${tgt.color};color:${tgt.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm priority → ${tgt.text}
-                            </button>
-                        </div>
                     </div>
                 `;
             } else if (armed) {
@@ -3155,16 +4010,6 @@
                             placeholder="${escHtml(armed.notePrompt || (armed.noteRequired ? 'Required note' : 'Optional note'))}"
                             style="width:100%;min-height:70px;background:#0e1115;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:4px;padding:6px 8px;font:inherit;font-size:12px;resize:vertical;box-sizing:border-box">${escHtml(pendingNote)}</textarea>
                         <div id="aim-issues-modal-noteerr" style="color:#ff8585;font-size:11px;margin-top:4px;min-height:14px"></div>
-                        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
-                            <button id="aim-issues-modal-cancel-transition"
-                                style="padding:6px 12px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
-                                Cancel
-                            </button>
-                            <button id="aim-issues-modal-confirm-transition"
-                                style="padding:6px 12px;background:${armed.color};color:${armed.textColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">
-                                Confirm → ${tgtLabel}
-                            </button>
-                        </div>
                     </div>
                 `;
             } else {
@@ -3202,7 +4047,43 @@
                         ${label}${isCur ? ' ●' : ''}
                     </button>`;
                 }).join('');
+                // v1.12: assignee chips — anyone can (re)assign. Roster =
+                // mapped Slack users + yourself + current assignee. One-click
+                // assign (no note step); current is highlighted; ⭐ marks you.
+                const assignSet = new Set(slackEnabled() ? Object.keys(slackConfig.users || {}) : []);
+                if (cachedUsername) assignSet.add(cachedUsername);
+                if (liveIssue.assignee) assignSet.add(liveIssue.assignee);
+                const cur = liveIssue.assignee || null;
+                const assignChips = Array.from(assignSet).sort().map(u => {
+                    const isCur = (cur === u);
+                    const isMe = (u === cachedUsername);
+                    return `<button class="aim-issues-assign-chip" data-assignee="${escHtml(u)}"
+                        style="padding:4px 9px;background:${isCur ? '#5fb3ff' : 'transparent'};color:${isCur ? '#0a1a2a' : '#5fb3ff'};border:1.5px solid #5fb3ff;border-radius:12px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">
+                        ${isMe ? '⭐ ' : ''}@${escHtml(u)}${isCur ? ' ✓' : ''}
+                    </button>`;
+                }).join('');
+                const unassignChip = `<button class="aim-issues-assign-chip" data-assignee=""
+                    style="padding:4px 9px;background:${cur ? 'transparent' : '#555'};color:${cur ? '#888' : '#fff'};border:1.5px solid #777;border-radius:12px;cursor:pointer;font:inherit;font-size:10px;font-weight:700">
+                    Unassign</button>`;
+                // v1.19: validator findings default to NO Slack. This toggle
+                // lets the user escalate a specific finding to Slack on demand
+                // (turning it on backfills the parent thread). Shown only for
+                // source==='validator' issues.
+                const isValidator = (liveIssue.source === 'validator');
+                const optedIn = !!liveIssue.slackNotifyOptIn;
+                const validatorSlackToggle = isValidator ? `
+                    <div style="margin-top:14px;padding:10px 12px;background:#14171b;border:1px solid ${optedIn ? 'rgba(95,255,95,0.40)' : 'rgba(255,255,255,0.12)'};border-radius:6px">
+                        <button class="aim-issues-slacknotify-toggle"
+                            title="Validator findings don't post to Slack by default. Turn this on to escalate THIS finding to the channel."
+                            style="display:inline-flex;align-items:center;gap:8px;padding:6px 12px;font:inherit;font-size:12px;font-weight:700;
+                                   border:1.5px solid ${optedIn ? '#5fff5f' : '#777'};border-radius:14px;cursor:pointer;
+                                   background:${optedIn ? '#10331f' : 'transparent'};color:${optedIn ? '#5fff5f' : '#aaa'}">
+                            🔔 Notify Slack: ${optedIn ? 'ON' : 'OFF'}
+                        </button>
+                        <span style="color:#888;font-size:10px;margin-left:8px;font-style:italic">${optedIn ? 'this finding is posting to Slack' : 'validator findings are silent by default'}</span>
+                    </div>` : '';
                 actionSectionHtml = `
+                    ${validatorSlackToggle}
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">Change status:</span>
                         ${transBtns}
@@ -3210,6 +4091,10 @@
                     <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                         <span style="color:#aaa;font-size:12px;margin-right:4px">🎯 Priority:</span>
                         ${priChips}
+                    </div>
+                    <div style="margin-top:10px">
+                        <div style="color:#aaa;font-size:12px;margin-bottom:4px">👤 Assignee: ${cur ? `<span style="color:#5fb3ff;font-weight:700">@${escHtml(cur)}</span>` : '<span style="color:#888">unassigned</span>'}</div>
+                        <div style="display:flex;gap:5px;flex-wrap:wrap">${assignChips}${unassignChip}</div>
                     </div>
                     <div style="margin-top:10px">
                         <button id="aim-issues-modal-commentbtn"
@@ -3278,6 +4163,62 @@
                          title="You're a CSM — propose changes for approver review.">
                        CSM
                    </span>`;
+            // v1.11: Slack-reported badge. Green ✓ + link to the thread when
+            // the issue posted successfully (has a thread ts); amber ⧗ when
+            // Slack is on but it hasn't posted (e.g. created pre-Slack, or the
+            // post failed). Hidden entirely when Slack isn't configured.
+            let slackBadge = '';
+            if (slackEnabled() && liveIssue.slackThreadTs) {
+                const permalink = `https://percepto.slack.com/archives/${slackConfig.channelId}/p${String(liveIssue.slackThreadTs).replace('.', '')}`;
+                // v1.15.1: real <button> so the header drag handler skips it
+                // (it skips buttons) and the click fires reliably. Opens via
+                // GM_openInTab (iframe sandbox blocks <a target=_blank>).
+                slackBadge = `<button type="button" class="aim-issues-slack-link" data-href="${permalink}"
+                        title="Reported to Slack — click to open the thread"
+                        style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
+                               background:#10331f;color:#5fff5f;font:inherit;font-size:9px;font-weight:700;
+                               border:1px solid rgba(95,255,95,0.45);letter-spacing:0.5px;cursor:pointer">
+                       ✓ SLACK
+                   </button>`;
+            } else if (slackEnabled()) {
+                slackBadge = `<span title="Not yet posted to Slack"
+                        style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;
+                               background:#3a2a10;color:#ffae5f;font-size:9px;font-weight:700;
+                               border:1px solid rgba(255,174,95,0.4);letter-spacing:0.5px">
+                       ⧗ SLACK
+                   </span>`;
+            }
+            // v1.06: pinned footer. When a transition/comment/priority is
+            // armed, Cancel + Confirm live here (always visible, no scrolling
+            // past them) instead of buried in the body. Unarmed, the footer
+            // holds only Delete (the header ✕ is the single close — no
+            // redundant bottom Close button). Empty unarmed footer is hidden.
+            const footerBase = `padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);display:flex;gap:8px;align-items:center;flex-shrink:0`;
+            let footerHtml = '';
+            if (armed) {
+                let confLabel, confBg, confColor;
+                if (armed.kind === 'comment') {
+                    confLabel = 'Confirm comment'; confBg = '#a8c4ff'; confColor = '#000';
+                } else if (armed.kind === 'priority') {
+                    const t = armed.to ? priorityMeta(armed.to) : { text: 'NONE', color: '#555', textColor: '#fff' };
+                    confLabel = `Confirm priority → ${t.text}`; confBg = t.color; confColor = t.textColor;
+                } else {
+                    const tl = (STATUS_LABEL[armed.to] || { text: armed.to.toUpperCase() }).text;
+                    confLabel = `Confirm → ${tl}`; confBg = armed.color; confColor = armed.textColor;
+                }
+                footerHtml = `<div style="${footerBase};justify-content:flex-end">
+                    <button id="aim-issues-modal-cancel-transition"
+                        style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit">
+                        Cancel
+                    </button>
+                    <button id="aim-issues-modal-confirm-transition"
+                        style="padding:7px 14px;background:${confBg};color:${confColor};border:none;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                        ${confLabel}
+                    </button>
+                </div>`;
+            } else if (canDelete) {
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}</div>`;
+            }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
                      style="padding:10px 14px;background:#14171b;border-bottom:1px solid rgba(255,255,255,0.10);
@@ -3287,6 +4228,8 @@
                     <span style="color:${statusMeta.color};font-weight:700;font-size:14px">${statusMeta.text}</span>
                     ${headerPri}
                     ${roleChip}
+                    ${slackBadge}
+                    ${liveIssue.assignee ? `<span title="Assigned to @${escHtml(liveIssue.assignee)}" style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:9px;background:#13294a;color:#5fb3ff;font-size:9px;font-weight:700;border:1px solid rgba(95,179,255,0.45);letter-spacing:0.3px">👤 ${escHtml(liveIssue.assignee)}</span>` : ''}
                     <button id="aim-issues-modal-headerclose" title="Close"
                         style="margin-left:auto;padding:3px 9px;background:#3a3f48;color:#e6e6e6;
                                border:none;border-radius:4px;cursor:pointer;font:inherit;font-size:12px">
@@ -3297,9 +4240,10 @@
                      style="padding:14px 18px;overflow:auto;flex:1;min-height:0">
                     <div style="color:#e6e6e6;font-size:13px;margin-bottom:12px;line-height:1.4">${safeNote}</div>
                     ${entitiesSectionHtml}
+                    ${actionSectionHtml}
                     <div id="aim-issues-modal-historyheader"
                          title="Click to toggle sort direction"
-                         style="color:#888;font-size:11px;margin:12px 0 4px 0;cursor:pointer;user-select:none;
+                         style="color:#888;font-size:11px;margin:14px 0 4px 0;cursor:pointer;user-select:none;
                                 display:inline-flex;align-items:center;gap:5px;padding:2px 6px;
                                 border-radius:4px;border:1px solid transparent;transition:border-color 150ms">
                         History
@@ -3307,16 +4251,8 @@
                         <span style="color:#888;font-style:italic">${sortLabel}</span>
                     </div>
                     <div style="border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:#14171b">${histRows}</div>
-                    ${actionSectionHtml}
                 </div>
-                <div style="padding:10px 18px;background:#14171b;border-top:1px solid rgba(255,255,255,0.06);
-                            display:flex;gap:8px;align-items:center;flex-shrink:0">
-                    ${deleteBtnHtml}
-                    <button id="aim-issues-modal-close"
-                        style="padding:7px 14px;background:#3a3f48;color:#e6e6e6;border:none;border-radius:4px;cursor:pointer;font:inherit;margin-left:${canDelete ? '0' : 'auto'}">
-                        Close
-                    </button>
-                </div>
+                ${footerHtml}
                 <div id="aim-issues-modal-resize"
                      title="Drag to resize"
                      style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;
@@ -3324,12 +4260,55 @@
                 </div>
             `;
             wireHandlers(liveIssue, transitions);
+            // v1.06: when armed, bring the note into view + focus it so the
+            // user sees the input (the Confirm/Cancel are pinned in the footer).
+            if (armed) {
+                const noteEl = card.querySelector('#aim-issues-modal-note');
+                if (noteEl) {
+                    try { noteEl.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+                    try { noteEl.focus(); } catch (e) {}
+                }
+            }
         }
 
         function wireHandlers(liveIssue, transitions) {
-            card.querySelector('#aim-issues-modal-close').onclick = closeStatusModal;
+            // v1.06: bottom "Close" removed — header ✕ is the single close.
+            const closeBtn = card.querySelector('#aim-issues-modal-close');
+            if (closeBtn) closeBtn.onclick = closeStatusModal;
             const headerCloseBtn = card.querySelector('#aim-issues-modal-headerclose');
             if (headerCloseBtn) headerCloseBtn.onclick = closeStatusModal;
+            // v1.13: ✓ SLACK badge → open the thread in a new tab via the top
+            // window (iframe sandbox blocks <a target=_blank>).
+            const slackLink = card.querySelector('.aim-issues-slack-link');
+            if (slackLink) {
+                // v1.15: the badge sits in the draggable header, which was
+                // eating the click — bind capture-phase pointerdown (like the
+                // chips) so it fires before the drag logic. Always toast so we
+                // know it fired even if opening is blocked.
+                let lastOpen = 0;
+                const openSlack = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastOpen < 400) return;   // ignore the paired event
+                    lastOpen = now;
+                    const href = slackLink.dataset.href;
+                    if (!href) return;
+                    let opened = false;
+                    if (typeof GM_openInTab === 'function') {
+                        try { GM_openInTab(href, { active: true, insert: true, setParent: true }); opened = true; } catch (e2) {}
+                    }
+                    if (!opened) { try { opened = !!(window.top || window).open(href, '_blank'); } catch (e3) {} }
+                    if (opened) {
+                        showToast('Opening Slack thread…', 1500);
+                    } else {
+                        copyTextToClipboard(href)
+                            .then(() => showToast('Slack link copied — paste it in your browser.', 3500))
+                            .catch(() => showToast('Could not open Slack link.', 3000));
+                    }
+                };
+                slackLink.addEventListener('pointerdown', openSlack, true);
+                slackLink.addEventListener('click', openSlack, true);
+            }
 
             // v0.30: history sort toggle
             const histHeader = card.querySelector('#aim-issues-modal-historyheader');
@@ -3380,6 +4359,52 @@
                 };
             });
 
+            // v1.12: assignee chips — one-click (re)assign. pointerdown+click
+            // +debounce for snappy, no-dropped-click behaviour; re-render to
+            // refresh the highlight + header chip.
+            let lastAssignFire = 0;
+            card.querySelectorAll('.aim-issues-assign-chip').forEach(chip => {
+                const handler = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastAssignFire < 300) return;
+                    lastAssignFire = now;
+                    const target = chip.dataset.assignee || null;
+                    if (applyAssignment(liveIssue.id, target)) render();
+                };
+                chip.addEventListener('pointerdown', handler, true);
+                chip.addEventListener('click', handler, true);
+            });
+
+            // v1.19: validator "🔔 Notify Slack" opt-in toggle. Turning it ON
+            // sets the flag (so slackPostable now passes) then backfills the
+            // parent thread; OFF just stops future posts (existing thread stays).
+            const slackToggle = card.querySelector('.aim-issues-slacknotify-toggle');
+            if (slackToggle) {
+                let lastToggle = 0;
+                const onToggle = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const now = Date.now();
+                    if (now - lastToggle < 350) return;
+                    lastToggle = now;
+                    const issueObj = currentSiteIssues.find(i => i.id === liveIssue.id) || liveIssue;
+                    const turningOn = !issueObj.slackNotifyOptIn;
+                    issueObj.slackNotifyOptIn = turningOn;
+                    if (turningOn) {
+                        showToast('Escalating finding to Slack…', 2000);
+                        ensureSlackThread(issueObj).then((ts) => {
+                            if (!ts) showToast('Could not post to Slack — see console.', 4000);
+                            render();
+                        });
+                    } else {
+                        showToast('Slack notifications off for this finding (existing thread kept).', 3000);
+                    }
+                    render();
+                };
+                slackToggle.addEventListener('pointerdown', onToggle, true);
+                slackToggle.addEventListener('click', onToggle, true);
+            }
+
             // v0.28: Comment button — arms a comment-mode (required note)
             const commentBtn = card.querySelector('#aim-issues-modal-commentbtn');
             if (commentBtn) {
@@ -3393,6 +4418,29 @@
                     }, 30);
                 };
             }
+
+            // v1.10: comment notify chips — toggle in place (no re-render so
+            // the comment textarea isn't cleared). pointerdown+click+debounce
+            // for the same snappy, no-dropped-click behaviour as elsewhere.
+            const cmtChipFire = new Map();
+            card.querySelectorAll('.aim-issues-comment-notify-chip').forEach(chip => {
+                const toggle = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    const login = chip.dataset.login;
+                    const now = Date.now();
+                    if (now - (cmtChipFire.get(login) || 0) < 300) return;
+                    cmtChipFire.set(login, now);
+                    if (pendingCommentNotify.has(login)) {
+                        pendingCommentNotify.delete(login);
+                        chip.style.background = 'transparent'; chip.style.color = '#5fb3ff';
+                    } else {
+                        pendingCommentNotify.add(login);
+                        chip.style.background = '#5fb3ff'; chip.style.color = '#0a1a2a';
+                    }
+                };
+                chip.addEventListener('pointerdown', toggle, true);
+                chip.addEventListener('click', toggle, true);
+            });
 
             // v0.28: Priority chips — arms a priority change (optional note)
             card.querySelectorAll('.aim-issues-modal-pribtn').forEach(btn => {
@@ -3437,7 +4485,7 @@
                             if (noteInput) noteInput.focus();
                             return;
                         }
-                        const ok = applyComment(liveIssue.id, note);
+                        const ok = applyComment(liveIssue.id, note, Array.from(pendingCommentNotify));
                         if (ok) closeStatusModal();
                         return;
                     }
@@ -3513,7 +4561,9 @@
             const handle = card.querySelector('#aim-issues-modal-resize');
             if (header) {
                 header.addEventListener('mousedown', (e) => {
-                    if (e.target.closest('button, input, textarea')) return;
+                    // v1.15.1: also skip the ✓ SLACK badge so clicking it
+                    // opens the thread instead of starting a drag.
+                    if (e.target.closest('button, input, textarea, .aim-issues-slack-link')) return;
                     if (e.button !== 0) return;
                     e.preventDefault(); e.stopPropagation();
                     startModalDrag(e, 'move');
@@ -3653,6 +4703,8 @@
     function panelMatchesIssue(issue) {
         const st = issue.status || 'open';
         if (!panelFilters.has(st)) return false;
+        // v1.12: "Assigned to me" filter.
+        if (panelAssignedToMe && (issue.assignee || null) !== (cachedUsername || null)) return false;
         // v0.29: priority filter — 'none' represents null/undefined.
         const priKey = issue.priority || 'none';
         if (!panelPriorityFilters.has(priKey)) return false;
@@ -3741,6 +4793,20 @@
         // M1 click: solo pending_fix + pending_ignore (hide everything else).
         // Always visible when role=approver, even if count is 0.
         const role = currentRole();
+        // v1.12: "Assigned to me" filter chip — everyone, when authed.
+        const myAssignedCount = cachedUsername
+            ? liveSiteIssues.filter(i => (i.assignee || null) === cachedUsername).length : 0;
+        const assignedToMeChipHtml = cachedUsername ? `
+            <button id="aim-issues-panel-assignedtome"
+                title="Show only issues assigned to you"
+                style="padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                       border:1.5px dashed #5fb3ff;
+                       background:${panelAssignedToMe ? '#5fb3ff' : 'transparent'};
+                       color:${panelAssignedToMe ? '#0a1a2a' : '#5fb3ff'};
+                       cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                <span>👤 Assigned to me</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${myAssignedCount}</span>
+            </button>` : '';
         const pendingShortcutHtml = (role === 'approver') ? `
             <button id="aim-issues-panel-pending-shortcut"
                 title="Solo pending issues (Pending Fix + Pending Ignore) — for your review"
@@ -3915,7 +4981,10 @@
                                     -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
                         ${affectsHtml}
                     </div>
-                    <div style="color:#a8c4ff;font-size:11px;text-align:right">@${safeBy}</div>
+                    <div style="color:#a8c4ff;font-size:11px;text-align:right">
+                        @${safeBy}
+                        ${issue.assignee ? `<div style="color:#5fb3ff;font-size:10px;margin-top:2px" title="Assigned to @${escHtml(issue.assignee)}">👤 ${escHtml(issue.assignee)}</div>` : ''}
+                    </div>
                 </div>`;
             }).join('');
         }
@@ -3945,6 +5014,7 @@
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
                 ${pendingShortcutHtml}
+                ${assignedToMeChipHtml}
                 <div style="margin-left:auto;display:flex;gap:6px">
                     ${hiddenIds.size > 0
                         ? `<button id="aim-issues-panel-unhide"
@@ -4038,6 +5108,14 @@
         }
         // v1.00: "Pending my review" shortcut — solo the two pending
         // statuses. Toggle: clicking again restores the prior full set.
+        // v1.12: "Assigned to me" filter toggle
+        const assignedToMeBtn = panelEl.querySelector('#aim-issues-panel-assignedtome');
+        if (assignedToMeBtn) {
+            assignedToMeBtn.onclick = () => {
+                panelAssignedToMe = !panelAssignedToMe;
+                renderIssuesPanel();
+            };
+        }
         const pendingShortcut = panelEl.querySelector('#aim-issues-panel-pending-shortcut');
         if (pendingShortcut) {
             pendingShortcut.onclick = () => {
@@ -4167,6 +5245,43 @@
             const c = bestInteriorPoint(issue.polygon);
             if (c) { try { map.panTo(c, { animate: true, duration: 0.4 }); } catch (e2) {} }
         }
+    }
+
+    // v1.06: deep-link focus. A Slack issue link carries ?aim_issue=<id>
+    // (before the hash). On load / nav we read it, then once that issue is
+    // loaded + the map is ready we zoom to it and open its box — and strip
+    // the param so a refresh doesn't re-trigger.
+    function readFocusParam() {
+        try {
+            let search = '';
+            try { search = (window.top && window.top.location && window.top.location.search) || ''; } catch (e) {}
+            if (!search) search = location.search || '';
+            const m = search.match(/[?&]aim_issue=([^&]+)/);
+            if (m) pendingFocusIssueId = decodeURIComponent(m[1]);
+        } catch (e) { console.warn(`${TAG} readFocusParam threw:`, e); }
+    }
+    function clearFocusParam() {
+        try {
+            const w = window.top || window;
+            const url = new URL(w.location.href);
+            if (url.searchParams.has('aim_issue')) {
+                url.searchParams.delete('aim_issue');
+                w.history.replaceState(null, '', url.toString());
+            }
+        } catch (e) {}
+    }
+    function maybeFocusPendingIssue() {
+        if (IS_TOP || !pendingFocusIssueId) return;   // UI + map live in the iframe
+        const issue = liveIssues(currentSiteIssues).find(i => i.id === pendingFocusIssueId);
+        if (!issue) return;          // not loaded yet (or another site) — retry next render
+        const id = pendingFocusIssueId;
+        pendingFocusIssueId = null;
+        clearFocusParam();
+        try {
+            zoomToIssue(issue);
+            openStatusModal(issue);
+            console.log(`${TAG} deep-link focus → issue ${id}`);
+        } catch (e) { console.warn(`${TAG} deep-link focus threw:`, e); }
     }
 
     // v0.16: panel drag/resize. Header drag → move; corner handle → resize.
@@ -4311,8 +5426,104 @@
     }
 
     // ------- Init -------
+    // ============================================================
+    // v1.02 — SOP Validator bridge.
+    // The Asset Inspector's SOP validators compute geometric SOP
+    // violations (FFZ↔Asset standoff, FP↔Asset, FFZ↔FFZ overlap, …) and
+    // hand them to us over the dedicated AIM_VALIDATOR_ISSUES channel.
+    // We render them through the normal issue pipeline (markers, polygon,
+    // panel, click-to-zoom) authored as 'Validator' with note 'violation:
+    // …'. They are EPHEMERAL: tagged source:'validator', wiped+redrawn on
+    // every run, never persisted to localStorage, never synced to GitHub
+    // (see saveIssuesToStorage / commitIssuesToGitHub filters). GM storage
+    // is per-script so the Asset Inspector cannot write our store directly
+    // — this channel is the only handoff.
+    // ============================================================
+    const VALIDATOR_CHANNEL_NAME = 'AIM_VALIDATOR_ISSUES';
+    let validatorChannel = null;
+
+    function setupValidatorChannel() {
+        try { validatorChannel = new BroadcastChannel(VALIDATOR_CHANNEL_NAME); }
+        catch (e) { console.warn(`${TAG} validator channel unavailable:`, e); return; }
+        validatorChannel.onmessage = (ev) => {
+            const m = ev.data || {};
+            if (m.type === 'VALIDATOR_ISSUES') applyValidatorIssues(m);
+            else if (m.type === 'CLEAR_VALIDATOR_ISSUES') clearValidatorIssues(m.siteID);
+        };
+    }
+
+    // Remove every previously-drawn validator issue for the given site
+    // (drops Leaflet layers + the in-memory records). No persistence to
+    // touch — validator issues never reach storage.
+    function clearValidatorIssues(forSite) {
+        if (forSite != null && String(forSite) !== String(siteID)) return;
+        const map = getLeafletMap();
+        let removed = 0;
+        currentSiteIssues = currentSiteIssues.filter(i => {
+            if (i.source !== 'validator') return true;
+            const layers = issueLayers.get(i.id);
+            if (layers && map) {
+                try { if (layers.polygon) map.removeLayer(layers.polygon); } catch (e) {}
+                try { if (layers.marker)  map.removeLayer(layers.marker);  } catch (e) {}
+            }
+            issueLayers.delete(i.id);
+            hiddenIds.delete(i.id);
+            removed++;
+            return false;
+        });
+        if (removed) {
+            renderButtonState();
+            try { renderIssuesPanel(); } catch (e) {}
+            console.log(`${TAG} cleared ${removed} validator issue${removed === 1 ? '' : 's'}`);
+        }
+    }
+
+    // Render a fresh batch of validator findings. Wipes any prior validator
+    // issues for this site first (re-runs replace, never accumulate).
+    function applyValidatorIssues(m) {
+        if (IS_TOP) return;                         // IFRAME owns rendering
+        if (!siteID) return;
+        if (m.siteID != null && String(m.siteID) !== String(siteID)) {
+            console.log(`${TAG} ignoring validator issues for site ${m.siteID} (current ${siteID})`);
+            return;
+        }
+        clearValidatorIssues(siteID);
+        const incoming = Array.isArray(m.issues) ? m.issues : [];
+        const nowIso = new Date().toISOString();
+        let drawn = 0;
+        incoming.forEach((vi, idx) => {
+            const polygon = Array.isArray(vi.polygon) ? vi.polygon : null;
+            if (!polygon || polygon.length < 3) return;
+            const note = vi.note || 'violation';
+            const id = `val_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`;
+            const pri = (vi.priority && PRIORITY_LABEL && PRIORITY_LABEL[vi.priority]) ? vi.priority : null;
+            const issue = {
+                id,
+                surface: 'site-setup',
+                shape: vi.shape || 'polygon',
+                polygon,
+                note,
+                status: 'open',
+                priority: pri,
+                createdAt: nowIso,
+                createdBy: 'Validator',
+                source: 'validator',
+                history: [
+                    { at: nowIso, by: 'Validator', fromStatus: null, toStatus: 'open', note },
+                ],
+            };
+            currentSiteIssues.push(issue);
+            try { renderOneIssue(issue); drawn++; } catch (e) { console.warn(`${TAG} renderOneIssue (validator) threw:`, e); }
+        });
+        renderButtonState();
+        try { renderIssuesPanel(); } catch (e) {}
+        showToast(`Validator: ${drawn} issue${drawn === 1 ? '' : 's'} drawn on the map.`, 3200);
+        console.log(`${TAG} drew ${drawn} validator issue${drawn === 1 ? '' : 's'} for site ${siteID}`);
+    }
+
     function init() {
         setupControlChannel();
+        setupValidatorChannel();
         registerWithControlPanel();
         // v0.5: seed sync status from the cached token recovered from
         // GM storage (survives refresh). Control Panel will broadcast
@@ -4325,8 +5536,22 @@
             // v1.00: refresh approver list in the background — handles
             // boss-just-added-me scenario without requiring a script reload.
             fetchApproversList();
+            // v1.03: same for the Slack notification config.
+            fetchSlackConfig();
         } else {
             syncStatus = 'no-token';
+        }
+        // v1.20: hourly stale-issue bump check while the page is open
+        // (refetchIssues also triggers one on each site load). IFRAME-gated
+        // inside runStaleBumpCheck — only ever sees the open site.
+        if (!IS_TOP) setInterval(() => { try { runStaleBumpCheck(); } catch (e) {} }, 60 * 60 * 1000);
+        // v1.22: GLOBAL cross-site sweep in the TOP frame — bumps stale issues
+        // on EVERY site without needing one open (approver-gated, see
+        // runGlobalStaleSweep). Kick once shortly after load (let the
+        // Control Panel broadcast a fresh token first), then hourly.
+        if (IS_TOP) {
+            setTimeout(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 30 * 1000);
+            setInterval(() => { try { runGlobalStaleSweep(); } catch (e) {} }, 60 * 60 * 1000);
         }
         // Always ask the Control Panel for the current token so we get
         // the latest if the user updated it elsewhere.
