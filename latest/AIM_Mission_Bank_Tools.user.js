@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.17';
+    const SCRIPT_VERSION = '1.18';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -195,6 +195,11 @@
     let autoSnapAglEnabled = false;
     const CACHE_KEY_DEFAULT_SNAP_AGL = 'aim-mb-default-snap-agl';
     let defaultSnapAglFt = gmGet(CACHE_KEY_DEFAULT_SNAP_AGL, 10);
+    // Editor compact-card altitude view: AGL (ground-relative) vs MSL (stored).
+    // AGL reads more naturally; MSL is what's stored (for verifying). Toggle in
+    // the editor button row. Persisted.
+    const CACHE_KEY_AGL_VIEW = 'aim-mb-editor-agl-view';
+    let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -1533,7 +1538,12 @@
         kml.style.cssText = 'flex:0 0 auto;padding:5px 9px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
             'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
         kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
-        row.appendChild(compact); row.appendChild(refresh); row.appendChild(kml);
+        const aglv = document.createElement('button');
+        aglv.id = AGL_VIEW_BTN_ID;
+        aglv.type = 'button';
+        aglv.style.cssText = 'flex:0 0 auto;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        aglv.onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAglView(!showAglInEditor); };
+        row.appendChild(compact); row.appendChild(refresh); row.appendChild(kml); row.appendChild(aglv);
         // Second row: the safety-gated Auto snapshot-AGL toggle (full width so
         // it's hard to miss). Default OFF; turning it ON warns + shows a banner.
         const row2 = document.createElement('div');
@@ -1549,7 +1559,28 @@
         else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
         updateEditorCollapseBtn();
         updateAutoSnapAglUI();
+        updateAglViewBtn();
         composerEnsureMapMode(true);
+    }
+
+    // ── Editor altitude view: AGL vs MSL toggle ──────────────────────────────
+    const AGL_VIEW_BTN_ID = 'aim-mb-aglview-btn';
+    function setAglView(on) {
+        showAglInEditor = !!on;
+        gmSet(CACHE_KEY_AGL_VIEW, showAglInEditor);
+        updateAglViewBtn();
+        try { applyNativeEditorCollapse(); } catch (e) {} // re-render cards in the new unit
+    }
+    function updateAglViewBtn() {
+        const btn = document.getElementById(AGL_VIEW_BTN_ID);
+        if (!btn) return;
+        btn.textContent = showAglInEditor ? '📐 AGL' : '📏 MSL';
+        btn.title = showAglInEditor
+            ? 'Showing AGL (height above ground) on each step. Click to switch to MSL (stored altitude).'
+            : 'Showing MSL (stored altitude) on each step. Click to switch to AGL (height above ground).';
+        btn.style.background = showAglInEditor ? 'rgba(95,255,95,0.14)' : 'rgba(150,180,255,0.12)';
+        btn.style.border = showAglInEditor ? '1px solid rgba(95,255,95,0.5)' : '1px solid rgba(150,180,255,0.5)';
+        btn.style.color = showAglInEditor ? '#7dff7d' : '#9cf';
     }
 
     // ── Snapshot auto-AGL: toggle button + on-map banner ─────────────────────
@@ -1798,6 +1829,9 @@
             });
         }
         if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
+        // AGL view depends on DEM that loads async — re-render cards each tick so
+        // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
+        else if (showAglInEditor && collapseEditorCards) { try { applyNativeEditorCollapse(); } catch (e) {} }
         // (2) Auto-AGL (armed only): re-float snapshots that MOVED to ground+AGL,
         //     live, via updateInstruction. First sighting = baseline (no change),
         //     so existing snapshots aren't clobbered until you actually move them.
@@ -2150,6 +2184,21 @@
         (document.head || document.documentElement).appendChild(st);
     }
     function compactAltFt(m) { return typeof m === 'number' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : ''; }
+    // Altitude shown on a nav/snap compact card: AGL (value1 − DEM ground) when
+    // the AGL view is on (falls back to MSL + triggers a DEM fetch until ground
+    // is cached), else MSL (stored value1). Suffix tells you which you're seeing.
+    function compactAltDisplay(instr) {
+        const m = instr.value1;
+        if (typeof m !== 'number') return '';
+        const msl = `${Math.round(m * 3.28084).toLocaleString()} ft MSL`;
+        if (!showAglInEditor) return msl;
+        const g = stepElevM(instr);
+        if (g == null) { // ground not cached yet — kick a fetch, show MSL meanwhile
+            if (instr.location && instr.location.lat != null) { try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {} }
+            return msl;
+        }
+        return `${Math.round((m - g) * 3.28084).toLocaleString()} ft AGL`;
+    }
 
     // Compact ONE card: hide its detail rows (via the class) and inject the key
     // value inline — Navigate/Snapshot=altitude (blue/pink), Wait=Ns (white),
@@ -2160,8 +2209,8 @@
         if (!header || !titleEl) return;
         const t = instr.type_name;
         let valText = null, valColor = '#cfe', titleColor = null, renameText = null, renameColor = '#fff';
-        if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = stepColor('nav'); titleColor = stepColor('nav'); }
-        else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = stepColor('snap'); titleColor = stepColor('snap'); }
+        if (t === 'navigate') { valText = compactAltDisplay(instr); valColor = stepColor('nav'); titleColor = stepColor('nav'); }
+        else if (t === 'snapshot') { valText = compactAltDisplay(instr); valColor = stepColor('snap'); titleColor = stepColor('snap'); }
         else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = stepColor('wait'); titleColor = stepColor('wait'); }
         else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? stepColor('thermalOn') : stepColor('thermalOff'); }
         else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }

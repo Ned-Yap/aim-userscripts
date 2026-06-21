@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.18 (dev/latest) — AGL/MSL toggle on the compact cards
+
+Each Navigate/Snapshot step in the compact editor list now shows its altitude as **AGL** (height above ground) by default, with a **📐 AGL / 📏 MSL** toggle in the editor button row to swap back and forth (AGL reads naturally; flip to MSL to verify the stored value). The label carries the unit suffix so it's never ambiguous. AGL uses each step's DEM ground; while the elevation loads it briefly shows MSL, then flips to AGL. Preference is remembered. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.17 (dev/latest) — LIVE snapshot auto-AGL on move + live editor sync
 
 The snapshot auto-AGL is now **live**: with the **📷 Auto-AGL** toggle ON, the moment you drag a snapshot to a new spot the editor sets its altitude to that point's **DEM ground + your default AGL** — no save needed, you see it immediately (it writes Percepto's own editor state via the mission editor's `updateInstruction`). It only touches snapshots you **move after arming** (existing/flare snapshots are left alone), and the on-save pass still backstops everything. Also fixes the **stale-altitude / vanishing-badge** lag: MBT now mirrors the live editor state every ~0.7 s, so the compact card altitudes and the N#/S# map badges update right after a native step edit or drag (instead of waiting for a full mission save), and the badge lat/lng match no longer breaks after a drag. Dev-only (latest/).
