@@ -30,6 +30,12 @@ The weekly stale-issue auto-bump (open/pending >7 days → ping assignee + appro
 
 ---
 
+## 2026-06-20 — Mission Bank Tools — map reorder works + auto-refresh — Mission Bank Tools v0.92 (dev/latest only)
+
+Editing a Navigate badge to renumber a stop now actually reorders and persists. The bug was that Percepto's `reorderInstructions` is a fresh function on every render, so reusing one across a multi-step group move ran every move against the original order (scrambling/crashing the editor) — now it re-fetches before each move. Also: the Composer **auto-refetches** the mission when the cache is stale (you added/edited steps), and there's a **🔄** button in the Composer header to force a resync — so you no longer have to open the SUM first. The diagnostic 🧪 probe was removed.
+
+---
+
 ## 2026-06-20 — Mission Bank Tools — editable Navigate order badges — Mission Bank Tools v0.87 (dev/latest only)
 
 The blue **N#** badges on the map are now **editable**: click one, type a new number, and that whole stop — the navigate plus its snapshots and scan steps — moves to that position, cascading everyone else's numbers. Snapshots auto-follow (you only edit one number). It drives Percepto's reorder via single-step group swaps, so the native list reorders live; then hit SAVE. Snapshot **S#** badges are display-only for now (editable next). The list ▲▼ arrows still work too.

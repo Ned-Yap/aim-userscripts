@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.91
+// @version      0.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.91';
+    const SCRIPT_VERSION = '0.92';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1456,24 +1456,45 @@
     function composerDomIds() {
         return [...document.querySelectorAll('[data-rfd-draggable-id]')].map(el => el.getAttribute('data-rfd-draggable-id'));
     }
-    // Match the open editor's cards to a cached mission by shared instruction ids.
+    // Match the open editor's cards to a cached mission by shared instruction
+    // ids. Auto-refetches the site's missions when the cache is STALE — i.e.
+    // the editor shows cards the cached mission doesn't have (you added/edited
+    // steps) — so you never have to open the SUM first to refresh.
     function identifyOpenMission(cb) {
         const domIds = composerDomIds();
         if (!domIds.length) { cb(null); return; }
         const sid = getCurrentSiteID();
-        const match = (missions) => {
-            if (!Array.isArray(missions)) { cb(null); return; }
+        const evaluate = (missions, fromFetch) => {
             let best = null, bestHits = 0;
-            for (const m of missions) {
+            for (const m of (Array.isArray(missions) ? missions : [])) {
                 const idset = new Set((m.instructions || []).map(x => String(x.id)));
                 let hits = 0; for (const d of domIds) if (idset.has(d)) hits++;
                 if (hits > bestHits) { bestHits = hits; best = m; }
             }
-            cb(best && bestHits >= Math.min(domIds.length, 3) ? { mission: best, domIds } : null);
+            const matched = best && bestHits >= Math.min(domIds.length, 3);
+            const bestSet = best ? new Set((best.instructions || []).map(x => String(x.id))) : null;
+            const covers = bestSet ? domIds.every(d => bestSet.has(d)) : false;
+            // If we matched but the cache doesn't cover every on-screen card
+            // (stale after an edit), OR didn't match at all, refetch ONCE.
+            if ((!matched || !covers) && !fromFetch) {
+                delete missionsBySite[sid];
+                fetchMissions(sid, (m) => evaluate(m, true), () => cb(matched ? { mission: best, domIds } : null));
+                return;
+            }
+            cb(matched ? { mission: best, domIds } : null);
         };
         const cached = missionsBySite[sid] && missionsBySite[sid].missions;
-        if (Array.isArray(cached)) match(cached);
-        else fetchMissions(sid, match, () => cb(null));
+        if (Array.isArray(cached)) evaluate(cached, false);
+        else fetchMissions(sid, (m) => evaluate(m, true), () => cb(null));
+    }
+    // Manual force-refresh: drop the cache + re-identify + redraw. Wired to the
+    // 🔄 button so you can resync after editing in the native editor.
+    function composerRefresh() {
+        const sid = getCurrentSiteID();
+        if (sid) delete missionsBySite[sid];
+        composerMission = null;
+        showToast('Refreshing mission from server…', '#9ad', 1500);
+        openComposer();
     }
 
     // Group ordered instructions into rows: nav | block (snapshot + scan) | struct | other.
@@ -1789,32 +1810,6 @@
         input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
     }
 
-    // SAFE self-reverting probe: swap two adjacent scan-step cards (4↔5) then
-    // immediately swap back. Net-zero, fully reversible, no boundary cards
-    // (takeoff/returnHome). Reveals (a) does a single reorderInstructions call
-    // work, (b) which index basis it uses (did cards[4,5] move, or cards[3,4]?),
-    // (c) does it throw. DON'T click SAVE after running it.
-    async function composerTestReorder() {
-        if (composerBusy) return;
-        if (!composerFindReorderFn()) { showToast('Test: reorder function NOT found.', '#ff5252', 4000); return; }
-        composerBusy = true;
-        const snap = () => composerDomIds().slice(0, 9);
-        const before = snap();
-        let threw1 = false, threw2 = false;
-        // Re-fetch the fn before EACH call — it's a per-render closure.
-        try { composerFindReorderFn()(4, 5); } catch (e) { threw1 = true; console.warn(`${TAG} [composer-test] fn(4,5) threw`, e); }
-        await new Promise(r => setTimeout(r, 700));
-        const afterSwap = snap();
-        try { composerFindReorderFn()(5, 4); } catch (e) { threw2 = true; console.warn(`${TAG} [composer-test] fn(5,4) threw`, e); }
-        await new Promise(r => setTimeout(r, 700));
-        const afterRestore = snap();
-        composerBusy = false;
-        console.log(`${TAG} [composer-test] ` + JSON.stringify({ before, afterSwap, afterRestore, threw1, threw2 }));
-        const ok = JSON.stringify(before) === JSON.stringify(afterRestore) && !threw1 && !threw2 &&
-            JSON.stringify(before) !== JSON.stringify(afterSwap);
-        showToast(`Test ran (self-reverting). ${ok ? 'Looks good' : 'See console'} — paste the [composer-test] line. Do NOT click SAVE.`, ok ? '#5fff5f' : '#ffd54f', 7000);
-    }
-
     function renderComposer(mission, rows) {
         closeComposer();
         const unit = getDistanceUnit();
@@ -1872,15 +1867,15 @@
         panel.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
                 <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
-                <button data-cmp-test title="Safe self-reverting reorder probe (won't change the mission). Don't SAVE after." style="background:rgba(255,213,79,0.14);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">🧪 Test</button>
+                <button data-cmp-refresh title="Re-fetch this mission from the server (resync after editing)" style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">🔄</button>
                 <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
             <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge on the map to renumber a stop (snapshots follow) — then SAVE. ▲▼ also moves a block.</span></div>
             <div style="overflow:auto">${rowHtml}</div>`;
         document.body.appendChild(panel);
         panel.querySelector('[data-cmp-x]').onclick = closeComposer;
-        const testBtn = panel.querySelector('[data-cmp-test]');
-        if (testBtn) testBtn.onclick = () => composerTestReorder();
+        const refreshBtn = panel.querySelector('[data-cmp-refresh]');
+        if (refreshBtn) refreshBtn.onclick = () => composerRefresh();
         panel.querySelectorAll('[data-cmp-cb]').forEach(cb => {
             cb.onchange = () => {
                 cb.getAttribute('data-ids').split(',').forEach(id => { if (cb.checked) composerSel.add(id); else composerSel.delete(id); });
