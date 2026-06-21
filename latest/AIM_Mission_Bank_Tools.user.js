@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.89
+// @version      0.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.89';
+    const SCRIPT_VERSION = '0.90';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1779,6 +1779,32 @@
         input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
     }
 
+    // SAFE self-reverting probe: swap two adjacent scan-step cards (4↔5) then
+    // immediately swap back. Net-zero, fully reversible, no boundary cards
+    // (takeoff/returnHome). Reveals (a) does a single reorderInstructions call
+    // work, (b) which index basis it uses (did cards[4,5] move, or cards[3,4]?),
+    // (c) does it throw. DON'T click SAVE after running it.
+    async function composerTestReorder() {
+        if (composerBusy) return;
+        const fn = composerFindReorderFn();
+        if (!fn) { showToast('Test: reorder function NOT found.', '#ff5252', 4000); return; }
+        composerBusy = true;
+        const snap = () => composerDomIds().slice(0, 9);
+        const before = snap();
+        let threw1 = false, threw2 = false;
+        try { fn(4, 5); } catch (e) { threw1 = true; console.warn(`${TAG} [composer-test] fn(4,5) threw`, e); }
+        await new Promise(r => setTimeout(r, 700));
+        const afterSwap = snap();
+        try { fn(5, 4); } catch (e) { threw2 = true; console.warn(`${TAG} [composer-test] fn(5,4) threw`, e); }
+        await new Promise(r => setTimeout(r, 700));
+        const afterRestore = snap();
+        composerBusy = false;
+        console.log(`${TAG} [composer-test] ` + JSON.stringify({ before, afterSwap, afterRestore, threw1, threw2 }));
+        const ok = JSON.stringify(before) === JSON.stringify(afterRestore) && !threw1 && !threw2 &&
+            JSON.stringify(before) !== JSON.stringify(afterSwap);
+        showToast(`Test ran (self-reverting). ${ok ? 'Looks good' : 'See console'} — paste the [composer-test] line. Do NOT click SAVE.`, ok ? '#5fff5f' : '#ffd54f', 7000);
+    }
+
     function renderComposer(mission, rows) {
         closeComposer();
         const unit = getDistanceUnit();
@@ -1836,12 +1862,15 @@
         panel.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
                 <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
+                <button data-cmp-test title="Safe self-reverting reorder probe (won't change the mission). Don't SAVE after." style="background:rgba(255,213,79,0.14);border:1px solid rgba(255,213,79,0.5);color:#ffd54f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">🧪 Test</button>
                 <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
             <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge on the map to renumber a stop (snapshots follow) — then SAVE. ▲▼ also moves a block.</span></div>
             <div style="overflow:auto">${rowHtml}</div>`;
         document.body.appendChild(panel);
         panel.querySelector('[data-cmp-x]').onclick = closeComposer;
+        const testBtn = panel.querySelector('[data-cmp-test]');
+        if (testBtn) testBtn.onclick = () => composerTestReorder();
         panel.querySelectorAll('[data-cmp-cb]').forEach(cb => {
             cb.onchange = () => {
                 cb.getAttribute('data-ids').split(',').forEach(id => { if (cb.checked) composerSel.add(id); else composerSel.delete(id); });
