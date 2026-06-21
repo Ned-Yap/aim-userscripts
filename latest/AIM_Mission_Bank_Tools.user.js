@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.99
+// @version      1.00
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.99';
+    const SCRIPT_VERSION = '1.00';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2091,7 +2091,10 @@
         // rows) so the card is one line, put the title content-width, and let
         // our injected value sit on the right. Card stays a real draggable box.
         st.textContent = `
-            [data-rfd-draggable-id].aim-mb-compact { max-height:44px !important; overflow:hidden !important; margin-bottom:3px !important; }
+            /* Cap the CARD to its title row (kills dead space at top/bottom),
+               but DON'T touch the draggable wrapper's margin — that gap between
+               steps is Percepto's drag-to-insert target. */
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item { max-height:42px !important; overflow:hidden !important; padding-top:0 !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__params { display:none !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding:0 !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
