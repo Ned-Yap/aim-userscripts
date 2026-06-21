@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.26
+// @version      1.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.26';
+    const SCRIPT_VERSION = '1.27';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2065,6 +2065,17 @@
             console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
             showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
             try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
+            // Navigate the SPA to the new mission's editor URL so it shows without
+            // a page refresh (setCurrentApp sets the data but not the view/route).
+            try {
+                const top = window.top || window;
+                const cur = (top.location && top.location.hash) || '';
+                const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/);
+                if (mm && saved && saved.id != null) {
+                    const target = `${mm[1]}/${saved.id}`;
+                    if (cur !== target) top.location.hash = target;
+                }
+            } catch (e) { console.warn(`${TAG} [gen] open-nav failed`, e); }
         } catch (e) {
             console.warn(`${TAG} [gen] saveApp failed`, e);
             showToast('Generate failed — see console (the mission was NOT created).', '#ff5252', 5000);
