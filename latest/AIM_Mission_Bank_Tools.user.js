@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.21
+// @version      1.22
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.21';
+    const SCRIPT_VERSION = '1.22';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1578,7 +1578,7 @@
     function updateAglViewBtn() {
         const btn = document.getElementById(AGL_VIEW_BTN_ID);
         if (!btn) return;
-        btn.textContent = showAglInEditor ? '📐 AGL' : '📏 MSL';
+        btn.textContent = showAglInEditor ? 'AGL' : 'MSL';
         btn.title = showAglInEditor
             ? 'Showing AGL (height above ground) on each step. Click to switch to MSL (stored altitude).'
             : 'Showing MSL (stored altitude) on each step. Click to switch to AGL (height above ground).';
