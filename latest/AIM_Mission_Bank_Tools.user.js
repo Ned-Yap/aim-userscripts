@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.13';
+    const SCRIPT_VERSION = '1.14';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3386,6 +3386,7 @@
                         ${panelState.detailSelection.size ? `<span class="aim-mb-sel-count">${panelState.detailSelection.size} selected</span>` : ''}
                         <button class="aim-mb-bulk-btn" data-bulk="agl" title="Set a target AGL for the selected steps (or all visible editable steps if none selected) — recomputes each step's altitude from its own ground elevation.">Bulk → AGL</button>
                         <button class="aim-mb-bulk-btn" data-bulk="alt" title="Set an absolute altitude for the selected steps (or all visible editable steps if none selected).">Bulk → ALT</button>
+                        <button class="aim-mb-bulk-btn" data-snap-agl title="Re-float snapshots to a target AGL (each snapshot's own ground + this AGL) — fixes snapshots dragged underground. Default: only snapshots below the target; toggle for all.">Snapshot AGL</button>
                         <label class="aim-mb-collapse-toggle" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:#9ad;white-space:nowrap;" title="Collapse each snapshot's Thermal/GEM/Wait block into one summary row. Data is untouched — view only.">
                             <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
                         </label>
@@ -3696,6 +3697,10 @@
                 openBulkPopover(b, missionId, filteredSteps, b.dataset.bulk);
             };
         });
+        // Snapshot AGL (auto-set / underground fix) — operates on ALL snapshots
+        // in the mission, regardless of the active type filter.
+        const saBtn = panelEl.querySelector('[data-snap-agl]');
+        if (saBtn) saBtn.onclick = (e) => { e.stopPropagation(); openSnapAglPopover(saBtn, missionId, allSteps); };
         // Lat / Long cells — click or right-click copies the raw number.
         // (M1-edit to move the waypoint is a planned fast-follow.)
         panelEl.querySelectorAll('.aim-mb-latlng').forEach(el => {
@@ -3976,6 +3981,103 @@
         });
         closeBulkPopover();
         showToast(`Bulk → ${mode.toUpperCase()}: queued ${queued}${skipped ? ` · skipped ${skipped}` : ''}`, queued ? '#ff9800' : '#888', 4500);
+        renderDetailView(missionId);
+    }
+
+    // ── Snapshot AGL (auto-set / underground fix) ────────────────────────────
+    // Snapshot altitude is stored as absolute MSL, so dragging a snapshot keeps
+    // its MSL while the new ground may be higher → AGL (= MSL − DEM ground) goes
+    // negative ("underground"). This re-floats snapshots to a target AGL
+    // (ground + AGL). Default scope = snapshots BELOW the target; toggle = ALL.
+    // Reuses the bulk popover shell + the altitude queue/commit pipeline.
+    function snapAglCandidates(allSteps) {
+        return (allSteps || []).filter(s => s && s.type_name === 'snapshot' && stepAltEditable(s) && stepElevM(s) != null);
+    }
+    function openSnapAglPopover(anchorBtn, missionId, allSteps) {
+        closeBulkPopover();
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        const toM = (d) => unit === 'imperial' ? (d / 3.28084) : d;
+        const defAgl = unit === 'imperial' ? 8 : 2;
+        const snaps = snapAglCandidates(allSteps);
+        const totalSnaps = (allSteps || []).filter(s => s && s.type_name === 'snapshot').length;
+        const skipNoElev = totalSnaps - snaps.length;
+        const pop = document.createElement('div');
+        pop.className = 'aim-mb-bp-pop';
+        pop.innerHTML = `
+            <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">Snapshot AGL</span><button class="aim-mb-menu-close" data-bp-close>✕</button></div>
+            <div style="padding:10px 12px;">
+                <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Re-floats snapshots to <b>ground + target AGL</b> — fixes snapshots dragged underground. Each snapshot uses its own DEM ground elevation.</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <label style="flex:1;font-size:11px;">Target AGL (${unitLabel})</label>
+                    <input type="text" data-sa-input value="${defAgl}" style="width:90px;">
+                </div>
+                <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin:6px 0;cursor:pointer;">
+                    <input type="checkbox" data-sa-all> Apply to ALL snapshots (not just below target)
+                </label>
+                <div style="font-size:11px;color:#888;margin:4px 0 10px;" data-sa-count></div>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-bp-cancel>Cancel</button>
+                    <button class="aim-mb-bulk-btn" data-sa-apply>Queue edits</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        bulkPopoverEl = pop;
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = r.left + 'px';
+        const pr = pop.getBoundingClientRect();
+        if (pr.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - pr.width) + 'px';
+        if (pr.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, r.top - pr.height - 4) + 'px';
+        const input = pop.querySelector('[data-sa-input]');
+        const allCb = pop.querySelector('[data-sa-all]');
+        const countEl = pop.querySelector('[data-sa-count]');
+        const applyBtn = pop.querySelector('[data-sa-apply]');
+        const recount = () => {
+            const v = parseFloat(input.value);
+            if (isNaN(v)) { countEl.textContent = 'Enter a target AGL.'; applyBtn.disabled = true; applyBtn.textContent = 'Queue edits'; return; }
+            applyBtn.disabled = false;
+            const tM = toM(v), all = allCb.checked;
+            let n = 0;
+            snaps.forEach(s => { const aglM = s.value1 - stepElevM(s); if (all || aglM < tM - 1e-6) n++; });
+            const under = snaps.filter(s => (s.value1 - stepElevM(s)) < 0).length;
+            countEl.innerHTML = `Will re-float <strong style="color:#ffd54f;">${n}</strong> of ${snaps.length} snapshot${snaps.length === 1 ? '' : 's'}${all ? '' : ` below ${v} ${unitLabel}`} · <span style="color:${under ? '#ff5252' : '#888'}">${under} underground</span>${skipNoElev ? ` · ${skipNoElev} no elevation yet` : ''}`;
+            applyBtn.textContent = `Queue ${n} edit${n === 1 ? '' : 's'}`;
+        };
+        recount();
+        input.focus(); input.select();
+        const doApply = () => applySnapAgl(missionId, allSteps, input.value, allCb.checked);
+        applyBtn.onclick = doApply;
+        allCb.onchange = recount;
+        input.oninput = recount;
+        pop.querySelector('[data-bp-cancel]').onclick = closeBulkPopover;
+        pop.querySelector('[data-bp-close]').onclick = closeBulkPopover;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); doApply(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeBulkPopover(); }
+        };
+        setTimeout(() => document.addEventListener('mousedown', bulkOutsideClose, true), 0);
+    }
+    function applySnapAgl(missionId, allSteps, rawInput, allMode) {
+        const v = parseFloat(rawInput);
+        if (isNaN(v)) { showToast('Invalid target AGL', '#ff5252'); return; }
+        const unit = panelState.distanceUnit;
+        const toM = (d) => unit === 'imperial' ? (d / 3.28084) : d;
+        const tM = toM(v);
+        let queued = 0, skipped = 0;
+        snapAglCandidates(allSteps).forEach(s => {
+            const groundM = stepElevM(s);
+            const aglM = s.value1 - groundM;
+            if (!allMode && aglM >= tM - 1e-6) { skipped++; return; } // already at/above target
+            const newAltM = groundM + tM;
+            const newDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            const origDisp = unit === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+            if (newDisp === origDisp) { discardPendingChange(missionId, s.id); skipped++; return; }
+            queueAltitudeChange(missionId, s.id, newDisp, unit);
+            queued++;
+        });
+        closeBulkPopover();
+        showToast(`Snapshot AGL → ${v} ${unit === 'imperial' ? 'ft' : 'm'}: queued ${queued}${skipped ? ` · skipped ${skipped}` : ''}`, queued ? '#ff9800' : '#888', 4500);
         renderDetailView(missionId);
     }
 

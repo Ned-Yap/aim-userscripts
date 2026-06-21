@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.14 (dev/latest) — Snapshot AGL (auto-set + underground fix)
+
+New **Snapshot AGL** button in the mission drill-down (next to Bulk → AGL). Snapshot altitude is stored absolute, so dragging a snapshot can drop it underground (its AGL goes negative against the new, higher terrain). This re-floats snapshots to a target AGL (each snapshot's own DEM ground + the AGL you enter, default 8 ft). By default it only touches snapshots **below the target** (so it fixes the dragged-underground ones and leaves good ones alone); a checkbox applies it to **all** snapshots for fast scan building. A live count shows how many will move and how many are currently underground; everything queues through the existing Commit / fast-save pipeline. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.13 (dev/latest) — KML routed path rides at altitude
 
 The captured flight path is 2D, so it was snapping to the ground. Each route vertex now takes the altitude of the nearest navigate (and switches to `absolute` altitude mode), so the white line rides up with the nav pins instead of lying on the terrain. Dev-only (latest/).
