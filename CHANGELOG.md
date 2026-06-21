@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.17 (dev/latest) — LIVE snapshot auto-AGL on move + live editor sync
+
+The snapshot auto-AGL is now **live**: with the **📷 Auto-AGL** toggle ON, the moment you drag a snapshot to a new spot the editor sets its altitude to that point's **DEM ground + your default AGL** — no save needed, you see it immediately (it writes Percepto's own editor state via the mission editor's `updateInstruction`). It only touches snapshots you **move after arming** (existing/flare snapshots are left alone), and the on-save pass still backstops everything. Also fixes the **stale-altitude / vanishing-badge** lag: MBT now mirrors the live editor state every ~0.7 s, so the compact card altitudes and the N#/S# map badges update right after a native step edit or drag (instead of waiting for a full mission save), and the badge lat/lng match no longer breaks after a drag. Dev-only (latest/).
+
+---
+
+## 2026-06-21 — Mission Bank Tools v1.16 (dev/latest) — re-stamp N#/S# badges on editor mutations
+
+(see commit) Percepto re-renders a step's marker after a per-step save, wiping the injected N#/S# number; MBT now re-stamps badges on editor mutations so the number returns promptly instead of waiting for the next pass.
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.15 (dev/latest) — Snapshot auto-AGL on save (safety-gated)
 
 Replaces the v1.14 manual button with an automatic, opt-in behavior: a **📷 Auto-AGL** toggle in the native-editor button row. While it's **ON**, every mission save re-sets all snapshots to their **DEM ground + a default AGL** (so snapshots you drag can't end up underground) — using each snapshot's current coordinates straight from the save body. **Safety:** it's OFF by default and **resets to OFF every time you (re)enter the Mission Bank**, so you have to arm it deliberately; turning it on shows a warning toast and a bright **on-map banner** while armed. Turn it OFF for the occasional elevated target (e.g. a flare-stack snapshot). The default AGL is set in the Control Panel ("Default snapshot AGL", default 10 ft). Out-of-range snapshots are still flagged by the Mission SOP checker. Dev-only (latest/).

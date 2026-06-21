@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.16';
+    const SCRIPT_VERSION = '1.17';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1557,6 +1557,9 @@
     const AUTO_SNAP_AGL_BANNER_ID = 'aim-mb-auto-snapagl-banner';
     function setAutoSnapAgl(on) {
         autoSnapAglEnabled = !!on;
+        // Re-baseline live tracking so arming only acts on snapshots you move
+        // AFTER turning it on (existing/flare snapshots are left until moved).
+        Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]);
         updateAutoSnapAglUI();
         if (autoSnapAglEnabled) {
             showToast(`⚠ Snapshot auto-AGL is ON — every save sets ALL snapshots to ground + ${defaultSnapAglFt} ft. Turn OFF for flares/elevated targets.`, '#ff7a00', 6000);
@@ -1738,6 +1741,87 @@
         if (!composerMission || !covered) { composerEnsureMapMode(true); return; }
         try { composerStyleNativeMarkers(); } catch (e) {}
     }
+    // ── Live mission-editor bridge ───────────────────────────────────────────
+    // Read/write Percepto's LIVE in-editor instruction state via React fiber —
+    // the same context MBT's reorder uses. `updateInstruction(fullObj)` replaces
+    // by id (confirmed: `R[M]=N; n({...t,instructions:R})`). The fn and the
+    // instructions array can sit on DIFFERENT context objects, so find each
+    // independently; re-walk FRESH each call (per-render closures). Also probe
+    // fiber.alternate to dodge React's double-buffered fibers.
+    function mbGetFiber(el) {
+        const k = el && Object.keys(el).find(kk => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'));
+        return k ? el[k] : null;
+    }
+    function findMissionEditorCtx() {
+        const card = document.querySelector('[data-rfd-draggable-id]');
+        if (!card) return null;
+        const f0 = mbGetFiber(card);
+        let upd = null, instrs = null;
+        for (const start of [f0, f0 && f0.alternate]) {
+            let node = start, depth = 0;
+            while (node && depth < 140) {
+                let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                if (v && typeof v === 'object') {
+                    if (!upd && typeof v.updateInstruction === 'function') upd = v.updateInstruction;
+                    if (!instrs && Array.isArray(v.instructions) && v.instructions[0] &&
+                        (v.instructions[0].type_name !== undefined || v.instructions[0].value1 !== undefined)) instrs = v.instructions;
+                }
+                node = node.return; depth++;
+            }
+            if (upd && instrs) break;
+        }
+        return (upd && instrs) ? { upd, instrs } : null;
+    }
+
+    // Per-snapshot last-handled position (so we act on MOVES, not every tick).
+    const liveSnapLastLoc = {};
+    let liveEditorTimer = null;
+    function startLiveEditorSync() {
+        if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
+        liveEditorTimer = setInterval(() => { try { liveEditorTick(); } catch (e) {} }, 700);
+    }
+    function liveEditorTick() {
+        if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
+        const ctx = findMissionEditorCtx();
+        if (!ctx) return;
+        // (1) Keep MBT's cached mission in sync with the LIVE editor state, so the
+        //     compact card + map badges reflect native step-edits / drags before a
+        //     mission save (fixes "sidebar shows the old altitude"). Also re-syncs
+        //     locations so the lat/lng badge match stops failing after a drag.
+        let changed = false;
+        if (composerMission && Array.isArray(composerMission.instructions)) {
+            const byId = {}; ctx.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; });
+            composerMission.instructions.forEach(ci => {
+                const live = byId[String(ci.id)]; if (!live) return;
+                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; changed = true; }
+                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; changed = true; }
+            });
+        }
+        if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
+        // (2) Auto-AGL (armed only): re-float snapshots that MOVED to ground+AGL,
+        //     live, via updateInstruction. First sighting = baseline (no change),
+        //     so existing snapshots aren't clobbered until you actually move them.
+        if (autoSnapAglEnabled) liveAutoSnapAgl(ctx);
+    }
+    function liveAutoSnapAgl(ctx) {
+        const aglM = defaultSnapAglFt / 3.28084;
+        for (const s of ctx.instrs) {
+            if (!s || s.type_name !== 'snapshot' || !s.location || s.location.lat == null) continue;
+            const key = `${(+s.location.lat).toFixed(6)},${(+s.location.lng).toFixed(6)}`;
+            if (liveSnapLastLoc[s.id] === key) continue;            // this position already handled
+            const ground = getElevationFromCache(s.location.lat, s.location.lng);
+            if (ground == null) { try { fetchElevation(s.location.lat, s.location.lng); } catch (e) {} continue; } // wait for DEM, retry next tick
+            const firstSight = !(s.id in liveSnapLastLoc);
+            liveSnapLastLoc[s.id] = key;
+            if (firstSight) continue;                                // baseline only
+            const newV = Math.round((ground + aglM) * 100) / 100;
+            if (typeof s.value1 === 'number' && Math.abs(s.value1 - newV) < 0.5) continue; // already correct
+            try { ctx.upd(Object.assign({}, s, { value1: newV })); } catch (e) { continue; }
+            if (composerMission) { const ci = (composerMission.instructions || []).find(x => x && String(x.id) === String(s.id)); if (ci) ci.value1 = newV; }
+            console.log(`${TAG} [auto-agl] live: snapshot ${s.id} moved → value1 ${newV}m (ground ${Math.round(ground)} + ${defaultSnapAglFt}ft)`);
+        }
+    }
+
     // The on-screen instruction ids, in current editor order.
     function composerDomIds() {
         return [...document.querySelectorAll('[data-rfd-draggable-id]')].map(el => el.getAttribute('data-rfd-draggable-id'));
@@ -6059,6 +6143,10 @@ ${snapPlacemarks}
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
             try { patchLeafletMap(); } catch (e) {}
+            // Live editor bridge: syncs MBT's display to the live mission-editor
+            // state + drives armed snapshot auto-AGL on GPS moves (700ms poll,
+            // early-returns unless a mission is open in the editor).
+            try { startLiveEditorSync(); } catch (e) {}
             // Re-apply the native-editor collapse promptly as the instruction
             // list mounts / virtualizes on scroll (the 4s interval is too slow
             // to feel responsive). Debounced so a burst of mutations = 1 pass.
@@ -6091,6 +6179,7 @@ ${snapPlacemarks}
                 // SAFETY: disarm snapshot auto-AGL on any navigation, so it never
                 // stays armed when you (re)enter the Mission Bank.
                 if (autoSnapAglEnabled) { autoSnapAglEnabled = false; try { updateAutoSnapAglUI(); } catch (e) {} }
+                Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]); // re-baseline next mission
                 runSumInjection();
             });
         } catch (e) {}
