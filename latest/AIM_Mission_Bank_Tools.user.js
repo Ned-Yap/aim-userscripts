@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.94
+// @version      0.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.94';
+    const SCRIPT_VERSION = '0.95';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1424,87 +1424,122 @@
     let composerMission = null;    // the matched mission (id→data source; order read from DOM)
     let composerRows = [];         // current grouped rows (for move handlers)
     let composerBusy = false;      // guard against concurrent reorders
-    // Map-edit mode: draw N#/S# badges on the native editor map + hide
-    // Percepto's own navigate/snapshot icons, so the badges are the only
-    // markers and you reorder right on the map (no floating list panel).
-    let composerMapMode = gmGet(COMPOSER_MAPMODE_KEY, false);
+    // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
+    // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
+    // same spot+size. Left-click (M1) stays native (opens the step); right-click
+    // (M2) opens our order editor. Always on; no toggle button.
+    let composerMapMode = true;
+    let composerMapEventsBound = false;
+    let loggedNoMarkers = false;
 
-    function updateComposerBtn() {
-        const btn = document.getElementById(COMPOSER_BTN_ID);
-        if (!btn) return;
-        btn.textContent = composerMapMode ? '🗺 Editing on map — stop' : '🗺 Edit order on map';
-        btn.style.background = composerMapMode ? 'rgba(95,255,95,0.30)' : 'rgba(95,255,95,0.12)';
-    }
     function injectComposerButton() {
         if (CONTEXT !== 'IFRAME') return;
         const content = document.querySelector('.mission-edit__content');
         if (!content) return;
-        if (document.getElementById(COMPOSER_ROW_ID)) { updateComposerBtn(); return; }
+        if (document.getElementById(COMPOSER_ROW_ID)) return;
         const row = document.createElement('div');
         row.id = COMPOSER_ROW_ID;
         row.style.cssText = 'display:flex;gap:6px;margin:0 0 8px;';
-        const btn = document.createElement('button');
-        btn.id = COMPOSER_BTN_ID;
-        btn.type = 'button';
-        btn.style.cssText = 'flex:1;padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
-            'color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleMapMode(); };
         const refresh = document.createElement('button');
+        refresh.id = COMPOSER_BTN_ID;
         refresh.type = 'button';
-        refresh.textContent = '🔄';
-        refresh.title = 'Re-fetch this mission from the server (resync after editing)';
-        refresh.style.cssText = 'padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
-            'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;';
+        refresh.textContent = '🔄 Resync map order';
+        refresh.title = 'Re-fetch this mission + re-number the map badges (right-click a badge to reorder)';
+        refresh.style.cssText = 'flex:1;padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+            'color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
         refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
-        row.appendChild(btn); row.appendChild(refresh);
+        row.appendChild(refresh);
         const anchor = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
         if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(row, anchor.nextSibling);
         else content.insertBefore(row, content.firstChild);
-        updateComposerBtn();
-        if (composerMapMode) composerEnsureMapMode();
+        composerEnsureMapMode(true);
     }
 
-    function toggleMapMode() {
-        composerMapMode = !composerMapMode;
-        gmSet(COMPOSER_MAPMODE_KEY, composerMapMode);
-        updateComposerBtn();
-        if (composerMapMode) composerEnsureMapMode();
-        else composerExitMapMode();
+    function composerBindMapEvents() {
+        if (composerMapEventsBound) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.on !== 'function') return;
+        map.on('zoomend moveend layeradd', () => { try { composerStyleNativeMarkers(); } catch (e) {} });
+        composerMapEventsBound = true;
     }
-    // Hide Percepto's own navigate/snapshot map icons (CSS :has) so only our
-    // N#/S# badges show. Removed when map-edit mode is off.
-    function applyNativeNavSnapHide(on) {
-        const ID = 'aim-mb-navsnap-hide';
-        const existing = document.getElementById(ID);
-        if (!on) { if (existing) existing.remove(); return; }
-        if (existing) return;
-        const st = document.createElement('style');
-        st.id = ID;
-        st.textContent = '.instruction-marker:has(img[src*="navigate-"]),.instruction-marker:has(img[src*="snapshot-"]){display:none!important;}';
-        (document.head || document.documentElement).appendChild(st);
+
+    // Recolor + number Percepto's native nav/snap markers in place.
+    function composerStyleNativeMarkers() {
+        if (!composerMapMode || CONTEXT !== 'IFRAME' || !composerMission) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        composerBindMapEvents();
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
+        const lookup = {}; let navN = 0, snapN = 0;
+        ordered.forEach(s => {
+            if (!s.location || s.location.lat == null) return;
+            if (s.type_name === 'navigate') { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
+            else if (s.type_name === 'snapshot') { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+        });
+        let matched = 0, seen = 0;
+        map.eachLayer(layer => {
+            const el = layer && layer._icon;
+            if (!el || !el.classList || !el.classList.contains('instruction-marker')) return;
+            seen++;
+            const ll = layer._latlng;
+            if (!ll) return;
+            const info = lookup[K(ll.lat, ll.lng)];
+            if (!info) return;
+            matched++;
+            composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+        });
+        if (!matched && seen && !loggedNoMarkers) {
+            loggedNoMarkers = true;
+            console.warn(`${TAG} [map-badges] saw ${seen} instruction-markers but matched 0 by lat/lng — Leaflet layer model differs; tell me and I'll switch to pixel matching.`);
+        }
     }
+    function composerStyleOneMarker(el, info, ll) {
+        const iconDiv = el.querySelector('.instruction-marker__icon');
+        if (!iconDiv) return;
+        const bg = info.kind === 'nav' ? '#2f6bff' : '#ec4899';
+        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
+        el.setAttribute('data-aim-id', info.id);
+        el.setAttribute('data-aim-kind', info.kind);
+        el.__aimLL = ll;
+        if (iconDiv.getAttribute('data-aim-label') !== label) {
+            iconDiv.setAttribute('data-aim-label', label);
+            iconDiv.style.cssText = `background:${bg} !important;border:1.5px solid #fff !important;border-radius:50% !important;` +
+                "display:flex !important;align-items:center;justify-content:center;font:800 11px/1 'Lato',sans-serif;color:#fff !important;";
+            iconDiv.innerHTML = `<span style="pointer-events:none;color:#fff;-webkit-text-fill-color:#fff">${label}</span>`;
+        } else {
+            iconDiv.style.background = bg;
+        }
+        if (!el.__aimCtx) {
+            el.__aimCtx = true;
+            // M2 (right-click) → reorder. M1 (left-click) left alone → native.
+            el.addEventListener('contextmenu', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const id = el.getAttribute('data-aim-id'), kind = el.getAttribute('data-aim-kind');
+                const n = parseInt((el.querySelector('.instruction-marker__icon')?.getAttribute('data-aim-label') || '').replace(/[^0-9]/g, ''), 10) || 1;
+                composerEditOrder(kind, id, n, el.__aimLL || ll);
+            }, true);
+        }
+    }
+
     function composerEnsureMapMode(silent) {
         identifyOpenMission((data) => {
-            if (!data) { if (!silent) showToast('Map edit: could not match the open mission to the cache.', '#ff9800', 4000); return; }
+            if (!data) { if (!silent) showToast('Map badges: could not match the open mission to the cache.', '#ff9800', 4000); return; }
             composerMission = data.mission;
-            composerDrawBadges();
-            applyNativeNavSnapHide(true);
+            composerStyleNativeMarkers();
         });
     }
-    function composerExitMapMode() {
-        composerClearBadges();
-        applyNativeNavSnapHide(false);
-    }
-    // Re-ensure badges when in map mode and they're missing or the editor
-    // switched to a different mission. Called from the injection interval.
+    // Interval-driven: load the mission if missing/stale, else re-style markers
+    // (idempotent — per-marker early-return when the label is unchanged).
     function composerEnsureMapModeIfNeeded() {
         if (!composerMapMode || CONTEXT !== 'IFRAME') return;
-        if (!document.querySelector('.mission-edit__content')) { if (composerBadgeLayer) composerClearBadges(); return; }
+        if (!document.querySelector('.mission-edit__content')) return;
         const domIds = composerDomIds();
         if (!domIds.length) return;
         const covered = composerMission && domIds.slice(0, 3).every(d => (composerMission.instructions || []).some(x => String(x.id) === d));
-        if (composerBadgeLayer && covered) return;
-        composerEnsureMapMode(true); // silent — interval-driven, don't spam toasts
+        if (!composerMission || !covered) { composerEnsureMapMode(true); return; }
+        try { composerStyleNativeMarkers(); } catch (e) {}
     }
     function closeComposer() {
         const el = document.getElementById(COMPOSER_PANEL_ID);
@@ -1556,10 +1591,9 @@
         const sid = getCurrentSiteID();
         if (sid) delete missionsBySite[sid];
         composerMission = null;
-        composerClearBadges();
+        loggedNoMarkers = false;
         showToast('Refreshing mission from server…', '#9ad', 1500);
-        composerEnsureMapMode(); // reload + redraw badges (also (re)enables the map view)
-        if (!composerMapMode) { composerMapMode = true; gmSet(COMPOSER_MAPMODE_KEY, true); updateComposerBtn(); }
+        composerEnsureMapMode(); // reload + re-number the native markers
     }
 
     // Group ordered instructions into rows: nav | block (snapshot + scan) | struct | other.
@@ -1606,7 +1640,7 @@
         // The floating list panel is retired (map-edit is the workflow), but if
         // it's ever open, keep it in sync. Badges always redraw.
         if (document.getElementById(COMPOSER_PANEL_ID)) renderComposer(composerMission, composerRows);
-        try { composerDrawBadges(); } catch (e) { console.warn(`${TAG} [composer] badge draw failed`, e); }
+        try { composerStyleNativeMarkers(); } catch (e) { console.warn(`${TAG} [composer] marker restyle failed`, e); }
     }
 
     // ── Reorder engine (ports the Quick Mission Editor's fiber reorder) ──
