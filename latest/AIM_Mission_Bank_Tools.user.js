@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.07
+// @version      1.08
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.07';
+    const SCRIPT_VERSION = '1.08';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1464,13 +1464,9 @@
     // a snapshot + its trailing Thermal/GEM/Wait steps) in a docked panel.
     // Block reorder / bulk param edit / GPS-pick build on this next.
     // ============================================================
-    const COMPOSER_PANEL_ID = 'aim-mb-composer';
     const COMPOSER_BTN_ID = 'aim-mb-composer-btn';
     const COMPOSER_ROW_ID = 'aim-mb-composer-row';
-    const COMPOSER_MAPMODE_KEY = 'aim-mb-composer-mapmode';
-    const composerSel = new Set(); // selected instruction ids (strings)
     let composerMission = null;    // the matched mission (id→data source; order read from DOM)
-    let composerRows = [];         // current grouped rows (for move handlers)
     let composerBusy = false;      // guard against concurrent reorders
     // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
     // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
@@ -1651,15 +1647,6 @@
         if (!composerMission || !covered) { composerEnsureMapMode(true); return; }
         try { composerStyleNativeMarkers(); } catch (e) {}
     }
-    function closeComposer() {
-        const el = document.getElementById(COMPOSER_PANEL_ID);
-        if (el) el.remove();
-        const ne = document.getElementById('aim-cmp-num-edit');
-        if (ne) ne.remove();
-        composerBusy = false;
-        try { composerClearBadges(); } catch (e) {}
-    }
-
     // The on-screen instruction ids, in current editor order.
     function composerDomIds() {
         return [...document.querySelectorAll('[data-rfd-draggable-id]')].map(el => el.getAttribute('data-rfd-draggable-id'));
@@ -1706,50 +1693,11 @@
         composerEnsureMapMode(); // reload + re-number the native markers
     }
 
-    // Group ordered instructions into rows: nav | block (snapshot + scan) | struct | other.
-    function composerGroup(ordered) {
-        const isBlk = t => t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
-        const rows = []; let i = 0;
-        while (i < ordered.length) {
-            const s = ordered[i];
-            if (!s) { i++; continue; }
-            if (s.type_name === 'snapshot') {
-                const row = { kind: 'block', snapshot: s, steps: [], ids: [String(s.id)] };
-                i++;
-                while (i < ordered.length && ordered[i] && isBlk(ordered[i].type_name)) { row.steps.push(ordered[i]); row.ids.push(String(ordered[i].id)); i++; }
-                rows.push(row);
-            } else if (s.type_name === 'navigate') { rows.push({ kind: 'nav', step: s, ids: [String(s.id)] }); i++; }
-            else if (s.type_name === 'takeoff' || s.type_name === 'returnHome') { rows.push({ kind: 'struct', step: s, ids: [String(s.id)] }); i++; }
-            else { rows.push({ kind: 'other', step: s, ids: [String(s.id)] }); i++; }
-        }
-        return rows;
-    }
-
-    function openComposer() {
-        composerBusy = false; // never inherit a stuck busy flag from a prior session
-        identifyOpenMission((data) => {
-            if (!data) {
-                const n = composerDomIds().length;
-                console.warn(`${TAG} [composer] open failed — ${n} draggable cards found but no cached mission matched. (Open the SUM once to warm the cache.)`);
-                showToast('Composer: could not match the open mission to the cache. Open the SUM once to load it.', '#ff9800', 4000);
-                return;
-            }
-            composerMission = data.mission;
-            rerenderComposer();
-        });
-    }
-
-    // Re-read the LIVE editor order and regroup (the cached mission supplies
-    // each step's data by id; the order comes from the DOM, so this stays
-    // correct after a reorder).
+    // Re-style the native markers after a reorder (the cached mission supplies
+    // each step's data by id; the order is read live from the DOM, so this
+    // stays correct after a reorder).
     function rerenderComposer() {
         if (!composerMission) return;
-        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
-        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
-        composerRows = composerGroup(ordered);
-        // The floating list panel is retired (map-edit is the workflow), but if
-        // it's ever open, keep it in sync. Badges always redraw.
-        if (document.getElementById(COMPOSER_PANEL_ID)) renderComposer(composerMission, composerRows);
         try { composerStyleNativeMarkers(); } catch (e) { console.warn(`${TAG} [composer] marker restyle failed`, e); }
     }
 
@@ -1814,25 +1762,6 @@
             placement = to + 1;
         }
     }
-    // Move composer row i up one row (down = move the row below up). Moves the
-    // whole block (snapshot + its 5 steps) as a unit; persists in Percepto's
-    // live state — the user then hits native SAVE.
-    async function composerMoveRow(i, dir) {
-        if (composerBusy) return;
-        if (dir === 'down') return composerMoveRow(i + 1, 'up');
-        if (i <= 0 || i >= composerRows.length) return;
-        const fn = composerFindReorderFn();
-        if (!fn) { showToast('Composer: reorder unavailable (Percepto changed). Tell me and I’ll re-point it.', '#ff5252', 5000); return; }
-        composerBusy = true;
-        try {
-            const dest = composerIndexById(composerRows[i - 1].ids[0]);
-            if (dest >= 0) await composerMoveIdsToIndex(composerRows[i].ids, dest);
-        } catch (e) { console.warn(`${TAG} [composer] move failed`, e); }
-        composerBusy = false;
-        rerenderComposer();
-        showToast('Reordered — hit SAVE in the editor to persist.', '#5fff5f', 3500);
-    }
-
     // ── Leaflet access (ported from Map Styler) ──────────────────────────
     let leafletMapRef = null, leafletPatched = false;
     function composerGetL() { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; return w.L || null; }
@@ -1869,56 +1798,6 @@
             for (const k in c) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} }
         }
         return null;
-    }
-
-    // ── Map order badges (Nav blue / Snap pink, numbered in flight order) ──
-    let composerBadgeLayer = null;
-    function composerBadgeIcon(n, kind) {
-        const L = composerGetL(); if (!L) return null;
-        const bg = kind === 'nav' ? '#2f6bff' : '#ec4899';
-        const html = `<div data-cmp-badge="${kind}" style="min-width:20px;height:20px;padding:0 4px;border-radius:10px;background:${bg};color:#fff;font:700 11px/20px 'Lato',sans-serif;text-align:center;border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.6);cursor:pointer;white-space:nowrap">${kind === 'nav' ? 'N' : 'S'}${n}</div>`;
-        return L.divIcon({ className: 'aim-cmp-badge', html, iconSize: [22, 20], iconAnchor: [11, 30] });
-    }
-    function composerClearBadges() {
-        const map = getLeafletMap();
-        if (composerBadgeLayer && map) { try { map.removeLayer(composerBadgeLayer); } catch (e) {} }
-        composerBadgeLayer = null;
-    }
-    let loggedBadgeFail = false;
-    function composerDrawBadges() {
-        patchLeafletMap();
-        const map = getLeafletMap();
-        const L = composerGetL();
-        if (!map || !L || !composerMission) {
-            if (!loggedBadgeFail && composerMission) {
-                loggedBadgeFail = true;
-                console.warn(`${TAG} [composer] badges not drawn — leafletMap=${!!map} L=${!!L}. (If L is false, Percepto doesn't expose window.L here — tell me and I'll source the marker constructor differently.)`);
-            }
-            return;
-        }
-        composerClearBadges();
-        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
-        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
-        const group = L.layerGroup();
-        let navN = 0, snapN = 0;
-        ordered.forEach(s => {
-            if (!s.location || s.location.lat == null) return;
-            if (s.type_name === 'navigate') {
-                navN++;
-                const navId = String(s.id), num = navN, ll = [s.location.lat, s.location.lng];
-                const mk = L.marker(ll, { icon: composerBadgeIcon(num, 'nav'), zIndexOffset: 2000, keyboard: false });
-                mk.on('click', () => composerEditOrder('nav', navId, num, ll));
-                group.addLayer(mk);
-            } else if (s.type_name === 'snapshot') {
-                snapN++;
-                const snapId = String(s.id), num = snapN, ll = [s.location.lat, s.location.lng];
-                const mk = L.marker(ll, { icon: composerBadgeIcon(num, 'snap'), zIndexOffset: 2000, keyboard: false });
-                mk.on('click', () => composerEditOrder('snap', snapId, num, ll));
-                group.addLayer(mk);
-            }
-        });
-        group.addTo(map);
-        composerBadgeLayer = group;
     }
 
     // ── Edit a Navigate's order number → move the whole stop there ──
@@ -2068,85 +1947,6 @@
         };
         input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
         input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
-    }
-
-    function renderComposer(mission, rows) {
-        closeComposer();
-        const unit = getDistanceUnit();
-        const ft = (m) => unit === 'imperial' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : `${Math.round(m)} m`;
-        const panel = document.createElement('div');
-        panel.id = COMPOSER_PANEL_ID;
-        // Percepto's native editor is a LEFT sidebar, so the Composer docks to
-        // the RIGHT edge and is locked there — it sits beside the editor (both
-        // visible) and can't drift over it. Full height of the map/editor area.
-        panel.style.cssText = 'position:fixed;top:0;right:0;width:360px;height:100vh;z-index:2147483600;' +
-            'background:#0f1216;border-left:1px solid rgba(95,255,95,0.45);box-shadow:-8px 0 30px rgba(0,0,0,0.55);' +
-            "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
-        const navCount = rows.filter(r => r.kind === 'nav').length;
-        const blkCount = rows.filter(r => r.kind === 'block').length;
-        // Index of the first/last MOVABLE row (skip struct rows so the arrows
-        // disable correctly at the real ends).
-        const movable = rows.map((r, idx) => (r.kind === 'nav' || r.kind === 'block') ? idx : -1).filter(i => i >= 0);
-        const firstMov = movable.length ? movable[0] : -1;
-        const lastMov = movable.length ? movable[movable.length - 1] : -1;
-        const moveBtns = (idx) => {
-            const upDis = idx <= firstMov ? 'opacity:0.25;pointer-events:none;' : '';
-            const dnDis = idx >= lastMov ? 'opacity:0.25;pointer-events:none;' : '';
-            const b = 'background:rgba(95,255,95,0.10);border:1px solid rgba(95,255,95,0.35);color:#5fff5f;width:20px;height:18px;line-height:1;border-radius:3px;cursor:pointer;font-size:10px;padding:0;';
-            return `<span style="display:flex;flex-direction:column;gap:1px;margin-left:6px">
-                <button data-cmp-move="up" data-row="${idx}" title="Move up" style="${b}${upDis}">▲</button>
-                <button data-cmp-move="down" data-row="${idx}" title="Move down" style="${b}${dnDis}">▼</button>
-            </span>`;
-        };
-        const rowHtml = rows.map((r, idx) => {
-            const idsAttr = r.ids.join(',');
-            const checked = r.ids.every(id => composerSel.has(id)) ? 'checked' : '';
-            if (r.kind === 'nav') {
-                const altM = typeof r.step.value1 === 'number' ? r.step.value1 : null;
-                const v = r.step.value2;
-                return `<div class="aim-cmp-row" style="padding:6px 10px;border-bottom:1px solid #1f2430;background:rgba(20,210,220,0.06);display:flex;align-items:center;gap:8px">
-                      <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
-                      <span style="color:#7adfe6;font-weight:700">▸ Navigate</span>
-                      <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}${v != null ? ` · ${Math.round(v * 2.23694)} mph` : ''}</span>
-                      ${moveBtns(idx)}
-                    </div>`;
-            }
-            if (r.kind === 'block') {
-                const altM = typeof r.snapshot.value1 === 'number' ? r.snapshot.value1 : null;
-                return `<div class="aim-cmp-row" style="padding:6px 10px 6px 22px;border-bottom:1px solid #1f2430;display:flex;align-items:center;gap:8px">
-                      <input type="checkbox" data-cmp-cb data-ids="${idsAttr}" ${checked}>
-                      <span style="color:#fff;font-weight:600">📷 Snapshot</span>
-                      <span style="color:#666;font-size:10px">+${r.steps.length} scan</span>
-                      <span style="color:#9ad;margin-left:auto;font-size:11px">${altM != null ? ft(altM) : ''}</span>
-                      ${moveBtns(idx)}
-                    </div>`;
-            }
-            if (r.kind === 'struct') return '';
-            return `<div class="aim-cmp-row" style="padding:5px 10px;border-bottom:1px solid #1f2430;color:#888;font-size:11px">${escapeHtml(r.step.type_name)}</div>`;
-        }).join('');
-        panel.innerHTML = `
-            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
-                <div style="flex:1;font-weight:700;color:#5fff5f;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">🧩 ${escapeHtml(mission.name || 'Mission')}</div>
-                <button data-cmp-refresh title="Re-fetch this mission from the server (resync after editing)" style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">🔄</button>
-                <button data-cmp-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
-            </div>
-            <div style="padding:6px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">${navCount} navigates · ${blkCount} snapshot blocks <span style="color:#666">· click a blue <b style="color:#6f9bff">N#</b> badge to renumber a stop (snapshots follow), or a pink <b style="color:#ff7ac0">S#</b> to reorder/re-home a snapshot — then SAVE.</span></div>
-            <div style="overflow:auto">${rowHtml}</div>`;
-        document.body.appendChild(panel);
-        panel.querySelector('[data-cmp-x]').onclick = closeComposer;
-        const refreshBtn = panel.querySelector('[data-cmp-refresh]');
-        if (refreshBtn) refreshBtn.onclick = () => composerRefresh();
-        panel.querySelectorAll('[data-cmp-cb]').forEach(cb => {
-            cb.onchange = () => {
-                cb.getAttribute('data-ids').split(',').forEach(id => { if (cb.checked) composerSel.add(id); else composerSel.delete(id); });
-            };
-        });
-        panel.querySelectorAll('[data-cmp-move]').forEach(btn => {
-            btn.onclick = (e) => {
-                e.preventDefault(); e.stopPropagation();
-                composerMoveRow(Number(btn.dataset.row), btn.dataset.move);
-            };
-        });
     }
 
     function ensureEditorCollapseStyle(on) {

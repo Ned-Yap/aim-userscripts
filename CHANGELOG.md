@@ -6,7 +6,13 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-21 — Mission Bank Tools v1.04 (dev/latest) — customizable per-step colors
+## 2026-06-21 — Mission Bank Tools v1.08 (dev/latest) — dead-code cleanup (no behavior change)
+
+Removed the retired floating-Composer panel and the old separate-badge map path now that map-editing (in-place native-marker badges) is the workflow. Deleted `renderComposer`/`openComposer`/`closeComposer`/`composerGroup`/`composerMoveRow` and the `composerDrawBadges`/`composerBadgeIcon`/`composerClearBadges`/`composerBadgeLayer` cluster plus their unused state (`composerSel`, `composerRows`, `COMPOSER_PANEL_ID`, `COMPOSER_MAPMODE_KEY`). ~200 lines lighter; the live reorder + marker-styling path is unchanged. Dev-only (latest/).
+
+---
+
+## 2026-06-21 — Mission Bank Tools v1.04–v1.07 (dev/latest) — customizable per-step colors
 
 The compact-card text in the native mission editor and the on-map N#/S# order badges now read their colors from a new **Step colors** section in the Control Panel (under Mission Bank Tools). Pick any color for Navigate, Snapshot, Thermal On/Off, GEM On/Off, and Wait — changes apply live to the editor cards, the map badges, and the reorder popup. One color per type, stored per user. Dev-only (latest/); not promoted.
 
