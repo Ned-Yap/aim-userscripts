@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.04
+// @version      1.05
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.04';
+    const SCRIPT_VERSION = '1.05';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2187,7 +2187,7 @@
         let valText = null, valColor = '#cfe', titleColor = null, renameText = null, renameColor = '#fff';
         if (t === 'navigate') { valText = compactAltFt(instr.value1); valColor = stepColor('nav'); titleColor = stepColor('nav'); }
         else if (t === 'snapshot') { valText = compactAltFt(instr.value1); valColor = stepColor('snap'); titleColor = stepColor('snap'); }
-        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = stepColor('wait'); }
+        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = stepColor('wait'); titleColor = stepColor('wait'); }
         else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? stepColor('thermalOn') : stepColor('thermalOff'); }
         else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }
         else { card.classList.remove('aim-mb-compact-renamed'); return; }
