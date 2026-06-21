@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.96
+// @version      0.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.96';
+    const SCRIPT_VERSION = '0.97';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1470,6 +1470,7 @@
         if (!map || typeof map.eachLayer !== 'function') return;
         composerBindMapEvents();
         installComposerMarkerEvents();
+        composerEnsureBadgeCSS();
         const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
         const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
         const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
@@ -1496,25 +1497,38 @@
             console.warn(`${TAG} [map-badges] saw ${seen} instruction-markers but matched 0 by lat/lng — Leaflet layer model differs; tell me and I'll switch to pixel matching.`);
         }
     }
+    // Persistent CSS: color nav (blue) / snap (pink) markers + hide their
+    // original icon by IMG SRC, so a Percepto re-render (during a reorder)
+    // re-applies the colored circle INSTANTLY — no flash of the original icon.
+    // (The number is JS-injected and may blink for a frame; the circle won't.)
+    // Keying off the img keeps :has matching even though we keep the img around.
+    function composerEnsureBadgeCSS() {
+        if (document.getElementById('aim-mb-badge-css')) return;
+        const st = document.createElement('style');
+        st.id = 'aim-mb-badge-css';
+        st.textContent = `
+            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:#2f6bff !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:#ec4899 !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
+            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
+            .instruction-marker__icon > .aim-num { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+                color:#fff !important; -webkit-text-fill-color:#fff; font:800 11px/1 'Lato',sans-serif; pointer-events:none; }
+        `;
+        (document.head || document.documentElement).appendChild(st);
+    }
     function composerStyleOneMarker(el, info, ll) {
         const iconDiv = el.querySelector('.instruction-marker__icon');
         if (!iconDiv) return;
-        const bg = info.kind === 'nav' ? '#2f6bff' : '#ec4899';
         const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         el.setAttribute('data-aim-id', info.id);
         el.setAttribute('data-aim-kind', info.kind);
         el.__aimLL = ll;
-        if (iconDiv.getAttribute('data-aim-label') !== label) {
-            iconDiv.setAttribute('data-aim-label', label);
-            iconDiv.style.cssText = `background:${bg} !important;border:1.5px solid #fff !important;border-radius:50% !important;` +
-                "display:flex !important;align-items:center;justify-content:center;font:800 11px/1 'Lato',sans-serif;color:#fff !important;";
-            iconDiv.innerHTML = `<span style="pointer-events:none;color:#fff;-webkit-text-fill-color:#fff">${label}</span>`;
-        } else {
-            iconDiv.style.background = bg;
-        }
-        // Click/right-click are handled by ONE window-capture listener (below),
-        // not per-marker — survives Leaflet recreating the marker + beats the
-        // Asset Inspector's window-BUBBLE contextmenu.
+        // Color + icon-hide is CSS (stable). JS only maintains the number span,
+        // keeping the original img in place so the :has() color rule still matches.
+        let num = iconDiv.querySelector('.aim-num');
+        if (!num) { num = document.createElement('span'); num.className = 'aim-num'; iconDiv.appendChild(num); }
+        if (num.textContent !== label) num.textContent = label;
+        // Click/right-click handled by ONE window-capture listener (below).
     }
 
     // ONE window-capture listener pair for all styled markers:
