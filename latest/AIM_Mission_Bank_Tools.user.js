@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.93
+// @version      0.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.93';
+    const SCRIPT_VERSION = '0.94';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1369,6 +1369,7 @@
         try { applyNativeEditorCollapse(); } catch (e) {}
         try { injectEditorCollapseButton(); } catch (e) {}
         try { injectComposerButton(); } catch (e) {}
+        try { composerEnsureMapModeIfNeeded(); } catch (e) {}
     }
 
     // A collapse/expand toggle button in Percepto's native mission-edit
@@ -1417,31 +1418,93 @@
     // ============================================================
     const COMPOSER_PANEL_ID = 'aim-mb-composer';
     const COMPOSER_BTN_ID = 'aim-mb-composer-btn';
+    const COMPOSER_ROW_ID = 'aim-mb-composer-row';
+    const COMPOSER_MAPMODE_KEY = 'aim-mb-composer-mapmode';
     const composerSel = new Set(); // selected instruction ids (strings)
     let composerMission = null;    // the matched mission (id→data source; order read from DOM)
     let composerRows = [];         // current grouped rows (for move handlers)
     let composerBusy = false;      // guard against concurrent reorders
+    // Map-edit mode: draw N#/S# badges on the native editor map + hide
+    // Percepto's own navigate/snapshot icons, so the badges are the only
+    // markers and you reorder right on the map (no floating list panel).
+    let composerMapMode = gmGet(COMPOSER_MAPMODE_KEY, false);
 
+    function updateComposerBtn() {
+        const btn = document.getElementById(COMPOSER_BTN_ID);
+        if (!btn) return;
+        btn.textContent = composerMapMode ? '🗺 Editing on map — stop' : '🗺 Edit order on map';
+        btn.style.background = composerMapMode ? 'rgba(95,255,95,0.30)' : 'rgba(95,255,95,0.12)';
+    }
     function injectComposerButton() {
         if (CONTEXT !== 'IFRAME') return;
         const content = document.querySelector('.mission-edit__content');
         if (!content) return;
-        if (document.getElementById(COMPOSER_BTN_ID)) return;
+        if (document.getElementById(COMPOSER_ROW_ID)) { updateComposerBtn(); return; }
+        const row = document.createElement('div');
+        row.id = COMPOSER_ROW_ID;
+        row.style.cssText = 'display:flex;gap:6px;margin:0 0 8px;';
         const btn = document.createElement('button');
         btn.id = COMPOSER_BTN_ID;
         btn.type = 'button';
-        btn.textContent = '🧩 Composer';
-        btn.style.cssText = 'display:block;width:100%;margin:0 0 8px;padding:6px 10px;background:rgba(95,255,95,0.12);' +
-            'border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleComposer(); };
+        btn.style.cssText = 'flex:1;padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+            'color:#5fff5f;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); toggleMapMode(); };
+        const refresh = document.createElement('button');
+        refresh.type = 'button';
+        refresh.textContent = '🔄';
+        refresh.title = 'Re-fetch this mission from the server (resync after editing)';
+        refresh.style.cssText = 'padding:6px 10px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+            'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;';
+        refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
+        row.appendChild(btn); row.appendChild(refresh);
         const anchor = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
-        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor.nextSibling);
-        else content.insertBefore(btn, content.firstChild);
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(row, anchor.nextSibling);
+        else content.insertBefore(row, content.firstChild);
+        updateComposerBtn();
+        if (composerMapMode) composerEnsureMapMode();
     }
 
-    function toggleComposer() {
-        if (document.getElementById(COMPOSER_PANEL_ID)) closeComposer();
-        else openComposer();
+    function toggleMapMode() {
+        composerMapMode = !composerMapMode;
+        gmSet(COMPOSER_MAPMODE_KEY, composerMapMode);
+        updateComposerBtn();
+        if (composerMapMode) composerEnsureMapMode();
+        else composerExitMapMode();
+    }
+    // Hide Percepto's own navigate/snapshot map icons (CSS :has) so only our
+    // N#/S# badges show. Removed when map-edit mode is off.
+    function applyNativeNavSnapHide(on) {
+        const ID = 'aim-mb-navsnap-hide';
+        const existing = document.getElementById(ID);
+        if (!on) { if (existing) existing.remove(); return; }
+        if (existing) return;
+        const st = document.createElement('style');
+        st.id = ID;
+        st.textContent = '.instruction-marker:has(img[src*="navigate-"]),.instruction-marker:has(img[src*="snapshot-"]){display:none!important;}';
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function composerEnsureMapMode(silent) {
+        identifyOpenMission((data) => {
+            if (!data) { if (!silent) showToast('Map edit: could not match the open mission to the cache.', '#ff9800', 4000); return; }
+            composerMission = data.mission;
+            composerDrawBadges();
+            applyNativeNavSnapHide(true);
+        });
+    }
+    function composerExitMapMode() {
+        composerClearBadges();
+        applyNativeNavSnapHide(false);
+    }
+    // Re-ensure badges when in map mode and they're missing or the editor
+    // switched to a different mission. Called from the injection interval.
+    function composerEnsureMapModeIfNeeded() {
+        if (!composerMapMode || CONTEXT !== 'IFRAME') return;
+        if (!document.querySelector('.mission-edit__content')) { if (composerBadgeLayer) composerClearBadges(); return; }
+        const domIds = composerDomIds();
+        if (!domIds.length) return;
+        const covered = composerMission && domIds.slice(0, 3).every(d => (composerMission.instructions || []).some(x => String(x.id) === d));
+        if (composerBadgeLayer && covered) return;
+        composerEnsureMapMode(true); // silent — interval-driven, don't spam toasts
     }
     function closeComposer() {
         const el = document.getElementById(COMPOSER_PANEL_ID);
@@ -1493,8 +1556,10 @@
         const sid = getCurrentSiteID();
         if (sid) delete missionsBySite[sid];
         composerMission = null;
+        composerClearBadges();
         showToast('Refreshing mission from server…', '#9ad', 1500);
-        openComposer();
+        composerEnsureMapMode(); // reload + redraw badges (also (re)enables the map view)
+        if (!composerMapMode) { composerMapMode = true; gmSet(COMPOSER_MAPMODE_KEY, true); updateComposerBtn(); }
     }
 
     // Group ordered instructions into rows: nav | block (snapshot + scan) | struct | other.
@@ -1538,7 +1603,9 @@
         const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
         const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
         composerRows = composerGroup(ordered);
-        renderComposer(composerMission, composerRows);
+        // The floating list panel is retired (map-edit is the workflow), but if
+        // it's ever open, keep it in sync. Badges always redraw.
+        if (document.getElementById(COMPOSER_PANEL_ID)) renderComposer(composerMission, composerRows);
         try { composerDrawBadges(); } catch (e) { console.warn(`${TAG} [composer] badge draw failed`, e); }
     }
 
