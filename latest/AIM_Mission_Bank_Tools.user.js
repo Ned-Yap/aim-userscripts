@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.01
+// @version      1.02
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.01';
+    const SCRIPT_VERSION = '1.02';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1369,6 +1369,7 @@
         try { applyNativeEditorCollapse(); } catch (e) {}
         try { injectEditorCollapseButton(); } catch (e) {}
         try { injectComposerButton(); } catch (e) {}
+        try { compactTopArea(); } catch (e) {}
         try { composerEnsureMapModeIfNeeded(); } catch (e) {}
     }
 
@@ -1383,6 +1384,29 @@
     // The Compact-view toggle now lives inside injectComposerButton's combined
     // row (kept here as a no-op so existing callers don't need touching).
     function injectEditorCollapseButton() { /* merged into the composer button row */ }
+
+    // Reclaim vertical space at the top of the native editor: shrink the
+    // ant-divider gap (CSS) and compact Percepto's tall "Add instruction"
+    // button (inline !important, re-applied if React recreates it).
+    function compactTopArea() {
+        if (CONTEXT !== 'IFRAME') return;
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        if (!document.getElementById('aim-mb-top-css')) {
+            const st = document.createElement('style');
+            st.id = 'aim-mb-top-css';
+            st.textContent = '.mission-edit__content .ant-divider { margin:5px 0 !important; }';
+            (document.head || document.documentElement).appendChild(st);
+        }
+        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
+        if (addBtn && addBtn.dataset.aimCompacted !== '1') {
+            addBtn.style.setProperty('padding-top', '7px', 'important');
+            addBtn.style.setProperty('padding-bottom', '7px', 'important');
+            addBtn.style.setProperty('margin', '2px 0', 'important');
+            addBtn.style.setProperty('min-height', '0', 'important');
+            addBtn.dataset.aimCompacted = '1';
+        }
+    }
 
     // ============================================================
     // MISSION COMPOSER — Increment 1 (read-only grouped view + multi-select)
@@ -1420,7 +1444,7 @@
         if (document.getElementById(COMPOSER_ROW_ID)) { updateEditorCollapseBtn(); return; }
         const row = document.createElement('div');
         row.id = COMPOSER_ROW_ID;
-        row.style.cssText = 'display:flex;gap:6px;margin:4px 0 6px;';
+        row.style.cssText = 'display:flex;gap:6px;margin:2px 0 2px;';
         const compact = document.createElement('button');
         compact.id = EDITOR_COLLAPSE_BTN_ID;
         compact.type = 'button';
