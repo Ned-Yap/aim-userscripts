@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.90
+// @version      0.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.90';
+    const SCRIPT_VERSION = '0.91';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1561,16 +1561,24 @@
         });
     }
     // Move a set of ids (in order) so they land starting at targetIndex.
-    async function composerMoveIdsToIndex(reorderFn, orderedIds, targetIndex) {
+    async function composerMoveIdsToIndex(orderedIds, targetIndex) {
         let placement = targetIndex;
         for (const id of orderedIds) {
             const from = composerIndexById(id);
             if (from < 0) continue;
             const to = from < placement ? placement - 1 : placement;
             if (from === to) { placement = to + 1; continue; }
+            // CRITICAL: reorderInstructions is a React closure over the CURRENT
+            // render's instruction snapshot; each call re-renders and
+            // invalidates it. Re-walk the fiber for a FRESH function before
+            // every move — reusing one stale fn was the v0.87 bug (every call
+            // operated on the original order → scramble/crash).
+            const fn = composerFindReorderFn();
+            if (!fn) { console.warn(`${TAG} [composer] reorder fn lost mid-move`); break; }
             const p = composerWaitForReorder(id, to, 3000);
-            try { reorderFn(from, to); } catch (e) { console.warn(`${TAG} [composer] reorder error`, e); }
+            try { fn(from, to); } catch (e) { console.warn(`${TAG} [composer] reorder error`, e); }
             await p;
+            await new Promise(r => setTimeout(r, 130)); // let the new render settle so the next fetch is current
             placement = to + 1;
         }
     }
@@ -1586,7 +1594,7 @@
         composerBusy = true;
         try {
             const dest = composerIndexById(composerRows[i - 1].ids[0]);
-            if (dest >= 0) await composerMoveIdsToIndex(fn, composerRows[i].ids, dest);
+            if (dest >= 0) await composerMoveIdsToIndex(composerRows[i].ids, dest);
         } catch (e) { console.warn(`${TAG} [composer] move failed`, e); }
         composerBusy = false;
         rerenderComposer();
@@ -1696,19 +1704,21 @@
         return groups;
     }
     // Move nav-group at index idx above the group at idx-1 (one step up).
-    async function composerSwapGroupUp(fn, idx) {
+    async function composerSwapGroupUp(idx) {
         if (idx <= 0) return;
         const groups = composerNavGroups(composerCurrentOrdered());
         if (idx >= groups.length) return;
         const dest = composerIndexById(groups[idx - 1].ids[0]);
-        if (dest >= 0) await composerMoveIdsToIndex(fn, groups[idx].ids, dest);
+        if (dest >= 0) await composerMoveIdsToIndex(groups[idx].ids, dest);
     }
     // DIAGNOSTIC MODE: while true, a nav-badge edit only LOGS the plan (which
     // reorderInstructions was found + the computed indices) and does NOT touch
     // the mission — so a wrong index basis can't scramble a real mission or
     // crash Percepto's editor (which was forcing a full-page refresh). Flip to
-    // false once the logged plan is verified correct.
-    let composerReorderDebug = true;
+    // false once the logged plan is verified correct. v0.91: ENABLED — the
+    // self-reverting probe confirmed card indices + single-call works; the bug
+    // was the stale-closure reuse (now fixed by re-fetching per move).
+    let composerReorderDebug = false;
     async function composerApplyNavOrder(navId, toNum) {
         if (composerBusy) return;
         const groups = composerNavGroups(composerCurrentOrdered());
@@ -1750,8 +1760,8 @@
         if (!fn) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
         composerBusy = true;
         try {
-            while (f > t) { await composerSwapGroupUp(fn, f); f--; }
-            while (f < t) { await composerSwapGroupUp(fn, f + 1); f++; }
+            while (f > t) { await composerSwapGroupUp(f); f--; }
+            while (f < t) { await composerSwapGroupUp(f + 1); f++; }
         } catch (e) { console.warn(`${TAG} [composer] nav reorder failed`, e); }
         composerBusy = false;
         rerenderComposer();
@@ -1786,16 +1796,16 @@
     // (c) does it throw. DON'T click SAVE after running it.
     async function composerTestReorder() {
         if (composerBusy) return;
-        const fn = composerFindReorderFn();
-        if (!fn) { showToast('Test: reorder function NOT found.', '#ff5252', 4000); return; }
+        if (!composerFindReorderFn()) { showToast('Test: reorder function NOT found.', '#ff5252', 4000); return; }
         composerBusy = true;
         const snap = () => composerDomIds().slice(0, 9);
         const before = snap();
         let threw1 = false, threw2 = false;
-        try { fn(4, 5); } catch (e) { threw1 = true; console.warn(`${TAG} [composer-test] fn(4,5) threw`, e); }
+        // Re-fetch the fn before EACH call — it's a per-render closure.
+        try { composerFindReorderFn()(4, 5); } catch (e) { threw1 = true; console.warn(`${TAG} [composer-test] fn(4,5) threw`, e); }
         await new Promise(r => setTimeout(r, 700));
         const afterSwap = snap();
-        try { fn(5, 4); } catch (e) { threw2 = true; console.warn(`${TAG} [composer-test] fn(5,4) threw`, e); }
+        try { composerFindReorderFn()(5, 4); } catch (e) { threw2 = true; console.warn(`${TAG} [composer-test] fn(5,4) threw`, e); }
         await new Promise(r => setTimeout(r, 700));
         const afterRestore = snap();
         composerBusy = false;
