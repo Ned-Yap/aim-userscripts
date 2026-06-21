@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.22
+// @version      1.23
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.22';
+    const SCRIPT_VERSION = '1.23';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1437,6 +1437,7 @@
         try { injectComposerButton(); } catch (e) {}
         try { compactTopArea(); } catch (e) {}
         try { composerEnsureMapModeIfNeeded(); } catch (e) {}
+        try { genEnsureButton(); } catch (e) {}
     }
 
     // A collapse/expand toggle button in Percepto's native mission-edit
@@ -1858,6 +1859,140 @@
             if (composerMission) { const ci = (composerMission.instructions || []).find(x => x && String(x.id) === String(s.id)); if (ci) ci.value1 = newV; }
             console.log(`${TAG} [auto-agl] live: snapshot ${s.id} moved → value1 ${newV}m (ground ${Math.round(ground)} + ${defaultSnapAglFt}ft)`);
         }
+    }
+
+    // ====================================================================
+    // MISSION GENERATOR — Increment 1: draw the site's assets + FFZs on the
+    // Mission Bank map; right-click (M2) an asset to PREVIEW its scan geometry
+    // (nav = closest safe point in the FFZ at ~100 ft standoff; snap = asset
+    // centroid at ground + default AGL). NO mission is written yet — this proves
+    // the data fetch, the drawing, the hit-test and the geometry. The actual
+    // build + save (saveApp) comes in Increment 2.
+    // ====================================================================
+    const GEN_BTN_ID = 'aim-mb-gen-btn';
+    const GEN_TARGET_STANDOFF_FT = 100; // ideal nav↔asset distance
+    const genEntCache = {};
+    let genLayer = null, genPreviewLayer = null, genOverlayOn = false;
+
+    function genFetchEntities(siteID) {
+        if (genEntCache[siteID]) return Promise.resolve(genEntCache[siteID]);
+        const url = `https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
+        return fetch(url, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => {
+                const list = Array.isArray(arr) ? arr : (arr && arr.objects) || [];
+                const ring = e => e.coords.map(c => ({ lat: c.lat, lng: c.lng }));
+                const assets = list.filter(e => e && e.type === 3 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!(e.custom && e.custom.is_unshielded) }));
+                const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null }));
+                const data = { assets, ffzs };
+                genEntCache[siteID] = data;
+                return data;
+            });
+    }
+    // ── geometry helpers (ported minimal) ──
+    function genCentroid(ring) { let lat = 0, lng = 0; ring.forEach(p => { lat += p.lat; lng += p.lng; }); return { lat: lat / ring.length, lng: lng / ring.length }; }
+    function genPointInPoly(pt, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].lng, yi = ring[i].lat, xj = ring[j].lng, yj = ring[j].lat;
+            if (((yi > pt.lat) !== (yj > pt.lat)) && (pt.lng < (xj - xi) * (pt.lat - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function genAssetFFZ(assetC, ffzs) {
+        for (const f of ffzs) if (genPointInPoly(assetC, f.ring)) return f;
+        let best = null, bd = Infinity;
+        for (const f of ffzs) { const d = sopHaversineFt(assetC, genCentroid(f.ring)); if (d < bd) { bd = d; best = f; } }
+        return best;
+    }
+    // Closest point on the FFZ boundary whose standoff to the asset is nearest
+    // the target (~100 ft) — densify each edge and pick the best sample.
+    function genNavPoint(assetC, ffz) {
+        let best = null, bestErr = Infinity, bestDist = 0;
+        const consider = pt => { const d = sopHaversineFt(assetC, pt); const err = Math.abs(d - GEN_TARGET_STANDOFF_FT); if (err < bestErr) { bestErr = err; best = pt; bestDist = d; } };
+        const ring = ffz.ring;
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length];
+            for (let k = 0; k <= 6; k++) { const t = k / 6; consider({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }); }
+        }
+        return { point: best, standoffFt: bestDist };
+    }
+
+    function genClearOverlay() {
+        const map = getLeafletMap();
+        if (genLayer && map) { try { map.removeLayer(genLayer); } catch (e) {} }
+        if (genPreviewLayer && map) { try { map.removeLayer(genPreviewLayer); } catch (e) {} }
+        genLayer = null; genPreviewLayer = null;
+    }
+    function genDrawOverlay() {
+        const L = composerGetL(); const map = getLeafletMap(); const siteID = getCurrentSiteID();
+        if (!L || !map || !siteID) { showToast('Generator: map/site not ready — open the Mission Bank map first.', '#ff9800'); return; }
+        patchLeafletMap();
+        genFetchEntities(siteID).then(({ assets, ffzs }) => {
+            genClearOverlay();
+            const group = L.layerGroup();
+            ffzs.forEach(f => { try { L.polygon(f.ring.map(p => [p.lat, p.lng]), { color: '#39ff14', weight: 1, fill: false, interactive: false }).addTo(group); } catch (e) {} });
+            let drawn = 0;
+            assets.forEach(a => {
+                try {
+                    const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#fff', weight: 1.5, fillColor: '#fff', fillOpacity: 0.08 });
+                    poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genPreviewAsset(a, ffzs); });
+                    poly.addTo(group); drawn++;
+                } catch (e) {}
+            });
+            group.addTo(map);
+            genLayer = group; genOverlayOn = true; genUpdateBtn();
+            showToast(`Generator: ${drawn} assets · ${ffzs.length} FFZs drawn. Right-click an asset to preview its scan.`, '#5fff5f', 5500);
+        }).catch(e => { console.warn(`${TAG} [gen] fetch/draw failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
+    }
+    function genToggleOverlay() {
+        if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); showToast('Generator overlay off.', '#888', 1500); }
+        else genDrawOverlay();
+    }
+    function genPreviewAsset(asset, ffzs) {
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) { showToast(`No FFZ found near ${asset.name || 'asset'} — can't place the drone.`, '#ff9800', 4000); return; }
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { fetchElevation(aC.lat, aC.lng); showToast('Fetching ground elevation — right-click again in a moment.', '#9ad', 2500); return; }
+        const nav = genNavPoint(aC, ffz);
+        const snapAltFt = Math.round(groundM * 3.28084) + defaultSnapAglFt;
+        const navAltFt = ffz.minAltM != null ? Math.round(ffz.minAltM * 3.28084) : null;
+        console.log(`${TAG} [gen] PREVIEW "${asset.name}" #${asset.id}`, { assetCentroid: aC, ffz: ffz.name || ffz.id, navPoint: nav.point, standoffFt: Math.round(nav.standoffFt), navAltFt, snapAltFt, groundFt: Math.round(groundM * 3.28084), poi: asset.poi, unshielded: asset.unshielded });
+        showToast(`${asset.name || 'Asset'}: nav ${Math.round(nav.standoffFt)} ft out @ ${navAltFt != null ? navAltFt + ' ft' : 'FFZ-min n/a'} · snap @ ground+${defaultSnapAglFt}=${snapAltFt} ft  (preview only)`, '#7adfe6', 6500);
+        genDrawPreview(aC, nav.point);
+    }
+    function genDrawPreview(snapPt, navPt) {
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map || !navPt) return;
+        if (genPreviewLayer) { try { map.removeLayer(genPreviewLayer); } catch (e) {} }
+        const g = L.layerGroup();
+        try {
+            L.polyline([[navPt.lat, navPt.lng], [snapPt.lat, snapPt.lng]], { color: '#b04dff', weight: 2, dashArray: '4,4' }).addTo(g);
+            L.circleMarker([navPt.lat, navPt.lng], { radius: 6, color: '#fff', weight: 1.5, fillColor: '#2f6bff', fillOpacity: 0.95 }).addTo(g);
+            L.circleMarker([snapPt.lat, snapPt.lng], { radius: 6, color: '#fff', weight: 1.5, fillColor: '#ec4899', fillOpacity: 0.95 }).addTo(g);
+        } catch (e) {}
+        g.addTo(map); genPreviewLayer = g;
+    }
+    function genUpdateBtn() {
+        const b = document.getElementById(GEN_BTN_ID);
+        if (b) { b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate'; b.style.background = genOverlayOn ? 'rgba(122,223,230,0.28)' : 'rgba(122,223,230,0.15)'; }
+    }
+    function genEnsureButton() {
+        if (CONTEXT !== 'IFRAME') return;
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!mapC) return;
+        if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
+        const btn = document.createElement('button');
+        btn.id = GEN_BTN_ID; btn.type = 'button';
+        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to preview its generated scan (Increment 1 — preview only).';
+        btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 10px;border-radius:6px;cursor:pointer;' +
+            'font:700 12px "Lato",sans-serif;background:rgba(122,223,230,0.15);border:1px solid rgba(122,223,230,0.6);color:#7adfe6;';
+        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
+        if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+        mapC.appendChild(btn);
+        genUpdateBtn();
     }
 
     // The on-screen instruction ids, in current editor order.

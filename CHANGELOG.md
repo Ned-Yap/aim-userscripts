@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.23 (dev/latest) — Mission Generator, Increment 1 (asset overlay + scan preview)
+
+First slice of the Mission Generator. A **⊕ Generate** button on the Mission Bank map draws the site's **assets (white) + FFZs (green)**; **right-click an asset** to preview its generated scan — the drone **Navigate** point (closest safe spot inside the FFZ at ~100 ft from the asset, at FFZ-min-alt) and the **Snapshot** point (asset centroid at ground + your default AGL), drawn as a blue→pink line with the standoff distance in a toast. **No mission is written yet** — this proves the data, drawing, hit-testing, and geometry before the save step (Increment 2). Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.18 (dev/latest) — AGL/MSL toggle on the compact cards
 
 Each Navigate/Snapshot step in the compact editor list now shows its altitude as **AGL** (height above ground) by default, with a **📐 AGL / 📏 MSL** toggle in the editor button row to swap back and forth (AGL reads naturally; flip to MSL to verify the stored value). The label carries the unit suffix so it's never ambiguous. AGL uses each step's DEM ground; while the elevation loads it briefly shows MSL, then flips to AGL. Preference is remembered. Dev-only (latest/).
