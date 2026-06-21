@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.06
+// @version      1.07
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.06';
+    const SCRIPT_VERSION = '1.07';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -183,16 +183,6 @@
         if (CONTEXT !== 'IFRAME') return;
         try { composerEnsureBadgeCSS(true); } catch (e) {}
         try { applyNativeEditorCollapse(); } catch (e) {}
-    }
-    // Pick black or white text for a given background color so even very
-    // dark / very light picks stay legible (used by the chip labels).
-    function contrastText(hex) {
-        const c = String(hex || '').replace('#', '');
-        if (c.length < 6) return '#fff';
-        const r = parseInt(c.slice(0, 2), 16), g = parseInt(c.slice(2, 4), 16), b = parseInt(c.slice(4, 6), 16);
-        if ([r, g, b].some(n => isNaN(n))) return '#fff';
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b; // perceptual luminance 0..255
-        return lum > 140 ? '#000' : '#fff';
     }
 
     // Battery → flights mapping. User's IFS formula:
@@ -2179,7 +2169,7 @@
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__header { padding-top:6px !important; padding-bottom:6px !important; }
             [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
             [data-rfd-draggable-id].aim-mb-compact-renamed .mission-instruction-item__title__name { display:none !important; }
-            .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; padding:1px 9px; border-radius:10px; }
+            .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; }
             .aim-mb-cx-val { flex:1; text-align:right; font-weight:800; font-size:13px; white-space:nowrap; padding-right:10px; }
         `;
         (document.head || document.documentElement).appendChild(st);
@@ -2211,10 +2201,7 @@
             let r = titleEl.querySelector('.aim-mb-cx-name');
             if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); }
             if (r.textContent !== renameText) r.textContent = renameText;
-            // Render as a filled chip so the EXACT picked color shows (even very
-            // dark "off" colors that would otherwise wash to grey on the dark UI).
-            r.style.background = renameColor;
-            r.style.color = contrastText(renameColor);
+            r.style.color = renameColor;
             const v = header.querySelector('.aim-mb-cx-val'); if (v) v.remove();
         } else {
             card.classList.remove('aim-mb-compact-renamed');
