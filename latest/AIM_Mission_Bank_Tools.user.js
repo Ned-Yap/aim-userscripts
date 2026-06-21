@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.20
+// @version      1.21
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.20';
+    const SCRIPT_VERSION = '1.21';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1446,7 +1446,7 @@
     function updateEditorCollapseBtn() {
         const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
         if (!btn) return;
-        btn.textContent = collapseEditorCards ? '⊟ Compact' : '⊞ Expand';
+        btn.textContent = collapseEditorCards ? '⊟' : '⊞';
         btn.title = collapseEditorCards ? 'Compact view: ON — click to expand the steps' : 'Compact view: OFF — click to compact the steps';
         btn.style.opacity = collapseEditorCards ? '1' : '0.7';
     }
@@ -1513,7 +1513,8 @@
         if (document.getElementById(COMPOSER_ROW_ID)) { updateEditorCollapseBtn(); return; }
         const row = document.createElement('div');
         row.id = COMPOSER_ROW_ID;
-        row.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 2px;';
+        // Equal-width grid so the 4 utility buttons align in one tidy row.
+        row.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin:2px 0 4px;';
         const compact = document.createElement('button');
         compact.id = EDITOR_COLLAPSE_BTN_ID;
         compact.type = 'button';
