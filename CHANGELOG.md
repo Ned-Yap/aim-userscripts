@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.12 (dev/latest) — KML uses AIM's real routed path + site name in title
+
+The KML's flight path is now the **actual routed line from AIM** — Percepto's white dashed route that follows the flight paths / FFZs (base → each step → back), captured off the map and converted to lat/lng — instead of a straight nav→nav line. Falls back to the straight line (and says so in the toast) when the routed line can't be read (e.g. exporting from the SUM drill-down). The KML **title now includes the site**: `Site 1502 - <site name> - <mission name>`. Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.11 (dev/latest) — KML colors + true flight path + standoff distances
 
 Refined the KML export: pins + labels now use your **AIM step colors** (blue Navigate / pink Snapshot, following whatever you pick in the Control Panel). Split the path geometry so it's accurate: a **white line** connects nav→nav (the real flight path) and separate **purple sightlines** run from each Navigate to its snapshots (what it's looking at) — no more nav→snap→nav zigzag. Each sightline is labeled with the **nav↔snapshot standoff distance** (e.g. `N2→S2 · 104 ft`) so you can confirm the ~100 ft target, and the distance also shows in the Navigate and Snapshot pin descriptions. Dev-only (latest/).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.12';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4026,6 +4026,36 @@
         return `${alpha || 'ff'}${c.slice(4, 6)}${c.slice(2, 4)}${c.slice(0, 2)}`.toLowerCase();
     }
 
+    // Capture AIM's REAL routed flight path off the map: Percepto draws it as
+    // white DASHED <path> elements in the Leaflet overlay SVG, whose `d` coords
+    // are layer points → invert via map.layerPointToLatLng to recover lat/lng
+    // (the route follows the FPs/FFZs, base→steps→back). Returns an array of
+    // lat/lng polylines, or null if the map/path isn't readable.
+    function captureFlightRoutes() {
+        try {
+            const map = getLeafletMap();
+            if (!map || typeof map.layerPointToLatLng !== 'function') return null;
+            const sel = 'path.leaflet-interactive[stroke="white"],path.leaflet-interactive[stroke="#fff"],path.leaflet-interactive[stroke="#ffffff"]';
+            const paths = document.querySelectorAll(sel);
+            const routes = [];
+            paths.forEach(p => {
+                const dash = p.getAttribute('stroke-dasharray') || '';
+                if (!/\d/.test(dash)) return; // the flight path is dashed; skip solid strokes
+                const d = p.getAttribute('d'); if (!d) return;
+                const pts = [];
+                const re = /(-?\d*\.?\d+)[ ,]+(-?\d*\.?\d+)/g; let m;
+                while ((m = re.exec(d)) !== null) pts.push([parseFloat(m[1]), parseFloat(m[2])]);
+                if (pts.length < 2) return;
+                const ll = [];
+                for (const pt of pts) {
+                    try { const g = map.layerPointToLatLng(pt); if (g && isFinite(g.lat) && isFinite(g.lng)) ll.push({ lat: g.lat, lng: g.lng }); } catch (e) {}
+                }
+                if (ll.length >= 2) routes.push(ll);
+            });
+            return routes.length ? routes : null;
+        } catch (e) { console.warn(`${TAG} [kml] route capture failed`, e); return null; }
+    }
+
     // Build a Google-Earth KML for an ordered list of mission steps:
     //   • a WHITE Flight Path line nav→nav (the real drone route),
     //   • PURPLE sightlines nav→each of its snapshots (what it's looking at),
@@ -4033,7 +4063,8 @@
     //   • N# pins (blue) whose description is the WHOLE stop — nav params + its
     //     snapshots (with distances) and their Thermal/GEM/Wait scan steps,
     //   • S# pins (pink) whose description is alt + distance-from-nav + scans.
-    function buildMissionKml(missionName, ordered) {
+    function buildMissionKml(missionName, ordered, opts) {
+        opts = opts || {};
         let navN = 0, snapN = 0;
         const stops = [];      // { nav, navNum, snaps:[snapBlock] }
         const snapBlocks = []; // { snap, snapNum, scans, parentNav, parentNavNum, distFt }
@@ -4067,13 +4098,28 @@
         const anySnap = snapBlocks.some(sb => sb.snap.location && sb.snap.location.lat != null);
         if (!navsLoc.length && !anySnap) return null;
 
-        // WHITE flight path: navigates only, in order (the real drone route).
-        const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
-        const pathPlacemark = navsLoc.length >= 2 ? `    <Placemark>
-      <name>Flight Path</name>
+        // Flight path: prefer the REAL routed path captured from AIM's map (the
+        // white dashed line that follows the FPs/FFZs, base→steps→back). Fall
+        // back to a straight nav→nav line when it isn't readable (e.g. the SUM
+        // export, where the open map may be a different mission).
+        let pathPlacemark = '';
+        if (opts.routes && opts.routes.length) {
+            pathPlacemark = opts.routes.map((route, i) => {
+                const coords = route.map(p => `${p.lng},${p.lat},0`).join(' ');
+                return `    <Placemark>
+      <name>Flight Path${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>clampToGround</altitudeMode><coordinates>${coords}</coordinates></LineString>
+    </Placemark>`;
+            }).join('\n');
+        } else if (navsLoc.length >= 2) {
+            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
+            pathPlacemark = `    <Placemark>
+      <name>Flight Path (straight nav→nav)</name>
       <styleUrl>#style-path</styleUrl>
       <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
-    </Placemark>` : '';
+    </Placemark>`;
+        }
 
         // PURPLE sightlines: nav → each of its snapshots, named with distance.
         const lookPlacemarks = snapBlocks.map(sb => {
@@ -4134,10 +4180,17 @@
         const navColor = hexToKmlColor(stepColor('nav'));
         const snapColor = hexToKmlColor(stepColor('snap'));
         const PIN = 'http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png';
+        // Title: "Site <id> - <site name> - <mission name>".
+        const sid = getCurrentSiteID(), sname = getCurrentSiteName();
+        const titleParts = [];
+        if (sid) titleParts.push(`Site ${sid}`);
+        if (sname) titleParts.push(sname);
+        titleParts.push(missionName || 'Mission');
+        const docName = titleParts.join(' - ');
         const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>${escapeXml(missionName || 'Mission')} — Flight Path</name>
+    <name>${escapeXml(docName)}</name>
     <description>White line = flight path (nav→nav). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
     <Style id="style-nav"><IconStyle><color>${navColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${navColor}</color></LabelStyle></Style>
     <Style id="style-snap"><IconStyle><color>${snapColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${snapColor}</color></LabelStyle></Style>
@@ -4157,7 +4210,7 @@ ${snapPlacemarks}
     </Folder>
   </Document>
 </kml>`;
-        return { kml, navCount: stops.length, snapCount: snapBlocks.length };
+        return { kml, navCount: stops.length, snapCount: snapBlocks.length, usedRoute: !!(opts.routes && opts.routes.length) };
     }
 
     // Download the KML (try top frame first to dodge the iframe sandbox, then
@@ -4193,9 +4246,13 @@ ${snapPlacemarks}
         if (!composerMission) { showToast('Open a mission first (hit 🔄 to load it).', '#ff9800'); return; }
         const ordered = composerCurrentOrdered();
         if (!ordered.length) { showToast('Could not read the open mission steps.', '#ff9800'); return; }
-        const built = buildMissionKml(composerMission.name, ordered);
+        const routes = captureFlightRoutes(); // AIM's real routed path off the map
+        const built = buildMissionKml(composerMission.name, ordered, { routes });
         if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
-        if (downloadKmlFile(composerMission.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
+        if (downloadKmlFile(composerMission.name, built.kml)) {
+            const path = built.usedRoute ? 'real routed path' : 'straight nav→nav path (couldn\'t read the routed line)';
+            showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots · ${path}`, '#5fff5f', 4500);
+        }
     }
 
     // Center the Leaflet map on a lat/lng. The map lives in the same
