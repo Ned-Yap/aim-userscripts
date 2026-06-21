@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.15
+// @version      1.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.15';
+    const SCRIPT_VERSION = '1.16';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -6069,6 +6069,10 @@ ${snapPlacemarks}
                     collapseDebounce = null;
                     try { applyNativeEditorCollapse(); } catch (e) {}
                     try { injectEditorCollapseButton(); } catch (e) {}
+                    // Re-stamp the N#/S# marker badges too — Percepto re-renders a
+                    // step's marker after a per-step save, wiping our number until
+                    // the next style pass (the "S1 vanished but the circle stayed").
+                    try { composerStyleNativeMarkers(); } catch (e) {}
                 }, 150);
             });
             try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
