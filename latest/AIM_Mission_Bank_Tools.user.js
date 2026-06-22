@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.35
+// @version      1.36
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.35';
+    const SCRIPT_VERSION = '1.36';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2309,43 +2309,46 @@
     // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
     // near the existing nav/snap so you can drag them into position. Navigates
     // keep shouldUseFreezoneMinAlt (FFZ-min); snapshots auto-set to ground+AGL on
-    // drop via the live Auto-AGL. Uses the editor's createInstruction.
-    // Build a fresh instruction with a NUMERIC type. createInstruction's h() +
-    // the server expect a number; the LIVE editor instructions carry a normalized
-    // type OBJECT which must NOT be copied (copying it = "No instruction component
-    // for type [object Object]" + save fails). Same minimal shape buildMissionForAsset uses.
-    function genInstr(type, value1, value2, location, extra) {
-        return { type, value1: value1 == null ? null : value1, value2: value2 == null ? null : value2, location: location || null, extra_options: extra || {}, polygon_points: null, snapshot_points: null };
-    }
-    async function genStageSteps(navCount, snapCount, inspectionScan) {
-        let ctx = findMissionAppCtx();
-        if (!ctx || typeof ctx.createInstruction !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
-        const instrs = ctx.currentApp.instructions || [];
+    // drop via the live Auto-AGL.
+    // IMPLEMENTATION: COPY existing steps verbatim (preserving their exact type
+    // objects + all fields) and rebuild the app via setCurrentApp. createInstruction's
+    // h() mangles the type (number OR object → "No instruction component for type
+    // [object Object]"), so we avoid it: copied steps already have valid types and
+    // setCurrentApp is the same path normal edits use → renders + saves cleanly.
+    function genStageSteps(navCount, snapCount, inspectionScan) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
+        const app = ctx.currentApp;
+        const instrs = app.instructions || [];
         const navRef = instrs.find(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
         const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
         if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
+        // wrap template = the scan steps trailing the first snapshot (copied as-is)
+        const wrapTpl = [];
+        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
+        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
         const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
-        const navExtra = Object.assign({ shouldUseFreezoneMinAlt: true }, (navRef && navRef.extra_options) || {});
-        const snapExtra = Object.assign({ pitch: 1001 }, (snapRef && snapRef.extra_options) || {});
-        const buildWrap = () => [genInstr(7, true, null, null, {}), genInstr(24, 1, null, null, {}), genInstr(5, 10, null, null, {}), genInstr(24, 0, null, null, {}), genInstr(7, false, null, null, {})];
-        const newSteps = [];
-        for (let i = 0; i < navCount; i++) newSteps.push(genInstr(1, navRef ? navRef.value1 : 0, 12, offEast(navRef, i), Object.assign({}, navExtra)));
+        // copy a step (preserve type object + all fields); drop id; optional new location
+        const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); delete c.id; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
+        const staged = [];
+        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, i)));
         for (let j = 0; j < snapCount; j++) {
-            newSteps.push(genInstr(6, snapRef ? snapRef.value1 : 0, 1, offEast(snapRef, j), Object.assign({}, snapExtra)));
-            if (inspectionScan) buildWrap().forEach(w => newSteps.push(w));
+            staged.push(copyStep(snapRef, offEast(snapRef, j)));
+            if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
-        let added = 0;
-        for (const step of newSteps) {
-            ctx = findMissionAppCtx(); // per-render closure — re-walk each call
-            if (!ctx || typeof ctx.createInstruction !== 'function' || !ctx.currentApp) break;
-            const cur = ctx.currentApp.instructions || [];
-            let idx = cur.findIndex(s => s && s.type_name === 'returnHome');
-            if (idx < 0) idx = cur.length;
-            try { ctx.createInstruction(step, idx); added++; } catch (e) { console.warn(`${TAG} [stage] createInstruction failed`, e); }
-            await new Promise(r => setTimeout(r, 130));
-        }
-        try { composerStyleNativeMarkers(); } catch (e) {}
-        showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) near the existing ones — drag them into place.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+        if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
+        // Rebuild the instruction list (shallow-copy existing so we don't mutate
+        // live objects), insert staged steps before returnHome, re-index.
+        const newInstrs = instrs.map(s => Object.assign({}, s));
+        let rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome');
+        if (rh < 0) rh = newInstrs.length;
+        newInstrs.splice(rh, 0, ...staged);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+        } catch (e) { console.warn(`${TAG} [stage] setCurrentApp failed`, e); showToast('Stage failed — see console.', '#ff5252', 4000); }
     }
     let genStagePopEl = null;
     function genStagePopup(anchorBtn) {
