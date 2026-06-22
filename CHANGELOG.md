@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.32 (dev/latest) — Generator: bulk "Generate All"
+
+With the ⊕ Generate overlay on, a **▣ Generate All** button opens a panel listing every **valid** asset (Empty/Unreachable/Unshielded skipped + shown separately), each with its mission name + nav/snap preview and a checkbox. Toggle **Inspection scan** for the whole batch, pick which to include, and **⊕ Create** generates them all in one go (sequential `saveApp`, progress readout, server-routed). Reuses the same per-asset build as the single-asset path. Dev-only (latest/) — test on a TEST site.
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.29 (dev/latest) — Generator: nav nudged inside FFZ + skip-state coloring
 
 Two refinements to the Mission Generator. The generated **Navigate** is now nudged **~1 m inside the FFZ edge** (it was landing right on the boundary, where Percepto could read it as *outside* the FFZ — which the SOP checker flags). And the overlay now reflects **skip-state**: assets that are Unreachable / Unshielded / Empty draw **red**, valid ones white; the right-click popup warns if an asset is in a skip-state (you can still generate it manually). This is the predicate the upcoming bulk "generate all" will use to auto-skip bad-state assets.

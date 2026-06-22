@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.31
+// @version      1.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.31';
+    const SCRIPT_VERSION = '1.32';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2002,25 +2002,38 @@
     }
     function genUpdateBtn() {
         const b = document.getElementById(GEN_BTN_ID);
-        if (!b) return;
-        b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate';
-        // Solid backgrounds so it reads over the satellite imagery.
-        b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
-        b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
+        if (b) {
+            b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate';
+            b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
+            b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
+        }
+        const all = document.getElementById(GEN_ALL_BTN_ID);
+        if (all) all.style.display = genOverlayOn ? 'block' : 'none';
     }
+    const GEN_ALL_BTN_ID = 'aim-mb-gen-all-btn';
     function genEnsureButton() {
         if (CONTEXT !== 'IFRAME') return;
         const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
         if (!mapC) return;
         if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
+        if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
         const btn = document.createElement('button');
         btn.id = GEN_BTN_ID; btn.type = 'button';
-        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to generate its scan mission (preview + Generate).';
+        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to generate its scan mission.';
         btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #14d2dc;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
-        if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
         mapC.appendChild(btn);
+        // "Generate All" — bulk-generate every valid (white) asset. Shown only
+        // while the overlay is on.
+        const all = document.createElement('button');
+        all.id = GEN_ALL_BTN_ID; all.type = 'button';
+        all.textContent = '▣ Generate All';
+        all.title = 'Generate a mission for every VALID asset (skips Empty / Unreachable / Unshielded) — preview, then commit.';
+        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:none;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
+        all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
+        mapC.appendChild(all);
         genUpdateBtn();
     }
 
@@ -2163,6 +2176,109 @@
             genGenerateForAsset(asset, ffzs, { inspectionScan: scan });
         };
         setTimeout(() => document.addEventListener('mousedown', genPopupOutside, true), 0);
+    }
+
+    // ── Bulk: generate a mission for every VALID asset ────────────────────────
+    const GEN_BULK_PANEL_ID = 'aim-mb-gen-bulk';
+    let genBulkBusy = false;
+    function genPreviewInfo(asset, ffzs) {
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        const nav = ffz ? genNavPoint(aC, ffz) : null;
+        return {
+            name: `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`,
+            ffz: !!ffz, ground: groundM,
+            standoffFt: nav ? Math.round(nav.standoffFt) : null,
+            snapAltFt: groundM != null ? Math.round(groundM * 3.28084) + defaultSnapAglFt : null,
+            navAltFt: (ffz && ffz.minAltM != null) ? Math.round(ffz.minAltM * 3.28084) : null,
+            buildable: !!(ffz && groundM != null),
+        };
+    }
+    function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    function genOpenBulkPanel() {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('Generator: no site.', '#ff9800'); return; }
+        showToast('Loading assets + elevations…', '#9ad', 2000);
+        genFetchEntities(siteID).then(({ assets, ffzs }) => {
+            const valid = assets.filter(a => !genSkipReason(a));
+            const skipped = assets.filter(a => genSkipReason(a));
+            const pts = valid.map(a => genCentroid(a.ring));
+            const render = () => genRenderBulkPanel(valid, skipped, ffzs);
+            try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
+        }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
+    }
+    function genRenderBulkPanel(valid, skipped, ffzs) {
+        genCloseBulkPanel();
+        const rows = valid.map((a, i) => {
+            const info = genPreviewInfo(a, ffzs);
+            const dis = info.buildable ? '' : 'opacity:0.5;';
+            const detail = info.buildable
+                ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
+                : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
+            return `<label class="aim-gen-row" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
+                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'}>
+                <span style="flex:1;color:#e6e6e6;font-weight:700;">${escapeHtml(info.name)}</span>
+                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
+            </label>`;
+        }).join('');
+        const skipRows = skipped.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
+        const p = document.createElement('div');
+        p.id = GEN_BULK_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:380px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483600;' +
+            'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">▣ Generate Missions</span>
+                <button data-gen-bulk-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
+                <b style="color:#7dff7d;">${valid.length}</b> valid · <b style="color:#ff8a8a;">${skipped.length}</b> skipped (Empty/Unreachable/Unshielded)
+                <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
+            </div>
+            <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No valid assets.</div>'}
+                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped</div>${skipRows}` : ''}
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-gen-bulk-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-gen-bulk-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-gen-bulk-go style="padding:5px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;">⊕ Create</button>
+            </div>`;
+        document.body.appendChild(p);
+        const close = () => genCloseBulkPanel();
+        p.querySelector('[data-gen-bulk-close]').onclick = close;
+        p.querySelector('[data-gen-bulk-cancel]').onclick = close;
+        const goBtn = p.querySelector('[data-gen-bulk-go]');
+        const updateGo = () => { const n = p.querySelectorAll('[data-gen-row]:checked').length; goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy; };
+        p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
+        updateGo();
+        goBtn.onclick = () => {
+            if (genBulkBusy) return;
+            const picked = [...p.querySelectorAll('[data-gen-row]:checked')].map(cb => valid[Number(cb.getAttribute('data-gen-row'))]).filter(Boolean);
+            const scan = p.querySelector('[data-gen-bulk-scan]').checked;
+            genBulkCommit(picked, ffzs, { inspectionScan: scan }, p.querySelector('[data-gen-bulk-status]'), goBtn);
+        };
+    }
+    async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
+        const ctx = findMissionAppCtx();
+        if (!ctx) { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        genBulkBusy = true; if (goBtn) goBtn.disabled = true;
+        let ok = 0, fail = 0;
+        const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+        for (let i = 0; i < assets.length; i++) {
+            setStatus(`Creating ${i + 1}/${assets.length}…`);
+            const built = buildMissionForAsset(assets[i], ffzs, opts);
+            if (!built) { fail++; continue; }
+            try { await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; }
+            catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); }
+        }
+        genBulkBusy = false;
+        setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
+        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}. Refresh the mission list to see them.`, ok ? '#5fff5f' : '#ff5252', 7000);
+        console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
+        // Soft-refresh the list so the new missions appear (iframe's own hash).
+        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)/); if (mm && cur !== mm[1]) location.hash = mm[1]; } catch (e) {}
+        if (goBtn) goBtn.disabled = false;
     }
 
     // The on-screen instruction ids, in current editor order.
