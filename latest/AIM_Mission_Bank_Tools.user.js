@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.48
+// @version      1.49
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.48';
+    const SCRIPT_VERSION = '1.49';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -476,7 +476,20 @@
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
     }
 
+    // Asset Inspector exposes its OTD-backed (Open-Topo-Data, batched, NO Percepto
+    // rate-limit) elevation service on window.__aimAIElevation for sibling scripts.
+    // When present we route MBT's DEM through it — this is what kills the bulk-
+    // generate "Elevation Not Loaded" 429 storm (Percepto's /location_altitude/
+    // throttles hard; OTD batches 100 pts/request). Falls back to MBT's own Percepto
+    // queue when the bridge isn't there (suite not fully installed).
+    function aiElev() {
+        try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; const b = w && w.__aimAIElevation; return (b && typeof b.fetch === 'function') ? b : null; }
+        catch (e) { return null; }
+    }
+
     function getElevationFromCache(lat, lng) {
+        const br = aiElev();
+        if (br) { try { const v = br.getCached(lat, lng); if (v != null) return v; } catch (e) {} }
         const cache = loadElevationCache();
         return cache[elevCacheKey(lat, lng)];
     }
@@ -489,6 +502,8 @@
     //      while a batch is mid-flight create duplicate HTTP requests)
     //   3. Miss → push to queue, throttled through pumpElevQueue
     function fetchElevation(lat, lng) {
+        const br = aiElev();
+        if (br) { try { return Promise.resolve(br.fetch(lat, lng)); } catch (e) {} }
         const key = elevCacheKey(lat, lng);
         const cache = loadElevationCache();
         if (cache[key] != null) return Promise.resolve(cache[key]);
@@ -536,6 +551,9 @@
     // Returns Promise<{[id|index]: meters | null}>.
     function bulkFetchElevations(points, onProgress) {
         if (!points || points.length === 0) return Promise.resolve({});
+        // Prefer the OTD bridge — batched, no Percepto 429 (the bulk-generate fix).
+        const br = aiElev();
+        if (br && typeof br.bulk === 'function') { try { return Promise.resolve(br.bulk(points, onProgress)); } catch (e) {} }
         let done = 0;
         const total = points.length;
         const result = {};

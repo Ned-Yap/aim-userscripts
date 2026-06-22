@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.49 (dev/latest) — fix bulk-generate "Elevation Not Loaded" (429 storm)
+
+Bulk **Generate All** (and the AGL view / auto-AGL) no longer choke on Percepto's `/location_altitude/` rate limit. MBT now routes its DEM elevation through Asset Inspector's **`__aimAIElevation` bridge** when present — the Open-Topo-Data source (batched, no rate limit) the Inspector already uses — instead of hammering Percepto per-point and getting 429s (which left assets un-built and forced the reload-and-rerun-til-it-catches-up grind). Falls back to MBT's own Percepto fetch if the bridge isn't installed. Requires the **Latest Asset Inspector** (the one with OTD) running. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.48 (dev/latest) — Section + Battery merge (build merged missions in MBT)
 
 New **⛟ Merge** button (next to ⊕ Generate, generator-unlock only): groups the site's solo missions into **battery-tiered merged missions per compass section** (8-way + Central), ordered **furthest→closest from base**. Routed distances are computed with Asset Inspector's exact routing core (flight-path graph + Dijkstra + FFZ-bridging), so the Tattu (≤14k ft) / Tulip (≤18k) tiers match its Battery column. Groups are named `North 1` (Tattu subset) / `North 2` (+Tulip) / `Central 1-2` (all-Tattu). A preview panel shows each group's ordered stops with per-stop **section override**; **Create** builds each merged mission directly in MBT via `saveApp` (ordered concatenation of the solos' bodies wrapped in one takeoff/return — verified faithful to Percepto's official merge) and refreshes the list — no admin-page paste. Dev-only (latest/).
