@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.70
+// @version      34.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,13 +33,20 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.70';
+    const SCRIPT_VERSION = '34.77';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
     const stateChannel = new BroadcastChannel(CHANNEL_NAME);
     stateChannel.onmessage = (event) => {
-        if (event.data.action === "TOGGLE") setActiveState(event.data.state);
+        const d = event.data || {};
+        if (d.action === "TOGGLE") setActiveState(d.state);
+        // The map iframe is the only frame that fetches asset data, so it
+        // broadcasts the discovered equipment set; every frame adopts it and
+        // re-registers so the panel schema is identical across frames (same
+        // scriptId → last register wins, so they MUST agree). See
+        // applyEquipFromBroadcast.
+        else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
     };
 
     // --- AIM Control Panel integration ---
@@ -53,6 +60,74 @@
     // category controls what applies to itself. Shielding's visual styling
     // (color/opacity/distance) lives in Advanced as a shared knob since
     // toggles in different categories share the same shielding appearance.
+    // --- Asset state styling (v34.70) ---
+    // Assets render as white SVG polygons that carry NO state info. Their
+    // state (Normal / Empty / Unshielded / Unreachable / HY / Inactive) lives
+    // in /map_objects — derived from the asset's subtype (custom.poi_type_str,
+    // the text after " - ", e.g. "battery - empty") plus the is_unshielded
+    // flag. When "Color assets by state" is on we fetch the entity list once
+    // per site, geometry-match each white path to its asset (point-in-polygon
+    // on the path centroid), tag it data-aim-asset-state, and style it
+    // per-state instead of with the single uniform white-asset look.
+    const ASSET_STATE_ORDER = ['Normal', 'Empty', 'Unshielded', 'Unreachable', 'HY', 'Inactive'];
+    const ASSET_STATE_DEFAULTS = {
+        // Normal = the build-to-it good state — pink, solid, with a subtle
+        // fill so healthy assets pop against the dashed problem states.
+        'Normal':      { color: '#ff5fb0', width: 10, dashed: false, fill: true,  fillColor: '#ff5fb0', opacity: 0.25 },
+        'Empty':       { color: '#cfcfcf', width: 10, dashed: true,  fill: false, fillColor: '#cfcfcf', opacity: 0.25 },
+        'Unshielded':  { color: '#ff5722', width: 10, dashed: true,  fill: false, fillColor: '#ff5722', opacity: 0.25 },
+        'Unreachable': { color: '#ffffff', width: 10, dashed: true,  fill: false, fillColor: '#ffffff', opacity: 0.25 },
+        'HY':          { color: '#22d3ee', width: 10, dashed: false, fill: false, fillColor: '#22d3ee', opacity: 0.25 },
+        'Inactive':    { color: '#ffa040', width: 10, dashed: true,  fill: false, fillColor: '#ffa040', opacity: 0.25 },
+    };
+    // Used for any state we discover at runtime that isn't in the fixed list
+    // above (e.g. midstream / T&D taxonomies) — gray dashed, no panel row.
+    const ASSET_STATE_FALLBACK = { color: '#9aa0a6', width: 10, dashed: true, fill: false, fillColor: '#9aa0a6', opacity: 0.25 };
+    const stateSlug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const MAP_OBJECTS_URL = 'https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=';
+    // Builds the per-state Control Panel rows appended to the Assets category.
+    function buildAssetStateToggles() {
+        const out = [
+            { type: 'header', label: 'Color assets by state' },
+            { id: 'asset.by-state', label: 'Color assets by state (overrides white)', type: 'boolean', default: false },
+            // Asset state/equipment is cached per site at load; after editing an
+            // asset in Percepto this re-fetches so its color/visibility updates.
+            { id: 'asset-refresh', label: '↻ Refresh asset data (after edits)', type: 'button', action: 'refresh-asset-data' },
+        ];
+        ASSET_STATE_ORDER.forEach(state => {
+            const slug = stateSlug(state);
+            const d = ASSET_STATE_DEFAULTS[state];
+            out.push({ type: 'header', label: `· ${state}` });
+            out.push({ id: `astate.${slug}.show`, label: `${state} — show on map`, type: 'boolean', default: true });
+            out.push({ id: `astate.${slug}.color`, label: `${state} outline color`, type: 'color', default: d.color });
+            out.push({ id: `astate.${slug}.width`, label: `${state} outline width`, type: 'number',
+                      min: 1, max: 20, step: 1, default: d.width, unit: 'px' });
+            out.push({ id: `astate.${slug}.dashed`, label: `${state} dashed`, type: 'boolean', default: d.dashed });
+            out.push({ id: `astate.${slug}.fill`, label: `${state} show fill`, type: 'boolean', default: d.fill });
+            out.push({ id: `astate.${slug}.fill-color`, label: `${state} fill color`, type: 'color', default: d.fillColor });
+            out.push({ id: `astate.${slug}.opacity`, label: `${state} fill opacity`, type: 'number',
+                      min: 0.05, max: 1, step: 0.05, default: d.opacity, unit: 'fill' });
+        });
+        return out;
+    }
+
+    // Equipment types (battery / v-well / h-well / sat / …) are the HEAD of
+    // the subtype before " - ". They vary per site, so the show/hide
+    // checkboxes are built dynamically: fetchAssetStates discovers the set on
+    // the loaded site, stores it here, and re-registers with the Control Panel
+    // so the panel renders one checkbox per type. Each entry: { name, slug }.
+    let assetEquipTypes = [];
+    // Builds the per-equipment-type "show" checkboxes appended to the Assets
+    // category. Empty until a site's assets have loaded.
+    function buildAssetEquipToggles() {
+        if (!assetEquipTypes.length) return [];
+        const out = [{ type: 'header', label: 'Show equipment types' }];
+        assetEquipTypes.forEach(eq => {
+            out.push({ id: `aeq.${eq.slug}.show`, label: `${eq.name} — show on map`, type: 'boolean', default: true });
+        });
+        return out;
+    }
+
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
         {
@@ -137,6 +212,7 @@
                 { id: 'asset.force-thickness', label: 'Force line thickness', type: 'boolean', default: true },
                 { id: 'asset.edit-mode', label: 'Show in edit mode', type: 'boolean', default: true },
                 { id: 'asset.locked', label: 'Lock assets (Shift+click to interact)', type: 'boolean', default: false },
+                ...buildAssetStateToggles(),
             ],
         },
         {
@@ -233,6 +309,31 @@
                 { id: 'validator-run', label: 'Run coverage check', type: 'button', action: 'run-validator' },
                 { id: 'validator-clear', label: 'Clear pins', type: 'button', action: 'clear-validator' },
                 { id: 'validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // Independent of the FFZ/FP Coverage Validator above: this one
+            // tests ASSETS. An asset is "shielded" if its centroid sits
+            // within (power-line radius + asset radius) of any power-line
+            // KML — default 200 + 200 = 400 ft. Assets beyond that get a
+            // high-contrast pin (color configurable) so we know which ones the
+            // SS Generator must build FFZs on. Power-line KMLs are the only
+            // shielding source.
+            type: 'category',
+            id: 'asset-validator-cat',
+            label: 'Asset Shielding Check',
+            meta: '(on-demand · finds Unshielded assets)',
+            master: { id: 'asset-validator.show', default: true },
+            children: [
+                { id: 'asset-validator.powerline-radius', label: 'Power-line radius', type: 'number',
+                  min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
+                { id: 'asset-validator.asset-radius', label: 'Asset radius', type: 'number',
+                  min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
+                { id: 'asset-validator.pin-color', label: 'Pin / ring color', type: 'color', default: '#ff1493' },
+                { id: 'asset-validator.skip-unshielded', label: 'Skip already-Unshielded assets', type: 'boolean', default: true },
+                { id: 'asset-validator-run', label: 'Run asset check', type: 'button', action: 'run-asset-validator' },
+                { id: 'asset-validator-clear', label: 'Clear asset pins', type: 'button', action: 'clear-asset-validator' },
+                { id: 'asset-validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
             ],
         },
         {
@@ -363,6 +464,12 @@
     const kmlResolvedPath = {};
     const KML_TYPES = ['distro', 'trans'];
     const kmlKey = (siteID, type) => `${siteID}|${type}`;
+    // Asset-state cache for "Color assets by state". Holds the type-3 asset
+    // polygons (lat/lng) + derived state for the CURRENT site only. Fetched
+    // lazily from /map_objects (cookie auth) the first time runUpdate needs
+    // it with by-state on; re-fetched when the site changes. polys[] entries:
+    // { state, coords:[{lat,lng}...], cLat, cLng }.
+    let assetStateData = { siteID: null, polys: [], loading: false, failed: false };
     // Tracks whether we've already warned about no-token in the current
     // session, so we don't spam (each panel-driven SET_TOGGLE echo
     // triggered a render → fetch attempt → warn). Cleared whenever a
@@ -379,6 +486,10 @@
         results: [],
         lastRun: null,
     };
+    // Asset Shielding Check shares validatorState.results (each entry tagged
+    // kind:'gap' | 'asset') so it reuses the same persistence + pin-click +
+    // render machinery, but keeps its own last-run summary for the console.
+    let assetValidatorLastRun = null;
     const VALIDATOR_CACHE_PREFIX = 'aim-validator-';
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
@@ -494,6 +605,44 @@
         document.querySelectorAll(ORIGINAL_BLUE_BUFFER_SELECTOR).forEach(el => { el.style.display = fpHide; });
         document.querySelectorAll(BLACK_DASHED_FP_SELECTOR).forEach(el => { el.style.display = fpHide; });
 
+        // 3b. ASSET STATE — lazy-fetch entity data + tag each white asset
+        // path with its state so the per-line loop can style it per-state.
+        // Runs after the buffer wipe (above) and before the loop creates new
+        // buffers, so querySelectorAll(WHITE_ASSET_SELECTOR) sees only native
+        // asset paths, never our clones. We re-match every run (cheap: dozens
+        // of paths × point-in-polygon) rather than tag once — runUpdate only
+        // re-fires on zoom/pan/mutation, which is exactly when a path's `d`
+        // could have been read mid-animation, so re-matching self-corrects any
+        // stale projection. We only OVERWRITE a tag on a positive match, so a
+        // transient (data still loading) never blanks an existing tag.
+        //
+        // We need entity data whenever Assets are shown — by-state coloring
+        // uses it, the per-state/equipment hide filters use it, and we also
+        // fetch once per site (even with nothing engaged) so the equipment
+        // checkboxes can populate the panel. Fetch is cached + idempotent per
+        // site, so calling it each run is cheap.
+        const assetByStateOn = !!(toggleState['asset.show'] && toggleState['asset.by-state']);
+        const assetDataWanted = !!toggleState['asset.show'];
+        if (assetDataWanted) {
+            const sid = getCurrentSiteID();
+            const needFetch = sid && (assetStateData.siteID !== sid
+                || (!assetStateData.loading && !assetStateData.polys.length && !assetStateData.failed));
+            // Only the iframe fetches (it owns the map + the cookie-auth'd
+            // same-origin context); it broadcasts the equipment set to TOP.
+            if (needFetch && CONTEXT === 'IFRAME') fetchAssetStates(sid);
+            const stMap = getLeafletMap();
+            if (stMap && assetStateData.siteID === sid && assetStateData.polys.length) {
+                document.querySelectorAll(WHITE_ASSET_SELECTOR).forEach(p => {
+                    if (p.hasAttribute(CUSTOM_BUFFER_ATTR)) return; // never tag our own clones
+                    const a = matchPathAsset(p, stMap);
+                    if (a) {
+                        if (a.state) p.setAttribute('data-aim-asset-state', a.state);
+                        if (a.equip) p.setAttribute('data-aim-asset-equip', a.equip);
+                    }
+                });
+            }
+        }
+
         // 4. REBUILD & ENFORCE
         const lines = document.querySelectorAll(ALL_TARGETS_SELECTOR);
         lines.forEach(line => {
@@ -532,6 +681,30 @@
             // outlines without fill even when halos are off.
             const wantAssetFillOverride = isWhiteAsset;
 
+            // Per-state asset styling. Non-null only for a white asset that
+            // we've tagged with a state while "Color assets by state" is on.
+            // When null, assets fall back to the uniform asset.* settings.
+            const assetState = (assetByStateOn && isWhiteAsset)
+                ? line.getAttribute('data-aim-asset-state') : null;
+            const assetStyle = assetState ? assetStateStyle(assetState) : null;
+
+            // --- Asset hide filter (per-state + per-equipment "show" boxes) ---
+            // Independent of by-state coloring: an asset box (and its halo)
+            // disappears when its STATE or its EQUIPMENT type is unchecked.
+            // display is always reset to '' when not hiding — including when
+            // the whole Assets category is off — so nothing stays stuck hidden.
+            if (isWhiteAsset) {
+                let hide = false;
+                if (toggleState['asset.show']) {
+                    const sTag = line.getAttribute('data-aim-asset-state');
+                    const eTag = line.getAttribute('data-aim-asset-equip');
+                    hide = (!!sTag && toggleState[`astate.${stateSlug(sTag)}.show`] === false)
+                        || (!!eTag && toggleState[`aeq.${eTag}.show`] === false);
+                }
+                line.style.display = hide ? 'none' : '';
+                if (hide) return; // skip styling + buffer creation for hidden assets
+            }
+
             // --- Line color / opacity override (runs every iteration,
             // before the early-return below, so it applies / clears even
             // when no other category sub-toggle is active).
@@ -550,12 +723,22 @@
                 }
             } else if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
-                    line.style.stroke = toggleState['asset.line-color'] || '';
-                    const op = Number(toggleState['asset.line-opacity']);
-                    line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                    if (assetStyle) {
+                        // Per-state: state color + optional dashed outline.
+                        // strokeOpacity left at full so the state color reads true.
+                        line.style.stroke = assetStyle.color || '';
+                        line.style.strokeOpacity = '';
+                        line.style.strokeDasharray = assetStyle.dashed ? assetDash(assetStyle.width) : '';
+                    } else {
+                        line.style.stroke = toggleState['asset.line-color'] || '';
+                        const op = Number(toggleState['asset.line-opacity']);
+                        line.style.strokeOpacity = isNaN(op) ? '' : String(op);
+                        line.style.strokeDasharray = '';
+                    }
                 } else {
                     line.style.stroke = '';
                     line.style.strokeOpacity = '';
+                    line.style.strokeDasharray = '';
                 }
             } else if (isBlueFlight) {
                 if (toggleState['fp.show']) {
@@ -578,15 +761,20 @@
             }
 
             // --- Force line thickness (per-category) ---
-            if (wantForce) {
+            if (assetStyle) {
+                // Per-state width wins over the global force-thickness setting.
+                if (currentAttrWidth !== String(assetStyle.width)) {
+                    line.setAttribute('stroke-width', String(assetStyle.width));
+                }
+            } else if (wantForce) {
                 if (currentAttrWidth !== String(lineThickness)) {
                     line.setAttribute('stroke-width', lineThickness);
                 }
-            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset) && originalWidth !== lineThickness) {
-                // Revert anything we previously forced.
-                if (currentAttrWidth === String(lineThickness)) {
-                    line.setAttribute('stroke-width', String(originalWidth));
-                }
+            } else if ((isBlueFlight || isSolidGreen || isWhiteAsset)
+                       && !isNaN(originalWidth) && currentAttrWidth !== String(originalWidth)) {
+                // Revert anything we previously forced (global thickness OR a
+                // now-disabled per-state width) back to the native width.
+                line.setAttribute('stroke-width', String(originalWidth));
             }
 
             // --- Asset fill override ---
@@ -595,12 +783,14 @@
             // When asset.fill is on, applies user-chosen fill color + opacity.
             if (isWhiteAsset) {
                 if (toggleState['asset.show']) {
-                    if (toggleState['asset.fill'] === false) {
+                    // Per-state fill when tagged; otherwise the uniform asset.* fill.
+                    const fillOn = assetStyle ? assetStyle.fill : (toggleState['asset.fill'] !== false);
+                    if (!fillOn) {
                         line.style.fillOpacity = '0';
                         line.style.fill = '';
                     } else {
-                        line.style.fill = toggleState['asset.fill-color'] || '';
-                        const fo = Number(toggleState['asset.fill-opacity']);
+                        line.style.fill = (assetStyle ? assetStyle.fillColor : toggleState['asset.fill-color']) || '';
+                        const fo = assetStyle ? assetStyle.fillOpacity : Number(toggleState['asset.fill-opacity']);
                         line.style.fillOpacity = isNaN(fo) ? '' : String(fo);
                     }
                 } else {
@@ -641,7 +831,9 @@
                 bufferOpacity = readOpacity('fp.opacity', 0.5);
                 finalBufferWidth = ftToUnits(Number(toggleState['fp.distance']) || 40);
             } else if (isWhiteAsset) {
-                bufferStroke = toggleState['asset.color'] || '#ffffff';
+                // Per-state assets tint their halo to the state color so the
+                // buffer reads as the same category at a glance.
+                bufferStroke = assetStyle ? (assetStyle.color || '#ffffff') : (toggleState['asset.color'] || '#ffffff');
                 bufferOpacity = readOpacity('asset.opacity', 0.4);
                 finalBufferWidth = ftToUnits(Number(toggleState['asset.distance']) || 15);
             } else {
@@ -1078,6 +1270,237 @@
     function getCurrentSiteID() {
         const m = (location.hash || '').match(SITE_ID_RE);
         return m ? m[1] : null;
+    }
+
+    // ============================================================
+    // ASSET STATE — fetch /map_objects, classify, geometry-match
+    // ============================================================
+
+    // Title-case an unknown modifier so it reads cleanly in logs.
+    function prettyState(s) {
+        s = String(s || '').trim();
+        if (!s) return '';
+        return s.charAt(0).toUpperCase() + s.slice(1);
+    }
+
+    // Ray-casting point-in-polygon on lat/lng. Ported from the Asset
+    // Inspector's hit-test — same algorithm so matches agree across scripts.
+    function pointInPolygon(lat, lng, poly) {
+        if (!poly || poly.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].lng, yi = poly[i].lat;
+            const xj = poly[j].lng, yj = poly[j].lat;
+            const intersect = ((yi > lat) !== (yj > lat))
+                && (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    // Derive a single state for a type-3 asset. Precedence is safety-first so
+    // a glance surfaces the worst problem: Unreachable > Unshielded > Empty >
+    // Inactive > HY > Normal. State text lives in custom.poi_type_str as
+    // " - "-separated modifiers ("battery - empty"); is_unshielded is also an
+    // independent boolean flag, honored even when the subtype omits it.
+    function classifyAssetState(e) {
+        const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
+        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase()).filter(Boolean);
+        const has = (k) => mods.indexOf(k) !== -1;
+        if (has('unreachable')) return 'Unreachable';
+        if ((e && e.is_unshielded) || has('unshielded')) return 'Unshielded';
+        if (has('empty')) return 'Empty';
+        if (has('inactive')) return 'Inactive';
+        if (has('hy')) return 'HY';
+        if (mods.length) return prettyState(mods[0]); // unknown modifier — best effort
+        return 'Normal';
+    }
+
+    // Equipment type = the HEAD of the subtype before " - " (e.g.
+    // "battery - empty" → "battery", "v-well" → "v-well"). Hyphens inside the
+    // equipment name are preserved because we split on " - " (space-dash-space)
+    // only. Assets with no subtype bucket as "Other". Returns { name, slug }.
+    function classifyAssetEquipment(e) {
+        const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
+        const head = sub.split(' - ')[0].trim();
+        const name = head ? prettyState(head) : 'Other';
+        return { name, slug: stateSlug(name) };
+    }
+
+    // Resolve the effective style for a state from the per-state toggles,
+    // falling back to ASSET_STATE_DEFAULTS (or the gray fallback for states
+    // with no Control Panel row, e.g. midstream taxonomies).
+    function assetStateStyle(state) {
+        const slug = stateSlug(state);
+        const def = ASSET_STATE_DEFAULTS[state] || ASSET_STATE_FALLBACK;
+        const get = (suffix, d) => {
+            const v = toggleState[`astate.${slug}.${suffix}`];
+            return v === undefined ? d : v;
+        };
+        const w = Number(get('width', def.width));
+        const fo = Number(get('opacity', def.opacity));
+        return {
+            color: get('color', def.color),
+            width: isNaN(w) ? def.width : w,
+            dashed: !!get('dashed', def.dashed),
+            fill: get('fill', def.fill) !== false,
+            fillColor: get('fill-color', def.fillColor),
+            fillOpacity: isNaN(fo) ? def.opacity : fo,
+        };
+    }
+
+    // SVG dash pattern scaled to the line width so it reads at any thickness.
+    function assetDash(width) {
+        const w = Number(width) || 10;
+        return `${Math.max(6, w * 1.4).toFixed(1)},${Math.max(4, w * 1.0).toFixed(1)}`;
+    }
+
+    // Fetch the current site's type-3 assets (cookie auth, no PAT). Self-
+    // contained — does not depend on the Asset Inspector being installed.
+    // Stores polygons + derived state in assetStateData, clears stale path
+    // tags, and re-renders when done. Idempotent per site while in flight.
+    function fetchAssetStates(siteID, force) {
+        if (!siteID) return;
+        if (!force && assetStateData.siteID === siteID
+            && (assetStateData.loading || assetStateData.polys.length || assetStateData.failed)) return;
+        assetStateData = { siteID, polys: [], loading: true, failed: false };
+        // New data incoming — drop existing tags so paths re-match.
+        try {
+            document.querySelectorAll('[data-aim-asset-state],[data-aim-asset-equip]')
+                .forEach(p => { p.removeAttribute('data-aim-asset-state'); p.removeAttribute('data-aim-asset-equip'); });
+        } catch (e) {}
+        fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const polys = [];
+                const equipByName = new Map(); // name → slug, de-duped + ordered by count
+                const equipCount = {};
+                list.forEach(e => {
+                    if (!e || e.type !== 3) return;
+                    const raw = Array.isArray(e.coords) ? e.coords
+                              : (Array.isArray(e.points) ? e.points : []);
+                    const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                    if (pts.length < 3) return;
+                    let sLat = 0, sLng = 0;
+                    pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    const eq = classifyAssetEquipment(e);
+                    equipByName.set(eq.name, eq.slug);
+                    equipCount[eq.name] = (equipCount[eq.name] || 0) + 1;
+                    polys.push({
+                        state: classifyAssetState(e),
+                        equip: eq.slug,
+                        coords: pts,
+                        cLat: sLat / pts.length,
+                        cLng: sLng / pts.length,
+                    });
+                });
+                // Ignore a stale response if the user navigated away mid-flight.
+                if (getCurrentSiteID() !== siteID) {
+                    assetStateData = { siteID: null, polys: [], loading: false, failed: false };
+                    return;
+                }
+                assetStateData = { siteID, polys, loading: false, failed: false };
+                // Publish the discovered equipment set (most-common first) and
+                // re-register so the panel shows a checkbox per type. Seed
+                // toggleState so hiding works before the panel echoes values.
+                const newEquip = [...equipByName.keys()]
+                    .sort((a, b) => (equipCount[b] - equipCount[a]) || a.localeCompare(b))
+                    .map(name => ({ name, slug: equipByName.get(name) }));
+                const sig = newEquip.map(e => e.slug).join('|');
+                const prevSig = assetEquipTypes.map(e => e.slug).join('|');
+                if (sig !== prevSig) {
+                    assetEquipTypes = newEquip;
+                    newEquip.forEach(e => {
+                        const k = `aeq.${e.slug}.show`;
+                        if (toggleState[k] === undefined) toggleState[k] = true;
+                    });
+                    registerWithControlPanel(); // pushes the new schema to the panel
+                }
+                console.log(`${TAG} asset-state: loaded ${polys.length} asset polygons for site ${siteID} (${newEquip.length} equipment types)`);
+                if (isActive) runUpdate();
+            })
+            .catch(err => {
+                assetStateData = { siteID, polys: [], loading: false, failed: true };
+                console.warn(`${TAG} asset-state: fetch failed for site ${siteID}:`, err);
+            });
+    }
+
+    // Layer-point centroid of an SVG asset path → lat/lng. Leaflet draws path
+    // `d` coordinates in the overlay pane's layer-point space, so we average
+    // the vertices and convert back with the live map. Returns null on a path
+    // we can't parse or before the map is ready.
+    function pathCentroidLatLng(path, map) {
+        const d = path.getAttribute('d') || '';
+        const nums = d.match(/-?\d+(?:\.\d+)?/g);
+        if (!nums || nums.length < 4) return null;
+        let sx = 0, sy = 0, n = 0;
+        for (let i = 0; i + 1 < nums.length; i += 2) {
+            const x = parseFloat(nums[i]), y = parseFloat(nums[i + 1]);
+            if (isNaN(x) || isNaN(y)) continue;
+            sx += x; sy += y; n++;
+        }
+        if (!n) return null;
+        try { return map.layerPointToLatLng({ x: sx / n, y: sy / n }); }
+        catch (e) { return null; }
+    }
+
+    // Match a white asset path to its asset: containment first, then nearest-
+    // centroid (covers self-intersecting "bowtie" assets where ray-casting on
+    // the raw polygon can miss). Returns { state, equip } or null if nothing
+    // loaded / unparseable.
+    function matchPathAsset(path, map) {
+        const polys = assetStateData.polys;
+        if (!polys.length) return null;
+        const ll = pathCentroidLatLng(path, map);
+        if (!ll) return null;
+        for (let i = 0; i < polys.length; i++) {
+            if (pointInPolygon(ll.lat, ll.lng, polys[i].coords)) return polys[i];
+        }
+        let best = null, bestD = Infinity;
+        for (let i = 0; i < polys.length; i++) {
+            const dLat = polys[i].cLat - ll.lat, dLng = polys[i].cLng - ll.lng;
+            const dd = dLat * dLat + dLng * dLng;
+            if (dd < bestD) { bestD = dd; best = polys[i]; }
+        }
+        return best || null;
+    }
+
+    // The registration schema = static TOGGLES with the dynamically-discovered
+    // equipment checkboxes spliced into the Assets category. Posted to the
+    // Control Panel on every register; the panel only re-renders when the
+    // equipment set actually changes (it signatures the payload).
+    function buildRegistrationToggles() {
+        const extra = buildAssetEquipToggles();
+        if (!extra.length) return TOGGLES;
+        return TOGGLES.map(cat => (cat && cat.id === 'asset-cat')
+            ? { ...cat, children: [...cat.children, ...extra] }
+            : cat);
+    }
+
+    // True if the user has unchecked any state or equipment "show" box — i.e.
+    // an asset hide filter is engaged. Drives whether we need entity data even
+    // when by-state coloring is off.
+    function anyAssetHidden() {
+        for (const k in toggleState) {
+            if (toggleState[k] !== false) continue;
+            if ((k.indexOf('astate.') === 0 || k.indexOf('aeq.') === 0) && k.endsWith('.show')) return true;
+        }
+        return false;
+    }
+
+    // Adopt an equipment set broadcast by the map iframe (cross-frame sync so
+    // every frame registers an identical schema). No-op if it's for a
+    // different site or matches what we already have.
+    function applyEquipFromBroadcast(d) {
+        if (!d || d.siteID !== getCurrentSiteID()) return;
+        const equip = Array.isArray(d.equip) ? d.equip : [];
+        const sig = equip.map(e => e.slug).join('|');
+        const prevSig = assetEquipTypes.map(e => e.slug).join('|');
+        if (sig === prevSig) return;
+        assetEquipTypes = equip;
+        equip.forEach(e => { const k = `aeq.${e.slug}.show`; if (toggleState[k] === undefined) toggleState[k] = true; });
+        registerWithControlPanel();
     }
 
     // GM storage helpers. Returns def if GM is unavailable (script grants
@@ -4110,22 +4533,7 @@
         // flagged spots that are right next to a power line but far from
         // either endpoint of the line — e.g. anywhere along the middle of
         // a 1000ft segment that's drawn as just two endpoints in the KML.
-        const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
-        KML_TYPES.forEach(t => {
-            const feats = kmlFeatures[kmlKey(siteID, t)] || [];
-            feats.forEach(f => {
-                const lps = [];
-                for (let i = 0; i < f.coords.length; i++) {
-                    try { lps.push(map.latLngToLayerPoint([f.coords[i].lat, f.coords[i].lng])); } catch (e) {}
-                }
-                for (let i = 0; i < lps.length - 1; i++) {
-                    segments.push({ ax: lps[i].x, ay: lps[i].y, bx: lps[i+1].x, by: lps[i+1].y });
-                }
-                // KML LinearRing already repeats its first point as the last,
-                // so the loop above naturally closes the ring. No extra
-                // closing segment needed.
-            });
-        });
+        const segments = buildShieldingSegments(siteID, map);
         if (!segments.length) {
             console.warn(`${TAG} validator: no shielding loaded for site ${siteID}`);
             validatorState.lastRun = { error: 'No shielding KMLs loaded for this site', at: Date.now() };
@@ -4134,16 +4542,7 @@
         }
 
         const thresholdFt = Number(toggleState['validator.distance']) || 200;
-        // Convert threshold from feet → layer-point units at this map state.
-        // Use a small latitude offset at the map's current center as the
-        // reference: same trick as renderValidatorPins. Web Mercator's scale
-        // varies with latitude, but within a single site the variation is
-        // negligible.
-        const centerLL = map.getCenter();
-        const latPerFt = 1 / 362776; // 1 deg lat ≈ 362,776 ft
-        const lpA = map.latLngToLayerPoint(centerLL);
-        const lpB = map.latLngToLayerPoint({ lat: centerLL.lat + thresholdFt * latPerFt, lng: centerLL.lng });
-        const thresholdPx = Math.hypot(lpB.x - lpA.x, lpB.y - lpA.y);
+        const thresholdPx = ftToPx(map, thresholdFt);
         const t2 = thresholdPx * thresholdPx;
 
         const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
@@ -4196,6 +4595,7 @@
             });
             const mid = segsLL[Math.floor(segsLL.length / 2)];
             return {
+                kind: 'gap',
                 number: i + 1,
                 midLat: mid.lat,
                 midLng: mid.lng,
@@ -4204,7 +4604,9 @@
             };
         });
 
-        validatorState.results = results;
+        // Replace ONLY the FFZ/FP gap pins; leave Asset Shielding Check pins
+        // (kind:'asset') untouched so the two tests stay independent.
+        validatorState.results = results.concat(validatorState.results.filter(r => r.kind === 'asset'));
         validatorState.lastRun = {
             count: results.length,
             at: Date.now(),
@@ -4220,11 +4622,206 @@
     }
 
     function clearCoverageValidator() {
-        const had = validatorState.results.length;
-        validatorState.results = [];
+        const before = validatorState.results.length;
+        // Clear gap pins only — keep Asset Shielding Check pins (kind:'asset').
+        validatorState.results = validatorState.results.filter(r => r.kind === 'asset');
         validatorState.lastRun = null;
         saveValidatorResults();
-        console.log(`${TAG} validator: cleared ${had} pin(s)`);
+        console.log(`${TAG} validator: cleared ${before - validatorState.results.length} pin(s)`);
+        runUpdate();
+    }
+
+    // ----- Shared shielding/geometry helpers (used by both Coverage Validator
+    // and Asset Shielding Check) -----
+
+    // Power-line KMLs as LINE SEGMENTS in layer-point space. Measuring against
+    // segments (not just vertices) is what stopped the validator from falsely
+    // flagging points near the MIDDLE of a long two-vertex segment (v32.2 bug).
+    function buildShieldingSegments(siteID, map) {
+        const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
+        KML_TYPES.forEach(t => {
+            const feats = kmlFeatures[kmlKey(siteID, t)] || [];
+            feats.forEach(f => {
+                const lps = [];
+                for (let i = 0; i < f.coords.length; i++) {
+                    try { lps.push(map.latLngToLayerPoint([f.coords[i].lat, f.coords[i].lng])); } catch (e) {}
+                }
+                for (let i = 0; i < lps.length - 1; i++) {
+                    segments.push({ ax: lps[i].x, ay: lps[i].y, bx: lps[i+1].x, by: lps[i+1].y });
+                }
+                // KML LinearRing repeats its first point as the last, so the
+                // loop above naturally closes the ring — no extra segment.
+            });
+        });
+        return segments;
+    }
+
+    // Feet → layer-point pixels at the map's current center. Web Mercator scale
+    // varies with latitude, but within one site the variation is negligible.
+    function ftToPx(map, ft) {
+        const centerLL = map.getCenter();
+        const latPerFt = 1 / 362776; // 1 deg lat ≈ 362,776 ft
+        const lpA = map.latLngToLayerPoint(centerLL);
+        const lpB = map.latLngToLayerPoint({ lat: centerLL.lat + ft * latPerFt, lng: centerLL.lng });
+        return Math.hypot(lpB.x - lpA.x, lpB.y - lpA.y);
+    }
+
+    // Fetch every asset (type 3) with its name + polygon centroid. Independent
+    // of the "color assets by state" feature so the Asset Shielding Check works
+    // whether or not that toggle is on. Cookie auth, same endpoint.
+    function fetchAssetCentroids(siteID) {
+        return fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const out = [];
+                list.forEach(e => {
+                    if (!e || e.type !== 3) return;
+                    const raw = Array.isArray(e.coords) ? e.coords
+                              : (Array.isArray(e.points) ? e.points : []);
+                    const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                    if (pts.length < 3) return;
+                    let sLat = 0, sLng = 0;
+                    pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    // Already-Unshielded per Percepto's own data: the is_unshielded
+                    // flag OR "...- Unshielded" in the subtype string (poi_type_str).
+                    const sub = (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
+                    out.push({
+                        name: e.name || (e.custom && e.custom.name) || `asset ${e.id}`,
+                        cLat: sLat / pts.length,
+                        cLng: sLng / pts.length,
+                        alreadyUnshielded: !!e.is_unshielded || /unshielded/i.test(sub),
+                    });
+                });
+                return out;
+            });
+    }
+
+    // Asset Shielding Check: an asset is "shielded" if its centroid sits within
+    // (power-line radius + asset radius) ft of any power-line KML — default
+    // 200 + 200 = 400 ft. Assets beyond that are flagged Unshielded so we know
+    // which ones the SS Generator must build FFZs on. Power-line KMLs are the
+    // only shielding source. Fully independent of the FFZ/FP Coverage Validator.
+    async function runAssetCoverageValidator() {
+        const map = getLeafletMap();
+        if (!map) {
+            const containers = document.querySelectorAll('.leaflet-container');
+            console.warn(`${TAG} asset-validator: Leaflet map not accessible (patched=${leafletPatched}, .leaflet-container count=${containers.length})`);
+            assetValidatorLastRun = { error: 'Leaflet map not accessible — see console for diagnostics', at: Date.now() };
+            return;
+        }
+        const siteID = getCurrentSiteID();
+        if (!siteID) {
+            assetValidatorLastRun = { error: 'No site ID in URL', at: Date.now() };
+            return;
+        }
+
+        const segments = buildShieldingSegments(siteID, map);
+        if (!segments.length) {
+            console.warn(`${TAG} asset-validator: no shielding loaded for site ${siteID}`);
+            assetValidatorLastRun = { error: 'No power-line KMLs loaded for this site', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        let assets;
+        try {
+            assets = await fetchAssetCentroids(siteID);
+        } catch (err) {
+            console.warn(`${TAG} asset-validator: asset fetch failed for site ${siteID}:`, err);
+            assetValidatorLastRun = { error: 'Asset fetch failed — see console', at: Date.now() };
+            return;
+        }
+        // The user may have navigated away while the fetch was in flight.
+        if (getCurrentSiteID() !== siteID) return;
+        if (!assets.length) {
+            console.warn(`${TAG} asset-validator: no assets found on site ${siteID}`);
+            assetValidatorLastRun = { error: 'No assets found on this site', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        const plRadiusFt = Number(toggleState['asset-validator.powerline-radius']);
+        const assetRadiusFt = Number(toggleState['asset-validator.asset-radius']);
+        const thresholdFt = (isFinite(plRadiusFt) ? plRadiusFt : 200)
+                          + (isFinite(assetRadiusFt) ? assetRadiusFt : 200);
+        const thresholdPx = ftToPx(map, thresholdFt);
+        const t2 = thresholdPx * thresholdPx;
+        const ftPerPx = thresholdPx > 0 ? thresholdFt / thresholdPx : 0;
+
+        // Skip assets Percepto already marks Unshielded (no point re-flagging
+        // what we already know) — on by default, toggleable in the panel.
+        const skipUnshielded = toggleState['asset-validator.skip-unshielded'] !== false;
+
+        const startTime = Date.now();
+        const unshielded = [];
+        let skipped = 0;
+        const allDistances = []; // every asset's nearest-line distance, for calibration
+        assets.forEach(a => {
+            let lp;
+            try { lp = map.latLngToLayerPoint([a.cLat, a.cLng]); } catch (e) { return; }
+            let best2 = Infinity;
+            for (let j = 0; j < segments.length; j++) {
+                const s = segments[j];
+                const d2 = pointToSegmentDist2(lp.x, lp.y, s.ax, s.ay, s.bx, s.by);
+                if (d2 < best2) best2 = d2;
+            }
+            const distFt = Math.round(Math.sqrt(best2) * ftPerPx);
+            const skip = skipUnshielded && a.alreadyUnshielded;
+            if (skip) skipped++;
+            allDistances.push({ name: a.name, distFt, skip, far: best2 > t2 });
+            if (!skip && best2 > t2) unshielded.push({ a, distFt });
+        });
+
+        // Full distance spread (farthest first) so the threshold can be tuned
+        // when a run flags nothing — "all shielded" alone hides whether 400ft
+        // was generous (everything sits at 50ft) or tight (farthest is 390ft).
+        // Mark assets skipped for being already-Unshielded with a ⊘.
+        allDistances.sort((x, y) => y.distFt - x.distFt);
+        console.log(`${TAG} asset-validator: nearest-power-line distance for all ${allDistances.length} assets (farthest first, threshold ${thresholdFt}ft, ${segments.length} line segs${skipped ? `, ${skipped} skipped as already-Unshielded` : ''}):`);
+        allDistances.forEach(d => console.log(`${TAG} asset-validator:   ${d.skip ? '⊘' : (d.far ? '✗' : '✓')} ${d.distFt}ft  ${d.name}${d.skip ? '  (already Unshielded)' : ''}`));
+
+        // Asset pin numbers live in a separate range (1000+) so they never
+        // collide with gap pins (1..N); label shows a clean 1..M sequence.
+        const ASSET_NUM_BASE = 1000;
+        const assetResults = unshielded.map((u, i) => ({
+            kind: 'asset',
+            number: ASSET_NUM_BASE + i + 1,
+            label: String(i + 1),
+            midLat: u.a.cLat,
+            midLng: u.a.cLng,
+            assetName: u.a.name,
+            distFt: u.distFt,
+            thresholdFt,
+            dismissed: false,
+        }));
+
+        // Replace ONLY asset pins; leave FFZ/FP gap pins untouched.
+        validatorState.results = validatorState.results.filter(r => r.kind !== 'asset').concat(assetResults);
+        assetValidatorLastRun = {
+            count: assetResults.length,
+            total: assets.length,
+            skipped,
+            at: Date.now(),
+            durationMs: Date.now() - startTime,
+        };
+        saveValidatorResults();
+        const skipNote = skipped ? ` (${skipped} skipped as already-Unshielded)` : '';
+        if (assetResults.length === 0) {
+            console.log(`${TAG} asset-validator: ✓ all ${assets.length - skipped} checked assets shielded (centroid within ${thresholdFt}ft of a power line)${skipNote} (${assetValidatorLastRun.durationMs}ms)`);
+        } else {
+            console.warn(`${TAG} asset-validator: ${assetResults.length}/${assets.length - skipped} checked assets UNSHIELDED (centroid >${thresholdFt}ft from any power line)${skipNote} in ${assetValidatorLastRun.durationMs}ms`);
+            assetResults.forEach(r => console.warn(`${TAG} asset-validator:   • ${r.assetName} — nearest power line ${r.distFt}ft`));
+        }
+        runUpdate();
+    }
+
+    function clearAssetCoverageValidator() {
+        const before = validatorState.results.length;
+        validatorState.results = validatorState.results.filter(r => r.kind !== 'asset');
+        assetValidatorLastRun = null;
+        saveValidatorResults();
+        console.log(`${TAG} asset-validator: cleared ${before - validatorState.results.length} pin(s)`);
         runUpdate();
     }
 
@@ -4295,8 +4892,24 @@
         }
     }
 
+    // True if a #rgb / #rrggbb color is light enough that black text reads
+    // better than white on it (per-channel luminance > ~0.6). Used to keep the
+    // asset pin number legible for any user-picked color.
+    function isLightColor(hex) {
+        if (typeof hex !== 'string') return false;
+        let h = hex.replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        if (h.length !== 6) return false;
+        const r = parseInt(h.slice(0, 2), 16) / 255;
+        const g = parseInt(h.slice(2, 4), 16) / 255;
+        const b = parseInt(h.slice(4, 6), 16) / 255;
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 0.6;
+    }
+
     function renderValidatorPins() {
-        if (!toggleState['validator.show']) return;
+        // Either test's master being on is enough to draw — each result is
+        // filtered per-kind inside the loop by its own show toggle.
+        if (!toggleState['validator.show'] && !toggleState['asset-validator.show']) return;
         if (!validatorState.results.length) return;
         const map = getLeafletMap();
         if (!map || typeof map.latLngToContainerPoint !== 'function') return;
@@ -4320,17 +4933,35 @@
             return sp.matrixTransform(inv);
         };
 
-        const thresholdFt = Number(toggleState['validator.distance']) || 200;
-        const latOffsetDeg = thresholdFt / 362776;
-        const showDismissed = !!toggleState['validator.show-dismissed'];
+        const gapThresholdFt = Number(toggleState['validator.distance']) || 200;
 
         validatorState.results.forEach(r => {
+            // Per-kind: asset pins (orange, centroid + stored threshold) vs
+            // FFZ/FP gap pins (red, outline + the live validator.distance).
+            const isAsset = r.kind === 'asset';
+            if (isAsset && !toggleState['asset-validator.show']) return;
+            if (!isAsset && !toggleState['validator.show']) return;
+            const showDismissed = isAsset
+                ? !!toggleState['asset-validator.show-dismissed']
+                : !!toggleState['validator.show-dismissed'];
             if (r.dismissed && !showDismissed) return;
+
+            const thresholdFt = isAsset ? (Number(r.thresholdFt) || 400) : gapThresholdFt;
+            const latOffsetDeg = thresholdFt / 362776;
+            // Asset pin/ring color is user-controllable (defaults to a high-
+            // contrast magenta that reads on both tan pads and dark imagery).
+            const assetColor = toggleState['asset-validator.pin-color'] || '#ff1493';
+            const ringColor = isAsset ? assetColor : '#ff0033';
+            const pinFill = isAsset ? assetColor : '#cc0029';
+            // Asset pins use a dark outline (not white) for contrast on light
+            // pads, and run a bit larger so the number stays legible.
+            const pinStroke = isAsset ? '#111111' : '#ffffff';
+            const pinLabel = (r.label != null) ? String(r.label) : String(r.number);
 
             const c = latLngToSVG(r.midLat, r.midLng);
             const c2 = latLngToSVG(r.midLat + latOffsetDeg, r.midLng);
             const radiusUnits = Math.hypot(c2.x - c.x, c2.y - c.y);
-            const pinR = Math.max(8, radiusUnits * 0.07);
+            const pinR = Math.max(isAsset ? 13 : 8, radiusUnits * (isAsset ? 0.10 : 0.07));
 
             // Active pins get the full visual (red highlight + coverage
             // circle). Dismissed pins (only shown when showDismissed=true)
@@ -4347,7 +4978,7 @@
                     hl.setAttribute('data-buffer-kind', 'validator-highlight');
                     hl.setAttribute('d', d);
                     hl.setAttribute('fill', 'none');
-                    hl.setAttribute('stroke', '#ff0033');
+                    hl.setAttribute('stroke', ringColor);
                     hl.setAttribute('stroke-opacity', '0.85');
                     hl.setAttribute('stroke-width', String(Math.max(4, pinR * 0.7)));
                     hl.setAttribute('stroke-linecap', 'round');
@@ -4356,18 +4987,20 @@
                     g.appendChild(hl);
                 }
 
-                // 2. 200ft coverage circle (translucent red, dashed border)
+                // 2. Coverage circle (translucent, dashed border) — radius is
+                //    the gap threshold (200ft) for gaps, or the asset shielding
+                //    threshold (centroid radius, default 400ft) for assets.
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 circle.setAttribute('data-buffer-kind', 'validator-coverage');
                 circle.setAttribute('cx', String(c.x));
                 circle.setAttribute('cy', String(c.y));
                 circle.setAttribute('r', String(radiusUnits));
-                circle.setAttribute('fill', '#ff0033');
-                circle.setAttribute('fill-opacity', '0.08');
-                circle.setAttribute('stroke', '#ff0033');
-                circle.setAttribute('stroke-opacity', '0.45');
-                circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.015)));
+                circle.setAttribute('fill', ringColor);
+                circle.setAttribute('fill-opacity', isAsset ? '0.10' : '0.08');
+                circle.setAttribute('stroke', ringColor);
+                circle.setAttribute('stroke-opacity', isAsset ? '0.85' : '0.45');
+                circle.setAttribute('stroke-width', String(Math.max(isAsset ? 2 : 1, radiusUnits * (isAsset ? 0.022 : 0.015))));
                 circle.setAttribute('stroke-dasharray', `${radiusUnits * 0.04} ${radiusUnits * 0.04}`);
                 circle.setAttribute('pointer-events', 'none');
                 g.appendChild(circle);
@@ -4389,11 +5022,11 @@
                 pin.setAttribute('stroke', '#aaa');
                 pin.setAttribute('stroke-opacity', '0.8');
             } else {
-                pin.setAttribute('fill', '#cc0029');
-                pin.setAttribute('stroke', '#ffffff');
+                pin.setAttribute('fill', pinFill);
+                pin.setAttribute('stroke', pinStroke);
                 pin.setAttribute('stroke-opacity', '1');
             }
-            pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
+            pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * (isAsset ? 0.28 : 0.2))));
             // Set pointer-events both as SVG attribute AND as inline CSS so
             // nothing — neither Leaflet's class-based pointer-events styling
             // nor a stylesheet — can override the hit area. Click/dismiss
@@ -4411,13 +5044,17 @@
             text.setAttribute('y', String(c.y));
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('dominant-baseline', 'central');
-            text.setAttribute('fill', r.dismissed ? '#ddd' : '#ffffff');
+            // Number stays legible on any user-picked fill: black on light
+            // pins, white on dark ones (asset pins only — gap pins are fixed).
+            const numFill = r.dismissed ? '#ddd'
+                : (isAsset ? (isLightColor(pinFill) ? '#111111' : '#ffffff') : '#ffffff');
+            text.setAttribute('fill', numFill);
             text.setAttribute('fill-opacity', r.dismissed ? '0.7' : '1');
             text.setAttribute('font-size', String(pinR * 1.25));
             text.setAttribute('font-weight', 'bold');
             text.setAttribute('font-family', 'sans-serif');
             text.setAttribute('pointer-events', 'none');
-            text.textContent = String(r.number);
+            text.textContent = pinLabel;
             g.appendChild(text);
         });
     }
@@ -4832,6 +5469,13 @@
                     }
                 });
                 console.log(`${TAG} 🦵 Kick — forced redraw on ${redrawn} tile layer(s)`);
+                // Also force-refresh the cached asset state/equipment data —
+                // users reach for Shift+K after editing an asset and expect
+                // its color/visibility to update. (IFRAME owns the fetch.)
+                if (CONTEXT === 'IFRAME') {
+                    const sid = getCurrentSiteID();
+                    if (sid) fetchAssetStates(sid, true);
+                }
                 runUpdate();
             }, 200);
         }, 100);
@@ -5099,6 +5743,14 @@
                 if (msg.toggleId === 'asset.locked') {
                     applyAssetLockClass();
                 }
+                // Color-by-state flipped on → kick off the entity fetch now so
+                // the styling appears without waiting for another interaction.
+                // (Tags are re-matched every runUpdate, so no clearing needed on
+                // flip-off; the runUpdate below repaints with coloring removed.)
+                if (msg.toggleId === 'asset.by-state' && newVal) {
+                    const sid = getCurrentSiteID();
+                    if (sid) fetchAssetStates(sid, true);
+                }
                 if (msg.toggleId === 'master') {
                     // Only log when the value actually transitions. The Control
                     // Panel re-broadcasts SET_TOGGLE on every REGISTER from any
@@ -5151,6 +5803,8 @@
                 }
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
+                else if (msg.actionId === 'run-asset-validator') runAssetCoverageValidator();
+                else if (msg.actionId === 'clear-asset-validator') clearAssetCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
                 else if (msg.actionId === 'unhide-file-distro') unhideAllFileHidden('distro');
@@ -5163,6 +5817,10 @@
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'refresh-asset-data') {
+                    const sid = getCurrentSiteID();
+                    if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
+                }
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
                 // re-run so the change takes effect immediately.
@@ -5233,9 +5891,19 @@
             description: 'Horizontal safety buffers (FFZs, assets, flight paths)',
             version: SCRIPT_VERSION,
             frame: FRAME_ID,
-            toggles: TOGGLES,
+            toggles: buildRegistrationToggles(),
             hotkeys: HOTKEYS,
         });
+        // Keep TOP's schema in sync: whenever the iframe (which owns the data)
+        // registers and has a discovered equipment set, broadcast it so other
+        // frames adopt the same schema. Idempotent on the receiving side.
+        if (CONTEXT === 'IFRAME' && assetEquipTypes.length) {
+            try {
+                stateChannel.postMessage({
+                    action: 'ASSET_EQUIP', siteID: getCurrentSiteID(), equip: assetEquipTypes,
+                });
+            } catch (e) {}
+        }
         // Also ask for the PAT — the control panel responds with TOKEN_VALUE
         // if it has one. (The panel also auto-sends on REGISTER, but asking
         // explicitly covers the case where this script loaded first.)

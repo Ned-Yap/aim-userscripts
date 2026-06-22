@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Map Styler **PROMOTED TO PROD v34.77** — Asset Shielding Check + Color assets by state
+
+Map Styler goes from prod v34.70 → **v34.77** for everyone. Two features that were dev-only reach coworkers, both **additive and off-by-default**, so nothing changes unless you opt in:
+
+- **Asset Shielding Check** — a new on-demand validator (its own Control Panel section, beside the FFZ/FP Coverage Validator) that flags **assets too far from any power line to shield**. An asset is "shielded" if its centroid is within *power-line radius + asset radius* (default **200 + 200 = 400 ft**, both editable) of a power-line KML; failures get a high-contrast pin (pickable color) + coverage ring, with each asset's nearest-line distance logged for calibration. **Skips assets Percepto already marks Unshielded** (toggle, on by default). Built to find the assets the SS Generator needs to build FFZs on.
+- **Color assets by state** — opt-in toggle that recolors each asset box by health (Normal / Empty / Unshielded / Unreachable / HY / Inactive) with full per-state styling controls.
+
+Promoted as one file (drift-verified to differ from dev only in the 3 expected header lines).
+
+---
+
 ## 2026-06-22 — Asset Inspector v4.3 (PROD) — fix: right-click subtype edits vanished when you opened the Summary
 
 If you right-clicked an asset, edited its **Subtype**, and saw the "Queued: …" toast, then opened the **Summary** panel to apply it — the change was silently gone (no Apply button, no pending highlight). The popup-only edit never registered which site it belonged to, so the Summary's site-change guard treated the queue as stale and cleared it on open. Now the queue records its site the moment any edit is added, so popup edits survive until you open SUM and hit **▶ Apply queue**. Surgical fix backported to prod ahead of the larger dev bundle.
