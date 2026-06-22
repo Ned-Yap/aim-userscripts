@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.38
+// @version      1.39
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.38';
+    const SCRIPT_VERSION = '1.39';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -425,6 +425,7 @@
     let elevationCache = null;    // lazy-loaded from GM storage
     let elevQueue = [];           // pending fetch tasks
     let elevActive = 0;           // currently in-flight fetches
+    let elevBackoffUntil = 0;     // pause the queue until this time on a 429
     const elevInFlight = {};      // key → Promise (so duplicate requests for same point share one fetch)
 
     function loadElevationCache() {
@@ -502,12 +503,14 @@
     }
 
     function pumpElevQueue() {
+        const now = Date.now();
+        if (now < elevBackoffUntil) { setTimeout(pumpElevQueue, (elevBackoffUntil - now) + 50); return; } // rate-limited; wait
         while (elevActive < ELEV_CONCURRENCY && elevQueue.length > 0) {
             const task = elevQueue.shift();
             elevActive++;
             const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat: task.lat, lng: task.lng }))}`;
             fetch(url, { credentials: 'include' })
-                .then(r => r.ok ? r.json() : null)
+                .then(r => { if (r.status === 429) { elevBackoffUntil = Date.now() + 6000; return null; } return r.ok ? r.json() : null; })
                 .then(data => {
                     const meters = data && typeof data.altitude === 'number' ? data.altitude : null;
                     if (meters != null) {
@@ -1679,9 +1682,14 @@
             seen++;
             const ll = layer._latlng;
             if (!ll) return;
-            // When auto-AGL is armed, warm the DEM cache for every marker's LIVE
-            // position (incl. just-moved snapshots) so the save hook has ground.
-            if (autoSnapAglEnabled) { try { fetchElevation(ll.lat, ll.lng); } catch (e) {} }
+            // When auto-AGL is armed, warm the DEM cache for marker positions —
+            // but ONLY if uncached and not already requested in the last 20s, so
+            // this style pass (which runs often) doesn't hammer /location_altitude/
+            // into 429s.
+            if (autoSnapAglEnabled && getElevationFromCache(ll.lat, ll.lng) == null) {
+                const ek = `${(+ll.lat).toFixed(5)},${(+ll.lng).toFixed(5)}`, now = Date.now();
+                if (!genElevReqAt[ek] || now - genElevReqAt[ek] > 20000) { genElevReqAt[ek] = now; try { fetchElevation(ll.lat, ll.lng); } catch (e) {} }
+            }
             const info = lookup[K(ll.lat, ll.lng)];
             if (!info) return;
             matched++;
@@ -1818,6 +1826,7 @@
 
     // Per-snapshot last-handled position (so we act on MOVES, not every tick).
     const liveSnapLastLoc = {};
+    const genElevReqAt = {}; // throttle DEM prefetch per marker position (anti-429)
     let liveEditorTimer = null;
     function startLiveEditorSync() {
         if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
@@ -2341,10 +2350,14 @@
         // ids (server assigns real ones), so any unique client id is fine.
         let idSeq = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100);
         const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); c.id = idSeq++; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
+        // Spread new steps PAST any nav/snap already in the mission (incl. ones
+        // staged earlier this session) so a 2nd Stage doesn't stack on the 1st.
+        const baseNav = instrs.filter(s => s && s.type_name === 'navigate').length;   // includes the original (1) + prior staged
+        const baseSnap = instrs.filter(s => s && s.type_name === 'snapshot').length;
         const staged = [];
-        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, i)));
+        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, (baseNav - 1) + i)));
         for (let j = 0; j < snapCount; j++) {
-            staged.push(copyStep(snapRef, offEast(snapRef, j)));
+            staged.push(copyStep(snapRef, offEast(snapRef, (baseSnap - 1) + j)));
             if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
