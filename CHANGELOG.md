@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.43 (dev/latest) — "Save & Next" step (rip through finetuning)
+
+New **Save ⏭** button in the mission editor (and **Shift+D** hotkey): saves the open step, then automatically opens the **next** step's editor — so you can finetune a generated mission step-by-step (move snapshot → save → next snapshot → …) without hunting the sidebar each time. "Next" skips the bundled camera/GEM toggles so you land on real nav/snapshot/wait steps; stops with a "last step" toast at the end. Pairs with **Shift+S** (save the open step in place). Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.34 (dev/latest) — "Stage steps" (add N navs + M snaps to a mission) + bulk skips existing
 
 New **➕ Stage** button in the mission editor: say how many **Navigates** and **Snapshots** you want (with optional inspection-scan wrap), and it adds them to the open mission, **placed next to the existing ones** so you can drag each into position. Navigates keep "Based on FFZ min alt"; snapshots auto-set their elevation on drop if 📷 Auto-AGL is armed — much faster than hand-adding steps. Also: the bulk **Generate All** now **skips assets that already have a mission** (split into to-create / already-have / skip-state). Dev-only (latest/).
