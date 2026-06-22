@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.75
+// @version      34.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.75';
+    const SCRIPT_VERSION = '34.76';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -315,9 +315,10 @@
             // Independent of the FFZ/FP Coverage Validator above: this one
             // tests ASSETS. An asset is "shielded" if its centroid sits
             // within (power-line radius + asset radius) of any power-line
-            // KML — default 200 + 200 = 400 ft. Assets beyond that get an
-            // orange pin so we know which ones the SS Generator must build
-            // FFZs on. Power-line KMLs are the only shielding source.
+            // KML — default 200 + 200 = 400 ft. Assets beyond that get a
+            // high-contrast pin (color configurable) so we know which ones the
+            // SS Generator must build FFZs on. Power-line KMLs are the only
+            // shielding source.
             type: 'category',
             id: 'asset-validator-cat',
             label: 'Asset Shielding Check',
@@ -328,6 +329,7 @@
                   min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
                 { id: 'asset-validator.asset-radius', label: 'Asset radius', type: 'number',
                   min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
+                { id: 'asset-validator.pin-color', label: 'Pin / ring color', type: 'color', default: '#ff1493' },
                 { id: 'asset-validator-run', label: 'Run asset check', type: 'button', action: 'run-asset-validator' },
                 { id: 'asset-validator-clear', label: 'Clear asset pins', type: 'button', action: 'clear-asset-validator' },
                 { id: 'asset-validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
@@ -4875,6 +4877,20 @@
         }
     }
 
+    // True if a #rgb / #rrggbb color is light enough that black text reads
+    // better than white on it (per-channel luminance > ~0.6). Used to keep the
+    // asset pin number legible for any user-picked color.
+    function isLightColor(hex) {
+        if (typeof hex !== 'string') return false;
+        let h = hex.replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        if (h.length !== 6) return false;
+        const r = parseInt(h.slice(0, 2), 16) / 255;
+        const g = parseInt(h.slice(2, 4), 16) / 255;
+        const b = parseInt(h.slice(4, 6), 16) / 255;
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 0.6;
+    }
+
     function renderValidatorPins() {
         // Either test's master being on is enough to draw — each result is
         // filtered per-kind inside the loop by its own show toggle.
@@ -4917,14 +4933,20 @@
 
             const thresholdFt = isAsset ? (Number(r.thresholdFt) || 400) : gapThresholdFt;
             const latOffsetDeg = thresholdFt / 362776;
-            const ringColor = isAsset ? '#ff8c00' : '#ff0033';
-            const pinFill = isAsset ? '#e67300' : '#cc0029';
+            // Asset pin/ring color is user-controllable (defaults to a high-
+            // contrast magenta that reads on both tan pads and dark imagery).
+            const assetColor = toggleState['asset-validator.pin-color'] || '#ff1493';
+            const ringColor = isAsset ? assetColor : '#ff0033';
+            const pinFill = isAsset ? assetColor : '#cc0029';
+            // Asset pins use a dark outline (not white) for contrast on light
+            // pads, and run a bit larger so the number stays legible.
+            const pinStroke = isAsset ? '#111111' : '#ffffff';
             const pinLabel = (r.label != null) ? String(r.label) : String(r.number);
 
             const c = latLngToSVG(r.midLat, r.midLng);
             const c2 = latLngToSVG(r.midLat + latOffsetDeg, r.midLng);
             const radiusUnits = Math.hypot(c2.x - c.x, c2.y - c.y);
-            const pinR = Math.max(8, radiusUnits * 0.07);
+            const pinR = Math.max(isAsset ? 13 : 8, radiusUnits * (isAsset ? 0.10 : 0.07));
 
             // Active pins get the full visual (red highlight + coverage
             // circle). Dismissed pins (only shown when showDismissed=true)
@@ -4960,10 +4982,10 @@
                 circle.setAttribute('cy', String(c.y));
                 circle.setAttribute('r', String(radiusUnits));
                 circle.setAttribute('fill', ringColor);
-                circle.setAttribute('fill-opacity', '0.08');
+                circle.setAttribute('fill-opacity', isAsset ? '0.10' : '0.08');
                 circle.setAttribute('stroke', ringColor);
-                circle.setAttribute('stroke-opacity', '0.45');
-                circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.015)));
+                circle.setAttribute('stroke-opacity', isAsset ? '0.85' : '0.45');
+                circle.setAttribute('stroke-width', String(Math.max(isAsset ? 2 : 1, radiusUnits * (isAsset ? 0.022 : 0.015))));
                 circle.setAttribute('stroke-dasharray', `${radiusUnits * 0.04} ${radiusUnits * 0.04}`);
                 circle.setAttribute('pointer-events', 'none');
                 g.appendChild(circle);
@@ -4986,10 +5008,10 @@
                 pin.setAttribute('stroke-opacity', '0.8');
             } else {
                 pin.setAttribute('fill', pinFill);
-                pin.setAttribute('stroke', '#ffffff');
+                pin.setAttribute('stroke', pinStroke);
                 pin.setAttribute('stroke-opacity', '1');
             }
-            pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * 0.2)));
+            pin.setAttribute('stroke-width', String(Math.max(1.5, pinR * (isAsset ? 0.28 : 0.2))));
             // Set pointer-events both as SVG attribute AND as inline CSS so
             // nothing — neither Leaflet's class-based pointer-events styling
             // nor a stylesheet — can override the hit area. Click/dismiss
@@ -5007,7 +5029,11 @@
             text.setAttribute('y', String(c.y));
             text.setAttribute('text-anchor', 'middle');
             text.setAttribute('dominant-baseline', 'central');
-            text.setAttribute('fill', r.dismissed ? '#ddd' : '#ffffff');
+            // Number stays legible on any user-picked fill: black on light
+            // pins, white on dark ones (asset pins only — gap pins are fixed).
+            const numFill = r.dismissed ? '#ddd'
+                : (isAsset ? (isLightColor(pinFill) ? '#111111' : '#ffffff') : '#ffffff');
+            text.setAttribute('fill', numFill);
             text.setAttribute('fill-opacity', r.dismissed ? '0.7' : '1');
             text.setAttribute('font-size', String(pinR * 1.25));
             text.setAttribute('font-weight', 'bold');

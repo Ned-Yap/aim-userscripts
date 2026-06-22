@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Map Styler v34.76 (dev/latest) — Asset Shielding Check pin contrast + color control
+
+Asset pins were hard to see (orange washed out on tan well-pads). Now they default to a high-contrast **deep pink** with a **dark outline**, render **larger**, and the coverage ring is bolder. New **Pin / ring color** picker in the Asset Shielding Check panel lets you set any color; the pin number auto-switches black/white so it stays legible on whatever you pick. (v34.75: each run also logs every asset's nearest-power-line distance, sorted, for threshold calibration.) Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Map Styler v34.74 (dev/latest) — new **Asset Shielding Check** (finds Unshielded assets)
 
 A second, independent validator alongside the FFZ/FP **Coverage Validator**. Where that one checks flight paths/FFZs against power lines, this one checks **assets**: an asset is **shielded** if its centroid sits within **power-line radius + asset radius** of any power-line KML (default **200 + 200 = 400 ft**, both editable in the panel). Assets beyond that get an **orange pin** labeled 1, 2, 3… with a 400 ft coverage circle and the nearest-line distance logged to the console — so you can see at a glance which assets the **SS Generator** needs to build FFZs on. Power-line KMLs are the only shielding source. Lives in its own **Asset Shielding Check** Control Panel section (Run / Clear / show-dismissed); click a pin to dismiss after confirming. Fully independent of the Coverage Validator (separate pins, separate run/clear) and works whether or not "color assets by state" is on. Dev-only (latest/).
