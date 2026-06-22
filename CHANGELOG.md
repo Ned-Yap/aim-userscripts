@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools **PROMOTED TO PROD v1.46** — first real coworker release
+
+Mission Bank Tools goes live for everyone (coworkers jump **v0.51 → v1.46** at next Tampermonkey check). The whole dev arc reaches coworkers in one shot: the **SUM panel** (right-click step inspector, full step table with search/filter/sort/export), **inline altitude batch editing** with DEM elevation + **AGL view toggle**, the **Mission SOP checker**, **KML export** (flight path + N#/S# pins), **auto-AGL on save**, **➕ Stage steps**, **Shift+S** step-save, and **click-a-marker to save & switch steps**. The **Mission Generator** (⊕ Generate / ▣ Generate All — the only tool that *creates* missions) ships **locked off by default** and stays dev-only until a coworker trial; nobody sees or can trigger it. Verified zero content drift between dev and prod before promoting (only the 3 standard header lines differ).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.46 (dev/latest) — Mission Generator locked off by default (pre-promotion)
 
 Ahead of pushing Mission Bank Tools live, the **Mission Generator** (⊕ Generate / ▣ Generate All — the only tool that *creates* real missions on a site) is now **locked off by default for everyone**: the buttons don't appear and the generate actions no-op unless an install explicitly unlocks it. Everything else (SUM panel, inspector, altitude editing, SOP check, KML export, auto-AGL, ➕ Stage, click-marker step-switch) is unaffected. Unlock on your own install from the Mission Bank iframe console: `__aimMBGenerator(true)` (persists), `__aimMBGenerator(false)` to re-lock, `__aimMBGenerator()` to check. Dev-only (latest/).

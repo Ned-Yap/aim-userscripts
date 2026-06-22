@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      0.51
+// @version      1.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '1.46';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -125,8 +125,81 @@
     const MISSION_LINK_SELECTOR = 'a[data-testid="edit-mission-link"]';
     const MISSION_HREF_RE = /\/mission-bank\/(\d+)(?:\/|$|\?)/;
     const CACHE_KEY_VISIBLE_COLS = 'aim-mb-visible-cols';
+    const CACHE_KEY_VISIBLE_COLS_LOG = 'aim-mb-visible-cols-log'; // separate column set for Mission Log mode
     const CACHE_KEY_DISTANCE_UNIT = 'aim-mb-distance-unit'; // 'imperial' | 'metric'
     const CACHE_KEY_FLIGHT_THRESHOLDS = 'aim-mb-flight-thresholds';
+    const CACHE_KEY_GAP_DAYS = 'aim-mb-log-gap-days';       // coverage-gap threshold (days)
+    const CACHE_KEY_COLLAPSE_BLOCKS = 'aim-mb-collapse-blocks'; // detail view: collapse Thermal/GEM/Wait scan blocks
+    const LOG_SUM_BTN_ID = 'aim-mb-log-sum-btn';            // launcher on the Mission Log page
+    const DEFAULT_GAP_DAYS = 7;
+    // Detail-view ergonomics: collapse each snapshot's redundant
+    // Thermal-on/GEM-on/Wait/GEM-off/Thermal-off block into ONE summary row.
+    // Default ON — these 5 steps eat the editor. The data is untouched; this
+    // is a pure view filter.
+    let collapseScanBlocks = gmGet(CACHE_KEY_COLLAPSE_BLOCKS, true);
+    // Map declutter: hide the redundant scan-block step markers (GEM/Thermal/
+    // Wait) on the Mission Bank map, keeping only Navigate + Snapshot. Matched
+    // by icon-filename substring via a CSS :has() rule (survives Leaflet's
+    // marker rebuilds on zoom/pan with no JS observer). Confirmed filenames
+    // from the live DOM: GEM = gem-mode-*.svg, Thermal/Camera-Type =
+    // camera-type-*.svg, Wait = wait-*.svg. The Snapshot icon is a DIFFERENT
+    // camera file (not "camera-type"), so these substrings never hit Navigate
+    // or Snapshot.
+    const CACHE_KEY_HIDE_SCAN_ICONS = 'aim-mb-hide-scan-icons';
+    let hideScanIcons = gmGet(CACHE_KEY_HIDE_SCAN_ICONS, true);
+    const REDUNDANT_MARKER_SRCS = ['gem-mode', 'camera-type', 'wait'];
+    let loggedMarkerSrcs = false;
+    // Native-editor collapse: shrink the redundant Camera Type / GEM Mode /
+    // Wait instruction CARDS in Percepto's own mission editor (the left list)
+    // to thin rows so the 100+-instruction list is scannable. The cards are
+    // [data-rfd-draggable-id="<instructionId>"] (same handle the commit code
+    // uses); we map each id → type from the open mission and tag the redundant
+    // ones with a class. Capped height (not display:none) keeps a measurable
+    // box so react-beautiful-dnd drag-reorder isn't disturbed.
+    const CACHE_KEY_COLLAPSE_EDITOR = 'aim-mb-collapse-editor';
+    let collapseEditorCards = gmGet(CACHE_KEY_COLLAPSE_EDITOR, true);
+    const EDITOR_COLLAPSE_STYLE_ID = 'aim-mb-editor-collapse-style';
+    let loggedEditorCards = false;
+
+    // Per-step-type display colors. One color per type, used for BOTH the
+    // compact-card text (native editor) AND the on-map order badges + reorder
+    // popup. User-customizable via the Control Panel (type:'color' toggles).
+    // Keep this the single source of truth — applyCompactCard,
+    // composerEnsureBadgeCSS and composerEditOrder all read stepColor().
+    const STEP_COLOR_DEFAULTS = {
+        nav: '#6f9bff',
+        snap: '#ff7ac0',
+        thermalOn: '#ff9d2e',
+        thermalOff: '#b5651d',
+        gemOn: '#39ff14',
+        gemOff: '#2e8b2e',
+        wait: '#ffffff',
+    };
+    const CACHE_KEY_STEP_COLORS = 'aim-mb-step-colors';
+    let stepColors = Object.assign({}, STEP_COLOR_DEFAULTS, gmGet(CACHE_KEY_STEP_COLORS, {}) || {});
+    function stepColor(key) { return stepColors[key] || STEP_COLOR_DEFAULTS[key] || '#fff'; }
+    // Re-apply every place a step color is rendered (called after a color change).
+    function refreshStepColors() {
+        if (CONTEXT !== 'IFRAME') return;
+        try { composerEnsureBadgeCSS(true); } catch (e) {}
+        try { applyNativeEditorCollapse(); } catch (e) {}
+    }
+
+    // Snapshot auto-AGL on save: when ON, every mission save re-sets each
+    // snapshot's altitude to its DEM ground + the default AGL (so dragged
+    // snapshots can't end up underground). SAFETY: this is in-memory only and
+    // DEFAULTS OFF on every page load / Mission Bank entry — it must be turned
+    // on deliberately via the editor-row button, which also raises a bright
+    // on-map banner + a warning toast while it's ON. The default AGL itself is
+    // persisted (Control Panel "Default snapshot AGL").
+    let autoSnapAglEnabled = false;
+    const CACHE_KEY_DEFAULT_SNAP_AGL = 'aim-mb-default-snap-agl';
+    let defaultSnapAglFt = gmGet(CACHE_KEY_DEFAULT_SNAP_AGL, 10);
+    // Editor compact-card altitude view: AGL (ground-relative) vs MSL (stored).
+    // AGL reads more naturally; MSL is what's stored (for verifying). Toggle in
+    // the editor button row. Persisted.
+    const CACHE_KEY_AGL_VIEW = 'aim-mb-editor-agl-view';
+    let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -143,6 +216,12 @@
     const missionsBySite = {};
     let inFlightFetch = null; // de-dupe concurrent fetches
 
+    // Mission Log cache: { [siteID]: { rows: [raw mission objects], total, fetchedAt } }
+    // Distinct from missionsBySite — the log is execution history from
+    // GET /missions/ (paginated), not the Mission Bank templates.
+    const logBySite = {};
+    let inFlightLogFetch = null;
+
     // Panel state — fresh each open
     let panelEl = null;
     let panelState = null; // { sortKey, sortDir, search, selectedIds, distanceUnit, drillId, tableScrollY }
@@ -152,6 +231,12 @@
     // Shape: { [missionId]: { [instructionId]: { value: number, unit: 'imperial'|'metric' } } }
     const pendingAltitudes = {};
     let committingChanges = false;
+    // Fast bulk save: when ON, staged altitude changes are spliced into the
+    // user's outgoing mission save (POST /available_app/) in one shot instead
+    // of the per-step dialog automation. SESSION-SCOPED + default OFF — resets
+    // to false on every reload, so a save is never modified unless the user
+    // deliberately flips it on this session. See installSaveHook / patchMissionSaveBody.
+    let fastBulkSave = false;
 
     // Committed-but-not-yet-refetched altitudes. After a successful
     // queue commit, we update Percepto's per-step state but our
@@ -171,6 +256,7 @@
             const msg = ev.data || {};
             if (msg.type === 'REQUEST_REGISTRATIONS') {
                 registerWithControlPanel();
+                registerMissionSop();
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
@@ -181,7 +267,49 @@
                     } else {
                         runSumInjection();
                     }
+                } else if (msg.toggleId === 'hide-scan-icons') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== hideScanIcons) {
+                        hideScanIcons = v;
+                        gmSet(CACHE_KEY_HIDE_SCAN_ICONS, hideScanIcons);
+                        if (CONTEXT === 'IFRAME') try { applyMapIconDeclutter(document); } catch (e) {}
+                    }
+                } else if (msg.toggleId === 'collapse-editor-cards') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== collapseEditorCards) {
+                        collapseEditorCards = v;
+                        gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
+                        if (CONTEXT === 'IFRAME') {
+                            try { applyNativeEditorCollapse(); } catch (e) {}
+                            try { updateEditorCollapseBtn(); } catch (e) {}
+                        }
+                    }
+                } else if (msg.toggleId === 'default-snap-agl') {
+                    const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (isFinite(v) && v !== defaultSnapAglFt) {
+                        defaultSnapAglFt = v;
+                        gmSet(CACHE_KEY_DEFAULT_SNAP_AGL, defaultSnapAglFt);
+                        if (CONTEXT === 'IFRAME') { try { updateAutoSnapAglUI(); } catch (e) {} }
+                    }
+                } else if (typeof msg.toggleId === 'string' && msg.toggleId.indexOf('color-') === 0) {
+                    const key = msg.toggleId.slice(6);
+                    if (Object.prototype.hasOwnProperty.call(STEP_COLOR_DEFAULTS, key)) {
+                        const v = msg.value !== undefined ? msg.value : msg.enabled;
+                        if (typeof v === 'string' && v && stepColors[key] !== v) {
+                            stepColors[key] = v;
+                            gmSet(CACHE_KEY_STEP_COLORS, stepColors);
+                            try { refreshStepColors(); } catch (e) {}
+                        }
+                    }
                 }
+            } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
+                handleMissionSopToggle(msg);
+            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
+                // The Mission Bank UI (and its map) live in the IFRAME — run +
+                // render the report there only, so the action fires exactly once.
+                if (CONTEXT !== 'IFRAME') return;
+                if (msg.actionId === 'mission-sop-run') runMissionSopAndReport();
+                else if (msg.actionId === 'mission-sop-close') closeSopReport();
             }
         };
     }
@@ -193,7 +321,20 @@
             description: 'Mission Summary panel + drill-down on Mission Bank URL.',
             version: SCRIPT_VERSION,
             group: 'Mission Bank Macros', scope: 'mission-bank', priority: 20,
-            toggles: [{ id: 'master', label: 'Enable', type: 'boolean', default: true, master: true }],
+            toggles: [
+                { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
+                { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
+                { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
+                { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
+                { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
+                { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
+                { id: 'color-snap', label: 'Snapshot', type: 'color', default: STEP_COLOR_DEFAULTS.snap },
+                { id: 'color-thermalOn', label: 'Thermal On', type: 'color', default: STEP_COLOR_DEFAULTS.thermalOn },
+                { id: 'color-thermalOff', label: 'Thermal Off', type: 'color', default: STEP_COLOR_DEFAULTS.thermalOff },
+                { id: 'color-gemOn', label: 'GEM On', type: 'color', default: STEP_COLOR_DEFAULTS.gemOn },
+                { id: 'color-gemOff', label: 'GEM Off', type: 'color', default: STEP_COLOR_DEFAULTS.gemOff },
+                { id: 'color-wait', label: 'Wait', type: 'color', default: STEP_COLOR_DEFAULTS.wait },
+            ],
             hotkeys: [],
         });
     }
@@ -249,6 +390,25 @@
         return /#\/site\/\d+\/control-panel\/mission-bank/.test(hash);
     }
 
+    function isOnMissionLog() {
+        const top = (() => { try { return window.top; } catch (e) { return window; } })();
+        const hash = (top && top.location && top.location.hash) || location.hash || '';
+        return /#\/site\/\d+\/mission-log/.test(hash);
+    }
+
+    // Which column set + visible-cols storage key is live, keyed off the
+    // panel mode. 'bank' (default) preserves every existing Mission Bank
+    // behaviour byte-for-byte; 'log' swaps in the Mission Log schema.
+    function activeColumns() {
+        return (panelState && panelState.mode === 'log') ? LOG_COLUMNS : COLUMNS;
+    }
+    function activeColById() {
+        return (panelState && panelState.mode === 'log') ? LOG_COL_BY_ID : COL_BY_ID;
+    }
+    function visibleColsStorageKey() {
+        return (panelState && panelState.mode === 'log') ? CACHE_KEY_VISIBLE_COLS_LOG : CACHE_KEY_VISIBLE_COLS;
+    }
+
     // ========================================================
     // Data — fetch + derive per-mission stats
     // ========================================================
@@ -265,6 +425,9 @@
     let elevationCache = null;    // lazy-loaded from GM storage
     let elevQueue = [];           // pending fetch tasks
     let elevActive = 0;           // currently in-flight fetches
+    let elevBackoffUntil = 0;     // pause the queue until this time on a 429
+    const elevFailedAt = {};      // key → last failure time (don't re-request for the cooldown)
+    const ELEV_FAIL_COOLDOWN = 30000;
     const elevInFlight = {};      // key → Promise (so duplicate requests for same point share one fetch)
 
     function loadElevationCache() {
@@ -330,6 +493,9 @@
         const cache = loadElevationCache();
         if (cache[key] != null) return Promise.resolve(cache[key]);
         if (elevInFlight[key]) return elevInFlight[key];
+        // Don't re-request a position that just failed (429/error) — this is what
+        // turned rate-limits into a request STORM (fail → uncached → re-request).
+        if (elevFailedAt[key] && Date.now() - elevFailedAt[key] < ELEV_FAIL_COOLDOWN) return Promise.resolve(null);
         const p = new Promise(resolve => {
             elevQueue.push({ lat, lng, key, resolve });
             pumpElevQueue();
@@ -342,22 +508,25 @@
     }
 
     function pumpElevQueue() {
+        const now = Date.now();
+        if (now < elevBackoffUntil) { setTimeout(pumpElevQueue, (elevBackoffUntil - now) + 50); return; } // rate-limited; wait
         while (elevActive < ELEV_CONCURRENCY && elevQueue.length > 0) {
             const task = elevQueue.shift();
             elevActive++;
             const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat: task.lat, lng: task.lng }))}`;
             fetch(url, { credentials: 'include' })
-                .then(r => r.ok ? r.json() : null)
+                .then(r => { if (r.status === 429) { elevBackoffUntil = Date.now() + 6000; return null; } return r.ok ? r.json() : null; })
                 .then(data => {
                     const meters = data && typeof data.altitude === 'number' ? data.altitude : null;
                     if (meters != null) {
                         const cache = loadElevationCache();
                         cache[task.key] = meters;
                         saveElevationCache();
-                    }
+                        delete elevFailedAt[task.key];
+                    } else { elevFailedAt[task.key] = Date.now(); } // 429/miss → cool down before retry
                     task.resolve(meters);
                 })
-                .catch(() => task.resolve(null))
+                .catch(() => { elevFailedAt[task.key] = Date.now(); task.resolve(null); })
                 .finally(() => { elevActive--; pumpElevQueue(); });
         }
     }
@@ -704,20 +873,25 @@
     }
 
     function getVisibleColumnIds() {
-        const stored = gmGet(CACHE_KEY_VISIBLE_COLS, null);
+        const cols = activeColumns();
+        const byId = activeColById();
+        const stored = gmGet(visibleColsStorageKey(), null);
         if (Array.isArray(stored) && stored.length > 0) {
-            // Migrate v0.8 hardcoded step-type IDs → stype:… IDs
+            // Migrate v0.8 hardcoded step-type IDs → stype:… IDs (bank only;
+            // log IDs aren't in the map so this is a no-op for log).
             const migrated = stored.map(id => COLUMN_ID_MIGRATION[id] || id);
-            return migrated.filter(id => COL_BY_ID[id]);
+            return migrated.filter(id => byId[id]);
         }
-        return COLUMNS.filter(c => c.defaultVisible).map(c => c.id);
+        return cols.filter(c => c.defaultVisible).map(c => c.id);
     }
 
     function setVisibleColumnIds(ids) {
-        gmSet(CACHE_KEY_VISIBLE_COLS, ids);
+        gmSet(visibleColsStorageKey(), ids);
     }
 
     function formatCellValue(row, col, unit, thresholds) {
+        // Columns may carry their own formatter (used by Mission Log mode).
+        if (typeof col.fmt === 'function') return col.fmt(row, unit);
         if (col.id === 'estFlights') {
             return fmtNum(estimateFlights(row.batteryConsumption, thresholds));
         }
@@ -737,11 +911,411 @@
     }
 
     function getSortValue(row, col, thresholds) {
+        if (typeof col.sortVal === 'function') return col.sortVal(row);
         if (col.id === 'estFlights') return estimateFlights(row.batteryConsumption, thresholds) || 0;
         if (col.dynamic && col.stepTypeKey) return (row.stepTypeCounts || {})[col.stepTypeKey] || 0;
         const v = row[col.key];
         if (col.kind === 'text' || col.kind === 'dot') return (v || '').toString().toLowerCase();
         return Number(v) || 0;
+    }
+
+    // ========================================================
+    // MISSION LOG MODE — execution-history SUM
+    // ========================================================
+    // The Mission Log (#/site/<id>/mission-log) is a DIFFERENT React page +
+    // data source from the Mission Bank: it's flight history pulled from
+    // GET /missions/ (paginated), not the bank templates. We reuse the whole
+    // SUM panel (chrome, table render, sort/filter, columns menu, export) by
+    // running it in panelState.mode === 'log' against LOG_COLUMNS + log rows.
+
+    const LOG_ONLY_FIELDS = 'id,mission_group_id,uploader_status,uploader_planned_images_count,drone_name,when,image_count,created_by_username,app_name,type,state,videos,landed,landing_files,tracking_files,landing_is_failed,duration,mission_data_reports,map_status,map_type,is_media_mission';
+
+    // Percepto stores `when` as ISO UTC and `duration` as milliseconds.
+    const LOG_CT_FMT = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: 'numeric', minute: '2-digit', hour12: true
+    });
+    function fmtWhenCT(ms) {
+        if (ms == null) return '';
+        const d = new Date(ms);
+        if (isNaN(d.getTime())) return '';
+        const p = {};
+        for (const x of LOG_CT_FMT.formatToParts(d)) p[x.type] = x.value;
+        return `${p.month}/${p.day}/${p.year} - ${p.hour}:${p.minute}${(p.dayPeriod || '').toLowerCase()} CT`;
+    }
+    function fmtDurationMs(ms) {
+        if (ms == null) return '';
+        const s = Math.round(ms / 1000);
+        const pad = (n) => String(n).padStart(2, '0');
+        if (s <= 0) return '00:00';
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+        return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
+    }
+    // Best-effort state-code labels — refine once the enum is confirmed.
+    const LOG_STATE_LABELS = { 0: 'Pending', 1: 'In Progress', 2: 'Completed', 3: 'Aborted', 4: 'Failed', 5: 'Cancelled' };
+    function logStateLabel(code) {
+        if (code == null) return '';
+        return LOG_STATE_LABELS[code] != null ? LOG_STATE_LABELS[code] : `State ${code}`;
+    }
+
+    const LOG_COLUMNS = [
+        { id: 'id', label: 'Mission ID', key: 'id', kind: 'num', defaultVisible: true },
+        { id: 'missionGroup', label: 'Group', key: 'missionGroup', kind: 'text', defaultVisible: true },
+        { id: 'name', label: 'Name', key: 'name', kind: 'text', defaultVisible: true, primary: true },
+        { id: 'timeCT', label: 'Time (CT)', kind: 'text', defaultVisible: true, fmt: (r) => fmtWhenCT(r.whenMs), sortVal: (r) => r.whenMs || 0 },
+        { id: 'duration', label: 'Duration', kind: 'text', defaultVisible: true, fmt: (r) => fmtDurationMs(r.durationMs), sortVal: (r) => r.durationMs || 0 },
+        { id: 'drone', label: 'Drone', key: 'drone', kind: 'text', defaultVisible: true },
+        { id: 'type', label: 'Type', key: 'type', kind: 'text', defaultVisible: true },
+        { id: 'state', label: 'State', kind: 'text', defaultVisible: true, fmt: (r) => r.stateLabel, sortVal: (r) => (r.stateCode == null ? -1 : r.stateCode) },
+        { id: 'status', label: 'Status', kind: 'text', defaultVisible: true, fmt: (r) => (r._aborted ? '⚠ Aborted' : (r.landed || '')), sortVal: (r) => (r._aborted ? 1 : 0) },
+        { id: 'images', label: 'Images', key: 'images', kind: 'num', defaultVisible: true },
+        { id: 'videos', label: 'Videos', key: 'videoCount', kind: 'num', defaultVisible: false },
+        { id: 'createdBy', label: 'Created By', key: 'createdBy', kind: 'text', defaultVisible: false },
+        { id: 'media', label: 'Media Mission', kind: 'text', defaultVisible: false, fmt: (r) => (r.isMedia ? 'Yes' : 'No'), sortVal: (r) => (r.isMedia ? 1 : 0) },
+    ];
+    const LOG_COL_BY_ID = Object.fromEntries(LOG_COLUMNS.map(c => [c.id, c]));
+
+    function buildLogRow(m) {
+        const whenMs = m.when ? Date.parse(m.when) : null;
+        const durationMs = (typeof m.duration === 'number') ? m.duration : (m.duration != null ? Number(m.duration) : 0);
+        const stateCode = (m.state != null) ? m.state : null;
+        const durS = durationMs != null ? Math.round(durationMs / 1000) : null;
+        const aborted = (durationMs === 0) || (m.landing_is_failed === true);
+        return {
+            id: m.id,
+            missionGroup: m.mission_group_id != null ? m.mission_group_id : '',
+            name: m.app_name || '',
+            whenMs, whenISO: m.when || '',
+            durationMs: durationMs == null ? 0 : durationMs, durationS: durS,
+            drone: m.drone_name || '',
+            type: m.type || '',
+            stateCode, stateLabel: logStateLabel(stateCode),
+            landed: m.landed || '',
+            landingFailed: m.landing_is_failed,
+            images: m.image_count != null ? m.image_count : 0,
+            videoCount: Array.isArray(m.videos) ? m.videos.length : 0,
+            isMedia: !!m.is_media_mission,
+            createdBy: m.created_by_username || '',
+            _aborted: aborted,
+            _raw: m,
+        };
+    }
+    function buildLogRows(siteID) {
+        const bucket = logBySite[siteID];
+        if (!bucket) return [];
+        return bucket.rows.map(buildLogRow);
+    }
+
+    // Paginated fetch of the full execution history. /missions/ returns the
+    // newest `past_missions` page + a `total_mission_count`; we walk backward
+    // via `last_mission_id` until we've collected the total (or a page is empty).
+    function fetchMissionLog(siteID, onDone, onErr) {
+        const all = [];
+        let total = null;
+        let guard = 0;
+        const end = new Date(), start = new Date();
+        start.setFullYear(start.getFullYear() - 2); // 2-year window
+        const fmt = (d) => d.toISOString().slice(0, 10);
+
+        function finish() {
+            inFlightLogFetch = null;
+            logBySite[siteID] = { rows: all, total: total != null ? total : all.length, fetchedAt: Date.now() };
+            dlog(`${TAG} log fetch done: ${all.length} missions (total ${total})`);
+            if (onDone) onDone();
+        }
+        function page(lastId) {
+            if (++guard > 80) { finish(); return; } // safety cap (~1600 missions)
+            const params = {
+                site_id: Number(siteID), drones: [], missionTypes: [], missionId: [],
+                users: [], state: null, takeoffCompleted: false,
+                start: fmt(start), end: fmt(end), last_mission_id: lastId
+            };
+            const url = `/missions/?site_id=${encodeURIComponent(siteID)}&params=${encodeURIComponent(JSON.stringify(params))}&only=${encodeURIComponent(LOG_ONLY_FIELDS)}`;
+            fetch(url, { credentials: 'include' })
+                .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+                .then(j => {
+                    const past = (j && j.past_missions) || [];
+                    if (total == null && typeof j.total_mission_count === 'number') total = j.total_mission_count;
+                    all.push(...past);
+                    const lastMid = past.length ? past[past.length - 1].id : null;
+                    const more = past.length > 0 && (total == null || all.length < total) && lastMid != null && lastMid !== lastId;
+                    if (more) page(lastMid); else finish();
+                })
+                .catch(e => {
+                    inFlightLogFetch = null;
+                    console.error(`${TAG} log fetch failed`, e);
+                    if (onErr) onErr(e.message || String(e));
+                });
+        }
+        inFlightLogFetch = siteID;
+        page(-1);
+    }
+
+    function renderLogTableView() {
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        panelState.drillId = null;
+        updateTitle();
+        const allRows = buildLogRows(sid);
+        const rows = filterAndSort(allRows);
+        const visibleCols = getVisibleColumnIds().map(id => LOG_COL_BY_ID[id]).filter(Boolean);
+        const total = (logBySite[sid] && logBySite[sid].total) || allRows.length;
+        const html = `
+            <div class="aim-mb-toolbar">
+                <input class="aim-mb-search" type="text" placeholder="Search name / type / drone / group…" value="${escapeHtml(panelState.search)}" />
+                <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
+                <button class="aim-mb-tbtn" data-stats title="Rollups, coverage gaps, outliers">📊 Stats</button>
+                <button class="aim-mb-tbtn" data-refresh title="Re-fetch the log">↻</button>
+            </div>
+            <div class="aim-mb-table-wrap" id="aim-mb-table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:32px;"><input type="checkbox" data-select-all ${selectAllState(rows)} /></th>
+                            ${visibleCols.map(col => renderHeaderCell(col)).join('')}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows.map(r => renderRow(r, visibleCols, panelState.thresholds)).join('')}
+                    </tbody>
+                </table>
+            </div>
+            <div class="aim-mb-footer">
+                <div class="aim-mb-info">
+                    ${rows.length} of ${total} mission${total === 1 ? '' : 's'}${panelState.selectedIds.size > 0 ? ` · <strong style="color:#14d2dc">${panelState.selectedIds.size} selected</strong>` : ''}
+                </div>
+                <button class="aim-mb-tbtn" data-export="csv">Copy CSV</button>
+                <button class="aim-mb-tbtn" data-export="tsv">Copy → Sheets</button>
+                <button class="aim-mb-tbtn" data-export="json">Copy JSON</button>
+            </div>
+        `;
+        setBodyHtml(html);
+        const tw = panelEl.querySelector('#aim-mb-table-wrap');
+        if (tw && panelState.tableScrollY) tw.scrollTop = panelState.tableScrollY;
+        wireLogTableEvents(rows, visibleCols);
+    }
+
+    function wireLogTableEvents(rows, visibleCols) {
+        const search = panelEl.querySelector('.aim-mb-search');
+        if (search) {
+            let dbnc = null;
+            search.addEventListener('input', (e) => {
+                const cursor = e.target.selectionStart;
+                const newVal = e.target.value;
+                if (dbnc) clearTimeout(dbnc);
+                dbnc = setTimeout(() => {
+                    panelState.search = newVal;
+                    renderTableView();
+                    const ns = panelEl.querySelector('.aim-mb-search');
+                    if (ns) { ns.focus(); try { ns.setSelectionRange(cursor, cursor); } catch (er) {} }
+                }, 250);
+            });
+        }
+        const colsBtn = panelEl.querySelector('[data-cols]');
+        if (colsBtn) colsBtn.onclick = () => openColumnsMenu(colsBtn);
+        const statsBtn = panelEl.querySelector('[data-stats]');
+        if (statsBtn) statsBtn.onclick = () => renderLogStats();
+        const refreshBtn = panelEl.querySelector('[data-refresh]');
+        if (refreshBtn) refreshBtn.onclick = () => {
+            const sid = getCurrentSiteID();
+            delete logBySite[sid];
+            renderLoadingState();
+            fetchMissionLog(sid, () => renderTableView(), (err) => renderErrorState(err));
+        };
+        panelEl.querySelectorAll('th[data-col]').forEach(th => {
+            th.onclick = () => {
+                const colId = th.dataset.col;
+                if (panelState.sortKey === colId) {
+                    if (panelState.sortDir === 'asc') panelState.sortDir = 'desc';
+                    else if (panelState.sortDir === 'desc') { panelState.sortKey = 'timeCT'; panelState.sortDir = 'desc'; }
+                    else panelState.sortDir = 'asc';
+                } else { panelState.sortKey = colId; panelState.sortDir = 'asc'; }
+                renderTableView();
+            };
+        });
+        panelEl.querySelectorAll('tbody tr[data-id]').forEach(tr => {
+            tr.onclick = (e) => {
+                if (e.target.matches('input[type="checkbox"]')) return;
+                const tw = panelEl.querySelector('#aim-mb-table-wrap');
+                if (tw) panelState.tableScrollY = tw.scrollTop;
+                renderLogDetail(Number(tr.dataset.id));
+            };
+        });
+        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const id = Number(cb.dataset.row);
+                if (cb.checked) panelState.selectedIds.add(id); else panelState.selectedIds.delete(id);
+                renderTableView();
+            };
+        });
+        const selAll = panelEl.querySelector('[data-select-all]');
+        if (selAll) selAll.onclick = (e) => {
+            e.stopPropagation();
+            if (selAll.checked) rows.forEach(r => panelState.selectedIds.add(r.id));
+            else rows.forEach(r => panelState.selectedIds.delete(r.id));
+            renderTableView();
+        };
+        panelEl.querySelectorAll('[data-export]').forEach(b => {
+            b.onclick = () => doExport(b.dataset.export, rows, visibleCols);
+        });
+    }
+
+    function renderLogDetail(missionId) {
+        const sid = getCurrentSiteID();
+        const row = buildLogRows(sid).find(r => r.id === missionId);
+        if (!row) { renderTableView(); return; }
+        panelState.drillId = missionId;
+        const m = row._raw || {};
+        const f = (label, val) => `<div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px solid #1f1f1f;"><span style="color:#888;min-width:150px;flex-shrink:0;">${escapeHtml(label)}</span><span style="color:#e6e6e6;word-break:break-word;">${escapeHtml(val == null || val === '' ? '—' : String(val))}</span></div>`;
+        const html = `
+            <div class="aim-mb-toolbar">
+                <button class="aim-mb-tbtn" data-back>← Back</button>
+                <span style="font-weight:700;color:#14d2dc;">${escapeHtml(row.name)} · #${row.id}</span>
+            </div>
+            <div class="aim-mb-table-wrap" style="padding:10px 14px;font-size:12px;">
+                ${f('Name', row.name)}
+                ${f('Mission ID', row.id)}
+                ${f('Group', row.missionGroup)}
+                ${f('Time (CT)', fmtWhenCT(row.whenMs))}
+                ${f('Time (raw UTC)', row.whenISO)}
+                ${f('Duration', fmtDurationMs(row.durationMs))}
+                ${f('Drone', row.drone)}
+                ${f('Type', row.type)}
+                ${f('State', `${row.stateLabel} (${row.stateCode})`)}
+                ${f('Landed', row.landed)}
+                ${f('Landing failed', row.landingFailed)}
+                ${f('Aborted (derived)', row._aborted ? 'Yes' : 'No')}
+                ${f('Images', row.images)}
+                ${f('Videos', row.videoCount)}
+                ${f('Media mission', row.isMedia ? 'Yes' : 'No')}
+                ${f('Created by', row.createdBy)}
+                ${f('Map status', m.map_status)}
+                ${f('Map type', m.map_type)}
+                ${f('Uploader status', m.uploader_status)}
+                ${f('Planned images', m.uploader_planned_images_count)}
+            </div>
+        `;
+        setBodyHtml(html);
+        const back = panelEl.querySelector('[data-back]');
+        if (back) back.onclick = () => renderTableView();
+    }
+
+    function renderLogStats() {
+        const sid = getCurrentSiteID();
+        const rows = buildLogRows(sid);
+        const gapDays = Number(gmGet(CACHE_KEY_GAP_DAYS, DEFAULT_GAP_DAYS)) || DEFAULT_GAP_DAYS;
+        const now = Date.now();
+        const daysSince = (ms) => (ms ? Math.floor((now - ms) / 86400000) : null);
+
+        const groups = {};
+        let totalMs = 0, minWhen = Infinity, maxWhen = -Infinity;
+        rows.forEach(r => {
+            totalMs += r.durationMs || 0;
+            if (r.whenMs) { if (r.whenMs < minWhen) minWhen = r.whenMs; if (r.whenMs > maxWhen) maxWhen = r.whenMs; }
+            const g = r.missionGroup === '' ? '(none)' : r.missionGroup;
+            if (!groups[g]) groups[g] = { group: g, names: new Set(), count: 0, totalMs: 0, durs: [], lastMs: 0 };
+            const gg = groups[g];
+            gg.count++; gg.totalMs += r.durationMs || 0;
+            if (r.durationMs) gg.durs.push(r.durationMs);
+            if (r.name) gg.names.add(r.name);
+            if (r.whenMs && r.whenMs > gg.lastMs) gg.lastMs = r.whenMs;
+        });
+        const groupArr = Object.values(groups).sort((a, b) => b.lastMs - a.lastMs);
+        const avgMs = rows.length ? totalMs / rows.length : 0;
+        const gaps = groupArr.filter(g => g.lastMs && daysSince(g.lastMs) > gapDays);
+        const outliers = rows.filter(r => r._aborted || (r.durationS != null && r.durationS > 0 && r.durationS < 60))
+            .sort((a, b) => (b.whenMs || 0) - (a.whenMs || 0));
+
+        const statCard = (label, val) => `<div style="background:#151a20;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;min-width:120px;"><div style="color:#888;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">${escapeHtml(label)}</div><div style="color:#14d2dc;font-size:16px;font-weight:700;">${escapeHtml(val)}</div></div>`;
+        const min = (arr) => arr.length ? Math.min(...arr) : 0;
+        const max = (arr) => arr.length ? Math.max(...arr) : 0;
+
+        const html = `
+            <div class="aim-mb-toolbar">
+                <button class="aim-mb-tbtn" data-back>← Back</button>
+                <span style="font-weight:700;color:#14d2dc;">📊 Mission Log Stats</span>
+                <span style="margin-left:auto;color:#888;font-size:11px;">Gap threshold:</span>
+                <input type="number" min="1" data-gap-days value="${gapDays}" style="width:54px;background:#0f1216;border:1px solid #444;color:#e6e6e6;padding:2px 4px;font-size:12px;border-radius:3px;" /> <span style="color:#888;font-size:11px;">days</span>
+            </div>
+            <div class="aim-mb-table-wrap" style="padding:12px 14px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+                    ${statCard('Missions', String(rows.length))}
+                    ${statCard('Groups', String(groupArr.length))}
+                    ${statCard('Total flight time', fmtDurationMs(totalMs))}
+                    ${statCard('Avg duration', fmtDurationMs(avgMs))}
+                    ${statCard('Date range', (minWhen === Infinity ? '—' : `${fmtWhenCT(minWhen).split(' - ')[0]} → ${fmtWhenCT(maxWhen).split(' - ')[0]}`))}
+                    ${statCard('Aborted/short', String(outliers.length))}
+                </div>
+
+                <div style="color:#14d2dc;font-weight:700;font-size:12px;margin:6px 0;">Per-group rollup</div>
+                <table style="margin-bottom:16px;">
+                    <thead><tr>
+                        <th>Group</th><th>Runs</th><th>Total</th><th>Avg</th><th>Min</th><th>Max</th><th>Last run (CT)</th><th>Days ago</th>
+                    </tr></thead>
+                    <tbody>
+                        ${groupArr.map(g => {
+                            const d = daysSince(g.lastMs);
+                            const stale = d != null && d > gapDays;
+                            return `<tr${stale ? ' style="background:rgba(255,82,82,0.12);"' : ''}>
+                                <td title="${escapeHtml(Array.from(g.names).join(', '))}">${escapeHtml(String(g.group))}</td>
+                                <td>${g.count}</td>
+                                <td>${fmtDurationMs(g.totalMs)}</td>
+                                <td>${fmtDurationMs(g.durs.length ? g.totalMs / g.count : 0)}</td>
+                                <td>${fmtDurationMs(min(g.durs))}</td>
+                                <td>${fmtDurationMs(max(g.durs))}</td>
+                                <td>${g.lastMs ? escapeHtml(fmtWhenCT(g.lastMs)) : '—'}</td>
+                                <td${stale ? ' style="color:#ff5252;font-weight:700;"' : ''}>${d == null ? '—' : d}</td>
+                            </tr>`;
+                        }).join('')}
+                    </tbody>
+                </table>
+
+                <div style="color:#ff8c42;font-weight:700;font-size:12px;margin:6px 0;">Coverage gaps (last run &gt; ${gapDays} days ago) — ${gaps.length}</div>
+                ${gaps.length ? `<table style="margin-bottom:16px;"><thead><tr><th>Group</th><th>Last run (CT)</th><th>Days ago</th></tr></thead><tbody>
+                    ${gaps.map(g => `<tr><td>${escapeHtml(String(g.group))}</td><td>${escapeHtml(fmtWhenCT(g.lastMs))}</td><td style="color:#ff5252;font-weight:700;">${daysSince(g.lastMs)}</td></tr>`).join('')}
+                </tbody></table>` : `<div style="color:#5fff5f;font-size:11px;margin-bottom:16px;">✓ No groups exceed the gap threshold.</div>`}
+
+                <div style="color:#ff8c42;font-weight:700;font-size:12px;margin:6px 0;">Duration outliers (aborted / &lt; 60s) — ${outliers.length}</div>
+                ${outliers.length ? `<table><thead><tr><th>Mission</th><th>Time (CT)</th><th>Duration</th><th>Reason</th></tr></thead><tbody>
+                    ${outliers.map(r => `<tr data-go="${r.id}" style="cursor:pointer;"><td>${escapeHtml(r.name)} · #${r.id}</td><td>${escapeHtml(fmtWhenCT(r.whenMs))}</td><td>${fmtDurationMs(r.durationMs)}</td><td>${r._aborted ? '⚠ aborted (0:00 / landing failed)' : 'short run'}</td></tr>`).join('')}
+                </tbody></table>` : `<div style="color:#5fff5f;font-size:11px;">✓ No aborted or abnormally short missions.</div>`}
+            </div>
+        `;
+        setBodyHtml(html);
+        const back = panelEl.querySelector('[data-back]');
+        if (back) back.onclick = () => renderTableView();
+        const gapInput = panelEl.querySelector('[data-gap-days]');
+        if (gapInput) gapInput.onchange = () => {
+            const v = Math.max(1, Number(gapInput.value) || DEFAULT_GAP_DAYS);
+            gmSet(CACHE_KEY_GAP_DAYS, v);
+            renderLogStats();
+        };
+        panelEl.querySelectorAll('tr[data-go]').forEach(tr => {
+            tr.onclick = () => renderLogDetail(Number(tr.dataset.go));
+        });
+    }
+
+    // Floating launcher on the Mission Log page (the log page has no
+    // Mission-Bank-style header to host an inline button, so we use a
+    // fixed pill bottom-right). Re-placeable inline later if desired.
+    function injectLogSumButton(doc) {
+        if (!masterEnabled) return;
+        if (!isOnMissionLog()) return;
+        if (doc.getElementById(LOG_SUM_BTN_ID)) return;
+        const btn = doc.createElement('button');
+        btn.id = LOG_SUM_BTN_ID;
+        btn.type = 'button';
+        btn.textContent = '📋 LOG SUM';
+        btn.title = 'Open Mission Log summary (AIM Mission Bank Tools)';
+        Object.assign(btn.style, {
+            position: 'fixed', bottom: '18px', right: '18px', zIndex: '99998',
+            background: '#14d2dc', color: '#000', border: 'none', borderRadius: '6px',
+            padding: '8px 14px', fontSize: '12px', fontWeight: '700', cursor: 'pointer',
+            fontFamily: "'Lato','Segoe UI',sans-serif", boxShadow: '0 3px 12px rgba(0,0,0,0.5)'
+        });
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openPanel('log'); };
+        (doc.body || doc.documentElement).appendChild(btn);
     }
 
     // ========================================================
@@ -787,16 +1361,69 @@
         injectButtonIntoRow(doc, row, header);
     }
 
+    // Neon-green SUM button styling — matches the Site Setup SUM button
+    // (Asset Inspector) so the two SUM launchers look/feel identical.
+    // Injected into the button's own document (the iframe) so it's green
+    // immediately, independent of whether the panel has ever opened.
+    function ensureSumButtonStyles(doc) {
+        if (doc.getElementById('aim-mb-sum-btn-styles')) return;
+        const st = doc.createElement('style');
+        st.id = 'aim-mb-sum-btn-styles';
+        st.textContent = `
+            @keyframes aim-mb-sum-pulse-glow {
+                0%, 100% { box-shadow: 0 0 4px rgba(57,255,20,0.45), 0 0 9px rgba(57,255,20,0.22); }
+                50%      { box-shadow: 0 0 11px rgba(57,255,20,0.90), 0 0 22px rgba(57,255,20,0.48); }
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn {
+                animation: aim-mb-sum-pulse-glow 1.8s ease-in-out infinite;
+                background: #39ff14 !important;
+                border-color: #39ff14 !important;
+                text-shadow: none !important;
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn,
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn * {
+                color: #000 !important;
+                -webkit-text-fill-color: #000 !important;
+            }
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn:hover,
+            #${SUM_BTN_ID}.aim-mb-sum-neon-btn:focus {
+                background: #5cff43 !important;
+                border-color: #5cff43 !important;
+            }
+            @media (prefers-reduced-motion: reduce) {
+                #${SUM_BTN_ID}.aim-mb-sum-neon-btn { animation: none; }
+            }`;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
     function injectButtonIntoRow(doc, row, header) {
+        ensureSumButtonStyles(doc);
         // Reuse the className from the existing "New mission" button so
         // SUM picks up Percepto's Ant theme (size, color, hover state).
         const newBtn = header.querySelector('.missions-list__new-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        btn.className = newBtn ? newBtn.className : 'ant-btn ant-btn-primary';
-        btn.innerHTML = '<span>SUM</span>';
-        btn.title = 'Open mission summary (AIM Mission Bank Tools)';
+        // Keep Ant's base shape class for sizing/radius, add our neon class
+        // for the pulsing glow. Built the SAME way as the Site Setup SUM
+        // button so the two launchers are identical.
+        btn.className = (newBtn ? newBtn.className : 'ant-btn ant-btn-primary') + ' aim-mb-sum-neon-btn';
+        Object.assign(btn.style, {
+            minWidth: 'unset', padding: '0 16px', height: '26px',
+            fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
+            borderRadius: '4px', textShadow: 'none',
+        });
+        // Inline !important is the strongest author declaration — it beats
+        // even Percepto's stylesheet !important. Their white
+        // -webkit-text-fill-color kept winning over a CSS-rule override, so
+        // set the color-critical props inline with explicit priority.
+        const forceStyle = (prop, val) => { try { btn.style.setProperty(prop, val, 'important'); } catch (e) {} };
+        forceStyle('background', '#39ff14');
+        forceStyle('border', '1px solid #39ff14');
+        forceStyle('color', '#000');
+        forceStyle('-webkit-text-fill-color', '#000');
+        btn.innerHTML = 'Mission Bank Summary';
+        btn.title = 'Open Mission Bank Summary (AIM Mission Bank Tools)';
         btn.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -812,12 +1439,1495 @@
         // floating button at the top-right of the viewport.
         if (CONTEXT !== 'IFRAME') return;
         try { injectSumButton(document); } catch (e) {}
+        try { injectLogSumButton(document); } catch (e) {}
+        try { applyMapIconDeclutter(document); } catch (e) {}
+        try { applyNativeEditorCollapse(); } catch (e) {}
+        try { injectEditorCollapseButton(); } catch (e) {}
+        try { injectComposerButton(); } catch (e) {}
+        try { compactTopArea(); } catch (e) {}
+        try { composerEnsureMapModeIfNeeded(); } catch (e) {}
+        try { genEnsureButton(); } catch (e) {}
+    }
+
+    // A collapse/expand toggle button in Percepto's native mission-edit
+    // sidebar (next to "Add instruction"), so the user can flip scan-block
+    // collapse without opening the Control Panel.
+    const EDITOR_COLLAPSE_BTN_ID = 'aim-mb-editor-collapse-btn';
+    function updateEditorCollapseBtn() {
+        const btn = document.getElementById(EDITOR_COLLAPSE_BTN_ID);
+        if (!btn) return;
+        btn.textContent = collapseEditorCards ? '⊟' : '⊞';
+        btn.title = collapseEditorCards ? 'Compact view: ON — click to expand the steps' : 'Compact view: OFF — click to compact the steps';
+        btn.style.opacity = collapseEditorCards ? '1' : '0.7';
+    }
+    // The Compact-view toggle now lives inside injectComposerButton's combined
+    // row (kept here as a no-op so existing callers don't need touching).
+    function injectEditorCollapseButton() { /* merged into the composer button row */ }
+
+    // Reclaim vertical space at the top of the native editor: shrink the
+    // ant-divider gap (CSS) and compact Percepto's tall "Add instruction"
+    // button (inline !important, re-applied if React recreates it).
+    function compactTopArea() {
+        if (CONTEXT !== 'IFRAME') return;
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        if (!document.getElementById('aim-mb-top-css')) {
+            const st = document.createElement('style');
+            st.id = 'aim-mb-top-css';
+            st.textContent = `
+                .mission-edit__content { padding-top:2px !important; }
+                .mission-edit__stats { margin:0 !important; padding:2px 0 !important; }
+                .mission-edit__content .ant-divider { margin:4px 0 !important; }
+            `;
+            (document.head || document.documentElement).appendChild(st);
+        }
+        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
+        if (addBtn && addBtn.dataset.aimCompacted !== '1') {
+            addBtn.style.setProperty('padding-top', '7px', 'important');
+            addBtn.style.setProperty('padding-bottom', '7px', 'important');
+            addBtn.style.setProperty('margin', '2px 0', 'important');
+            addBtn.style.setProperty('min-height', '0', 'important');
+            addBtn.dataset.aimCompacted = '1';
+        }
+    }
+
+    // ============================================================
+    // MISSION COMPOSER — Increment 1 (read-only grouped view + multi-select)
+    // ------------------------------------------------------------
+    // Identifies the mission open in Percepto's native editor by matching the
+    // on-screen instruction-card ids (data-rfd-draggable-id === instruction id)
+    // to the cached /available_app/ mission — no fiber, no name guessing — then
+    // groups its steps into INSPECTION BLOCKS (Navigate-group → Snapshot-block,
+    // a snapshot + its trailing Thermal/GEM/Wait steps) in a docked panel.
+    // Block reorder / bulk param edit / GPS-pick build on this next.
+    // ============================================================
+    const COMPOSER_BTN_ID = 'aim-mb-composer-btn';
+    const COMPOSER_ROW_ID = 'aim-mb-composer-row';
+    let composerMission = null;    // the matched mission (id→data source; order read from DOM)
+    let composerBusy = false;      // guard against concurrent reorders
+    // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
+    // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
+    // same spot+size. Left-click (M1) stays native (opens the step); right-click
+    // (M2) opens our order editor. Always on; no toggle button.
+    let composerMapMode = true;
+    let composerMapEventsBound = false;
+    let loggedNoMarkers = false;
+
+    // ONE compact button row (Compact-view toggle + a small 🔄 Resync), side by
+    // side, inserted right under "Add instruction" — keeps the top of the
+    // sidebar tight so more steps show.
+    function injectComposerButton() {
+        if (CONTEXT !== 'IFRAME') return;
+        const content = document.querySelector('.mission-edit__content');
+        if (!content) return;
+        if (document.getElementById(COMPOSER_ROW_ID)) { updateEditorCollapseBtn(); return; }
+        const row = document.createElement('div');
+        row.id = COMPOSER_ROW_ID;
+        // Equal-width grid so the 4 utility buttons align in one tidy row.
+        row.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin:2px 0 4px;';
+        const compact = document.createElement('button');
+        compact.id = EDITOR_COLLAPSE_BTN_ID;
+        compact.type = 'button';
+        compact.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:transparent;border:1px solid rgba(20,210,220,0.5);' +
+            'color:#14d2dc;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
+        compact.onclick = (e) => {
+            e.preventDefault(); e.stopPropagation();
+            collapseEditorCards = !collapseEditorCards;
+            gmSet(CACHE_KEY_COLLAPSE_EDITOR, collapseEditorCards);
+            try { applyNativeEditorCollapse(); } catch (er) {}
+            updateEditorCollapseBtn();
+        };
+        const refresh = document.createElement('button');
+        refresh.id = COMPOSER_BTN_ID;
+        refresh.type = 'button';
+        refresh.textContent = '🔄';
+        refresh.title = 'Resync map order — re-fetch this mission + re-number the badges (right-click a badge to reorder)';
+        refresh.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.5);' +
+            'color:#5fff5f;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        refresh.onclick = (e) => { e.preventDefault(); e.stopPropagation(); composerRefresh(); };
+        const kml = document.createElement('button');
+        kml.type = 'button';
+        kml.textContent = '⬇ KML';
+        kml.title = 'Export this mission to a Google-Earth KML — flight path + N#/S# pins, each pin showing its step details';
+        kml.style.cssText = 'flex:0 0 auto;padding:5px 8px;background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);' +
+            'color:#9cf;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        kml.onclick = (e) => { e.preventDefault(); e.stopPropagation(); exportOpenMissionKml(); };
+        const aglv = document.createElement('button');
+        aglv.id = AGL_VIEW_BTN_ID;
+        aglv.type = 'button';
+        aglv.style.cssText = 'flex:0 0 auto;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        aglv.onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAglView(!showAglInEditor); };
+        row.appendChild(compact); row.appendChild(refresh); row.appendChild(kml); row.appendChild(aglv);
+        // Second row: the safety-gated Auto snapshot-AGL toggle (full width so
+        // it's hard to miss). Default OFF; turning it ON warns + shows a banner.
+        const row2 = document.createElement('div');
+        row2.style.cssText = 'display:flex;margin:0 0 4px;';
+        const autoBtn = document.createElement('button');
+        autoBtn.id = AUTO_SNAP_AGL_BTN_ID;
+        autoBtn.type = 'button';
+        autoBtn.style.cssText = 'flex:1;padding:5px 8px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
+        autoBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAutoSnapAgl(!autoSnapAglEnabled); };
+        const stageBtn = document.createElement('button');
+        stageBtn.type = 'button';
+        stageBtn.textContent = '➕ Stage';
+        stageBtn.title = 'Add N Navigates + M Snapshots to this mission, staged near the existing ones — then drag them into place (snapshots auto-set elevation if Auto-AGL is on; navigates use FFZ-min).';
+        stageBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+            'background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);color:#9cf;';
+        stageBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); genStagePopup(stageBtn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn);
+        const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
+        if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); }
+        else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
+        updateEditorCollapseBtn();
+        updateAutoSnapAglUI();
+        updateAglViewBtn();
+        composerEnsureMapMode(true);
+    }
+
+    // ── Editor altitude view: AGL vs MSL toggle ──────────────────────────────
+    const AGL_VIEW_BTN_ID = 'aim-mb-aglview-btn';
+    function setAglView(on) {
+        showAglInEditor = !!on;
+        gmSet(CACHE_KEY_AGL_VIEW, showAglInEditor);
+        updateAglViewBtn();
+        try { applyNativeEditorCollapse(); } catch (e) {} // re-render cards in the new unit
+    }
+    function updateAglViewBtn() {
+        const btn = document.getElementById(AGL_VIEW_BTN_ID);
+        if (!btn) return;
+        btn.textContent = showAglInEditor ? 'AGL' : 'MSL';
+        btn.title = showAglInEditor
+            ? 'Showing AGL (height above ground) on each step. Click to switch to MSL (stored altitude).'
+            : 'Showing MSL (stored altitude) on each step. Click to switch to AGL (height above ground).';
+        btn.style.background = showAglInEditor ? 'rgba(95,255,95,0.14)' : 'rgba(150,180,255,0.12)';
+        btn.style.border = showAglInEditor ? '1px solid rgba(95,255,95,0.5)' : '1px solid rgba(150,180,255,0.5)';
+        btn.style.color = showAglInEditor ? '#7dff7d' : '#9cf';
+    }
+
+    // ── Snapshot auto-AGL: toggle button + on-map banner ─────────────────────
+    const AUTO_SNAP_AGL_BTN_ID = 'aim-mb-auto-snapagl-btn';
+    const AUTO_SNAP_AGL_BANNER_ID = 'aim-mb-auto-snapagl-banner';
+    function setAutoSnapAgl(on) {
+        autoSnapAglEnabled = !!on;
+        // Re-baseline live tracking so arming only acts on snapshots you move
+        // AFTER turning it on (existing/flare snapshots are left until moved).
+        Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]);
+        updateAutoSnapAglUI();
+        if (autoSnapAglEnabled) {
+            showToast(`⚠ Snapshot auto-AGL is ON — every save sets ALL snapshots to ground + ${defaultSnapAglFt} ft. Turn OFF for flares/elevated targets.`, '#ff7a00', 6000);
+        } else {
+            showToast('Snapshot auto-AGL is OFF — saves won\'t change snapshot altitudes.', '#888', 3000);
+        }
+    }
+    function updateAutoSnapAglUI() {
+        const btn = document.getElementById(AUTO_SNAP_AGL_BTN_ID);
+        if (btn) {
+            if (autoSnapAglEnabled) {
+                btn.textContent = `📷 Auto-AGL: ON · ground+${defaultSnapAglFt}ft`;
+                btn.style.background = 'rgba(255,122,0,0.22)';
+                btn.style.border = '1px solid #ff7a00';
+                btn.style.color = '#ff9d3a';
+                btn.title = 'ON: every save sets ALL snapshots to their DEM ground + the default AGL. Click to turn OFF.';
+            } else {
+                btn.textContent = `📷 Auto-AGL: OFF`;
+                btn.style.background = 'transparent';
+                btn.style.border = '1px solid rgba(255,122,0,0.45)';
+                btn.style.color = '#c98a4a';
+                btn.title = `OFF: snapshot altitudes are untouched on save. Click to turn ON (then every save re-floats ALL snapshots to ground + ${defaultSnapAglFt} ft).`;
+            }
+        }
+        updateAutoSnapAglBanner();
+    }
+    // Bright, persistent on-map banner so it's obvious auto-AGL is armed.
+    function updateAutoSnapAglBanner() {
+        if (CONTEXT !== 'IFRAME') return;
+        let banner = document.getElementById(AUTO_SNAP_AGL_BANNER_ID);
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!autoSnapAglEnabled || !mapC) { if (banner) banner.remove(); return; }
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = AUTO_SNAP_AGL_BANNER_ID;
+            banner.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:1200;' +
+                'background:rgba(255,122,0,0.92);color:#1a1000;font:700 12px/1.3 "Lato",sans-serif;' +
+                'padding:5px 12px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);pointer-events:none;white-space:nowrap;';
+            if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+            mapC.appendChild(banner);
+        }
+        banner.textContent = `⚠ SNAPSHOT AUTO-AGL ON — saves set all snapshots to ground + ${defaultSnapAglFt} ft`;
+    }
+
+    function composerBindMapEvents() {
+        if (composerMapEventsBound) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.on !== 'function') return;
+        map.on('zoomend moveend layeradd', () => { try { composerStyleNativeMarkers(); } catch (e) {} });
+        composerMapEventsBound = true;
+    }
+
+    // Recolor + number Percepto's native nav/snap markers in place.
+    function composerStyleNativeMarkers() {
+        if (!composerMapMode || CONTEXT !== 'IFRAME' || !composerMission) return;
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        composerBindMapEvents();
+        installComposerMarkerEvents();
+        composerEnsureBadgeCSS();
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
+        const lookup = {}; let navN = 0, snapN = 0;
+        ordered.forEach(s => {
+            if (!s.location || s.location.lat == null) return;
+            if (s.type_name === 'navigate') { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
+            else if (s.type_name === 'snapshot') { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+        });
+        let matched = 0, seen = 0;
+        map.eachLayer(layer => {
+            const el = layer && layer._icon;
+            if (!el || !el.classList || !el.classList.contains('instruction-marker')) return;
+            seen++;
+            const ll = layer._latlng;
+            if (!ll) return;
+            const info = lookup[K(ll.lat, ll.lng)];
+            if (!info) return;
+            matched++;
+            composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+        });
+        if (!matched && seen && !loggedNoMarkers) {
+            loggedNoMarkers = true;
+            console.warn(`${TAG} [map-badges] saw ${seen} instruction-markers but matched 0 by lat/lng — Leaflet layer model differs; tell me and I'll switch to pixel matching.`);
+        }
+    }
+    // Persistent CSS: color nav (blue) / snap (pink) markers + hide their
+    // original icon by IMG SRC, so a Percepto re-render (during a reorder)
+    // re-applies the colored circle INSTANTLY — no flash of the original icon.
+    // (The number is JS-injected and may blink for a frame; the circle won't.)
+    // Keying off the img keeps :has matching even though we keep the img around.
+    function composerEnsureBadgeCSS(rebuild) {
+        let st = document.getElementById('aim-mb-badge-css');
+        if (st && !rebuild) return;
+        if (!st) {
+            st = document.createElement('style');
+            st.id = 'aim-mb-badge-css';
+            (document.head || document.documentElement).appendChild(st);
+        }
+        const navC = stepColor('nav'), snapC = stepColor('snap');
+        st.textContent = `
+            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
+            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
+            /* Number as ::after on the MARKER el (survives hover — Percepto only
+               re-renders the inner icon's contents on hover, wiping a child span). */
+            .instruction-marker[data-aim-num]::after { content: attr(data-aim-num); position:absolute; inset:0;
+                display:flex; align-items:center; justify-content:center; color:#fff; -webkit-text-fill-color:#fff;
+                font:800 11px/1 'Lato',sans-serif; pointer-events:none; z-index:2; }
+        `;
+    }
+    function composerStyleOneMarker(el, info, ll) {
+        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
+        el.setAttribute('data-aim-id', info.id);
+        el.setAttribute('data-aim-kind', info.kind);
+        el.__aimLL = ll;
+        // Color + icon-hide is CSS (:has). Number is a CSS ::after from this
+        // attr on the MARKER el — survives Percepto's hover re-render of the
+        // inner icon. Click/right-click handled by the window-capture listeners.
+        if (el.getAttribute('data-aim-num') !== label) el.setAttribute('data-aim-num', label);
+    }
+
+    // ONE window-capture listener pair for all styled markers:
+    //  • right-click (M2) on a badge → our order editor, and stopImmediate so the
+    //    Asset Inspector's window-bubble contextmenu doesn't also fire.
+    //  • left-click (M1) on a badge → open that step's edit form (Percepto's
+    //    native click only scrolls to it; we additionally trigger ⋮ → Edit).
+    let composerMarkerEventsInstalled = false;
+    function installComposerMarkerEvents() {
+        if (composerMarkerEventsInstalled) return;
+        composerMarkerEventsInstalled = true;
+        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id]') : null;
+        window.addEventListener('contextmenu', (e) => {
+            const m = badge(e); if (!m) return;
+            e.preventDefault(); e.stopImmediatePropagation();
+            const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
+            // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
+            // the v0.99 hover fix moved it here from the inner icon's old
+            // data-aim-label, so read it from `m`, not a child.
+            const lbl = m.getAttribute('data-aim-num') || '';
+            const n = parseInt(lbl.replace(/[^0-9]/g, ''), 10) || 1;
+            composerEditOrder(kind, id, n, m.__aimLL);
+        }, true);
+        // Left-click (M1) on a marker:
+        //  • No step editor open → native scroll + open that step's editor (as before).
+        //  • A DIFFERENT step's editor IS open → this is a STEP SWITCH. Block Percepto's
+        //    native "move the open step to this point" (the cause of a snapshot sliding
+        //    to the wrong spot), SAVE the current step (Shift+S), then open the clicked
+        //    step. We block at pointerdown/mousedown too (left-button only) so Leaflet
+        //    never even starts the move.
+        //  • The marker of the step you're ALREADY editing → fully native (drag/reposition).
+        const switchTargetFor = (e) => {
+            const m = badge(e); if (!m) return null;
+            if (!document.querySelector('[data-testid="btn-save-instruction"]')) return null; // no editor open
+            const id = m.getAttribute('data-aim-id');
+            const curId = getOpenStepId();
+            if (curId != null && String(curId) === String(id)) return null; // same step → leave native
+            return id;
+        };
+        const blockSwitchDown = (e) => {
+            if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
+            if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
+        };
+        window.addEventListener('pointerdown', blockSwitchDown, true);
+        window.addEventListener('mousedown', blockSwitchDown, true);
+        window.addEventListener('click', (e) => {
+            const m = badge(e); if (!m) return;
+            const id = m.getAttribute('data-aim-id');
+            const switchId = switchTargetFor(e);
+            if (switchId) {
+                // Switching steps mid-edit: suppress the native move, then
+                // openInstructionEditor saves the open step + opens this one.
+                e.preventDefault(); e.stopImmediatePropagation();
+                try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
+                catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+                return;
+            }
+            // No editor open (or the same step): native scroll + open the clicked step.
+            setTimeout(() => composerOpenStepEdit(id), 320);
+        }, true);
+    }
+    function composerOpenStepEdit(id) {
+        const draggable = document.querySelector(`[data-rfd-draggable-id="${id}"]`);
+        if (!draggable) { showToast('Could not find that step to edit.', '#ff9800', 3000); return; }
+        try {
+            const ok = triggerInstructionAction(draggable, 'edit');
+            if (!ok) forceOpenInstructionEdit(draggable);
+        } catch (e) { try { forceOpenInstructionEdit(draggable); } catch (e2) { console.warn(`${TAG} [composer] open edit failed`, e2); } }
+    }
+
+    function composerEnsureMapMode(silent) {
+        identifyOpenMission((data) => {
+            if (!data) { if (!silent) showToast('Map badges: could not match the open mission to the cache.', '#ff9800', 4000); return; }
+            composerMission = data.mission;
+            composerStyleNativeMarkers();
+        });
+    }
+    // Interval-driven: load the mission if missing/stale, else re-style markers
+    // (idempotent — per-marker early-return when the label is unchanged).
+    function composerEnsureMapModeIfNeeded() {
+        if (!composerMapMode || CONTEXT !== 'IFRAME') return;
+        if (!document.querySelector('.mission-edit__content')) return;
+        const domIds = composerDomIds();
+        if (!domIds.length) return;
+        const covered = composerMission && domIds.slice(0, 3).every(d => (composerMission.instructions || []).some(x => String(x.id) === d));
+        if (!composerMission || !covered) { composerEnsureMapMode(true); return; }
+        try { composerStyleNativeMarkers(); } catch (e) {}
+    }
+    // ── Live mission-editor bridge ───────────────────────────────────────────
+    // Read/write Percepto's LIVE in-editor instruction state via React fiber —
+    // the same context MBT's reorder uses. `updateInstruction(fullObj)` replaces
+    // by id (confirmed: `R[M]=N; n({...t,instructions:R})`). The fn and the
+    // instructions array can sit on DIFFERENT context objects, so find each
+    // independently; re-walk FRESH each call (per-render closures). Also probe
+    // fiber.alternate to dodge React's double-buffered fibers.
+    function mbGetFiber(el) {
+        const k = el && Object.keys(el).find(kk => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'));
+        return k ? el[k] : null;
+    }
+    function findMissionEditorCtx() {
+        const card = document.querySelector('[data-rfd-draggable-id]');
+        if (!card) return null;
+        const f0 = mbGetFiber(card);
+        let upd = null, instrs = null;
+        for (const start of [f0, f0 && f0.alternate]) {
+            let node = start, depth = 0;
+            while (node && depth < 140) {
+                let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                if (v && typeof v === 'object') {
+                    if (!upd && typeof v.updateInstruction === 'function') upd = v.updateInstruction;
+                    if (!instrs && Array.isArray(v.instructions) && v.instructions[0] &&
+                        (v.instructions[0].type_name !== undefined || v.instructions[0].value1 !== undefined)) instrs = v.instructions;
+                }
+                node = node.return; depth++;
+            }
+            if (upd && instrs) break;
+        }
+        return (upd && instrs) ? { upd, instrs } : null;
+    }
+
+    // Per-snapshot last-handled position (so we act on MOVES, not every tick).
+    const liveSnapLastLoc = {};
+    const genElevReqAt = {}; // throttle DEM prefetch per marker position (anti-429)
+    let liveEditorTimer = null;
+    function startLiveEditorSync() {
+        if (liveEditorTimer || CONTEXT !== 'IFRAME') return;
+        liveEditorTimer = setInterval(() => { try { liveEditorTick(); } catch (e) {} }, 700);
+    }
+    function liveEditorTick() {
+        if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
+        const ctx = findMissionEditorCtx();
+        if (!ctx) return;
+        // (1) Keep MBT's cached mission in sync with the LIVE editor state, so the
+        //     compact card + map badges reflect native step-edits / drags before a
+        //     mission save (fixes "sidebar shows the old altitude"). Also re-syncs
+        //     locations so the lat/lng badge match stops failing after a drag.
+        let changed = false;
+        if (composerMission && Array.isArray(composerMission.instructions)) {
+            const byId = {}; ctx.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; });
+            const cmIds = {}; composerMission.instructions.forEach(ci => { cmIds[String(ci.id)] = true; });
+            composerMission.instructions.forEach(ci => {
+                const live = byId[String(ci.id)]; if (!live) return;
+                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; changed = true; }
+                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; changed = true; }
+            });
+            // ADD instructions present live but not in the cache (e.g. ➕ Stage
+            // steps with client-only ids) so the compact view + N#/S# badges
+            // recognize them before a save.
+            ctx.instrs.forEach(live => {
+                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); changed = true; }
+            });
+        }
+        if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
+        // AGL view depends on DEM that loads async — re-render cards each tick so
+        // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
+        else if (showAglInEditor && collapseEditorCards) { try { applyNativeEditorCollapse(); } catch (e) {} }
+        // NOTE: auto-AGL is SAVE-ONLY now (applySnapAglToBodyStr) — we no longer
+        // re-float snapshots on every move (it hammered the DEM endpoint into
+        // 429s, and you only need it correct at save time).
+    }
+    function liveAutoSnapAgl(ctx) {
+        const aglM = defaultSnapAglFt / 3.28084;
+        for (const s of ctx.instrs) {
+            if (!s || s.type_name !== 'snapshot' || !s.location || s.location.lat == null) continue;
+            const key = `${(+s.location.lat).toFixed(6)},${(+s.location.lng).toFixed(6)}`;
+            if (liveSnapLastLoc[s.id] === key) continue;            // this position already handled
+            const ground = getElevationFromCache(s.location.lat, s.location.lng);
+            if (ground == null) { try { fetchElevation(s.location.lat, s.location.lng); } catch (e) {} continue; } // wait for DEM, retry next tick
+            const firstSight = !(s.id in liveSnapLastLoc);
+            liveSnapLastLoc[s.id] = key;
+            if (firstSight) continue;                                // baseline only
+            const newV = Math.round((ground + aglM) * 100) / 100;
+            if (typeof s.value1 === 'number' && Math.abs(s.value1 - newV) < 0.5) continue; // already correct
+            try { ctx.upd(Object.assign({}, s, { value1: newV })); } catch (e) { continue; }
+            if (composerMission) { const ci = (composerMission.instructions || []).find(x => x && String(x.id) === String(s.id)); if (ci) ci.value1 = newV; }
+            console.log(`${TAG} [auto-agl] live: snapshot ${s.id} moved → value1 ${newV}m (ground ${Math.round(ground)} + ${defaultSnapAglFt}ft)`);
+        }
+    }
+
+    // ====================================================================
+    // MISSION GENERATOR — Increment 1: draw the site's assets + FFZs on the
+    // Mission Bank map; right-click (M2) an asset to PREVIEW its scan geometry
+    // (nav = closest safe point in the FFZ at ~100 ft standoff; snap = asset
+    // centroid at ground + default AGL). NO mission is written yet — this proves
+    // the data fetch, the drawing, the hit-test and the geometry. The actual
+    // build + save (saveApp) comes in Increment 2.
+    // ====================================================================
+    const GEN_BTN_ID = 'aim-mb-gen-btn';
+    const GEN_TARGET_STANDOFF_FT = 100; // ideal nav↔asset distance
+    const GEN_FFZ_INSET_M = 1;          // push the nav this far inside the FFZ edge
+    const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
+    // Skip-state reason for an asset (unreachable/unshielded/empty) or null if
+    // it's valid to generate. Ported from the Asset Inspector's assetSkipReason:
+    // is_unshielded flag, else the state suffix after " - " in poi_type_str.
+    function genSkipReason(asset) {
+        if (asset.unshielded) return 'unshielded';
+        const p = asset.poi || '';
+        const i = p.indexOf(' - ');
+        const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
+        return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
+    }
+    const genEntCache = {};
+    let genLayer = null, genPreviewLayer = null, genOverlayOn = false, genBase = null, genPopupEl = null;
+
+    function genFetchEntities(siteID) {
+        if (genEntCache[siteID]) return Promise.resolve(genEntCache[siteID]);
+        const url = `https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
+        return fetch(url, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => {
+                const list = Array.isArray(arr) ? arr : (arr && arr.objects) || [];
+                const ring = e => e.coords.map(c => ({ lat: c.lat, lng: c.lng }));
+                const assets = list.filter(e => e && e.type === 3 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), poi: (e.custom && e.custom.poi_type_str) || '', unshielded: !!(e.custom && e.custom.is_unshielded) }));
+                const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({ id: e.id, name: e.name || '', ring: ring(e), minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null }));
+                // Base station (type 8) → origin for N/E/S/W section naming.
+                // Fallback: centroid of all assets (so naming still works).
+                let base = null;
+                const baseEnt = list.find(e => e && e.type === 8 && (e.location || (Array.isArray(e.coords) && e.coords.length)));
+                if (baseEnt) base = baseEnt.location ? { lat: baseEnt.location.lat, lng: baseEnt.location.lng } : { lat: baseEnt.coords[0].lat, lng: baseEnt.coords[0].lng };
+                if (!base && assets.length) { let la = 0, ln = 0; assets.forEach(a => { const c = genCentroid(a.ring); la += c.lat; ln += c.lng; }); base = { lat: la / assets.length, lng: ln / assets.length }; }
+                const data = { assets, ffzs, base };
+                genEntCache[siteID] = data; genBase = base;
+                return data;
+            });
+    }
+    // ── geometry helpers (ported minimal) ──
+    function genCentroid(ring) { let lat = 0, lng = 0; ring.forEach(p => { lat += p.lat; lng += p.lng; }); return { lat: lat / ring.length, lng: lng / ring.length }; }
+    function genPointInPoly(pt, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i].lng, yi = ring[i].lat, xj = ring[j].lng, yj = ring[j].lat;
+            if (((yi > pt.lat) !== (yj > pt.lat)) && (pt.lng < (xj - xi) * (pt.lat - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+    function genAssetFFZ(assetC, ffzs) {
+        for (const f of ffzs) if (genPointInPoly(assetC, f.ring)) return f;
+        let best = null, bd = Infinity;
+        for (const f of ffzs) { const d = sopHaversineFt(assetC, genCentroid(f.ring)); if (d < bd) { bd = d; best = f; } }
+        return best;
+    }
+    // Nav point: walk the FFZ boundary, and for each sample step ~1 m along the
+    // edge's INWARD normal (the offset point that tests INSIDE the polygon), then
+    // pick the inside point whose standoff to the asset is nearest ~100 ft. This
+    // guarantees the nav lands inside the FFZ (not on the edge, where Percepto can
+    // read it as outside) regardless of the FFZ's shape.
+    function genNavPoint(assetC, ffz) {
+        const ring = ffz.ring;
+        const lat0 = (assetC.lat || ring[0].lat) * Math.PI / 180;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0);
+        const toXY = p => ({ x: p.lng * mLng, y: p.lat * mLat });
+        const toLL = q => ({ lng: q.x / mLng, lat: q.y / mLat });
+        let best = null, bestErr = Infinity, bestDist = 0;
+        const consider = ll => {
+            if (!genPointInPoly(ll, ring)) return;          // must land INSIDE
+            const d = sopHaversineFt(assetC, ll), err = Math.abs(d - GEN_TARGET_STANDOFF_FT);
+            if (err < bestErr) { bestErr = err; best = ll; bestDist = d; }
+        };
+        for (let i = 0; i < ring.length; i++) {
+            const ax = toXY(ring[i]), bx = toXY(ring[(i + 1) % ring.length]);
+            let nx = -(bx.y - ax.y), ny = (bx.x - ax.x); const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl; // unit edge normal
+            for (let k = 0; k <= 6; k++) {
+                const t = k / 6, px = ax.x + (bx.x - ax.x) * t, py = ax.y + (bx.y - ax.y) * t;
+                consider(toLL({ x: px + nx * GEN_FFZ_INSET_M, y: py + ny * GEN_FFZ_INSET_M })); // one normal
+                consider(toLL({ x: px - nx * GEN_FFZ_INSET_M, y: py - ny * GEN_FFZ_INSET_M })); // the other (inside one wins)
+            }
+        }
+        if (!best) { const c = genCentroid(ring); best = c; bestDist = sopHaversineFt(assetC, c); } // fallback
+        return { point: best, standoffFt: bestDist };
+    }
+
+    function genClearOverlay() {
+        const map = getLeafletMap();
+        if (genLayer && map) { try { map.removeLayer(genLayer); } catch (e) {} }
+        if (genPreviewLayer && map) { try { map.removeLayer(genPreviewLayer); } catch (e) {} }
+        genLayer = null; genPreviewLayer = null;
+    }
+    function genDrawOverlay() {
+        const L = composerGetL(); const map = getLeafletMap(); const siteID = getCurrentSiteID();
+        if (!L || !map || !siteID) { showToast('Generator: map/site not ready — open the Mission Bank map first.', '#ff9800'); return; }
+        patchLeafletMap();
+        genFetchEntities(siteID).then(({ assets, ffzs }) => {
+            genClearOverlay();
+            const group = L.layerGroup();
+            ffzs.forEach(f => { try { L.polygon(f.ring.map(p => [p.lat, p.lng]), { color: '#39ff14', weight: 1, fill: false, interactive: false }).addTo(group); } catch (e) {} });
+            let valid = 0, skipped = 0;
+            assets.forEach(a => {
+                try {
+                    const skip = genSkipReason(a);             // red = would be skipped (bad state)
+                    if (skip) skipped++; else valid++;
+                    const col = skip ? '#ff6b6b' : '#fff';
+                    const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 1.5, fillColor: col, fillOpacity: skip ? 0.05 : 0.08, className: 'aim-gen-asset' });
+                    poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genShowGeneratePopup(a, ffzs, ev); });
+                    poly.addTo(group);
+                } catch (e) {}
+            });
+            group.addTo(map);
+            genLayer = group; genOverlayOn = true; genUpdateBtn();
+            showToast(`Generator: ${valid} valid · ${skipped} skip-state (red) · ${ffzs.length} FFZs. Right-click an asset to generate.`, '#5fff5f', 5500);
+        }).catch(e => { console.warn(`${TAG} [gen] fetch/draw failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
+    }
+    function genToggleOverlay() {
+        if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; genUpdateBtn(); showToast('Generator overlay off.', '#888', 1500); }
+        else genDrawOverlay();
+    }
+    function genDrawPreview(snapPt, navPt) {
+        const L = composerGetL(), map = getLeafletMap(); if (!L || !map || !navPt) return;
+        if (genPreviewLayer) { try { map.removeLayer(genPreviewLayer); } catch (e) {} }
+        const g = L.layerGroup();
+        try {
+            L.polyline([[navPt.lat, navPt.lng], [snapPt.lat, snapPt.lng]], { color: '#b04dff', weight: 2, dashArray: '4,4' }).addTo(g);
+            L.circleMarker([navPt.lat, navPt.lng], { radius: 6, color: '#fff', weight: 1.5, fillColor: '#2f6bff', fillOpacity: 0.95 }).addTo(g);
+            L.circleMarker([snapPt.lat, snapPt.lng], { radius: 6, color: '#fff', weight: 1.5, fillColor: '#ec4899', fillOpacity: 0.95 }).addTo(g);
+        } catch (e) {}
+        g.addTo(map); genPreviewLayer = g;
+    }
+    function genUpdateBtn() {
+        const b = document.getElementById(GEN_BTN_ID);
+        if (b) {
+            b.textContent = genOverlayOn ? '⊕ Assets: ON' : '⊕ Generate';
+            b.style.background = genOverlayOn ? '#14d2dc' : '#0d1b24';
+            b.style.color = genOverlayOn ? '#04222a' : '#3fe0ea';
+        }
+        const all = document.getElementById(GEN_ALL_BTN_ID);
+        if (all) all.style.display = genOverlayOn ? 'block' : 'none';
+    }
+    const GEN_ALL_BTN_ID = 'aim-mb-gen-all-btn';
+
+    // ── Generator lock ────────────────────────────────────────────────────────
+    // The mission GENERATOR (⊕ Generate / ▣ Generate All) CREATES real missions on
+    // the live site via saveApp — by far the highest blast-radius tool here. It is
+    // therefore LOCKED OFF by default for everyone; only an install that has flipped
+    // the local flag below shows or runs it. Coworkers never run the unlock, so they
+    // never see the buttons and can't trigger it. (Per-install GM flag — effectively
+    // "just my machine"; nothing identity-bound, but undocumented + default-off.)
+    // Unlock on your own install from the Mission Bank iframe console:
+    //     __aimMBGenerator(true)     // unlock (persists across reloads)
+    //     __aimMBGenerator(false)    // re-lock
+    //     __aimMBGenerator()         // report current state
+    // Everything else (SUM panel, inspector, altitude editing, SOP check, KML,
+    // auto-AGL, ➕ Stage, marker-switch) is unaffected by this lock.
+    const GEN_LOCK_KEY = 'aim-mb-generator-unlocked';
+    let generatorUnlocked = false;
+    try { generatorUnlocked = gmGet(GEN_LOCK_KEY, false) === true; } catch (e) {}
+    function setGeneratorUnlocked(on) {
+        if (on === undefined) { console.log(`${TAG} [generator] ${generatorUnlocked ? 'UNLOCKED' : 'LOCKED'} on this install`); return generatorUnlocked; }
+        generatorUnlocked = !!on;
+        try { gmSet(GEN_LOCK_KEY, generatorUnlocked); } catch (e) {}
+        try {
+            if (!generatorUnlocked) {
+                const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
+                const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+                genCloseBulkPanel();
+                try { if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; } } catch (e) {} // tear down any drawn asset overlay
+            } else {
+                genEnsureButton();
+            }
+        } catch (e) {}
+        console.log(`${TAG} [generator] ${generatorUnlocked ? 'UNLOCKED' : 'LOCKED'} on this install`);
+        showToast(`Mission Generator ${generatorUnlocked ? 'unlocked' : 'locked'} on this install.`, generatorUnlocked ? '#5fff5f' : '#ff9800', 3500);
+        return generatorUnlocked;
+    }
+    try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; w.__aimMBGenerator = setGeneratorUnlocked; } catch (e) {}
+
+    function genEnsureButton() {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!generatorUnlocked) return;   // generator locked off on this install
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!mapC) return;
+        if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
+        if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+        const btn = document.createElement('button');
+        btn.id = GEN_BTN_ID; btn.type = 'button';
+        btn.title = 'Draw the site\'s assets + FFZs on the map, then right-click an asset to generate its scan mission.';
+        btn.style.cssText = 'position:absolute;top:8px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #14d2dc;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
+        btn.onclick = e => { e.preventDefault(); e.stopPropagation(); genToggleOverlay(); };
+        mapC.appendChild(btn);
+        // "Generate All" — bulk-generate every valid (white) asset. Shown only
+        // while the overlay is on.
+        const all = document.createElement('button');
+        all.id = GEN_ALL_BTN_ID; all.type = 'button';
+        all.textContent = '▣ Generate All';
+        all.title = 'Generate a mission for every VALID asset (skips Empty / Unreachable / Unshielded) — preview, then commit.';
+        all.style.cssText = 'position:absolute;top:40px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;display:none;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
+        all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
+        mapC.appendChild(all);
+        genUpdateBtn();
+    }
+
+    // ── Increment 2: build a mission for an asset + create it via saveApp ──────
+    // N/E/S/W quadrant of a point relative to the base station (dominant axis).
+    function genSection(pt) {
+        if (!genBase) return '?';
+        const dLat = pt.lat - genBase.lat, dLng = pt.lng - genBase.lng;
+        if (Math.abs(dLat) >= Math.abs(dLng)) return dLat >= 0 ? 'N' : 'S';
+        return dLng >= 0 ? 'E' : 'W';
+    }
+    // Pure: build the instruction list + name for one asset. Returns null if the
+    // FFZ or ground elevation isn't available yet. Step shapes match a real solo
+    // mission (types: takeoff 0, navigate 1, snapshot 6, cameraSelect 7, gemMode
+    // 24, wait 5, returnHome 99). saveApp only sends type/location/value1/value2/
+    // extra_options/polygon_points/snapshot_points, so that's all we set.
+    function buildMissionForAsset(asset, ffzs, opts) {
+        opts = opts || {};
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) return null;
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { if (aC.lat != null) try { fetchElevation(aC.lat, aC.lng); } catch (e) {} return null; }
+        const nav = genNavPoint(aC, ffz);
+        const navAltM = ffz.minAltM != null ? ffz.minAltM : (groundM + 40);
+        const snapAltM = groundM + (defaultSnapAglFt / 3.28084);
+        const I = (type, value1, value2, location, extra) => ({ type, value1: value1 === undefined ? null : value1, value2: value2 === undefined ? null : value2, location: location || null, extra_options: extra || {}, polygon_points: null, snapshot_points: null });
+        const instrs = [];
+        instrs.push(I(0, 20, null, null, {}));                                              // takeoff
+        instrs.push(I(1, navAltM, 12, { lat: nav.point.lat, lng: nav.point.lng }, { shouldUseFreezoneMinAlt: true })); // navigate (FFZ min alt)
+        const count = Math.max(1, opts.count || 1);
+        for (let s = 0; s < count; s++) {
+            instrs.push(I(6, snapAltM, 1, { lat: aC.lat, lng: aC.lng }, { pitch: 1001 }));   // snapshot @ asset center
+            if (opts.inspectionScan) {
+                instrs.push(I(7, true, null, null, {}));   // camera (thermal) ON
+                instrs.push(I(24, 1, null, null, {}));     // GEM ON
+                instrs.push(I(5, 10, null, null, {}));     // wait 10s
+                instrs.push(I(24, 0, null, null, {}));     // GEM OFF
+                instrs.push(I(7, false, null, null, {}));  // camera OFF
+            }
+        }
+        instrs.push(I(99, null, null, null, {}));                                           // returnHome
+        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        return { instructions: instrs, name, navStandoffFt: nav.standoffFt };
+    }
+    // Find the mission editor's app context (saveApp + setCurrentApp). Anchors on
+    // stable Mission Bank DOM (works even with NO mission open in the editor).
+    function findMissionAppCtx() {
+        const anchors = ['[data-rfd-draggable-id]', '.mission-bank__map-container', '.mission-bank__content', '.mission-bank'];
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 160) {
+                    let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                    if (v && typeof v === 'object' && typeof v.saveApp === 'function' && typeof v.setCurrentApp === 'function') return v;
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
+    async function genGenerateForAsset(asset, ffzs, opts) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
+        const ctx = findMissionAppCtx();
+        if (!ctx) { showToast('Mission context not found — make sure you\'re on the Mission Bank page.', '#ff5252', 4000); return; }
+        const built = buildMissionForAsset(asset, ffzs, opts);
+        if (!built) { showToast('Could not build mission (no FFZ near asset, or ground elevation still loading — try again).', '#ff9800', 4000); return; }
+        showToast(`Creating "${built.name}"…`, '#9ad', 2500);
+        try {
+            const app = { id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] };
+            const res = await ctx.saveApp(app, built.name);
+            const saved = (res && res.app) ? res.app : res;
+            console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
+            showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
+            try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
+            // Navigate to the new mission's editor URL so it shows without a page
+            // refresh. Use THIS frame's own hash (the editor is in the react-pages
+            // iframe) — the iframe is sandboxed and can't navigate the top window.
+            try {
+                const cur = location.hash || '';
+                const mm = cur.match(/^(.*\/mission-bank)(?:\/\d+)?/);
+                if (mm && saved && saved.id != null) {
+                    const target = `${mm[1]}/${saved.id}`;
+                    if (cur !== target) location.hash = target;
+                }
+            } catch (e) { console.warn(`${TAG} [gen] open-nav failed`, e); }
+        } catch (e) {
+            console.warn(`${TAG} [gen] saveApp failed`, e);
+            showToast('Generate failed — see console (the mission was NOT created).', '#ff5252', 5000);
+        }
+    }
+    // M2 on an asset → preview line + a small popup to confirm + Generate.
+    function genCloseGenPopup() { if (genPopupEl) { genPopupEl.remove(); genPopupEl = null; } document.removeEventListener('mousedown', genPopupOutside, true); }
+    function genPopupOutside(e) { if (genPopupEl && !genPopupEl.contains(e.target)) genCloseGenPopup(); }
+    function genShowGeneratePopup(asset, ffzs, ev) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
+        genCloseGenPopup();
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) { showToast(`No FFZ near ${asset.name || 'asset'} — can't place the drone.`, '#ff9800', 4000); return; }
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { try { fetchElevation(aC.lat, aC.lng); } catch (e) {} showToast('Loading ground elevation — right-click again in a moment.', '#9ad', 2500); return; }
+        const nav = genNavPoint(aC, ffz);
+        genDrawPreview(aC, nav.point);
+        const snapAltFt = Math.round(groundM * 3.28084) + defaultSnapAglFt;
+        const navAltFt = ffz.minAltM != null ? Math.round(ffz.minAltM * 3.28084) : null;
+        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        const pop = document.createElement('div');
+        pop.className = 'aim-mb-bp-pop';
+        // Solid styling INLINE (the .aim-mb-bp-pop CSS is only injected when the
+        // SUM panel renders; this popup can appear without it).
+        pop.style.cssText += 'position:fixed;z-index:2147483600;min-width:250px;background:#1f2228;' +
+            'border:1px solid #14d2dc;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        pop.innerHTML = `
+            <div class="aim-mb-menu-head" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.12);"><span class="aim-mb-menu-title" style="font-weight:800;color:#7adfe6;font-size:13px;">⊕ Generate mission</span><button class="aim-mb-menu-close" data-gp-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:13px;line-height:1;">✕</button></div>
+            <div style="padding:10px 12px;font-size:11px;color:#cfe;">
+                <div style="font-weight:800;color:#7adfe6;margin-bottom:6px;font-size:12px;">${escapeHtml(name)}</div>
+                <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
+                <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
+                ${genSkipReason(asset) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset))}</b> — bulk would SKIP this one.</div>` : ''}
+                <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-gp-cancel>Cancel</button>
+                    <button class="aim-mb-bulk-btn" data-gp-go>⊕ Generate</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        genPopupEl = pop;
+        const oe = ev.originalEvent || ev;
+        pop.style.left = ((oe.clientX || 100) + 8) + 'px';
+        pop.style.top = ((oe.clientY || 100) + 8) + 'px';
+        const r = pop.getBoundingClientRect();
+        if (r.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - r.width) + 'px';
+        if (r.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, (oe.clientY || 100) - r.height - 8) + 'px';
+        pop.querySelector('[data-gp-close]').onclick = genCloseGenPopup;
+        pop.querySelector('[data-gp-cancel]').onclick = genCloseGenPopup;
+        pop.querySelector('[data-gp-go]').onclick = () => {
+            const scan = pop.querySelector('[data-gp-scan]').checked;
+            genCloseGenPopup();
+            genGenerateForAsset(asset, ffzs, { inspectionScan: scan });
+        };
+        setTimeout(() => document.addEventListener('mousedown', genPopupOutside, true), 0);
+    }
+
+    // ── Bulk: generate a mission for every VALID asset ────────────────────────
+    const GEN_BULK_PANEL_ID = 'aim-mb-gen-bulk';
+    let genBulkBusy = false;
+    function genPreviewInfo(asset, ffzs) {
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        const nav = ffz ? genNavPoint(aC, ffz) : null;
+        return {
+            name: `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`,
+            ffz: !!ffz, ground: groundM,
+            standoffFt: nav ? Math.round(nav.standoffFt) : null,
+            snapAltFt: groundM != null ? Math.round(groundM * 3.28084) + defaultSnapAglFt : null,
+            navAltFt: (ffz && ffz.minAltM != null) ? Math.round(ffz.minAltM * 3.28084) : null,
+            buildable: !!(ffz && groundM != null),
+        };
+    }
+    function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    // Existing mission names (lowercased) for the site — so bulk skips assets
+    // that already have a mission. Always a FRESH fetch (catches ones you just made).
+    function genFetchMissionNames(siteID) {
+        return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
+            .then(r => r.ok ? r.json() : [])
+            .then(arr => (Array.isArray(arr) ? arr : []).map(m => ((m && m.name) || '').trim().toLowerCase()).filter(Boolean))
+            .catch(() => []);
+    }
+    function genHasMission(asset, names) {
+        const an = (asset.name || '').trim().toLowerCase();
+        if (!an) return false;
+        const gen = `${genSection(genCentroid(asset.ring))} - ${asset.name}`.trim().toLowerCase();
+        return names.some(nm => nm === gen || nm === an || nm.endsWith(' - ' + an));
+    }
+    function genOpenBulkPanel() {
+        if (!generatorUnlocked) return;   // generator locked off on this install
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showToast('Generator: no site.', '#ff9800'); return; }
+        showToast('Loading assets + missions + elevations…', '#9ad', 2200);
+        Promise.all([genFetchEntities(siteID), genFetchMissionNames(siteID)]).then(([{ assets, ffzs }, names]) => {
+            const stateSkip = assets.filter(a => genSkipReason(a));
+            const haveMission = assets.filter(a => !genSkipReason(a) && genHasMission(a, names));
+            const valid = assets.filter(a => !genSkipReason(a) && !genHasMission(a, names));
+            const pts = valid.map(a => genCentroid(a.ring));
+            const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs);
+            try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
+        }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
+    }
+    function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs) {
+        genCloseBulkPanel();
+        const rows = valid.map((a, i) => {
+            const info = genPreviewInfo(a, ffzs);
+            const dis = info.buildable ? '' : 'opacity:0.5;';
+            const detail = info.buildable
+                ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
+                : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
+            return `<label class="aim-gen-row" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
+                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'}>
+                <span style="flex:1;color:#e6e6e6;font-weight:700;">${escapeHtml(info.name)}</span>
+                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
+            </label>`;
+        }).join('');
+        const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
+        const existRows = haveMission.map(a => `<div style="padding:3px 4px;color:#9ad;font-size:11px;border-bottom:1px solid #1b2430;">${nm(a)} <span style="color:#678;">· already has a mission</span></div>`).join('');
+        const skipRows = stateSkip.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${nm(a)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
+        const p = document.createElement('div');
+        p.id = GEN_BULK_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:380px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483600;' +
+            'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">▣ Generate Missions</span>
+                <button data-gen-bulk-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
+                <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
+                <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
+            </div>
+            <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
+                ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have missions</div>${existRows}` : ''}
+                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (state)</div>${skipRows}` : ''}
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-gen-bulk-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-gen-bulk-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-gen-bulk-go style="padding:5px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;">⊕ Create</button>
+            </div>`;
+        document.body.appendChild(p);
+        const close = () => genCloseBulkPanel();
+        p.querySelector('[data-gen-bulk-close]').onclick = close;
+        p.querySelector('[data-gen-bulk-cancel]').onclick = close;
+        const goBtn = p.querySelector('[data-gen-bulk-go]');
+        const updateGo = () => { const n = p.querySelectorAll('[data-gen-row]:checked').length; goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy; };
+        p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
+        updateGo();
+        goBtn.onclick = () => {
+            if (genBulkBusy) return;
+            const picked = [...p.querySelectorAll('[data-gen-row]:checked')].map(cb => valid[Number(cb.getAttribute('data-gen-row'))]).filter(Boolean);
+            const scan = p.querySelector('[data-gen-bulk-scan]').checked;
+            genBulkCommit(picked, ffzs, { inspectionScan: scan }, p.querySelector('[data-gen-bulk-status]'), goBtn);
+        };
+    }
+    async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
+        const ctx = findMissionAppCtx();
+        if (!ctx) { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        genBulkBusy = true; if (goBtn) goBtn.disabled = true;
+        let ok = 0, fail = 0;
+        const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+        for (let i = 0; i < assets.length; i++) {
+            setStatus(`Creating ${i + 1}/${assets.length}…`);
+            const built = buildMissionForAsset(assets[i], ffzs, opts);
+            if (!built) { fail++; continue; }
+            try { await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; }
+            catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); }
+        }
+        genBulkBusy = false;
+        setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
+        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}. Refresh the mission list to see them.`, ok ? '#5fff5f' : '#ff5252', 7000);
+        console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
+        // Soft-refresh the list so the new missions appear (iframe's own hash).
+        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)/); if (mm && cur !== mm[1]) location.hash = mm[1]; } catch (e) {}
+        if (goBtn) goBtn.disabled = false;
+    }
+
+    // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
+    // near the existing nav/snap so you can drag them into position. Navigates
+    // keep shouldUseFreezoneMinAlt (FFZ-min); snapshots auto-set to ground+AGL on
+    // drop via the live Auto-AGL.
+    // IMPLEMENTATION: COPY existing steps verbatim (preserving their exact type
+    // objects + all fields) and rebuild the app via setCurrentApp. createInstruction's
+    // h() mangles the type (number OR object → "No instruction component for type
+    // [object Object]"), so we avoid it: copied steps already have valid types and
+    // setCurrentApp is the same path normal edits use → renders + saves cleanly.
+    function genStageSteps(navCount, snapCount, inspectionScan) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
+        const app = ctx.currentApp;
+        const instrs = app.instructions || [];
+        const navRef = instrs.find(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
+        const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
+        if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
+        // wrap template = the scan steps trailing the first snapshot (copied as-is)
+        const wrapTpl = [];
+        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
+        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
+        const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
+        // copy a step (preserve type object + all fields) with a UNIQUE id —
+        // Percepto uses instruction.id as the React key (id.toString()), so a
+        // missing/duplicate id crashes the editor (blank screen). The save strips
+        // ids (server assigns real ones), so any unique client id is fine.
+        let idSeq = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100);
+        const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); c.id = idSeq++; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
+        // Spread new steps PAST any nav/snap already in the mission (incl. ones
+        // staged earlier this session) so a 2nd Stage doesn't stack on the 1st.
+        const baseNav = instrs.filter(s => s && s.type_name === 'navigate').length;   // includes the original (1) + prior staged
+        const baseSnap = instrs.filter(s => s && s.type_name === 'snapshot').length;
+        const staged = [];
+        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, (baseNav - 1) + i)));
+        for (let j = 0; j < snapCount; j++) {
+            staged.push(copyStep(snapRef, offEast(snapRef, (baseSnap - 1) + j)));
+            if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
+        }
+        if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
+        // Rebuild the instruction list (shallow-copy existing so we don't mutate
+        // live objects), insert staged steps before returnHome, re-index.
+        const newInstrs = instrs.map(s => Object.assign({}, s));
+        let rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome');
+        if (rh < 0) rh = newInstrs.length;
+        newInstrs.splice(rh, 0, ...staged);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+        } catch (e) { console.warn(`${TAG} [stage] setCurrentApp failed`, e); showToast('Stage failed — see console.', '#ff5252', 4000); }
+    }
+    let genStagePopEl = null;
+    function genStagePopup(anchorBtn) {
+        if (genStagePopEl) { genStagePopEl.remove(); genStagePopEl = null; return; }
+        const pop = document.createElement('div');
+        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:210px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
+            'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        pop.innerHTML = `
+            <div style="font-weight:800;color:#9cf;font-size:13px;margin-bottom:8px;">➕ Stage steps</div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="0" data-st-nav style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="1" data-st-snap style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan checked> Inspection scan wrap per snapshot</label>
+            <div style="display:flex;gap:6px;justify-content:flex-end;">
+                <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
+                <button data-st-add style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;">Stage</button>
+            </div>`;
+        document.body.appendChild(pop);
+        genStagePopEl = pop;
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + 'px';
+        pop.style.top = (r.bottom + 4) + 'px';
+        const close = () => { pop.remove(); genStagePopEl = null; document.removeEventListener('mousedown', outside, true); };
+        const outside = e => { if (genStagePopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
+        pop.querySelector('[data-st-cancel]').onclick = close;
+        pop.querySelector('[data-st-add]').onclick = () => {
+            const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
+            const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
+            const scan = pop.querySelector('[data-st-scan]').checked;
+            close();
+            if (!nav && !snap) { showToast('Set a Navigate and/or Snapshot count.', '#ff9800'); return; }
+            genStageSteps(nav, snap, scan);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    }
+
+    // The on-screen instruction ids, in current editor order.
+    function composerDomIds() {
+        return [...document.querySelectorAll('[data-rfd-draggable-id]')].map(el => el.getAttribute('data-rfd-draggable-id'));
+    }
+    // Match the open editor's cards to a cached mission by shared instruction
+    // ids. Auto-refetches the site's missions when the cache is STALE — i.e.
+    // the editor shows cards the cached mission doesn't have (you added/edited
+    // steps) — so you never have to open the SUM first to refresh.
+    function identifyOpenMission(cb) {
+        const domIds = composerDomIds();
+        if (!domIds.length) { cb(null); return; }
+        const sid = getCurrentSiteID();
+        const evaluate = (missions, fromFetch) => {
+            let best = null, bestHits = 0;
+            for (const m of (Array.isArray(missions) ? missions : [])) {
+                const idset = new Set((m.instructions || []).map(x => String(x.id)));
+                let hits = 0; for (const d of domIds) if (idset.has(d)) hits++;
+                if (hits > bestHits) { bestHits = hits; best = m; }
+            }
+            const matched = best && bestHits >= Math.min(domIds.length, 3);
+            const bestSet = best ? new Set((best.instructions || []).map(x => String(x.id))) : null;
+            const covers = bestSet ? domIds.every(d => bestSet.has(d)) : false;
+            // If we matched but the cache doesn't cover every on-screen card
+            // (stale after an edit), OR didn't match at all, refetch ONCE.
+            if ((!matched || !covers) && !fromFetch) {
+                delete missionsBySite[sid];
+                fetchMissions(sid, (m) => evaluate(m, true), () => cb(matched ? { mission: best, domIds } : null));
+                return;
+            }
+            cb(matched ? { mission: best, domIds } : null);
+        };
+        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
+        if (Array.isArray(cached)) evaluate(cached, false);
+        else fetchMissions(sid, (m) => evaluate(m, true), () => cb(null));
+    }
+    // Manual force-refresh: drop the cache + re-identify + redraw. Wired to the
+    // 🔄 button so you can resync after editing in the native editor.
+    function composerRefresh() {
+        const sid = getCurrentSiteID();
+        if (sid) delete missionsBySite[sid];
+        composerMission = null;
+        loggedNoMarkers = false;
+        showToast('Refreshing mission from server…', '#9ad', 1500);
+        composerEnsureMapMode(); // reload + re-number the native markers
+    }
+
+    // Re-style the native markers after a reorder (the cached mission supplies
+    // each step's data by id; the order is read live from the DOM, so this
+    // stays correct after a reorder).
+    function rerenderComposer() {
+        if (!composerMission) return;
+        try { composerStyleNativeMarkers(); } catch (e) { console.warn(`${TAG} [composer] marker restyle failed`, e); }
+    }
+
+    // ── Reorder engine (ports the Quick Mission Editor's fiber reorder) ──
+    function composerGetFiber(el) {
+        const k = Object.keys(el).find(kk => kk.startsWith('__reactFiber') || kk.startsWith('__reactInternalInstance'));
+        return k ? el[k] : null;
+    }
+    const COMPOSER_REORDER_CANDIDATES = [
+        n => n && n.memoizedProps && n.memoizedProps.value && n.memoizedProps.value.reorderInstructions,
+        n => n && n.memoizedProps && n.memoizedProps.reorderInstructions,
+        n => n && n.stateNode && n.stateNode.props && n.stateNode.props.reorderInstructions,
+        n => n && n.stateNode && n.stateNode.reorderInstructions,
+    ];
+    function composerFindReorderFn() {
+        const d = document.querySelector('[data-rfd-draggable-id]');
+        if (!d) return null;
+        let node = composerGetFiber(d), depth = 0;
+        while (node && depth < 80) {
+            for (const p of COMPOSER_REORDER_CANDIDATES) { let fn; try { fn = p(node); } catch (e) {} if (typeof fn === 'function') return fn; }
+            node = node.return; depth++;
+        }
+        console.warn(`${TAG} [composer] reorderInstructions not found after ${depth} fiber levels — Percepto may have refactored.`);
+        return null;
+    }
+    function composerIndexById(id) {
+        return [...document.querySelectorAll('[data-rfd-draggable-id]')].findIndex(el => el.getAttribute('data-rfd-draggable-id') === String(id));
+    }
+    // Wait until the moved item actually lands at expectedIdx (DOM reorder),
+    // or time out. Mirrors the Quick Mission Editor's completion signal.
+    function composerWaitForReorder(movedId, expectedIdx, ms = 3000) {
+        return new Promise(resolve => {
+            let done = false, obs = null, timer = null;
+            const finish = (ok) => { if (done) return; done = true; if (obs) obs.disconnect(); if (timer) clearTimeout(timer); resolve(ok); };
+            const target = document.querySelector('[data-rfd-droppable-id]') || document.querySelector('.mission-edit__content');
+            if (target) {
+                obs = new MutationObserver(() => { if (composerIndexById(movedId) === expectedIdx) finish(true); });
+                obs.observe(target, { childList: true, subtree: true });
+            }
+            timer = setTimeout(() => finish(composerIndexById(movedId) === expectedIdx), ms);
+        });
+    }
+    // Move a set of ids (in order) so they land starting at targetIndex.
+    async function composerMoveIdsToIndex(orderedIds, targetIndex) {
+        let placement = targetIndex;
+        for (const id of orderedIds) {
+            const from = composerIndexById(id);
+            if (from < 0) continue;
+            const to = from < placement ? placement - 1 : placement;
+            if (from === to) { placement = to + 1; continue; }
+            // CRITICAL: reorderInstructions is a React closure over the CURRENT
+            // render's instruction snapshot; each call re-renders and
+            // invalidates it. Re-walk the fiber for a FRESH function before
+            // every move — reusing one stale fn was the v0.87 bug (every call
+            // operated on the original order → scramble/crash).
+            const fn = composerFindReorderFn();
+            if (!fn) { console.warn(`${TAG} [composer] reorder fn lost mid-move`); break; }
+            const p = composerWaitForReorder(id, to, 3000);
+            try { fn(from, to); } catch (e) { console.warn(`${TAG} [composer] reorder error`, e); }
+            await p;
+            await new Promise(r => setTimeout(r, 130)); // let the new render settle so the next fetch is current
+            placement = to + 1;
+        }
+    }
+    // ── Leaflet access (ported from Map Styler) ──────────────────────────
+    let leafletMapRef = null, leafletPatched = false;
+    function composerGetL() { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; return w.L || null; }
+    function composerLooksLikeMap(v) {
+        return v && typeof v === 'object'
+            && typeof v.latLngToContainerPoint === 'function'
+            && typeof v.layerPointToLatLng === 'function'
+            && typeof v.addLayer === 'function'
+            && typeof v.removeLayer === 'function'
+            && typeof v.getContainer === 'function';
+    }
+    function patchLeafletMap() {
+        if (leafletPatched) return;
+        const L = composerGetL();
+        if (!L || !L.Map) return;
+        try {
+            ['initialize', 'getPane', 'addLayer', 'setView', '_animateZoom'].forEach(m => {
+                if (typeof L.Map.prototype[m] !== 'function') return;
+                const orig = L.Map.prototype[m];
+                L.Map.prototype[m] = function(...a) {
+                    try { if (this && this._container && !this._container.__aim_map__) this._container.__aim_map__ = this; } catch (e) {}
+                    return orig.apply(this, a);
+                };
+            });
+            leafletPatched = true;
+        } catch (e) {}
+    }
+    function getLeafletMap() {
+        if (leafletMapRef && leafletMapRef._container && document.body.contains(leafletMapRef._container)) return leafletMapRef;
+        leafletMapRef = null;
+        for (const c of document.querySelectorAll('.leaflet-container')) {
+            if (composerLooksLikeMap(c.__aim_map__)) { leafletMapRef = c.__aim_map__; return leafletMapRef; }
+            try { for (const k of Object.getOwnPropertyNames(c)) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} } } catch (e) {}
+            for (const k in c) { try { const v = c[k]; if (composerLooksLikeMap(v)) { leafletMapRef = v; return v; } } catch (e) {} }
+        }
+        return null;
+    }
+
+    // ── Edit a Navigate's order number → move the whole stop there ──
+    // A "stop" = the navigate + every step until the next navigate (its
+    // snapshots + their scan steps), so snapshots auto-follow.
+    function composerCurrentOrdered() {
+        if (!composerMission) return [];
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        return composerDomIds().map(id => byId[id]).filter(Boolean);
+    }
+    function composerNavGroups(ordered) {
+        const groups = []; let cur = null;
+        ordered.forEach(s => {
+            if (s.type_name === 'navigate') { cur = { navId: String(s.id), ids: [String(s.id)] }; groups.push(cur); }
+            else if (cur) cur.ids.push(String(s.id));
+        });
+        return groups;
+    }
+    // Move nav-group at index idx above the group at idx-1 (one step up).
+    async function composerSwapGroupUp(idx) {
+        if (idx <= 0) return;
+        const groups = composerNavGroups(composerCurrentOrdered());
+        if (idx >= groups.length) return;
+        const dest = composerIndexById(groups[idx - 1].ids[0]);
+        if (dest >= 0) await composerMoveIdsToIndex(groups[idx].ids, dest);
+    }
+    // DIAGNOSTIC MODE: while true, a nav-badge edit only LOGS the plan (which
+    // reorderInstructions was found + the computed indices) and does NOT touch
+    // the mission — so a wrong index basis can't scramble a real mission or
+    // crash Percepto's editor (which was forcing a full-page refresh). Flip to
+    // false once the logged plan is verified correct. v0.91: ENABLED — the
+    // self-reverting probe confirmed card indices + single-call works; the bug
+    // was the stale-closure reuse (now fixed by re-fetching per move).
+    let composerReorderDebug = false;
+    async function composerApplyNavOrder(navId, toNum) {
+        if (composerBusy) return;
+        const groups = composerNavGroups(composerCurrentOrdered());
+        let f = groups.findIndex(g => g.navId === String(navId));
+        const t = Math.max(1, Math.min(groups.length, toNum)) - 1;
+        if (f < 0 || f === t) return;
+        // Resolve the reorder fn + record which fiber path matched (for the log).
+        let fn = null, fnWhy = 'no draggable card';
+        const card = document.querySelector('[data-rfd-draggable-id]');
+        if (card) {
+            let node = composerGetFiber(card), depth = 0, found = false;
+            while (node && depth < 80 && !found) {
+                for (let pi = 0; pi < COMPOSER_REORDER_CANDIDATES.length; pi++) {
+                    let cand; try { cand = COMPOSER_REORDER_CANDIDATES[pi](node); } catch (e) {}
+                    if (typeof cand === 'function') { fn = cand; fnWhy = `candidate#${pi} @depth${depth}`; found = true; break; }
+                }
+                node = node.return; depth++;
+            }
+            if (!fn) fnWhy = `NOT FOUND after ${depth} fiber levels`;
+        }
+        const domIds = composerDomIds();
+        const grpIds = groups[f].ids;
+        const grpDomIdx = grpIds.map(id => composerIndexById(id));
+        // Flat string (no console expansion needed) + a basis check: the first
+        // few draggable ids vs the mission's first/last instruction ids+types,
+        // which reveals if the card index is offset from the instruction array
+        // (takeoff/returnHome not being cards).
+        const instr = composerMission.instructions || [];
+        console.log(`${TAG} [composer-reorder] PLAN ` + JSON.stringify({
+            nav: navId, fromN: f + 1, toN: t + 1, reorderFn: fnWhy, groups: groups.length,
+            domCards: domIds.length, instrCount: instr.length, groupDomIndices: grpDomIdx,
+            firstCards: domIds.slice(0, 3), firstInstr: instr.slice(0, 3).map(x => `${x.type_name}#${x.id}`),
+            lastInstr: instr.slice(-2).map(x => `${x.type_name}#${x.id}`),
+        }));
+        if (composerReorderDebug) {
+            showToast('Reorder is in DIAGNOSTIC mode — the plan was logged to the console (paste it to me). Paused so it can’t scramble a mission until we confirm it’s safe.', '#ffd54f', 7000);
+            return;
+        }
+        if (!fn) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
+        composerBusy = true;
+        try {
+            while (f > t) { await composerSwapGroupUp(f); f--; }
+            while (f < t) { await composerSwapGroupUp(f + 1); f++; }
+        } catch (e) { console.warn(`${TAG} [composer] nav reorder failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Moved to N${t + 1} — hit SAVE in the editor.`, '#5fff5f', 3500);
+    }
+    // ── Snapshot reorder: move a snapshot block (snapshot + its scan steps) to
+    // a global capture position S#. Within a stop → reorders captures; landing
+    // under a different navigate → re-homes it there (for Nav↔Snap spacing).
+    function composerSnapBlocks(ordered) {
+        const isBlk = t => t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
+        const blocks = []; let i = 0;
+        while (i < ordered.length) {
+            const s = ordered[i];
+            if (s && s.type_name === 'snapshot') {
+                const b = { snapId: String(s.id), ids: [String(s.id)] };
+                i++;
+                while (i < ordered.length && ordered[i] && isBlk(ordered[i].type_name)) { b.ids.push(String(ordered[i].id)); i++; }
+                blocks.push(b);
+            } else i++;
+        }
+        return blocks;
+    }
+    async function composerSwapSnapBlockUp(idx) {
+        if (idx <= 0) return;
+        const blocks = composerSnapBlocks(composerCurrentOrdered());
+        if (idx >= blocks.length) return;
+        const dest = composerIndexById(blocks[idx - 1].ids[0]);
+        if (dest >= 0) await composerMoveIdsToIndex(blocks[idx].ids, dest);
+    }
+    async function composerApplySnapOrder(snapId, toNum) {
+        if (composerBusy) return;
+        const blocks = composerSnapBlocks(composerCurrentOrdered());
+        let f = blocks.findIndex(b => b.snapId === String(snapId));
+        const t = Math.max(1, Math.min(blocks.length, toNum)) - 1;
+        if (f < 0 || f === t) return;
+        if (!composerFindReorderFn()) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
+        composerBusy = true;
+        try {
+            while (f > t) { await composerSwapSnapBlockUp(f); f--; }
+            while (f < t) { await composerSwapSnapBlockUp(f + 1); f++; }
+        } catch (e) { console.warn(`${TAG} [composer] snap reorder failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
+    }
+
+    // Inline number editor for a Nav (blue) or Snapshot (pink) badge.
+    function composerEditOrder(kind, id, currentNum, ll) {
+        if (composerBusy) return;
+        const map = getLeafletMap(); if (!map) return;
+        const old = document.getElementById('aim-cmp-num-edit'); if (old) old.remove();
+        let pt, rect;
+        try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
+        catch (e) { return; }
+        const color = kind === 'nav' ? stepColor('nav') : stepColor('snap');
+        const label = kind === 'nav' ? 'N' : 'S';
+        const wrap = document.createElement('div');
+        wrap.id = 'aim-cmp-num-edit';
+        wrap.style.cssText = `position:fixed;left:${rect.left + pt.x}px;top:${rect.top + pt.y - 16}px;z-index:2147483640;` +
+            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:4px 6px;` +
+            'display:flex;gap:5px;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,0.6)';
+        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">${label}${currentNum}→</span>` +
+            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid ${color};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
+        document.body.appendChild(wrap);
+        const input = wrap.querySelector('input');
+        input.focus(); input.select();
+        const commit = () => {
+            const v = parseInt(input.value, 10); wrap.remove();
+            if (!isNaN(v)) { if (kind === 'nav') composerApplyNavOrder(id, v); else composerApplySnapOrder(id, v); }
+        };
+        input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
+        input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
+    }
+
+    function ensureEditorCollapseStyle(on) {
+        const existing = document.getElementById(EDITOR_COLLAPSE_STYLE_ID);
+        if (!on) { if (existing) existing.remove(); return; }
+        if (existing) return;
+        const st = document.createElement('style');
+        st.id = EDITOR_COLLAPSE_STYLE_ID;
+        // COMPACT VIEW: hide each card's detail block (altitude/velocity/GPS
+        // rows) so the card is one line, put the title content-width, and let
+        // our injected value sit on the right. Card stays a real draggable box.
+        st.textContent = `
+            /* Cap the draggable WRAPPER (the visible tile) to its title row, so
+               there's no dead space inside the tile. The wrapper's MARGIN (the
+               between-step drag-to-insert gap) is outside the box → untouched. */
+            [data-rfd-draggable-id].aim-mb-compact { max-height:38px !important; overflow:hidden !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item { max-height:38px !important; min-height:0 !important; overflow:hidden !important; padding-top:0 !important; padding-bottom:0 !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__params { display:none !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__top { padding:0 !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__header { padding-top:6px !important; padding-bottom:6px !important; }
+            [data-rfd-draggable-id].aim-mb-compact .mission-instruction-item__title { flex:0 0 auto !important; }
+            [data-rfd-draggable-id].aim-mb-compact-renamed .mission-instruction-item__title__name { display:none !important; }
+            .aim-mb-cx-name { font-weight:800; white-space:nowrap; margin-left:2px; }
+            .aim-mb-cx-val { flex:1; text-align:right; font-weight:800; font-size:13px; white-space:nowrap; padding-right:10px; }
+        `;
+        (document.head || document.documentElement).appendChild(st);
+    }
+    function compactAltFt(m) { return typeof m === 'number' ? `${Math.round(m * 3.28084).toLocaleString()} ft` : ''; }
+    // Altitude shown on a nav/snap compact card: AGL (value1 − DEM ground) when
+    // the AGL view is on (falls back to MSL + triggers a DEM fetch until ground
+    // is cached), else MSL (stored value1). Suffix tells you which you're seeing.
+    function compactAltDisplay(instr) {
+        const m = instr.value1;
+        if (typeof m !== 'number') return '';
+        const msl = `${Math.round(m * 3.28084).toLocaleString()} ft MSL`;
+        if (!showAglInEditor) return msl;
+        const g = stepElevM(instr);
+        if (g == null) { // ground not cached yet — kick a fetch, show MSL meanwhile
+            if (instr.location && instr.location.lat != null) { try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {} }
+            return msl;
+        }
+        return `${Math.round((m - g) * 3.28084).toLocaleString()} ft AGL`;
+    }
+
+    // Compact ONE card: hide its detail rows (via the class) and inject the key
+    // value inline — Navigate/Snapshot=altitude (blue/pink), Wait=Ns (white),
+    // Camera Type→Thermal On/Off (orange), GEM Mode→GEM On/Off (green).
+    function applyCompactCard(card, instr) {
+        const header = card.querySelector('.mission-instruction-item__header');
+        const titleEl = card.querySelector('.mission-instruction-item__title');
+        if (!header || !titleEl) return;
+        const t = instr.type_name;
+        let valText = null, valColor = '#cfe', titleColor = null, renameText = null, renameColor = '#fff';
+        if (t === 'navigate') { valText = compactAltDisplay(instr); valColor = stepColor('nav'); titleColor = stepColor('nav'); }
+        else if (t === 'snapshot') { valText = compactAltDisplay(instr); valColor = stepColor('snap'); titleColor = stepColor('snap'); }
+        else if (t === 'wait') { valText = `${Math.round(Number(instr.value1) || 0)}s`; valColor = stepColor('wait'); titleColor = stepColor('wait'); }
+        else if (t === 'cameraSelect') { renameText = instr.value1 ? 'Thermal On' : 'Thermal Off'; renameColor = instr.value1 ? stepColor('thermalOn') : stepColor('thermalOff'); }
+        else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }
+        else { card.classList.remove('aim-mb-compact-renamed'); return; }
+
+        // Color the native title name (Navigate=blue, Snapshot=pink).
+        const nameEl = titleEl.querySelector('.mission-instruction-item__title__name');
+        if (nameEl) nameEl.style.color = titleColor || '';
+
+        if (renameText != null) {
+            card.classList.add('aim-mb-compact-renamed');
+            let r = titleEl.querySelector('.aim-mb-cx-name');
+            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); }
+            if (r.textContent !== renameText) r.textContent = renameText;
+            r.style.color = renameColor;
+            const v = header.querySelector('.aim-mb-cx-val'); if (v) v.remove();
+        } else {
+            card.classList.remove('aim-mb-compact-renamed');
+            let v = header.querySelector('.aim-mb-cx-val');
+            if (!v) {
+                v = document.createElement('div'); v.className = 'aim-mb-cx-val';
+                const opts = header.querySelector('.mission-instruction-item__options');
+                if (opts) header.insertBefore(v, opts); else header.appendChild(v);
+            }
+            if (v.textContent !== (valText || '')) v.textContent = valText || '';
+            v.style.color = valColor;
+            const r = titleEl.querySelector('.aim-mb-cx-name'); if (r) r.remove();
+        }
+    }
+
+    // Apply / remove the compact view across the native editor's instruction
+    // cards. Needs the mission data (composerMission) for the inline values;
+    // when it isn't loaded yet, leave cards full (the interval re-runs once the
+    // map-badge path has loaded the mission). Keeps native drag-drop intact.
+    function applyNativeEditorCollapse() {
+        if (CONTEXT !== 'IFRAME') return;
+        const cards = document.querySelectorAll('[data-rfd-draggable-id]');
+        const off = () => {
+            ensureEditorCollapseStyle(false);
+            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); });
+        };
+        if (!collapseEditorCards) { off(); return; }
+        if (!document.querySelector('.mission-edit__content') || !cards.length) return;
+        if (!composerMission) { off(); return; } // wait for the mission to load
+        ensureEditorCollapseStyle(true);
+        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        cards.forEach(card => {
+            const instr = byId[card.getAttribute('data-rfd-draggable-id')];
+            if (!instr) return;
+            card.classList.add('aim-mb-compact');
+            applyCompactCard(card, instr);
+        });
+    }
+
+    // Log the distinct instruction-marker icon filenames once, so we can
+    // extend REDUNDANT_MARKER_SRCS with the exact Thermal + Wait names
+    // without risking the Snapshot (camera) icon.
+    function logMarkerIconSrcs(doc) {
+        if (loggedMarkerSrcs) return;
+        const imgs = doc.querySelectorAll('.instruction-marker img[src]');
+        if (!imgs.length) return;
+        const names = new Set();
+        imgs.forEach(i => {
+            const src = i.getAttribute('src') || '';
+            const file = src.split('/').pop();
+            if (file) names.add(file);
+        });
+        if (names.size) {
+            loggedMarkerSrcs = true;
+            console.log(`${TAG} [map-icons] distinct instruction-marker icons on this map:`, Array.from(names).sort());
+        }
+    }
+
+    // Inject/refresh the CSS that hides redundant scan-block markers. Pure
+    // CSS :has() so it auto-applies to markers Leaflet re-creates on zoom/pan.
+    function applyMapIconDeclutter(doc) {
+        logMarkerIconSrcs(doc);
+        const STYLE_ID = 'aim-mb-map-declutter';
+        const existing = doc.getElementById(STYLE_ID);
+        if (!hideScanIcons) { if (existing) existing.remove(); return; }
+        const css = REDUNDANT_MARKER_SRCS
+            .map(sub => `.instruction-marker:has(img[src*="${sub}"]){display:none!important;}`)
+            .join('\n');
+        if (existing) { if (existing.textContent !== css) existing.textContent = css; return; }
+        const st = doc.createElement('style');
+        st.id = STYLE_ID;
+        st.textContent = css;
+        (doc.head || doc.documentElement).appendChild(st);
     }
 
     function hideSumButton() {
         try {
             document.querySelectorAll(`#${SUM_BTN_ID}`).forEach(el => el.remove());
             document.querySelectorAll(`#${TOOLBAR_ROW_ID}`).forEach(el => el.remove());
+            document.querySelectorAll(`#${LOG_SUM_BTN_ID}`).forEach(el => el.remove());
         } catch (e) {}
     }
 
@@ -1064,6 +3174,7 @@
         if (!panelState) initPanelState();
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
+        if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
         const bucket = missionsBySite[siteID];
         const goDrill = () => {
             // Confirm the mission exists in the loaded set; if not,
@@ -1115,12 +3226,25 @@
     // ========================================================
     // Panel — open/close + state
     // ========================================================
-    function openPanel() {
+    function openPanel(mode) {
+        mode = mode || 'bank';
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('No site loaded.', '#ff5252'); return; }
-        if (!panelState) initPanelState();
+        // (Re)init when opening fresh or switching surfaces between opens.
+        if (!panelState || panelState.mode !== mode) initPanelState(mode);
         if (!panelEl) buildPanelChrome();
         panelEl.style.display = 'flex';
+        if (panelGeom.snap) snapPanel(panelGeom.snap); // re-fit dock to current map size
+        if (mode === 'log') {
+            const bucket = logBySite[siteID];
+            if (!bucket) {
+                renderLoadingState();
+                fetchMissionLog(siteID, () => renderTableView(), (err) => renderErrorState(err));
+            } else {
+                renderTableView();
+            }
+            return;
+        }
         const bucket = missionsBySite[siteID];
         if (!bucket) {
             renderLoadingState();
@@ -1139,9 +3263,11 @@
         panelState = null;
     }
 
-    function initPanelState() {
+    function initPanelState(mode) {
+        mode = mode || 'bank';
         panelState = {
-            sortKey: 'flightDistance', // default: longest distance first
+            mode,
+            sortKey: mode === 'log' ? 'timeCT' : 'flightDistance', // log: newest first
             sortDir: 'desc',
             search: '',
             selectedIds: new Set(),
@@ -1162,10 +3288,11 @@
             style.id = 'aim-mb-styles';
             style.textContent = `
                 #${PANEL_ID} { font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
-                #${PANEL_ID} .aim-mb-header { background: #14d2dc; color: #000; padding: 6px 12px; cursor: move; display: flex; align-items: center; gap: 10px; user-select: none; border-radius: 6px 6px 0 0; flex-shrink: 0; }
-                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-                #${PANEL_ID} .aim-mb-header-btn { background: rgba(0,0,0,0.15); border: none; color: #000; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
-                #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(0,0,0,0.3); }
+                /* Header: green centered title on a subtle dark bar, matching the Site Setup SUM look/feel. */
+                #${PANEL_ID} .aim-mb-header { background: rgba(95,255,95,0.06); color: #5fff5f; padding: 8px 12px; cursor: move; display: flex; align-items: center; gap: 8px; user-select: none; border-bottom: 1px solid rgba(255,255,255,0.08); border-radius: 6px 6px 0 0; flex-shrink: 0; }
+                #${PANEL_ID} .aim-mb-header-title { font-weight: 700; font-size: 13px; flex: 1; text-align: left; color: #5fff5f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-header-btn { background: rgba(95,255,95,0.12); border: 1px solid rgba(95,255,95,0.4); color: #5fff5f; padding: 2px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; font-weight: 600; }
+                #${PANEL_ID} .aim-mb-header-btn:hover { background: rgba(95,255,95,0.25); }
                 /* Body is a flex column so toolbar + footer stay pinned and only the table scrolls. */
                 #${PANEL_ID} .aim-mb-body { flex: 1; overflow: hidden; background: #0f1216; display: flex; flex-direction: column; }
                 #${PANEL_ID} .aim-mb-toolbar { background: #1a1a1a; padding: 6px 10px; border-bottom: 1px solid #2a2a2a; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
@@ -1212,6 +3339,10 @@
                 #${PANEL_ID} .aim-mb-step-snap { color: #ff9800; font-weight: 700; }
                 #${PANEL_ID} .aim-mb-loc { cursor: pointer; color: #fff; text-decoration: underline; }
                 #${PANEL_ID} .aim-mb-loc:hover { color: #14d2dc; }
+                #${PANEL_ID} .aim-mb-latlng { cursor: pointer; color: #cdd6e0; }
+                #${PANEL_ID} .aim-mb-latlng:hover { color: #14d2dc; }
+                #${PANEL_ID} .aim-mb-gps { cursor: pointer; color: #8ab4f8; text-decoration: underline; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-gps:hover { color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-step-focus { cursor: pointer; font-size: 12px; opacity: 0.6; }
                 #${PANEL_ID} .aim-mb-step-focus:hover { opacity: 1; }
                 #${PANEL_ID} .aim-mb-step-edit { cursor: pointer; font-size: 12px; opacity: 0.6; }
@@ -1223,6 +3354,8 @@
                 #${PANEL_ID} .aim-mb-agl-low { color: #ff5252; }
                 #${PANEL_ID} .aim-mb-agl-ok { color: #5fff5f; }
                 #${PANEL_ID} .aim-mb-agl-high { color: #3399ff; }
+                #${PANEL_ID} .aim-mb-agl-editable { border-bottom: 1px dotted #555; }
+                #${PANEL_ID} .aim-mb-agl-editable:hover { border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-editable { cursor: pointer; border-bottom: 1px dotted #555; }
                 #${PANEL_ID} .aim-mb-alt-editable:hover { color: #14d2dc; border-bottom-color: #14d2dc; }
                 #${PANEL_ID} .aim-mb-alt-pending { cursor: pointer; background: #ff9800; color: #000; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
@@ -1230,6 +3363,13 @@
                 #${PANEL_ID} .aim-mb-alt-committed { color: #ffeb3b; font-weight: 700; margin-left: 4px; }
                 #${PANEL_ID} .aim-mb-alt-input { width: 80px; background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 2px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 #${PANEL_ID} .aim-mb-pending-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,152,0,0.15); border: 1px solid #ff9800; border-radius: 4px; margin-bottom: 8px; color: #ffb84d; font-size: 11px; font-weight: 600; }
+                /* Gold "Bulk →" buttons — mirror the Site Setup SUM bulk toolbar. */
+                #${PANEL_ID} .aim-mb-bulk-btn { background: #2a2a2a; border: 1px solid rgba(255,213,79,0.55); color: #ffd54f; padding: 3px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+                #${PANEL_ID} .aim-mb-bulk-btn:hover { background: rgba(255,213,79,0.12); border-color: #ffd54f; }
+                #${PANEL_ID} .aim-mb-sel-count { font-size: 11px; color: #ffd54f; white-space: nowrap; font-weight: 600; }
+                #${PANEL_ID} td.aim-mb-sel-cell input, #${PANEL_ID} th.aim-mb-sel-cell input { cursor: pointer; margin: 0; }
+                .aim-mb-bp-pop { position: fixed; z-index: 100002; min-width: 240px; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
+                .aim-mb-bp-pop input[type="text"] { background: #0f1216; border: 1px solid #14d2dc; color: #fff; padding: 3px 6px; font-size: 11px; border-radius: 3px; outline: none; }
                 /* Floating menus — fixed positioning so they're not clipped by the panel and survive renders. */
                 .aim-mb-cols-menu, .aim-mb-settings-popover { position: fixed; background: #1f2228; border: 1px solid #14d2dc; border-radius: 6px; z-index: 100001; box-shadow: 0 4px 20px rgba(0,0,0,0.7); font-family: 'Lato','Segoe UI',sans-serif; color: #e6e6e6; }
                 .aim-mb-cols-menu { padding: 0; max-height: 360px; overflow: hidden; display: flex; flex-direction: column; }
@@ -1257,24 +3397,36 @@
             document.head.appendChild(style);
         }
 
+        loadPanelGeom();
         panelEl = document.createElement('div');
         panelEl.id = PANEL_ID;
+        const startW = panelGeom.w || 900, startH = panelGeom.h || 600;
         Object.assign(panelEl.style, {
-            position: 'fixed', top: '80px', right: '20px',
-            width: '900px', height: '600px', minWidth: '500px', minHeight: '300px',
+            position: 'fixed',
+            width: startW + 'px', height: startH + 'px', minWidth: '500px', minHeight: '300px',
             background: '#0f1216', border: '1px solid #14d2dc', borderRadius: '6px',
             zIndex: '99999', display: 'flex', flexDirection: 'column',
             boxShadow: '0 8px 28px rgba(0,0,0,0.7)',
         });
+        // Restore a saved float position, else default to top-right.
+        if (typeof panelGeom.x === 'number' && typeof panelGeom.y === 'number') {
+            panelEl.style.left = Math.max(0, Math.min(window.innerWidth - 80, panelGeom.x)) + 'px';
+            panelEl.style.top = Math.max(0, Math.min(window.innerHeight - 40, panelGeom.y)) + 'px';
+        } else {
+            panelEl.style.top = '80px';
+            panelEl.style.right = '20px';
+        }
 
-        // Header (draggable handle)
+        // Header (draggable handle) — title, snap-dock buttons, refresh, close.
         const header = document.createElement('div');
         header.className = 'aim-mb-header';
         header.innerHTML = `
-            <div class="aim-mb-header-title">📋 Mission Summary — <span data-site></span></div>
+            <div class="aim-mb-header-title">📋 Mission Bank Summary — <span data-site></span></div>
+            <span class="aim-mb-snap" style="display:flex;align-items:center;gap:1px;margin-right:2px"></span>
             <button class="aim-mb-header-btn" data-refresh title="Re-fetch missions">Refresh</button>
             <button class="aim-mb-header-btn" data-close>✕</button>
         `;
+        addSnapButtons(header.querySelector('.aim-mb-snap'));
         panelEl.appendChild(header);
         makeDraggable(panelEl, header);
         header.querySelector('[data-close]').onclick = closePanel;
@@ -1302,6 +3454,16 @@
         makeResizable(panelEl, resize);
 
         document.body.appendChild(panelEl);
+
+        // Re-apply a saved dock (now that the panel is in the DOM and we can
+        // measure the map), and re-fit it when the window/sidebar resizes.
+        if (panelGeom.snap) snapPanel(panelGeom.snap);
+        if (!panelResizeBound) {
+            panelResizeBound = true;
+            window.addEventListener('resize', () => {
+                if (panelGeom.snap && panelEl && panelEl.style.display !== 'none') snapPanel(panelGeom.snap);
+            });
+        }
     }
 
     // Pointer-event drag: setPointerCapture guarantees we keep receiving
@@ -1326,11 +3488,18 @@
             if (!dragging || e.pointerId !== pointerId) return;
             el.style.left = `${startLeft + e.clientX - startX}px`;
             el.style.top = `${startTop + e.clientY - startY}px`;
+            panelGeom.snap = null; // manual move un-docks
         });
         const stop = (e) => {
             if (e && e.pointerId !== pointerId) return;
+            if (!dragging) return;
             dragging = false;
             try { handle.releasePointerCapture(pointerId); } catch (er) {}
+            // Persist the new floating position.
+            const r = el.getBoundingClientRect();
+            panelGeom.x = Math.round(r.left); panelGeom.y = Math.round(r.top);
+            panelGeom.w = Math.round(r.width); panelGeom.h = Math.round(r.height);
+            savePanelGeom();
         };
         handle.addEventListener('pointerup', stop);
         handle.addEventListener('pointercancel', stop);
@@ -1354,11 +3523,109 @@
         });
         const stop = (e) => {
             if (e && e.pointerId !== pointerId) return;
+            if (!resizing) return;
             resizing = false;
             try { handle.releasePointerCapture(pointerId); } catch (er) {}
+            const r = el.getBoundingClientRect();
+            panelGeom.w = Math.round(r.width); panelGeom.h = Math.round(r.height);
+            panelGeom.x = Math.round(r.left); panelGeom.y = Math.round(r.top);
+            savePanelGeom();
         };
         handle.addEventListener('pointerup', stop);
         handle.addEventListener('pointercancel', stop);
+    }
+
+    // ========================================================
+    // Panel geometry + snap docking — ported from the Site Setup SUM
+    // panel so the two SUMs behave identically: dock to the left / right /
+    // bottom of the MAP, float/restore, and persist position+size+snap
+    // across opens. Snap targets come from the .leaflet-container region so
+    // a side-dock fills the map's edge (not the sidebar).
+    // ========================================================
+    const PANEL_GEOM_KEY = 'aim-mb-panel-geom';
+    const panelGeom = { x: null, y: null, w: 900, h: 600, snap: null, floatRect: null };
+    let panelResizeBound = false;
+    function loadPanelGeom() {
+        const g = gmGet(PANEL_GEOM_KEY, null);
+        if (!g || typeof g !== 'object') return;
+        if (typeof g.x === 'number') panelGeom.x = g.x;
+        if (typeof g.y === 'number') panelGeom.y = g.y;
+        if (typeof g.w === 'number') panelGeom.w = g.w;
+        if (typeof g.h === 'number') panelGeom.h = g.h;
+        if (g.snap === 'left' || g.snap === 'right' || g.snap === 'bottom' || g.snap === null) panelGeom.snap = g.snap;
+        if (g.floatRect && typeof g.floatRect === 'object') panelGeom.floatRect = g.floatRect;
+    }
+    function savePanelGeom() {
+        gmSet(PANEL_GEOM_KEY, {
+            x: panelGeom.x, y: panelGeom.y, w: panelGeom.w, h: panelGeom.h,
+            snap: panelGeom.snap, floatRect: panelGeom.floatRect,
+        });
+    }
+    function getMapRect() {
+        try {
+            const mc = document.querySelector('.leaflet-container');
+            if (mc) {
+                const r = mc.getBoundingClientRect();
+                if (r.width > 200 && r.height > 200) return { left: r.left, top: r.top, width: r.width, height: r.height };
+            }
+        } catch (e) {}
+        return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    }
+    function applyPanelGeom(L, T, W, H) {
+        if (!panelEl) return;
+        panelEl.style.right = 'auto';
+        panelEl.style.left = Math.round(L) + 'px';
+        panelEl.style.top = Math.round(T) + 'px';
+        panelEl.style.width = Math.round(W) + 'px';
+        panelEl.style.height = Math.round(H) + 'px';
+        panelGeom.x = Math.round(L); panelGeom.y = Math.round(T);
+        panelGeom.w = Math.round(W); panelGeom.h = Math.round(H);
+    }
+    function snapPanel(where) {
+        if (!panelEl) return;
+        const m = getMapRect();
+        const priorSnap = panelGeom.snap;
+        // Remember the floating geometry the first time we dock so float/restore can return to it.
+        if (!priorSnap) {
+            const r = panelEl.getBoundingClientRect();
+            panelGeom.floatRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+        }
+        const floatW = (panelGeom.floatRect && panelGeom.floatRect.w) || 900;
+        let L, T, W, H;
+        if (where === 'left' || where === 'right') {
+            const baseW = priorSnap ? floatW : panelEl.getBoundingClientRect().width;
+            W = Math.min(Math.max(baseW, 480), Math.round(m.width * 0.7));
+            H = m.height; T = m.top;
+            L = where === 'left' ? m.left : (m.left + m.width - W);
+        } else { // bottom dock
+            W = m.width; L = m.left;
+            H = Math.min(Math.max(Math.round(m.height * 0.45), 300), m.height);
+            T = m.top + m.height - H;
+        }
+        applyPanelGeom(L, T, W, H);
+        panelGeom.snap = where;
+    }
+    function floatPanel() {
+        panelGeom.snap = null;
+        const f = panelGeom.floatRect;
+        if (f) applyPanelGeom(f.x, f.y, f.w, f.h);
+    }
+    function makeSnapButton(glyph, tip, fn) {
+        const b = document.createElement('button');
+        b.textContent = glyph;
+        b.title = tip;
+        b.style.cssText = 'background:transparent;border:1px solid transparent;color:#9fb4bb;font-size:13px;line-height:1;cursor:pointer;padding:2px 5px;border-radius:3px';
+        b.onmouseenter = () => { b.style.background = 'rgba(95,255,95,0.18)'; b.style.color = '#cdeff3'; };
+        b.onmouseleave = () => { b.style.background = 'transparent'; b.style.color = '#9fb4bb'; };
+        b.onpointerdown = (e) => { e.stopPropagation(); }; // don't start a header drag
+        b.onclick = (e) => { e.stopPropagation(); fn(); };
+        return b;
+    }
+    function addSnapButtons(container) {
+        container.appendChild(makeSnapButton('◧', 'Dock to left of map', () => { snapPanel('left'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('◨', 'Dock to right of map', () => { snapPanel('right'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('⬓', 'Dock to bottom of map', () => { snapPanel('bottom'); savePanelGeom(); }));
+        container.appendChild(makeSnapButton('❐', 'Float / restore', () => { floatPanel(); savePanelGeom(); }));
     }
 
     // ========================================================
@@ -1371,11 +3638,12 @@
 
     function updateTitle() {
         if (!panelEl) return;
-        const span = panelEl.querySelector('[data-site]');
-        if (!span) return;
+        const titleEl = panelEl.querySelector('.aim-mb-header-title');
         const name = getCurrentSiteName();
         const sid = getCurrentSiteID();
-        span.textContent = name || (sid ? `Site ${sid}` : '?');
+        const site = name || (sid ? `Site ${sid}` : '?');
+        const prefix = (panelState && panelState.mode === 'log') ? '📋 Mission Log' : '📋 Mission Bank Summary';
+        if (titleEl) titleEl.innerHTML = `${prefix} — <span data-site>${escapeHtml(site)}</span>`;
     }
 
     function renderLoadingState() {
@@ -1395,6 +3663,7 @@
         const sid = getCurrentSiteID();
         if (!sid) return;
         if (!panelState) initPanelState();
+        if (panelState.mode === 'log') { renderLogTableView(); return; }
         panelState.drillId = null;
         updateTitle();
         // Rebuild dynamic step-type columns from the loaded missions so
@@ -1591,8 +3860,9 @@
         const visSet = new Set(visIds);
         // Build the list: visible columns first in their stored order
         // (with ↑/↓ arrows), then hidden columns below a divider.
-        const visibleRows = visIds.map(id => COL_BY_ID[id]).filter(Boolean);
-        const hiddenRows = COLUMNS.filter(c => !visSet.has(c.id));
+        const byId = activeColById();
+        const visibleRows = visIds.map(id => byId[id]).filter(Boolean);
+        const hiddenRows = activeColumns().filter(c => !visSet.has(c.id));
         menu.innerHTML = `
             <div class="aim-mb-menu-head">
                 <div class="aim-mb-menu-title">Columns</div>
@@ -1789,10 +4059,15 @@
         const q = (panelState.search || '').trim().toLowerCase();
         let out = rows;
         if (q) {
-            out = out.filter(r => (r.name || '').toLowerCase().includes(q)
-                || (r.description || '').toLowerCase().includes(q));
+            if (panelState.mode === 'log') {
+                out = out.filter(r => [r.name, r.type, r.drone, r.stateLabel, r.createdBy, String(r.missionGroup), String(r.id)]
+                    .some(v => (v || '').toString().toLowerCase().includes(q)));
+            } else {
+                out = out.filter(r => (r.name || '').toLowerCase().includes(q)
+                    || (r.description || '').toLowerCase().includes(q));
+            }
         }
-        const col = COL_BY_ID[panelState.sortKey];
+        const col = activeColById()[panelState.sortKey];
         if (col) {
             const dir = panelState.sortDir === 'asc' ? 1 : -1;
             out = out.slice().sort((a, b) => {
@@ -1817,6 +4092,11 @@
         if (!row) { renderTableView(); return; }
         panelState.drillId = missionId;
         if (!panelState.detailFilter) panelState.detailFilter = new Set();
+        // Row selection is per-mission — reset it when we land on a new mission.
+        if (!panelState.detailSelection || panelState.detailSelDrill !== missionId) {
+            panelState.detailSelection = new Set();
+            panelState.detailSelDrill = missionId;
+        }
 
         // Preserve scroll positions across re-renders so inline edits
         // don't snap the user back to the top of the drill-down.
@@ -1940,28 +4220,36 @@
                     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
                         <div class="aim-mb-card-title" style="margin-bottom:0;">Instructions</div>
                         <div style="display:flex;gap:4px;flex-wrap:wrap;flex:1;">${filterChips}</div>
+                        ${panelState.detailSelection.size ? `<span class="aim-mb-sel-count">${panelState.detailSelection.size} selected</span>` : ''}
+                        <button class="aim-mb-bulk-btn" data-bulk="agl" title="Set a target AGL for the selected steps (or all visible editable steps if none selected) — recomputes each step's altitude from its own ground elevation.">Bulk → AGL</button>
+                        <button class="aim-mb-bulk-btn" data-bulk="alt" title="Set an absolute altitude for the selected steps (or all visible editable steps if none selected).">Bulk → ALT</button>
+                        <label class="aim-mb-collapse-toggle" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:#9ad;white-space:nowrap;" title="Collapse each snapshot's Thermal/GEM/Wait block into one summary row. Data is untouched — view only.">
+                            <input type="checkbox" data-collapse-blocks ${collapseScanBlocks ? 'checked' : ''}> Collapse scan blocks
+                        </label>
                         <button class="aim-mb-tbtn" data-detail-export="sheets" title="Copy visible rows → Sheets">Copy → Sheets</button>
-                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export GPS steps (navigate/snapshot) as KML with 3D altitude pins">Export KML</button>
+                        <button class="aim-mb-tbtn" data-detail-export="kml" title="Export as KML — flight-path line + N#/S# 3D pins, each pin showing its step details (bundled Thermal/GEM/Wait)">Export KML</button>
                     </div>
                     ${(() => {
                         const n = countPending(missionId);
                         if (n === 0) return '';
                         return `<div class="aim-mb-pending-banner">
                             <span><strong>${n}</strong> altitude change${n === 1 ? '' : 's'} pending</span>
-                            <button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n}</button>
+                            ${fastBulkSave
+                                ? `<span style="color:#14d2dc;font-weight:700;white-space:nowrap;">⚡ ON → just <u>Save the mission</u> to apply all ${n} (no Commit needed)</span>`
+                                : `<button class="aim-mb-tbtn" data-commit-pending style="background:#5fff5f;color:#000;border-color:#5fff5f;">Commit ${n} (per-step)</button>`}
                             <button class="aim-mb-tbtn" data-discard-pending>Discard</button>
+                            <label style="display:inline-flex;align-items:center;gap:5px;margin-left:auto;cursor:pointer;white-space:nowrap;${fastBulkSave ? 'color:#14d2dc;font-weight:700;' : ''}" title="ON: skip per-step — staged changes are spliced into your next mission Save in one shot. Snapshot → altitude; Navigate → altitude + drop freezone-min. Strict match, fail-closed. OFF by default; resets each reload.">
+                                <input type="checkbox" data-fast-save ${fastBulkSave ? 'checked' : ''}> ⚡ Fast bulk save
+                            </label>
                         </div>`;
                     })()}
                     <div class="aim-mb-detail-instr-scroll" style="overflow:auto;max-height:400px;">
                         <table style="margin:0" id="aim-mb-detail-table">
                             <thead style="position:sticky;top:0;z-index:2;background:#1a1a1a;">
-                                <tr><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Location</th></tr>
+                                <tr><th class="aim-mb-sel-cell" style="width:24px;text-align:center;"><input type="checkbox" data-sel-all title="Select all editable visible steps"></th><th style="width:28px;"></th><th style="width:28px;"></th><th>Step</th><th>Type</th><th>Elevation</th><th>Value</th><th>AGL Δ</th><th>Lat</th><th>Long</th><th>GPS</th></tr>
                             </thead>
                             <tbody>
-                                ${filteredSteps.map(s => {
-                                    const origIdx = allSteps.indexOf(s) + 1;
-                                    return renderStepRow(s, origIdx, unit);
-                                }).join('')}
+                                ${renderDetailRows(filteredSteps, allSteps, unit)}
                             </tbody>
                         </table>
                     </div>
@@ -1983,7 +4271,7 @@
         kickOffElevationFetch(missionId, allSteps);
         // Optionally auto-focus the next editable altitude after a queue commit
         if (opts && opts.focusNextAfter != null) {
-            focusNextAltEditable(missionId, opts.focusNextAfter);
+            focusNextAltEditable(missionId, opts.focusNextAfter, opts.focusColumn);
         }
     }
 
@@ -2038,14 +4326,18 @@
         }
     }
 
-    function focusNextAltEditable(missionId, currentInstrId) {
-        const cells = panelEl.querySelectorAll('[data-alt-edit]');
+    // Tab advances to the NEXT editable cell in the SAME column (not across
+    // columns). column = 'alt' (Value) or 'agl' (AGL Δ).
+    function focusNextAltEditable(missionId, currentInstrId, column) {
+        const col = column === 'agl' ? 'agl' : 'alt';
+        const opener = col === 'agl' ? startInlineAglEdit : startInlineAltEdit;
+        const cells = panelEl.querySelectorAll(`[data-${col}-edit]`);
         let foundCurrent = false;
         for (const cell of cells) {
             const id = Number(cell.dataset.instrId);
             if (foundCurrent) {
                 cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                setTimeout(() => startInlineAltEdit(cell, missionId), 100);
+                setTimeout(() => opener(cell, missionId), 100);
                 return;
             }
             if (id === currentInstrId) foundCurrent = true;
@@ -2086,7 +4378,8 @@
                 renderDetailView(missionId);
             };
         });
-        // Step-type filter chips — multi-select toggle. "__all" clears filters.
+        // Step-type filter chips — left-click multi-select toggle ("__all"
+        // clears). Right-click (M2) solos that type only — like Site Setup SUM.
         panelEl.querySelectorAll('[data-step-filter]').forEach(b => {
             b.onclick = () => {
                 const key = b.dataset.stepFilter;
@@ -2098,6 +4391,14 @@
                     else f.add(key);
                     // If all types are now selected, same as "all" — clear the set
                 }
+                renderDetailView(missionId);
+            };
+            b.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const key = b.dataset.stepFilter;
+                // M2 on "All" clears; M2 on a type selects ONLY that type.
+                panelState.detailFilter = (key === '__all') ? new Set() : new Set([key]);
                 renderDetailView(missionId);
             };
         });
@@ -2148,10 +4449,18 @@
             };
         });
         // Commit pending changes
+        const fastSaveCb = panelEl.querySelector('[data-fast-save]');
+        if (fastSaveCb) fastSaveCb.onchange = () => {
+            fastBulkSave = !!fastSaveCb.checked;
+            showToast(fastBulkSave
+                ? '⚡ Fast bulk save ON — staged changes apply when you Save the mission'
+                : 'Fast bulk save OFF — back to per-step Commit', fastBulkSave ? '#14d2dc' : '#888', 4000);
+            renderDetailView(missionId);
+        };
         const commitBtn = panelEl.querySelector('[data-commit-pending]');
         if (commitBtn) commitBtn.onclick = () => {
             const n = countPending(missionId);
-            if (n > 5 && !confirm(`Commit ${n} altitude changes? This will open each step in the editor and save it — takes ~2 seconds per step.`)) return;
+            if (n > 5 && !confirm(`Commit ${n} altitude changes? This opens each step in the editor, sets the value, and clicks Save on the step — ~2s per step. You still save the overall mission yourself afterward.`)) return;
             commitPendingChanges(missionId);
         };
         // Discard pending changes
@@ -2180,40 +4489,83 @@
             el.onclick = copy;
             el.oncontextmenu = copy;
         });
-        // AGL Δ click-to-copy: raw whole number (left + right both copy)
-        panelEl.querySelectorAll('[data-agl-raw]').forEach(el => {
-            const copy = (e) => {
-                if (e) { e.preventDefault(); e.stopPropagation(); }
+        // AGL Δ cell — left-click edits AGL (back-solves altitude = ground + AGL),
+        // right-click copies the raw value. Mirrors the Value cell + Site Setup SUM.
+        panelEl.querySelectorAll('[data-agl-edit]').forEach(el => {
+            el.onclick = (e) => {
+                e.stopPropagation();
+                startInlineAglEdit(el, missionId);
+            };
+            el.oncontextmenu = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 copyToClipboard(el.dataset.aglRaw);
                 showToast(`Copied: ${el.dataset.aglRaw}`, '#5fff5f');
+            };
+        });
+        // Row-selection checkboxes (per editable step) — drive Bulk scope.
+        if (!panelState.detailSelection) panelState.detailSelection = new Set();
+        panelEl.querySelectorAll('[data-sel-row]').forEach(cb => {
+            cb.onclick = (e) => e.stopPropagation();
+            cb.onchange = () => {
+                const id = Number(cb.dataset.instrId);
+                if (cb.checked) panelState.detailSelection.add(id);
+                else panelState.detailSelection.delete(id);
+                renderDetailView(missionId);
+            };
+        });
+        // Select-all — toggles every editable step currently visible (respects filter).
+        const selAll = panelEl.querySelector('[data-sel-all]');
+        if (selAll) {
+            const editableVisible = filteredSteps.filter(stepAltEditable);
+            selAll.checked = editableVisible.length > 0 && editableVisible.every(s => panelState.detailSelection.has(s.id));
+            selAll.onclick = (e) => e.stopPropagation();
+            selAll.onchange = () => {
+                if (selAll.checked) editableVisible.forEach(s => panelState.detailSelection.add(s.id));
+                else editableVisible.forEach(s => panelState.detailSelection.delete(s.id));
+                renderDetailView(missionId);
+            };
+        }
+        // Bulk → AGL / Bulk → ALT buttons.
+        panelEl.querySelectorAll('[data-bulk]').forEach(b => {
+            b.onclick = (e) => {
+                e.stopPropagation();
+                openBulkPopover(b, missionId, filteredSteps, b.dataset.bulk);
+            };
+        });
+        // Lat / Long cells — click or right-click copies the raw number.
+        // (M1-edit to move the waypoint is a planned fast-follow.)
+        panelEl.querySelectorAll('.aim-mb-latlng').forEach(el => {
+            const copy = (e) => {
+                if (e) { e.preventDefault(); e.stopPropagation(); }
+                copyToClipboard(el.dataset.coordVal);
+                showToast(`Copied: ${el.dataset.coordVal}`, '#5fff5f');
             };
             el.onclick = copy;
             el.oncontextmenu = copy;
         });
-        // Location cells — left-click opens Google Maps, right-click copies coords
-        panelEl.querySelectorAll('.aim-mb-loc').forEach(el => {
+        // GPS cell — left-click opens the Google Maps link in a new tab,
+        // right-click copies the link.
+        panelEl.querySelectorAll('.aim-mb-gps').forEach(el => {
             el.onclick = (e) => {
                 e.preventDefault();
-                const lat = el.dataset.lat;
-                const lng = el.dataset.lng;
-                if (!lat || !lng) return;
-                const url = `https://www.google.com/maps?q=${lat},${lng}`;
+                const url = el.dataset.mapsUrl;
+                if (!url) return;
                 let opened = null;
                 try { opened = (window.top || window).open(url, '_blank'); }
                 catch (er) { opened = null; }
                 if (!opened) {
                     copyToClipboard(url);
-                    showToast(`Popup blocked. Copied URL: ${url}`, '#ff9800');
+                    showToast(`Popup blocked. Copied link: ${url}`, '#ff9800');
                 }
             };
             el.oncontextmenu = (e) => {
                 e.preventDefault();
-                const lat = el.dataset.lat;
-                const lng = el.dataset.lng;
-                if (lat && lng) {
-                    const coords = `${lat}, ${lng}`;
-                    copyToClipboard(coords);
-                    showToast(`Copied: ${coords}`, '#5fff5f');
+                e.stopPropagation();
+                const url = el.dataset.mapsUrl;
+                if (url) {
+                    copyToClipboard(url);
+                    showToast('Copied Maps link', '#5fff5f');
                 }
             };
         });
@@ -2223,6 +4575,13 @@
         // Export KML
         const kmlBtn = panelEl.querySelector('[data-detail-export="kml"]');
         if (kmlBtn) kmlBtn.onclick = () => exportDetailToKML(row, allSteps, unit);
+        // Collapse scan blocks toggle — persist + re-render the detail view.
+        const collapseCb = panelEl.querySelector('[data-collapse-blocks]');
+        if (collapseCb) collapseCb.onchange = () => {
+            collapseScanBlocks = !!collapseCb.checked;
+            gmSet(CACHE_KEY_COLLAPSE_BLOCKS, collapseScanBlocks);
+            renderDetailView(missionId);
+        };
     }
 
     function startInlineAltEdit(cellSpan, missionId) {
@@ -2250,23 +4609,33 @@
                 return;
             }
             const rounded = Math.round(v);
+            const adv = advanceAfter ? { focusNextAfter: instrId, focusColumn: 'alt' } : null;
             if (rounded === origAlt) {
                 discardPendingChange(missionId, instrId);
-                renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+                renderDetailView(missionId, adv);
                 return;
             }
             queueAltitudeChange(missionId, instrId, rounded, unit);
             showToast(`Queued: step ${instrId} → ${rounded} ${unitLabel}`, '#ff9800');
-            renderDetailView(missionId, advanceAfter ? { focusNextAfter: instrId } : null);
+            renderDetailView(missionId, adv);
         };
         input.onblur = commit;
         input.onkeydown = (e) => {
+            // Enter = done (commit, no advance). Tab = commit + advance to the
+            // next editable cell in the SAME column.
             if (e.key === 'Enter' || e.key === 'Tab') {
                 e.preventDefault();
-                advanceAfter = true;
+                // stopPropagation: this key belongs to our inline editor, NOT the
+                // Quick Mission Editor's document-level Enter handler (which would
+                // otherwise pop its move dialog). We blur() synchronously below, so
+                // by the time the event bubbled to QME, activeElement would no
+                // longer be this input and QME's guard would miss it.
+                e.stopPropagation();
+                advanceAfter = (e.key === 'Tab');
                 input.blur();
             } else if (e.key === 'Escape') {
                 e.preventDefault();
+                e.stopPropagation();
                 input.onblur = null;
                 renderDetailView(missionId);
             }
@@ -2291,6 +4660,162 @@
         return Number(trimmed);
     }
 
+    // Inline edit of the AGL Δ cell. The user types a target AGL (clearance
+    // above ground); we back-solve altitude = ground elevation + AGL and queue
+    // it as an ordinary altitude change, so it rides the same queue / Commit /
+    // ⚡ fast-save pipeline as a direct Value edit. Mirrors the Site Setup SUM,
+    // where editing AGL writes Min Alt = Elevation + AGL.
+    function startInlineAglEdit(cellSpan, missionId) {
+        const instrId = Number(cellSpan.dataset.instrId);
+        const elevM = Number(cellSpan.dataset.elevM);
+        const origAlt = Number(cellSpan.dataset.origAlt);      // original altitude, display units
+        const startAgl = Number(cellSpan.dataset.aglCur);      // current (effective) AGL, display units
+        if (!isFinite(elevM)) { showToast('Ground elevation not loaded yet — try again in a moment', '#ff9800'); return; }
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'aim-mb-alt-input';
+        input.value = isFinite(startAgl) ? startAgl : '';
+        input.title = `Target AGL in ${unitLabel}. Altitude becomes ground + this. Formulas like 100+10 work.`;
+        cellSpan.replaceWith(input);
+        input.focus();
+        input.select();
+        let advanceAfter = false;
+        const commit = () => {
+            const agl = parseFormulaValue(input.value);
+            if (isNaN(agl)) {
+                showToast('Invalid value or formula', '#ff5252');
+                renderDetailView(missionId);
+                return;
+            }
+            // target AGL (display) → meters → altitude meters → display altitude
+            const targetAglM = unit === 'imperial' ? (agl / 3.28084) : agl;
+            const newAltM = elevM + targetAglM;
+            const newAltDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            const adv = advanceAfter ? { focusNextAfter: instrId, focusColumn: 'agl' } : null;
+            if (newAltDisp === origAlt) {
+                discardPendingChange(missionId, instrId);
+                renderDetailView(missionId, adv);
+                return;
+            }
+            queueAltitudeChange(missionId, instrId, newAltDisp, unit);
+            showToast(`Queued: step ${instrId} → ${Math.round(agl)} ${unitLabel} AGL (alt ${newAltDisp.toLocaleString()} ${unitLabel})`, '#ff9800', 4000);
+            renderDetailView(missionId, adv);
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => {
+            // Enter = done; Tab = commit + advance to the next AGL cell.
+            if (e.key === 'Enter' || e.key === 'Tab') {
+                e.preventDefault();
+                e.stopPropagation();   // belongs to our editor, not QME's document-level Enter
+                advanceAfter = (e.key === 'Tab');
+                input.blur();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                input.onblur = null;
+                renderDetailView(missionId);
+            }
+        };
+    }
+
+    // ── Bulk → AGL / Bulk → ALT ─────────────────────────────────────────────
+    // Scope rule (matches Site Setup SUM): if any rows are checked, act on the
+    // selection; otherwise act on ALL editable steps currently visible (the
+    // active type filter is respected). Everything queues through the existing
+    // pipeline, so the same Commit / ⚡ fast-save / safety model applies.
+    let bulkPopoverEl = null;
+    function closeBulkPopover() {
+        if (bulkPopoverEl) { bulkPopoverEl.remove(); bulkPopoverEl = null; }
+        document.removeEventListener('mousedown', bulkOutsideClose, true);
+    }
+    function bulkOutsideClose(e) {
+        if (bulkPopoverEl && !bulkPopoverEl.contains(e.target)) closeBulkPopover();
+    }
+    function bulkScopedSteps(filteredSteps) {
+        const sel = panelState.detailSelection || new Set();
+        const editable = filteredSteps.filter(stepAltEditable);
+        return sel.size ? editable.filter(s => sel.has(s.id)) : editable;
+    }
+    function openBulkPopover(anchorBtn, missionId, filteredSteps, mode) {
+        closeBulkPopover();
+        const unit = panelState.distanceUnit;
+        const unitLabel = unit === 'imperial' ? 'ft' : 'm';
+        const sel = panelState.detailSelection || new Set();
+        const scoped = bulkScopedSteps(filteredSteps);
+        const eligible = (mode === 'agl') ? scoped.filter(s => stepElevM(s) != null) : scoped;
+        const skipNoElev = scoped.length - eligible.length;
+        const scopeWord = sel.size ? 'selected' : 'visible editable';
+        const title = mode === 'agl' ? 'Bulk → AGL' : 'Bulk → ALT';
+        const hint = mode === 'agl'
+            ? `Sets each step's altitude to its own ground elevation + this AGL (${unitLabel}).`
+            : `Sets each step's altitude to this absolute value (${unitLabel}).`;
+        const pop = document.createElement('div');
+        pop.className = 'aim-mb-bp-pop';
+        pop.innerHTML = `
+            <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">${title}</span><button class="aim-mb-menu-close" data-bp-close>✕</button></div>
+            <div style="padding:10px 12px;">
+                <div style="font-size:11px;color:#aaa;margin-bottom:8px;">${hint}</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <label style="flex:1;font-size:11px;">Target ${mode === 'agl' ? 'AGL' : 'altitude'} (${unitLabel})</label>
+                    <input type="text" data-bp-input placeholder="${mode === 'agl' ? 'e.g. 100' : 'e.g. 2700'}" style="width:90px;">
+                </div>
+                <div style="font-size:11px;color:#888;margin:4px 0 10px;">Applies to <strong style="color:#ffd54f;">${eligible.length} ${scopeWord}</strong> step${eligible.length === 1 ? '' : 's'}${skipNoElev ? ` · ${skipNoElev} skipped (no elevation yet)` : ''}</div>
+                <div style="display:flex;gap:6px;justify-content:flex-end;">
+                    <button class="aim-mb-tbtn" data-bp-cancel>Cancel</button>
+                    <button class="aim-mb-bulk-btn" data-bp-apply>Queue ${eligible.length} edit${eligible.length === 1 ? '' : 's'}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(pop);
+        bulkPopoverEl = pop;
+        // Position below the button, clamped into the viewport.
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = r.left + 'px';
+        const pr = pop.getBoundingClientRect();
+        if (pr.right > window.innerWidth - 8) pop.style.left = Math.max(8, window.innerWidth - 8 - pr.width) + 'px';
+        if (pr.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, r.top - pr.height - 4) + 'px';
+        const input = pop.querySelector('[data-bp-input]');
+        input.focus();
+        const doApply = () => applyBulk(mode, input.value, missionId, filteredSteps);
+        pop.querySelector('[data-bp-apply]').onclick = doApply;
+        pop.querySelector('[data-bp-cancel]').onclick = closeBulkPopover;
+        pop.querySelector('[data-bp-close]').onclick = closeBulkPopover;
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); doApply(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeBulkPopover(); }
+        };
+        // Defer so the click that opened the popover doesn't immediately close it.
+        setTimeout(() => document.addEventListener('mousedown', bulkOutsideClose, true), 0);
+    }
+    function applyBulk(mode, rawInput, missionId, filteredSteps) {
+        const v = parseFormulaValue(rawInput);
+        if (isNaN(v)) { showToast('Invalid value or formula', '#ff5252'); return; }
+        const unit = panelState.distanceUnit;
+        const toM = (d) => unit === 'imperial' ? (d / 3.28084) : d;
+        const scoped = bulkScopedSteps(filteredSteps);
+        let queued = 0, skipped = 0;
+        scoped.forEach(s => {
+            let newAltM;
+            if (mode === 'agl') {
+                const elevM = stepElevM(s);
+                if (elevM == null) { skipped++; return; }
+                newAltM = elevM + toM(v);
+            } else {
+                newAltM = toM(v);
+            }
+            const newDisp = unit === 'imperial' ? Math.round(newAltM * 3.28084) : Math.round(newAltM);
+            const origDisp = unit === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+            if (newDisp === origDisp) { discardPendingChange(missionId, s.id); skipped++; return; }
+            queueAltitudeChange(missionId, s.id, newDisp, unit);
+            queued++;
+        });
+        closeBulkPopover();
+        showToast(`Bulk → ${mode.toUpperCase()}: queued ${queued}${skipped ? ` · skipped ${skipped}` : ''}`, queued ? '#ff9800' : '#888', 4500);
+        renderDetailView(missionId);
+    }
+
     function exportDetailToSheets(filteredSteps, allSteps, unit, missionName) {
         const lines = ['Step\tType\tValue\tLocation'];
         filteredSteps.forEach(s => {
@@ -2307,86 +4832,274 @@
         showToast(`Copied ${filteredSteps.length} steps → Sheets`, '#5fff5f');
     }
 
-    function exportDetailToKML(row, allSteps, unit) {
-        const gpsSteps = allSteps.filter(s =>
-            s.location && typeof s.location === 'object' && s.location.lat != null
-            && (s.type_name === 'navigate' || s.type_name === 'snapshot')
-        );
-        if (gpsSteps.length === 0) {
-            showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800');
-            return;
-        }
-        // KML colors are aabbggrr (reversed from hex RGB).
-        // Navigate = #5fff5f → green → KML ff5fff5f
-        // Snapshot = #ff9800 → orange → KML ff0098ff
-        const placemarks = gpsSteps.map((s, i) => {
-            const idx = allSteps.indexOf(s) + 1;
-            const type = displayStepType(s);
-            const altM = (s.value1 != null && s.value1_name === 'm') ? Number(s.value1) : 0;
-            const lat = Number(s.location.lat);
-            const lng = Number(s.location.lng);
-            const styleId = s.type_name === 'navigate' ? 'nav' : 'snap';
-            return `    <Placemark>
-      <name>Step ${idx} — ${escapeXml(type)}</name>
-      <description>Altitude: ${Math.round(altM)} m (${Math.round(altM * 3.28084).toLocaleString()} ft)</description>
-      <styleUrl>#style-${styleId}</styleUrl>
-      <Point>
-        <altitudeMode>absolute</altitudeMode>
-        <coordinates>${lng},${lat},${altM}</coordinates>
-      </Point>
+    // ── KML export (shared by the SUM drill-down + the map-edit row) ──────
+    // value2 on a navigate is ground speed in m/s; ×2.23694 = mph.
+    function kmlSpeedMph(s) {
+        const v = s && s.value2;
+        return (typeof v === 'number' && v > 0) ? Math.round(v * 2.23694) : null;
+    }
+    // One bundled (non-located) step as a description line — mirrors the
+    // editor's compact-card labels (Thermal/GEM On/Off, Wait Ns).
+    function kmlBundledLine(s) {
+        const t = s.type_name;
+        if (t === 'cameraSelect') return s.value1 ? 'Thermal On' : 'Thermal Off';
+        if (t === 'gemMode') return Number(s.value1) === 1 ? 'GEM On' : 'GEM Off';
+        if (t === 'wait') return `Wait ${Math.round(Number(s.value1) || 0)}s`;
+        return displayStepType(s);
+    }
+    // value1 is the stored (absolute MSL) altitude in meters → "X ft (Y m)".
+    function kmlAltText(s) {
+        if (s.value1 == null || s.value1_name !== 'm' || typeof s.value1 !== 'number') return '—';
+        return `${Math.round(s.value1 * 3.28084).toLocaleString()} ft (${Math.round(s.value1)} m)`;
+    }
+    function kmlAltM(s) {
+        return (typeof s.value1 === 'number' && s.value1_name === 'm') ? s.value1 : 0;
+    }
+    // Hex #rrggbb → KML aabbggrr (KML byte order is reversed). Used so the
+    // pins/labels match the user's AIM step colors (nav blue / snap pink).
+    function hexToKmlColor(hex, alpha) {
+        const c = String(hex || '').replace('#', '');
+        if (c.length < 6) return 'ff00ffff';
+        return `${alpha || 'ff'}${c.slice(4, 6)}${c.slice(2, 4)}${c.slice(0, 2)}`.toLowerCase();
+    }
+
+    // Capture AIM's REAL routed flight path off the map: Percepto draws it as
+    // white DASHED <path> elements in the Leaflet overlay SVG, whose `d` coords
+    // are layer points → invert via map.layerPointToLatLng to recover lat/lng
+    // (the route follows the FPs/FFZs, base→steps→back). Returns an array of
+    // lat/lng polylines, or null if the map/path isn't readable.
+    function captureFlightRoutes() {
+        try {
+            const map = getLeafletMap();
+            if (!map || typeof map.layerPointToLatLng !== 'function') return null;
+            const sel = 'path.leaflet-interactive[stroke="white"],path.leaflet-interactive[stroke="#fff"],path.leaflet-interactive[stroke="#ffffff"]';
+            const paths = document.querySelectorAll(sel);
+            const routes = [];
+            paths.forEach(p => {
+                const dash = p.getAttribute('stroke-dasharray') || '';
+                if (!/\d/.test(dash)) return; // the flight path is dashed; skip solid strokes
+                const d = p.getAttribute('d'); if (!d) return;
+                const pts = [];
+                const re = /(-?\d*\.?\d+)[ ,]+(-?\d*\.?\d+)/g; let m;
+                while ((m = re.exec(d)) !== null) pts.push([parseFloat(m[1]), parseFloat(m[2])]);
+                if (pts.length < 2) return;
+                const ll = [];
+                for (const pt of pts) {
+                    try { const g = map.layerPointToLatLng(pt); if (g && isFinite(g.lat) && isFinite(g.lng)) ll.push({ lat: g.lat, lng: g.lng }); } catch (e) {}
+                }
+                if (ll.length >= 2) routes.push(ll);
+            });
+            return routes.length ? routes : null;
+        } catch (e) { console.warn(`${TAG} [kml] route capture failed`, e); return null; }
+    }
+
+    // Build a Google-Earth KML for an ordered list of mission steps:
+    //   • a WHITE Flight Path line nav→nav (the real drone route),
+    //   • PURPLE sightlines nav→each of its snapshots (what it's looking at),
+    //     labeled with the nav↔snapshot standoff distance (ideal ~100 ft),
+    //   • N# pins (blue) whose description is the WHOLE stop — nav params + its
+    //     snapshots (with distances) and their Thermal/GEM/Wait scan steps,
+    //   • S# pins (pink) whose description is alt + distance-from-nav + scans.
+    function buildMissionKml(missionName, ordered, opts) {
+        opts = opts || {};
+        let navN = 0, snapN = 0;
+        const stops = [];      // { nav, navNum, snaps:[snapBlock] }
+        const snapBlocks = []; // { snap, snapNum, scans, parentNav, parentNavNum, distFt }
+        let curStop = null, curSnapBlock = null;
+        ordered.forEach(s => {
+            const t = s.type_name;
+            if (t === 'navigate') {
+                navN++;
+                curStop = { nav: s, navNum: navN, snaps: [] };
+                stops.push(curStop); curSnapBlock = null;
+            } else if (t === 'snapshot') {
+                snapN++;
+                curSnapBlock = {
+                    snap: s, snapNum: snapN, scans: [],
+                    parentNav: curStop ? curStop.nav : null,
+                    parentNavNum: curStop ? curStop.navNum : null, distFt: null,
+                };
+                // Horizontal nav↔snapshot standoff (the ~100 ft the user checks).
+                const pn = curSnapBlock.parentNav;
+                if (pn && pn.location && pn.location.lat != null && s.location && s.location.lat != null) {
+                    curSnapBlock.distFt = Math.round(sopHaversineFt(pn.location, s.location));
+                }
+                snapBlocks.push(curSnapBlock);
+                if (curStop) curStop.snaps.push(curSnapBlock);
+            } else {
+                if (curSnapBlock) curSnapBlock.scans.push(s);
+            }
+        });
+
+        const navsLoc = stops.map(st => st.nav).filter(n => n.location && n.location.lat != null);
+        const anySnap = snapBlocks.some(sb => sb.snap.location && sb.snap.location.lat != null);
+        if (!navsLoc.length && !anySnap) return null;
+
+        // Flight path: prefer the REAL routed path captured from AIM's map (the
+        // white dashed line that follows the FPs/FFZs, base→steps→back). Fall
+        // back to a straight nav→nav line when it isn't readable (e.g. the SUM
+        // export, where the open map may be a different mission).
+        let pathPlacemark = '';
+        if (opts.routes && opts.routes.length) {
+            // The captured route is 2D (lat/lng only). Raise each vertex to the
+            // altitude of the NEAREST navigate so the line rides up with the nav
+            // pins instead of snapping to the ground.
+            const navAlts = navsLoc.map(n => ({ lat: Number(n.location.lat), lng: Number(n.location.lng), alt: kmlAltM(n) }));
+            const altForPoint = (p) => {
+                let best = 0, bd = Infinity;
+                for (const na of navAlts) { const a = na.lat - p.lat, b = na.lng - p.lng, d = a * a + b * b; if (d < bd) { bd = d; best = na.alt; } }
+                return best;
+            };
+            const mode = navAlts.length ? 'absolute' : 'clampToGround';
+            pathPlacemark = opts.routes.map((route, i) => {
+                const coords = route.map(p => `${p.lng},${p.lat},${altForPoint(p)}`).join(' ');
+                return `    <Placemark>
+      <name>Flight Path${opts.routes.length > 1 ? ' ' + (i + 1) : ''}</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>${mode}</altitudeMode><coordinates>${coords}</coordinates></LineString>
     </Placemark>`;
-        }).join('\n');
+            }).join('\n');
+        } else if (navsLoc.length >= 2) {
+            const pathCoords = navsLoc.map(n => `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)}`).join(' ');
+            pathPlacemark = `    <Placemark>
+      <name>Flight Path (straight nav→nav)</name>
+      <styleUrl>#style-path</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${pathCoords}</coordinates></LineString>
+    </Placemark>`;
+        }
+
+        // PURPLE sightlines: nav → each of its snapshots, named with distance.
+        const lookPlacemarks = snapBlocks.map(sb => {
+            const n = sb.parentNav, s = sb.snap;
+            if (!n || !n.location || n.location.lat == null || !s.location || s.location.lat == null) return '';
+            const coords = `${Number(n.location.lng)},${Number(n.location.lat)},${kmlAltM(n)} ${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}`;
+            const dTxt = sb.distFt != null ? ` · ${sb.distFt.toLocaleString()} ft` : '';
+            return `    <Placemark>
+      <name>N${sb.parentNavNum}→S${sb.snapNum}${dTxt}</name>
+      <styleUrl>#style-look</styleUrl>
+      <LineString><tessellate>1</tessellate><altitudeMode>absolute</altitudeMode><coordinates>${coords}</coordinates></LineString>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
+        // Navigate pins — description carries the whole stop (with distances).
+        const navPlacemarks = stops.map(st => {
+            const s = st.nav;
+            if (!s.location || s.location.lat == null) return '';
+            const mph = kmlSpeedMph(s);
+            let html = `<b>Stop N${st.navNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
+            if (mph != null) html += `Speed: ${mph} mph<br/>`;
+            if (st.snaps.length) {
+                html += `<br/><b>Snapshots in this stop:</b><br/>`;
+                st.snaps.forEach(sb => {
+                    const d = sb.distFt != null ? ` — ${sb.distFt.toLocaleString()} ft away` : '';
+                    html += `S${sb.snapNum} — ${kmlAltText(sb.snap)}${d}<br/>`;
+                    sb.scans.forEach(sc => { html += `&nbsp;&nbsp;${kmlBundledLine(sc)}<br/>`; });
+                });
+            }
+            return `    <Placemark>
+      <name>N${st.navNum}</name>
+      <description><![CDATA[${html}]]></description>
+      <styleUrl>#style-nav</styleUrl>
+      <Point><altitudeMode>absolute</altitudeMode><coordinates>${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}</coordinates></Point>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
+        // Snapshot pins — description = alt + distance-from-nav + scan steps.
+        const snapPlacemarks = snapBlocks.map(sb => {
+            const s = sb.snap;
+            if (!s.location || s.location.lat == null) return '';
+            let html = `<b>Snapshot S${sb.snapNum}</b><br/>Altitude: ${kmlAltText(s)}<br/>`;
+            if (sb.parentNavNum != null && sb.distFt != null) html += `Distance from N${sb.parentNavNum}: ${sb.distFt.toLocaleString()} ft<br/>`;
+            if (sb.scans.length) {
+                html += `<br/><b>Scan steps:</b><br/>`;
+                sb.scans.forEach(sc => { html += `${kmlBundledLine(sc)}<br/>`; });
+            }
+            return `    <Placemark>
+      <name>S${sb.snapNum}</name>
+      <description><![CDATA[${html}]]></description>
+      <styleUrl>#style-snap</styleUrl>
+      <Point><altitudeMode>absolute</altitudeMode><coordinates>${Number(s.location.lng)},${Number(s.location.lat)},${kmlAltM(s)}</coordinates></Point>
+    </Placemark>`;
+        }).filter(Boolean).join('\n');
+
+        // White pushpin icon + color tint = the exact AIM color (tinting the
+        // default colored pin is unreliable; a white pin takes the tint cleanly).
+        const navColor = hexToKmlColor(stepColor('nav'));
+        const snapColor = hexToKmlColor(stepColor('snap'));
+        const PIN = 'http://maps.google.com/mapfiles/kml/pushpin/wht-pushpin.png';
+        // Title: "Site <id> - <site name> - <mission name>".
+        const sid = getCurrentSiteID(), sname = getCurrentSiteName();
+        const titleParts = [];
+        if (sid) titleParts.push(`Site ${sid}`);
+        if (sname) titleParts.push(sname);
+        titleParts.push(missionName || 'Mission');
+        const docName = titleParts.join(' - ');
         const kml = `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>${escapeXml(row.name)} — GPS Steps</name>
-    <description>Navigate + Snapshot steps with 3D altitude pins. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
-    <Style id="style-nav">
-      <IconStyle><color>ff5fff5f</color><scale>1.1</scale></IconStyle>
-      <LabelStyle><color>ff5fff5f</color></LabelStyle>
-    </Style>
-    <Style id="style-snap">
-      <IconStyle><color>ff0098ff</color><scale>1.1</scale></IconStyle>
-      <LabelStyle><color>ff0098ff</color></LabelStyle>
-    </Style>
-${placemarks}
+    <name>${escapeXml(docName)}</name>
+    <description>White line = flight path (nav→nav). Purple lines = nav→snapshot sightlines (labeled with distance). Blue/pink pins carry per-stop step detail. Exported by AIM Mission Bank Tools v${SCRIPT_VERSION}.</description>
+    <Style id="style-nav"><IconStyle><color>${navColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${navColor}</color></LabelStyle></Style>
+    <Style id="style-snap"><IconStyle><color>${snapColor}</color><scale>1.1</scale><Icon><href>${PIN}</href></Icon></IconStyle><LabelStyle><color>${snapColor}</color></LabelStyle></Style>
+    <Style id="style-path"><LineStyle><color>ffffffff</color><width>3</width></LineStyle></Style>
+    <Style id="style-look"><LineStyle><color>ffe24db0</color><width>1.6</width></LineStyle></Style>
+    <Folder><name>Flight Path</name>
+${pathPlacemark}
+    </Folder>
+    <Folder><name>Sightlines — Nav → Snapshot</name>
+${lookPlacemarks}
+    </Folder>
+    <Folder><name>Navigates (${stops.length})</name>
+${navPlacemarks}
+    </Folder>
+    <Folder><name>Snapshots (${snapBlocks.length})</name>
+${snapPlacemarks}
+    </Folder>
   </Document>
 </kml>`;
-        // Download as file. Percepto's iframe sandbox may block the
-        // download attribute, so try from top frame first, then fall
-        // back to clipboard so the user can paste into a .kml file.
+        return { kml, navCount: stops.length, snapCount: snapBlocks.length, usedRoute: !!(opts.routes && opts.routes.length) };
+    }
+
+    // Download the KML (try top frame first to dodge the iframe sandbox, then
+    // this frame, then clipboard as a last resort).
+    function downloadKmlFile(missionName, kml) {
         const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
         const blobUrl = URL.createObjectURL(blob);
-        const safeName = (row.name || 'mission').replace(/[^a-zA-Z0-9_\- ]/g, '').trim();
+        const safeName = ((missionName || 'mission').replace(/[^a-zA-Z0-9_\- ]/g, '').trim()) || 'mission';
         let downloaded = false;
-        try {
-            const topDoc = (window.top || window).document;
-            const a = topDoc.createElement('a');
-            a.href = blobUrl;
-            a.download = `${safeName}_steps.kml`;
-            topDoc.body.appendChild(a);
-            a.click();
-            a.remove();
-            downloaded = true;
-        } catch (e) {}
-        if (!downloaded) {
+        for (const doc of [(window.top || window).document, document]) {
+            if (downloaded) break;
             try {
-                const a = document.createElement('a');
-                a.href = blobUrl;
-                a.download = `${safeName}_steps.kml`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
+                const a = doc.createElement('a');
+                a.href = blobUrl; a.download = `${safeName}_flightpath.kml`;
+                (doc.body || document.body).appendChild(a); a.click(); a.remove();
                 downloaded = true;
             } catch (e) {}
         }
-        if (!downloaded) {
-            copyToClipboard(kml);
-            showToast('Download blocked. KML copied to clipboard — paste into a .kml file.', '#ff9800');
-        } else {
-            showToast(`Exported ${gpsSteps.length} GPS steps as KML`, '#5fff5f');
+        if (!downloaded) { copyToClipboard(kml); showToast('Download blocked. KML copied to clipboard — paste into a .kml file.', '#ff9800'); }
+        setTimeout(() => { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }, 5000);
+        return downloaded;
+    }
+
+    function exportDetailToKML(row, allSteps) {
+        const built = buildMissionKml(row && row.name, allSteps || []);
+        if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
+        if (downloadKmlFile(row && row.name, built.kml)) showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots`, '#5fff5f');
+    }
+
+    // Map-edit row: export the mission currently open in the native editor,
+    // using the LIVE on-screen order (so an unsaved reorder still exports right).
+    function exportOpenMissionKml() {
+        if (!composerMission) { showToast('Open a mission first (hit 🔄 to load it).', '#ff9800'); return; }
+        const ordered = composerCurrentOrdered();
+        if (!ordered.length) { showToast('Could not read the open mission steps.', '#ff9800'); return; }
+        const routes = captureFlightRoutes(); // AIM's real routed path off the map
+        const built = buildMissionKml(composerMission.name, ordered, { routes });
+        if (!built) { showToast('No GPS steps (navigate/snapshot) to export.', '#ff9800'); return; }
+        if (downloadKmlFile(composerMission.name, built.kml)) {
+            const path = built.usedRoute ? 'real routed path' : 'straight nav→nav path (couldn\'t read the routed line)';
+            showToast(`Exported KML — ${built.navCount} stops · ${built.snapCount} snapshots · ${path}`, '#5fff5f', 4500);
         }
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     }
 
     // Center the Leaflet map on a lat/lng. The map lives in the same
@@ -2857,11 +5570,60 @@ ${placemarks}
     // assignment doesn't trigger React's controlled-input update —
     // we have to use the underlying HTMLInputElement setter and
     // dispatch input + change events.
+    //
+    // v0.52: the trailing BLUR is the critical bit. Ant InputNumber keeps
+    // the value you type in an internal "editing" buffer and only COMMITS it
+    // to the form's React state on blur (or Enter). Without it, our value
+    // showed in the box but Save read the original — so snapshot altitudes
+    // reverted to 0 the moment the instruction saved. The Asset Inspector's
+    // working Apply does exactly this; ported here.
     function setReactInputValue(input, value) {
         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         setter.call(input, String(value));
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.dispatchEvent(new Event('change', { bubbles: true }));
+        // v0.58: do NOT focus()-then-blur. v0.57 did, and Percepto's edit dialog
+        // closes on the input blur — that's why the step "opened then instantly
+        // closed" like a cancel. The form commit is handled by
+        // commitInputNumberViaFiber (the InputNumber component onChange), which
+        // doesn't need a blur. We still dispatch a bubbling blur event (no prior
+        // focus, so harmless) only to satisfy any listener that expects one.
+        input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        // NOTE (v0.55): no synthetic Enter — the Quick Mission Editor listens
+        // for Enter on this page and would pop its move dialog.
+    }
+
+    // The inner `.ant-input-number-input` events update Ant's display but do
+    // NOT reliably reach the Ant InputNumber *component's* onChange — the one
+    // that emits the committed numeric value into Percepto's form. Diagnostics
+    // proved the box holds the new value yet Save persists the old one, i.e. the
+    // form model never updated. Walk up the fiber from the inner input to the
+    // InputNumber component and call its onChange(value) directly. Returns true
+    // if a component-level onChange was found and invoked.
+    function commitInputNumberViaFiber(input, numericValue) {
+        try {
+            const fk = Object.keys(input).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+            if (!fk) return false;
+            let fiber = input[fk], depth = 0;
+            // Walk up. The inner <input> and wrapper <div>s are HOST fibers
+            // (fiber.type is a string like 'input'/'div'). The Ant/rc InputNumber
+            // is a COMPONENT fiber (fiber.type is a function/object). Its onChange
+            // takes the committed value directly — that's the one that updates
+            // Percepto's form. v0.59: target "first component fiber with onChange"
+            // (the old numeric-prop heuristic didn't match Ant v5 → componentOnChange=false).
+            while (fiber && depth < 30) {
+                const props = fiber.memoizedProps;
+                const isHost = typeof fiber.type === 'string';
+                if (!isHost && props && typeof props.onChange === 'function') {
+                    try { props.onChange(numericValue); return true; } catch (e) {
+                        // Some wrappers expect an event-shaped arg; try that, then keep walking.
+                        try { props.onChange({ target: { value: numericValue } }); return true; } catch (e2) {}
+                    }
+                }
+                fiber = fiber.return; depth++;
+            }
+        } catch (e) { /* fall through — DOM events are the fallback */ }
+        return false;
     }
 
     function findEditDialogInputByLabel(...labelTexts) {
@@ -2900,6 +5662,7 @@ ${placemarks}
         if (origDisplayValue != null && !isNaN(origDisplayValue)) {
             const candidates = document.querySelectorAll('.edit-instruction__form input.ant-input-number-input');
             const target = Math.round(Number(origDisplayValue));
+            dlog(`${TAG} [edit] ${candidates.length} number input(s); target≈${target}; current=[${Array.from(candidates).map(i => (i.getAttribute('aria-valuenow') || i.value)).join(', ')}]`);
             for (const inp of candidates) {
                 const raw = inp.getAttribute('aria-valuenow') || inp.value;
                 const num = Math.round(Number(raw));
@@ -2951,8 +5714,14 @@ ${placemarks}
 
     function setAltValue(group, value, done, preferredInput) {
         const numInput = preferredInput || group.querySelector('input.ant-input-number-input');
-        if (!numInput) { done(false); return; }
+        if (!numInput) { console.warn(`${TAG} [edit] no number input in group`); done(false); return; }
         setReactInputValue(numInput, value);
+        // The decisive commit: push the numeric value into the InputNumber
+        // component's own onChange so Percepto's form model actually updates.
+        // This is THE fix — Ant v5's display-level events don't reach the form.
+        const committed = commitInputNumberViaFiber(numInput, Number(value));
+        dlog(`${TAG} [edit] set → "${numInput.value}" (wanted ${value}) · componentOnChange=${committed}`);
+        if (!committed) console.warn(`${TAG} [edit] componentOnChange=false — form may not have taken the value`);
         done(true);
     }
 
@@ -2973,12 +5742,393 @@ ${placemarks}
         if (lbl) lbl.click(); else el.click();
     }
 
+    // Click a button through its React onClick handler. Native .click() on
+    // Percepto's Ant v5 buttons doesn't always invoke React's onClick (so the
+    // dialog can close without actually saving — "acts like cancel"). Call the
+    // handler directly, with a native click as fallback. Returns true if fired.
+    function clickReactButton(btn) {
+        if (!btn) return false;
+        const k = Object.keys(btn).find(key => key.startsWith('__reactProps$'));
+        if (k && btn[k] && typeof btn[k].onClick === 'function') {
+            try {
+                btn[k].onClick({ preventDefault(){}, stopPropagation(){}, nativeEvent: {}, currentTarget: btn, target: btn });
+                return true;
+            } catch (e) { console.warn(`${TAG} [edit] react onClick threw, falling back to native click`, e); }
+        }
+        try { btn.click(); return true; } catch (e) { return false; }
+    }
+
+    // ========================================================
+    // Read-only save-diff probe
+    // ========================================================
+    // Watches the outgoing mission save (POST /available_app/) and diffs every
+    // instruction field against the cached original. MODIFIES NOTHING — passes
+    // the save through untouched and only logs. Purpose: learn whether Percepto's
+    // edit form RECOMPUTES dependent fields (value2 / extra_options / …) when you
+    // change a value. If a save ever shows only value1 changing, a fast "patch
+    // the save body" path would produce identical data (safe). If dependent
+    // fields move too, a body-patch would desync — stay per-step. General by
+    // design: diffs ALL fields, so it answers this for any field we bulk-edit later.
+    function findCachedMissionForPayload(body) {
+        for (const sid in missionsBySite) {
+            const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = arr.find(mm => mm && (
+                (mm.app_id != null && body.app_id != null && mm.app_id === body.app_id) ||
+                (mm.name != null && body.name != null && mm.name === body.name)
+            ));
+            if (m) return m;
+        }
+        return null;
+    }
+    function probeSavePayload(bodyStr) {
+        try {
+            const body = JSON.parse(bodyStr);
+            if (!body || !Array.isArray(body.instructions)) return;
+            const m = findCachedMissionForPayload(body);
+            if (!m || !Array.isArray(m.instructions)) {
+                console.log(`${TAG} [diff-probe] save "${body.name}" — no cached original to diff (open the SUM panel for this site first)`);
+                return;
+            }
+            const orig = m.instructions, usedO = new Set(), rows = [];
+            let recompute = false;
+            body.instructions.forEach((bi, i) => {
+                if (!bi || !bi.location || bi.location.lat == null) return;
+                let oi = null;
+                for (let j = 0; j < orig.length; j++) {
+                    if (usedO.has(j)) continue;
+                    const o = orig[j];
+                    if (o && o.location && o.location.lat != null &&
+                        Math.abs(Number(o.location.lat) - Number(bi.location.lat)) < 1e-9 &&
+                        Math.abs(Number(o.location.lng) - Number(bi.location.lng)) < 1e-9) { oi = o; usedO.add(j); break; }
+                }
+                if (!oi) return;
+                const diffs = [];
+                if (oi.value1 != null && Number(oi.value1) !== Number(bi.value1)) diffs.push(`value1 ${oi.value1}→${bi.value1}`);
+                if (oi.value2 != null && Number(oi.value2) !== Number(bi.value2)) diffs.push(`value2 ${oi.value2}→${bi.value2}`);
+                const oe = JSON.stringify(oi.extra_options || {}), be = JSON.stringify(bi.extra_options || {});
+                if (oe !== be) diffs.push(`extra_options ${oe} → ${be}`);
+                const op = JSON.stringify(oi.polygon_points || null), bp = JSON.stringify(bi.polygon_points || null);
+                if (op !== bp) diffs.push(`polygon_points changed`);
+                if (diffs.length) {
+                    if (diffs.some(d => !d.startsWith('value1 '))) recompute = true;
+                    rows.push(`#${i} (${bi.type_name || 'type ' + bi.type}) ${diffs.join(' · ')}`);
+                }
+            });
+            if (!rows.length) { console.log(`${TAG} [diff-probe] save "${body.name}" — no field changes vs cached original`); return; }
+            console.log(`${TAG} [diff-probe] save "${body.name}" — ${rows.length} step(s) changed:`);
+            rows.forEach(r => console.log(`${TAG} [diff-probe]   ${r}`));
+            console.log(`${TAG} [diff-probe] VERDICT: ${recompute
+                ? '⚠ dependent fields ALSO changed → the form recomputes; a body-patch interceptor WOULD DESYNC. Stay per-step (or replicate the recompute).'
+                : '✓ ONLY value1 changed → a body-patch interceptor would produce identical data. Safe to build for speed.'}`);
+        } catch (e) { console.warn(`${TAG} [diff-probe] error`, e); }
+    }
+
+    // ---- Fast bulk save: patch the outgoing mission save (toggle-gated) ------
+    // Splice staged altitude changes into the POST /available_app/ body. Per-type
+    // rules learned from the probe: snapshot (type 6) → set value1; navigate
+    // (type 1) → set value1 + extra_options.shouldUseFreezoneMinAlt=false (the
+    // exact recompute the form does). Strict UNIQUE match by location + original
+    // value (the payload has no instruction ids). Returns a modified body string,
+    // or null to send the ORIGINAL unchanged (fail-closed). Only touches value1
+    // (+ the one navigate flag) on staged steps — nothing else.
+    function patchMissionSaveBody(bodyStr) {
+        const body = JSON.parse(bodyStr);
+        if (!body || !Array.isArray(body.instructions)) return null;
+        let missionId = null, changes = null;
+        for (const mid in pendingAltitudes) {
+            if (!Object.keys(pendingAltitudes[mid] || {}).length) continue;
+            const m = findCachedMissionById(mid);
+            if (!m) continue;
+            if ((m.app_id != null && body.app_id != null && m.app_id === body.app_id) ||
+                (m.name != null && body.name != null && m.name === body.name)) { missionId = mid; changes = pendingAltitudes[mid]; break; }
+        }
+        if (!changes) {
+            const totalPending = Object.values(pendingAltitudes).reduce((a, o) => a + Object.keys(o || {}).length, 0);
+            console.warn(`${TAG} [fast-save] mission-save seen for "${body.name}" (app_id=${body.app_id}) but NO staged changes matched it (${totalPending} staged across ${Object.keys(pendingAltitudes).length} mission(s)). Did the page reload after staging?`);
+            return null;
+        }
+        let applied = 0, skipped = 0; const used = new Set();
+        for (const instrId in changes) {
+            const ch = changes[instrId];
+            if (ch.newM == null || ch.lat == null) { skipped++; console.warn(`${TAG} [fast-save] skip ${instrId} — missing match data`); continue; }
+            let idx = -1, matchCount = 0;
+            for (let i = 0; i < body.instructions.length; i++) {
+                if (used.has(i)) continue;
+                const bi = body.instructions[i];
+                if (!bi || !bi.location || bi.location.lat == null) continue;
+                const locOk = Math.abs(Number(bi.location.lat) - ch.lat) < 1e-7 && Math.abs(Number(bi.location.lng) - ch.lng) < 1e-7;
+                const valOk = (ch.origM == null) || (typeof bi.value1 === 'number' && Math.abs(bi.value1 - ch.origM) < 0.5);
+                if (locOk && valOk) { matchCount++; if (idx < 0) idx = i; }
+            }
+            // STRICT: only patch on a single unambiguous match.
+            if (idx < 0 || matchCount !== 1) { skipped++; console.warn(`${TAG} [fast-save] skip step (lat=${ch.lat}, origM=${ch.origM}) — ${matchCount} matches, not 1`); continue; }
+            const bi = body.instructions[idx];
+            bi.value1 = Math.round(ch.newM * 100) / 100;
+            if (bi.type === 1) { // navigate: setting a custom altitude drops freezone-min
+                if (!bi.extra_options || typeof bi.extra_options !== 'object') bi.extra_options = {};
+                bi.extra_options.shouldUseFreezoneMinAlt = false;
+            }
+            used.add(idx); applied++;
+            console.log(`${TAG} [fast-save]   #${idx} (type ${bi.type}) value1→${bi.value1}${bi.type === 1 ? ' + freezone-min off' : ''}`);
+        }
+        if (applied === 0) return null;
+        // Reflect into cache + clear the staged queue for this mission.
+        try {
+            const m = findCachedMissionById(missionId);
+            if (m) for (const instrId in changes) {
+                const instr = (m.instructions || []).find(i => i && i.id === Number(instrId));
+                if (instr && changes[instrId].newM != null) instr.value1 = Math.round(changes[instrId].newM * 100) / 100;
+            }
+        } catch (e) {}
+        discardAllPendingFor(missionId);
+        const msg = `⚡ Fast save — patched ${applied}${skipped ? ` (skipped ${skipped} — see console)` : ''} altitude${applied === 1 ? '' : 's'}`;
+        showToast(msg, skipped ? '#ff9800' : '#5fff5f', 5000);
+        console.log(`${TAG} [fast-save] patched ${applied}, skipped ${skipped} for "${body.name}"`);
+        return JSON.stringify(body);
+    }
+
+    // Hook router: returns a modified body to send, or null = send original.
+    // Fail-closed: any throw → null (original save goes through untouched).
+    // Auto snapshot-AGL pass: when armed, re-set every snapshot's value1 to its
+    // DEM ground + the default AGL, using the body's OWN (current/moved) coords.
+    // Ground must be cached (the marker prefetch warms it); uncached → skipped +
+    // a "re-save in a moment" warning. Returns a modified body string or null.
+    function applySnapAglToBodyStr(bodyStr) {
+        const body = JSON.parse(bodyStr);
+        if (!body || !Array.isArray(body.instructions)) return null;
+        const aglM = defaultSnapAglFt / 3.28084;
+        let set = 0, missDem = 0;
+        body.instructions.forEach(bi => {
+            if (!bi || bi.type !== 6) return; // 6 = snapshot
+            if (!bi.location || bi.location.lat == null) return;
+            const groundM = getElevationFromCache(Number(bi.location.lat), Number(bi.location.lng));
+            if (groundM == null) { missDem++; try { fetchElevation(bi.location.lat, bi.location.lng); } catch (e) {} return; }
+            const newV = Math.round((groundM + aglM) * 100) / 100;
+            if (typeof bi.value1 === 'number' && Math.abs(bi.value1 - newV) < 0.5) return; // already correct
+            bi.value1 = newV;
+            set++;
+        });
+        if (missDem) {
+            console.warn(`${TAG} [auto-agl] ${missDem} snapshot(s) had no DEM cached — skipped; fetching now. Re-save in a moment.`);
+            showToast(`⚠ Auto-AGL: ${missDem} snapshot(s) had no ground elevation yet — re-save in a moment to fix them.`, '#ff7a00', 5000);
+        }
+        if (set === 0) return null;
+        showToast(`📷 Auto-AGL: set ${set} snapshot${set === 1 ? '' : 's'} to ground + ${defaultSnapAglFt} ft on save.`, '#5fff5f', 4500);
+        console.log(`${TAG} [auto-agl] set ${set} snapshot altitude(s) to ground+${defaultSnapAglFt}ft on save`);
+        return JSON.stringify(body);
+    }
+
+    function handleMissionSave(bodyStr) {
+        let working = bodyStr;
+        // 1. Snapshot auto-AGL pass (independent of fast-save; armed via the
+        //    editor-row toggle, default OFF).
+        if (autoSnapAglEnabled) {
+            try { const s = applySnapAglToBodyStr(working); if (s) working = s; }
+            catch (e) { console.warn(`${TAG} [auto-agl] pass error — leaving snapshots unchanged:`, e); }
+        }
+        // 2. Fast bulk-save pass (staged altitude edits), if enabled.
+        if (fastBulkSave) {
+            console.log(`${TAG} [fast-save] mission-save request intercepted — fastBulkSave ON, checking staged changes…`);
+            try { const p = patchMissionSaveBody(working); if (p) working = p; }
+            catch (e) { console.warn(`${TAG} [fast-save] patch error — sending body unchanged by fast-save:`, e); }
+        } else {
+            try { if (DEBUG()) probeSavePayload(bodyStr); } catch (e) {} // read-only diff log only when debugging
+        }
+        return working === bodyStr ? null : working;
+    }
+
+    // Shift+S → click the open STEP's "Save" button (data-testid=btn-save-instruction
+    // in the edit-instruction panel). Shift+D → "Save & Next": save the open step,
+    // then open the NEXT step's editor (rip through per-step finetuning). Both are
+    // input-guarded so they don't fire while typing.
+    // (Saving the whole mission via saveApp fails while a step editor is open — and
+    // the per-step save is what's actually wanted in the editing workflow.)
+    function installSaveHotkey() {
+        if (CONTEXT !== 'IFRAME') return;
+        window.addEventListener('keydown', (e) => {
+            if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+            const isS = (e.key === 'S' || e.key === 's');
+            const isD = (e.key === 'D' || e.key === 'd');
+            if (!isS && !isD) return;
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable ||
+                (t.closest && t.closest('.ant-input,.ant-select,.ant-select-selection-search-input,[role="textbox"]')))) return;
+            const stepBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+            if (!stepBtn || stepBtn.disabled) return;   // only when a step editor is open
+            e.preventDefault(); e.stopPropagation();
+            if (isD) { saveAndNextStep(); return; }
+            try { stepBtn.click(); showToast('✓ Step saved (Shift+S)', '#5fff5f', 1800); }
+            catch (err) { console.warn(`${TAG} [save-hotkey] click failed`, err); }
+        }, true);
+    }
+
+    // "Save & Next" — save the currently-open step, then auto-open the NEXT step's
+    // editor. Lets you rip through per-step finetuning of a generated mission (move
+    // snapshot → Save ⏭ → next snapshot → …) WITHOUT clicking the next marker on the
+    // map (which Percepto would interpret as "move the open step" — the cause of the
+    // snapshot sliding to the wrong spot). Surfaced as a button INSIDE the step editor
+    // (next to Percepto's own Save) + the Shift+D hotkey.
+    //
+    // KEY: while a step editor is open, Percepto REPLACES the instruction-card list,
+    // so the [data-rfd-draggable-id] cards are GONE. We therefore compute "next" from
+    // REACT STATE (the ordered instructions array), not the DOM — then hand the next
+    // id to openInstructionEditor(), which itself saves the open step, waits for the
+    // editor to close + the list to re-render, and opens the target.
+    const SAVE_NEXT_SKIP_TYPES = new Set([7, 24]); // cameraSelect, gemMode — no useful editor
+    let saveNextLastOpenedId = null; // fallback "current step" when focus id is unavailable
+
+    // The ordered instructions array from React state (survives the editor being open;
+    // findMissionAppCtx anchors on stable DOM, not the [data-rfd-draggable-id] cards).
+    function getMissionInstrsState() {
+        try { const ac = findMissionAppCtx(); if (ac && ac.currentApp && Array.isArray(ac.currentApp.instructions) && ac.currentApp.instructions.length) return ac.currentApp.instructions; } catch (e) {}
+        try { const ec = findMissionEditorCtx(); if (ec && Array.isArray(ec.instrs) && ec.instrs.length) return ec.instrs; } catch (e) {}
+        return null;
+    }
+
+    // The id of the step whose editor is open — Percepto's own focusedInstructionId,
+    // found by a broad fiber walk (the value can live on a different provider than
+    // saveApp). Anchors include .edit-instruction so it works mid step-edit. Falls
+    // back to the last step we opened in a Save & Next chain.
+    function findFocusedInstrId() {
+        const anchors = ['.edit-instruction', '[data-rfd-draggable-id]', '.mission-edit__content', '.mission-bank__map-container', '.mission-bank'];
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 170) {
+                    let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                    if (v && typeof v === 'object' && v.focusedInstructionId != null &&
+                        (typeof v.saveApp === 'function' || typeof v.setCurrentApp === 'function' || Array.isArray(v.instructions))) {
+                        return String(v.focusedInstructionId);
+                    }
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
+    function getOpenStepId() {
+        const fid = findFocusedInstrId();
+        if (fid != null) return fid;
+        return saveNextLastOpenedId;
+    }
+
+    // The next editable instruction id after `currentId` in the mission order
+    // (skips camera/GEM toggles). Pure React-state — no DOM cards needed.
+    function nextEditableInstrId(currentId) {
+        const instrs = getMissionInstrsState();
+        if (!instrs) return null;
+        const idx = currentId != null ? instrs.findIndex(s => s && String(s.id) === String(currentId)) : -1;
+        for (let j = idx + 1; j < instrs.length; j++) {
+            const s = instrs[j];
+            if (!s || s.id == null) continue;
+            if (SAVE_NEXT_SKIP_TYPES.has(s.type)) continue;
+            return String(s.id);
+        }
+        return null;
+    }
+
+    function currentMissionIdFromHash() {
+        const m = (location.hash || '').match(/mission-bank\/(\d+)/);
+        return m ? m[1] : null;
+    }
+
+    function saveAndNextStep() {
+        if (CONTEXT !== 'IFRAME') return;
+        const stepBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+        if (!stepBtn || stepBtn.disabled) {
+            showToast('Open a step’s editor first — Save & Next saves it, then opens the next.', '#ff9800', 3500);
+            return;
+        }
+        const curId = getOpenStepId();
+        const nextId = nextEditableInstrId(curId);
+        const missionId = currentMissionIdFromHash();
+        if (!nextId) {
+            // Nothing after this one — just save the open step in place.
+            try { stepBtn.click(); showToast('✓ Step saved — last step (no next).', '#5fff5f', 2600); }
+            catch (err) { console.warn(`${TAG} [save-next] save failed`, err); showToast('Save failed — see console.', '#ff5252', 3000); }
+            saveNextLastOpenedId = null;
+            return;
+        }
+        // openInstructionEditor saves the OPEN step (clicks btn-save-instruction),
+        // waits for the editor to close + the list to re-render, then opens nextId.
+        saveNextLastOpenedId = nextId;
+        showToast('✓ Saving — opening next step…', '#5fff5f', 1600);
+        try { openInstructionEditor(nextId, missionId); }
+        catch (err) { console.warn(`${TAG} [save-next] open-next failed`, err); showToast('Saved, but couldn’t open the next step — open it manually.', '#ff9800', 4000); }
+    }
+
+    let saveProbeInstalled = false;
+    function installSaveDiffProbe() {
+        if (saveProbeInstalled) return;
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        if (win.__aim_mb_diffprobe) { saveProbeInstalled = true; return; }
+        const SAVE_RE = /\/available_app\/(?:$|\?|#)/;
+        try {
+            const origFetch = win.fetch;
+            if (typeof origFetch === 'function') {
+                win.fetch = function(input, init) {
+                    try {
+                        const url = (typeof input === 'string') ? input : (input && input.url);
+                        const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+                        if (method === 'POST' && url && SAVE_RE.test(url) && init && typeof init.body === 'string') {
+                            const patched = handleMissionSave(init.body);
+                            if (patched) init = Object.assign({}, init, { body: patched });
+                        }
+                    } catch (e) {}
+                    return origFetch.apply(this, arguments);
+                };
+            }
+        } catch (e) {}
+        try {
+            const XHR = win.XMLHttpRequest;
+            const origOpen = XHR.prototype.open, origSend = XHR.prototype.send;
+            XHR.prototype.open = function(method, url) { this.__aim_mb_m = (method || '').toUpperCase(); this.__aim_mb_u = url; return origOpen.apply(this, arguments); };
+            XHR.prototype.send = function(b) {
+                try {
+                    if (this.__aim_mb_m === 'POST' && this.__aim_mb_u && SAVE_RE.test(this.__aim_mb_u) && typeof b === 'string') {
+                        const patched = handleMissionSave(b);
+                        if (patched) return origSend.call(this, patched);
+                    }
+                } catch (e) {}
+                return origSend.apply(this, arguments);
+            };
+        } catch (e) {}
+        win.__aim_mb_diffprobe = true;
+        saveProbeInstalled = true;
+        console.log(`${TAG} save hook armed — Fast bulk save is OFF by default (read-only) until you toggle it on`);
+    }
+
     // ========================================================
     // Pending altitude changes — queue + commit
     // ========================================================
+    function findCachedMissionById(missionId) {
+        // String-tolerant: pendingAltitudes keys are strings (object keys), but
+        // mission.id is a number — a strict === never matched, so the fast-save
+        // mission lookup found nothing ("NO staged changes matched"). Compare as strings.
+        for (const sid in missionsBySite) {
+            const arr = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = arr.find(mm => mm && String(mm.id) === String(missionId));
+            if (m) return m;
+        }
+        return null;
+    }
     function queueAltitudeChange(missionId, instructionId, value, unit) {
         if (!pendingAltitudes[missionId]) pendingAltitudes[missionId] = {};
-        pendingAltitudes[missionId][instructionId] = { value, unit };
+        // Stash what the fast-save interceptor needs to match this step in the
+        // save payload (which has no instruction ids): the new value in METERS,
+        // plus the step's original altitude + location. Harmless for the
+        // per-step path, which only reads {value, unit}.
+        const newM = unit === 'imperial' ? (Number(value) / 3.28084) : Number(value);
+        let origM = null, lat = null, lng = null;
+        const m = findCachedMissionById(missionId);
+        const instr = m && (m.instructions || []).find(i => i && i.id === Number(instructionId));
+        if (instr) {
+            if (typeof instr.value1 === 'number') origM = instr.value1;
+            if (instr.location && instr.location.lat != null) { lat = Number(instr.location.lat); lng = Number(instr.location.lng); }
+        }
+        pendingAltitudes[missionId][instructionId] = { value, unit, newM, origM, lat, lng };
     }
     function discardPendingChange(missionId, instructionId) {
         if (pendingAltitudes[missionId]) {
@@ -3101,20 +6251,29 @@ ${placemarks}
                         // altitude — much more robust than label text.
                         setAltitudeInEditDialog(change.value, (ok) => {
                             if (!ok) { done(false, 'altitude input not found'); return; }
+                            // v0.61: KEEP the ~1.1s beat. It is NOT just for show —
+                            // Percepto's form needs time to process the altitude
+                            // change (recompute/validate) before Save reads it. v0.60
+                            // trimmed this to 250ms and it broke (Save read the old
+                            // value). This is the timing the user confirmed working.
+                            dlog(`${TAG} [edit] set ${change.value} ${change.unit === 'imperial' ? 'ft' : 'm'}, saving…`);
                             setTimeout(() => {
                                 const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
-                                if (!saveBtn) { done(false, 'save button not found'); return; }
-                                saveBtn.click();
+                                if (!saveBtn) { console.warn(`${TAG} [edit] save button not found`); done(false, 'save button not found'); return; }
+                                // Click through React's onClick — native click can
+                                // close the dialog without firing the save handler.
+                                clickReactButton(saveBtn);
                                 let saveAttempts = 0;
                                 const saveInterval = setInterval(() => {
                                     saveAttempts++;
-                                    if (saveAttempts > 25) { clearInterval(saveInterval); done(false, 'save did not complete'); return; }
+                                    if (saveAttempts > 30) { clearInterval(saveInterval); console.warn(`${TAG} [edit] save did NOT close dialog (timeout)`); done(false, 'save did not complete'); return; }
                                     if (!document.querySelector('.edit-instruction')) {
                                         clearInterval(saveInterval);
+                                        dlog(`${TAG} [edit] dialog closed after ~${saveAttempts * 200}ms — saved`);
                                         done(true);
                                     }
                                 }, 200);
-                            }, 250);
+                            }, 1100);
                         }, origDisplay);
                     }, 200);
                 }, 400);
@@ -3151,13 +6310,87 @@ ${placemarks}
         return `<div class="${cls}" ${copyAttr}${title}><div class="aim-mb-stat-label">${escapeHtml(label)}</div><div class="aim-mb-stat-value">${escapeHtml(String(value))}</div></div>`;
     }
 
+    // Is this step's altitude inline/bulk editable? Gate shared by the row
+    // renderer, the selection checkboxes, and the Bulk → AGL/ALT actions.
+    function stepAltEditable(s) {
+        return !!(s && s.value1_name === 'm' && typeof s.value1 === 'number');
+    }
+    // Ground elevation (m) for a step's GPS, or null if no GPS / not cached yet.
+    function stepElevM(s) {
+        if (!s || !s.location || s.location.lat == null) return null;
+        const e = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
+        return (e == null) ? null : e;
+    }
+
+    // Is this step one of the redundant "scan-block" toggle/wait steps that
+    // collapse into a single summary row? (Thermal on/off, GEM on/off, Wait.)
+    function isScanBlockStep(s) {
+        const t = s && s.type_name;
+        return t === 'cameraSelect' || t === 'gemMode' || t === 'wait';
+    }
+
+    // Build the detail table body. When collapseScanBlocks is on, each run of
+    // Thermal/GEM/Wait steps collapses into ONE compact summary row; Navigate
+    // and Snapshot rows render normally. Off → every step gets its own row.
+    function renderDetailRows(filteredSteps, allSteps, unit) {
+        if (!collapseScanBlocks) {
+            return filteredSteps.map(s => renderStepRow(s, allSteps.indexOf(s) + 1, unit)).join('');
+        }
+        const out = [];
+        let i = 0;
+        while (i < filteredSteps.length) {
+            const s = filteredSteps[i];
+            if (isScanBlockStep(s)) {
+                const run = [];
+                while (i < filteredSteps.length && isScanBlockStep(filteredSteps[i])) { run.push(filteredSteps[i]); i++; }
+                out.push(renderScanBlockRow(run));
+            } else {
+                out.push(renderStepRow(s, allSteps.indexOf(s) + 1, unit));
+                i++;
+            }
+        }
+        return out.join('');
+    }
+
+    // One collapsed summary row for a run of Thermal/GEM/Wait steps. Shows the
+    // canonical block at a glance + a ✓/⚠ on whether it's the expected
+    // Thermal-on → GEM-on → Wait → GEM-off → Thermal-off shape.
+    function renderScanBlockRow(run) {
+        const camOn = run.filter(s => s.type_name === 'cameraSelect' && s.value1).length;
+        const camOff = run.filter(s => s.type_name === 'cameraSelect' && !s.value1).length;
+        const gemOn = run.filter(s => s.type_name === 'gemMode' && Number(s.value1) === 1).length;
+        const gemOff = run.filter(s => s.type_name === 'gemMode' && Number(s.value1) === 0).length;
+        const waits = run.filter(s => s.type_name === 'wait');
+        const waitTxt = waits.map(w => `${Math.round(Number(w.value1) || 0)}s`).join('+') || '—';
+        const canonical = camOn === 1 && camOff === 1 && gemOn === 1 && gemOff === 1 && waits.length === 1;
+        const mark = canonical ? '<span style="color:#5fff5f">✓</span>' : '<span style="color:#ffd54f" title="Not the canonical Thermal-on→GEM-on→Wait→GEM-off→Thermal-off block">⚠</span>';
+        const summary = `🔥 Scan block ${mark} <span style="color:#9ad">·</span> 🌡️ Thermal ${camOn}/${camOff} <span style="color:#9ad">·</span> 📡 GEM ${gemOn}/${gemOff} <span style="color:#9ad">·</span> ⏱ ${waitTxt}`;
+        return `<tr class="aim-mb-scan-block-row">
+            <td></td><td></td><td></td>
+            <td colspan="8" style="color:#8aa;font-size:11px;font-style:italic;padding:3px 6px;">↳ ${summary} <span style="color:#666">(${run.length} steps collapsed)</span></td>
+        </tr>`;
+    }
+
     function renderStepRow(s, idx, unit) {
         const type = displayStepType(s);
         const val = displayStepValue(s, unit);
         const rawType = s && s.type_name;
-        let rowClass = '';
-        if (rawType === 'navigate') rowClass = ' class="aim-mb-step-nav"';
-        else if (rawType === 'snapshot') rowClass = ' class="aim-mb-step-snap"';
+        const missionId = panelState && panelState.drillId;
+        // Pending altitude change (if any) — used by BOTH the Value cell and the
+        // AGL cell so editing either keeps the other in sync (effective altitude).
+        const pendingChange = (missionId != null && s) ? getPendingChange(missionId, s.id) : null;
+        const editable = stepAltEditable(s);
+        const selSet = panelState && panelState.detailSelection;
+        const isSelected = editable && selSet && selSet.has(s.id);
+        const classes = [];
+        if (rawType === 'navigate') classes.push('aim-mb-step-nav');
+        else if (rawType === 'snapshot') classes.push('aim-mb-step-snap');
+        if (isSelected) classes.push('selected');
+        const rowClass = classes.length ? ` class="${classes.join(' ')}"` : '';
+        // Selection checkbox — only for editable steps (bulk can't touch the rest).
+        const selCell = editable
+            ? `<td class="aim-mb-sel-cell" style="text-align:center;"><input type="checkbox" data-sel-row data-instr-id="${s.id}" ${isSelected ? 'checked' : ''}></td>`
+            : '<td></td>';
         const hasGps = s && s.location && typeof s.location === 'object' && s.location.lat != null;
         // Binoculars — center map on this step's GPS
         let focusCell;
@@ -3174,11 +6407,10 @@ ${placemarks}
         // Altitude value: inline-editable when value1_name === 'm'.
         // Click → input → Enter/blur to queue change.
         let valCell;
-        if (s && s.value1_name === 'm' && typeof s.value1 === 'number') {
+        if (editable) {
             const u = unit || getDistanceUnit();
             const rawNum = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
-            const missionId = panelState && panelState.drillId;
-            const pending = missionId ? getPendingChange(missionId, s.id) : null;
+            const pending = pendingChange;
             const committed = missionId ? getCommitted(missionId, s.id) : null;
             if (pending) {
                 const pendingDisplay = u === 'imperial' ? `${Math.round(pending.value).toLocaleString()} ft ALT` : `${Math.round(pending.value).toLocaleString()} m ALT`;
@@ -3192,14 +6424,25 @@ ${placemarks}
                 valCell = `<td><span class="aim-mb-alt-editable" data-alt-edit data-instr-id="${s.id}" data-orig-alt="${rawNum}" title="Click to edit altitude. Right-click to copy raw value.">${escapeHtml(val)}</span></td>`;
             }
         } else {
+            // v0.64 diag: why isn't this step's altitude editable? Dump the raw
+            // altitude fields for navigate steps so we can wire up nav editing.
+            if (s && s.type_name === 'navigate') {
+                dlog(`${TAG} [navalt] navigate not editable — value1=${JSON.stringify(s.value1)} value1_name=${JSON.stringify(s.value1_name)} value2=${JSON.stringify(s.value2)} value2_name=${JSON.stringify(s.value2_name)} keys=[${Object.keys(s).join(',')}]`);
+            }
             valCell = `<td>${escapeHtml(val)}</td>`;
         }
-        // Location cell — clickable link to Google Maps
-        let locCell = '';
+        // Lat / Long / GPS cells. Lat & Long: click or right-click copies the
+        // raw number (M1-edit to move the waypoint is a planned fast-follow).
+        // GPS: a Google Maps link — left-click opens a new tab, right-click
+        // copies the URL.
+        let latCell = '<td></td>', lngCell = '<td></td>', gpsCell = '<td></td>';
         if (hasGps) {
             const lat = Number(s.location.lat);
             const lng = Number(s.location.lng);
-            locCell = `<span class="aim-mb-loc" data-lat="${lat}" data-lng="${lng}" title="Click: open in Google Maps. Right-click: copy coords.">${lat.toFixed(5)}, ${lng.toFixed(5)}</span>`;
+            const mapsUrl = `https://www.google.com/maps?q=${lat},${lng}`;
+            latCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lat}" title="Click or right-click to copy latitude. (Editing — moving the waypoint — coming soon.)">${lat.toFixed(6)}</span></td>`;
+            lngCell = `<td style="font-size:10px;"><span class="aim-mb-latlng" data-coord-val="${lng}" title="Click or right-click to copy longitude. (Editing — moving the waypoint — coming soon.)">${lng.toFixed(6)}</span></td>`;
+            gpsCell = `<td style="font-size:10px;"><span class="aim-mb-gps" data-maps-url="${mapsUrl}" title="Click: open in Google Maps (new tab). Right-click: copy the Maps link.">${lat.toFixed(6)}, ${lng.toFixed(6)}</span></td>`;
         }
         // Elevation + AGL cells — populated by elevation cache (or "…" while fetching)
         const u = unit || getDistanceUnit();
@@ -3213,20 +6456,25 @@ ${placemarks}
                 const elevDisplay = u === 'imperial' ? Math.round(elevM * 3.28084) : Math.round(elevM);
                 const elevUnit = u === 'imperial' ? 'ft' : 'm';
                 elevCell = `<td><span class="aim-mb-elev" data-elev-raw="${elevDisplay}" title="Click to copy raw elevation">${elevDisplay.toLocaleString()} ${elevUnit} ELV</span></td>`;
-                // AGL only meaningful if step has altitude (value1_name === 'm')
-                if (s.value1_name === 'm' && typeof s.value1 === 'number') {
-                    const aglM = s.value1 - elevM;
+                // AGL only meaningful if step has altitude (value1_name === 'm').
+                // It's inline-editable: editing AGL back-solves altitude = ground + AGL.
+                // Uses the EFFECTIVE altitude (pending change wins) so editing the
+                // Value cell and the AGL cell stay in sync, just like the Site Setup SUM.
+                if (editable) {
+                    const effAltM = (pendingChange && typeof pendingChange.newM === 'number') ? pendingChange.newM : s.value1;
+                    const origAltDisp = u === 'imperial' ? Math.round(s.value1 * 3.28084) : Math.round(s.value1);
+                    const aglM = effAltM - elevM;
                     const aglDisplay = u === 'imperial' ? Math.round(aglM * 3.28084) : Math.round(aglM);
                     const aglFt = u === 'imperial' ? aglDisplay : Math.round(aglM * 3.28084);
                     const { cls, titleSuffix } = aglThresholdsForType(rawType, aglFt);
-                    aglCell = `<td><span class="aim-mb-agl ${cls}" data-agl-raw="${aglDisplay}" title="AGL = altitude − ground elevation. ${titleSuffix} Click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
+                    aglCell = `<td><span class="aim-mb-agl aim-mb-agl-editable ${cls}" data-agl-edit data-instr-id="${s.id}" data-elev-m="${elevM}" data-orig-alt="${origAltDisp}" data-agl-raw="${aglDisplay}" data-agl-cur="${aglDisplay}" title="AGL = altitude − ground elevation. ${titleSuffix} Click to edit AGL (sets altitude = ground + AGL). Right-click to copy raw.">${aglDisplay.toLocaleString()} ${elevUnit}</span></td>`;
                 }
             } else {
                 elevCell = `<td><span class="aim-mb-elev-loading" data-elev-loading="${lat},${lng}">…</span></td>`;
                 aglCell = `<td><span class="aim-mb-agl-loading">…</span></td>`;
             }
         }
-        return `<tr${rowClass}>${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}<td style="font-size:10px;">${locCell}</td></tr>`;
+        return `<tr${rowClass}>${selCell}${focusCell}${editCell}<td>${idx}</td><td>${escapeHtml(type)}</td>${elevCell}${valCell}${aglCell}${latCell}${lngCell}${gpsCell}</tr>`;
     }
 
     // AGL thresholds differ by step type:
@@ -3266,8 +6514,14 @@ ${placemarks}
         } else if (kind === 'json') {
             // JSON dumps everything (full mission objects, not just visible cols)
             const sid = getCurrentSiteID();
-            const bucket = missionsBySite[sid];
-            const full = bucket ? bucket.missions.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            let full;
+            if (panelState.mode === 'log') {
+                const bucket = logBySite[sid];
+                full = bucket ? bucket.rows.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            } else {
+                const bucket = missionsBySite[sid];
+                full = bucket ? bucket.missions.filter(m => sel.size === 0 || sel.has(m.id)) : [];
+            }
             copyToClipboard(JSON.stringify(full, null, 2));
             showToast(`Copied ${full.length} mission${full.length === 1 ? '' : 's'} as JSON`, '#5fff5f');
         }
@@ -3319,6 +6573,347 @@ ${placemarks}
         }[c]));
     }
 
+    // ============================================================
+    // MISSION SOP VALIDATORS  (Phase 1)
+    // ------------------------------------------------------------
+    // Geometric/structural SOP checks over the site's missions, the
+    // mission-side twin of the Site Setup SOP Validators in the Asset
+    // Inspector. Registered as their OWN Control Panel section (second
+    // scriptId, scope 'mission-bank') with a site-type PRESET selector,
+    // per-check enables + editable thresholds, and a "🚩 Run check"
+    // action that lists every violation in a floating report.
+    //
+    // 5 checks (per the SOP spec):
+    //   1. navInFfz     — no Navigate is OUTSIDE an FFZ
+    //   2. navAboveFfz  — no Navigate is lower than the FFZ it sits in
+    //   3. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
+    //   4. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
+    //   5. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
+    //
+    // Presets are pluggable: add a key to MISSION_SOP_PRESETS and it
+    // appears in the selector. Per-preset threshold/enable EDITS persist
+    // separately (MISSION_SOP_OVERRIDES_KEY) so switching presets never
+    // loses a tweak. Only Upstream ships real SOP numbers today; the
+    // others inherit the same defaults until their SOPs are defined.
+    // ============================================================
+    const MISSION_SOP_SCRIPT_ID = 'aim-mission-sop';
+    const MISSION_SOP_PRESET_KEY = 'aim-mb-sop-preset';
+    const MISSION_SOP_OVERRIDES_KEY = 'aim-mb-sop-overrides';
+    const MISSION_SOP_ENABLED_KEY = 'aim-mb-sop-enabled';
+    const SOP_REPORT_ID = 'aim-mb-sop-report';
+
+    // Per-check default enables (shared across presets unless overridden).
+    const MISSION_SOP_ENABLE_DEFAULTS = {
+        navInFfz: true, navAboveFfz: true, snapAgl: true, blockBalance: true, navSnapDist: true,
+    };
+    // Threshold defaults per preset. Upstream = the live SOP numbers.
+    // Downstream / T&D start as copies (editable) until their SOPs land.
+    const UPSTREAM_THRESH = {
+        navSnapMinFt: 96,   // Navigate→Snapshot min standoff
+        navSnapMaxFt: 204,  // Navigate→Snapshot max standoff
+        snapMinAglFt: 0,    // Snapshot must be at/above this AGL
+        navFloorTolFt: 0,   // slack on "Navigate ≥ FFZ min alt"
+    };
+    const MISSION_SOP_PRESETS = {
+        upstream:   { label: 'OIL · Upstream',   thresholds: { ...UPSTREAM_THRESH } },
+        downstream: { label: 'OIL · Downstream', thresholds: { ...UPSTREAM_THRESH } },
+        td:         { label: 'T&D',              thresholds: { ...UPSTREAM_THRESH } },
+    };
+
+    function loadSopPreset() {
+        const k = gmGet(MISSION_SOP_PRESET_KEY, 'upstream');
+        return MISSION_SOP_PRESETS[k] ? k : 'upstream';
+    }
+    let sopPreset = loadSopPreset();
+    function loadSopOverrides() {
+        const o = gmGet(MISSION_SOP_OVERRIDES_KEY, null);
+        return (o && typeof o === 'object') ? o : {};
+    }
+    let sopOverrides = loadSopOverrides();
+    function loadSopEnabled() {
+        const e = gmGet(MISSION_SOP_ENABLED_KEY, null);
+        return Object.assign({}, MISSION_SOP_ENABLE_DEFAULTS, (e && typeof e === 'object') ? e : {});
+    }
+    let sopEnabled = loadSopEnabled();
+    let sopMasterEnabled = true;
+
+    // Effective thresholds = preset defaults with this preset's saved edits applied.
+    function effectiveSopThresholds() {
+        const base = MISSION_SOP_PRESETS[sopPreset].thresholds;
+        const ov = (sopOverrides[sopPreset] && sopOverrides[sopPreset].thresholds) || {};
+        return Object.assign({}, base, ov);
+    }
+    function setSopThreshold(id, value) {
+        if (!sopOverrides[sopPreset]) sopOverrides[sopPreset] = { thresholds: {} };
+        if (!sopOverrides[sopPreset].thresholds) sopOverrides[sopPreset].thresholds = {};
+        sopOverrides[sopPreset].thresholds[id] = value;
+        gmSet(MISSION_SOP_OVERRIDES_KEY, sopOverrides);
+    }
+
+    // --- geometry helpers (self-contained; ring = [{lat,lng}]) -----------
+    function sopPointInPolygon(pt, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i].lat, xi = ring[i].lng;
+            const yj = ring[j].lat, xj = ring[j].lng;
+            const intersect = ((yi > pt.lat) !== (yj > pt.lat)) &&
+                (pt.lng < (xj - xi) * (pt.lat - yi) / ((yj - yi) || 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    function sopHaversineFt(a, b) {
+        const R = 6371000; // m
+        const toRad = d => d * Math.PI / 180;
+        const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+        const s = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+        return (2 * R * Math.asin(Math.min(1, Math.sqrt(s)))) * 3.28084;
+    }
+
+    // Fetch the site's FFZs (type 16) → [{ring, minAltM}]. Cookie auth,
+    // same endpoint the Asset Inspector uses. Cached per site for the
+    // session so repeat runs don't re-hit the network.
+    const sopFfzCache = {};
+    function fetchSiteFfzs(siteID) {
+        if (sopFfzCache[siteID]) return Promise.resolve(sopFfzCache[siteID]);
+        const url = `https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteID)}`;
+        return fetch(url, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => {
+                const list = Array.isArray(arr) ? arr : (arr && arr.objects) || [];
+                const ffzs = list.filter(e => e && e.type === 16 && Array.isArray(e.coords) && e.coords.length >= 3)
+                    .map(e => ({
+                        ring: e.coords.map(c => ({ lat: c.lat, lng: c.lng })),
+                        minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null,
+                        name: e.name || '',
+                    }));
+                sopFfzCache[siteID] = ffzs;
+                return ffzs;
+            });
+    }
+
+    // Core check. Returns { violations:[{missionId,missionName,check,stepIndex,detail,severity}], ffzCount, missionCount }.
+    async function runMissionSop(missions, ffzs) {
+        const th = effectiveSopThresholds();
+        const violations = [];
+
+        // Pre-warm DEM cache for all snapshot points (AGL check).
+        if (sopEnabled.snapAgl) {
+            const pts = [];
+            missions.forEach(m => realSteps(m.instructions).forEach(s => {
+                if (s.type_name === 'snapshot' && s.location) pts.push({ lat: s.location.lat, lng: s.location.lng });
+            }));
+            if (pts.length) { try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} SOP DEM prefetch failed`, e); } }
+        }
+
+        for (const m of missions) {
+            const steps = realSteps(m.instructions);
+            const ctx = { id: m.id, name: m.name || `Mission ${m.id}` };
+            let lastNav = null;                 // governing Navigate for snapshots below it
+            let snapN = 0, camOn = 0, camOff = 0, gemOn = 0, gemOff = 0, waitN = 0;
+
+            steps.forEach((s, i) => {
+                if (s.type_name === 'navigate') {
+                    lastNav = s;
+                    if (!s.location) return;
+                    // 1. Navigate must be inside some FFZ.
+                    const containing = ffzs.find(f => sopPointInPolygon(s.location, f.ring));
+                    if (sopEnabled.navInFfz && ffzs.length && !containing) {
+                        violations.push({ ...ctx, check: 'Navigate outside FFZ', stepIndex: s.index_in_app,
+                            detail: 'Navigate point is not inside any Free-Fly Zone', severity: 'high' });
+                    }
+                    // 2. Navigate altitude ≥ containing FFZ min alt (− tolerance).
+                    if (sopEnabled.navAboveFfz && containing && typeof containing.minAltM === 'number' && typeof s.value1 === 'number') {
+                        const navFt = s.value1 * 3.28084, floorFt = containing.minAltM * 3.28084;
+                        if (Math.round(navFt) < Math.round(floorFt) - th.navFloorTolFt) {
+                            violations.push({ ...ctx, check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
+                                detail: `Navigate ${Math.round(navFt)} ft < FFZ min ${Math.round(floorFt)} ft${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                        }
+                    }
+                } else if (s.type_name === 'snapshot') {
+                    snapN++;
+                    // 3. Snapshot AGL ≥ min (default 0 → not underground).
+                    if (sopEnabled.snapAgl && s.location && typeof s.value1 === 'number') {
+                        const groundM = getElevationFromCache(s.location.lat, s.location.lng);
+                        if (typeof groundM === 'number') {
+                            const aglFt = (s.value1 - groundM) * 3.28084;
+                            if (Math.round(aglFt) < th.snapMinAglFt) {
+                                violations.push({ ...ctx, check: 'Snapshot below min AGL', stepIndex: s.index_in_app,
+                                    detail: `Snapshot AGL ${Math.round(aglFt)} ft < min ${th.snapMinAglFt} ft`, severity: 'high' });
+                            }
+                        }
+                    }
+                    // 5. Navigate→Snapshot distance within band.
+                    if (sopEnabled.navSnapDist && lastNav && lastNav.location && s.location) {
+                        const dFt = sopHaversineFt(lastNav.location, s.location);
+                        if (dFt < th.navSnapMinFt || dFt > th.navSnapMaxFt) {
+                            violations.push({ ...ctx, check: 'Navigate↔Snapshot distance', stepIndex: s.index_in_app,
+                                detail: `${Math.round(dFt)} ft (allowed ${th.navSnapMinFt}–${th.navSnapMaxFt} ft)`, severity: 'warn' });
+                        }
+                    }
+                } else if (s.type_name === 'cameraSelect') {
+                    if (s.value1) camOn++; else camOff++;
+                } else if (s.type_name === 'gemMode') {
+                    if (Number(s.value1) === 1) gemOn++; else gemOff++;
+                } else if (s.type_name === 'wait') {
+                    waitN++;
+                }
+            });
+
+            // 4. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
+            if (sopEnabled.blockBalance) {
+                const parts = [];
+                if (camOn !== snapN) parts.push(`Thermal-on ${camOn}`);
+                if (camOff !== snapN) parts.push(`Thermal-off ${camOff}`);
+                if (gemOn !== snapN) parts.push(`GEM-on ${gemOn}`);
+                if (gemOff !== snapN) parts.push(`GEM-off ${gemOff}`);
+                if (waitN !== snapN) parts.push(`Wait ${waitN}`);
+                if (parts.length) {
+                    violations.push({ ...ctx, check: 'Scan-block mismatch', stepIndex: null,
+                        detail: `${snapN} snapshot${snapN === 1 ? '' : 's'} but ${parts.join(', ')}`, severity: 'high' });
+                }
+            }
+        }
+        return { violations, ffzCount: ffzs.length, missionCount: missions.length };
+    }
+
+    // Run over the current site's missions (fetch if cold) and show report.
+    function runMissionSopAndReport() {
+        if (!sopMasterEnabled) { renderSopReport({ error: 'Mission SOP validators are disabled in the Control Panel.' }); return; }
+        const sid = getCurrentSiteID();
+        if (!sid) { renderSopReport({ error: 'No site loaded' }); return; }
+        renderSopReport({ loading: 'Loading missions…' });
+        const go = (missions) => {
+            renderSopReport({ loading: 'Fetching FFZs + ground elevations…' });
+            fetchSiteFfzs(sid)
+                .then(ffzs => runMissionSop(missions, ffzs))
+                .then(res => renderSopReport(res))
+                .catch(e => { console.warn(`${TAG} SOP run failed`, e); renderSopReport({ error: e.message || String(e) }); });
+        };
+        const cached = missionsBySite[sid] && missionsBySite[sid].missions;
+        if (Array.isArray(cached) && cached.length) go(cached);
+        else fetchMissions(sid, go, (err) => renderSopReport({ error: err }));
+    }
+
+    // --- floating report popup -------------------------------------------
+    function closeSopReport() {
+        const el = document.getElementById(SOP_REPORT_ID);
+        if (el) el.remove();
+    }
+    function renderSopReport(state) {
+        closeSopReport();
+        const pop = document.createElement('div');
+        pop.id = SOP_REPORT_ID;
+        pop.style.cssText = 'position:fixed;top:80px;right:24px;width:440px;max-height:72vh;z-index:2147483600;' +
+            'background:#0f1216;border:1px solid rgba(95,255,95,0.4);border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.6);' +
+            "font-family:'Lato','Segoe UI',sans-serif;color:#e6e6e6;display:flex;flex-direction:column;overflow:hidden";
+        const presetLabel = MISSION_SOP_PRESETS[sopPreset].label;
+        let body;
+        if (state.error) {
+            body = `<div style="padding:16px;color:#ff8a80">⚠ ${escapeHtml(state.error)}</div>`;
+        } else if (state.loading) {
+            body = `<div style="padding:16px;color:#9ad">${escapeHtml(state.loading)}</div>`;
+        } else {
+            const v = state.violations || [];
+            // Group by mission.
+            const byMission = {};
+            v.forEach(x => { (byMission[x.id] = byMission[x.id] || { name: x.name, items: [] }).items.push(x); });
+            const missionsWith = Object.keys(byMission).length;
+            const clean = state.missionCount - missionsWith;
+            const highN = v.filter(x => x.severity === 'high').length;
+            const sevColor = s => s === 'high' ? '#ff5252' : '#ffd54f';
+            const rows = Object.keys(byMission).map(mid => {
+                const g = byMission[mid];
+                const items = g.items.map(it => `
+                    <div style="display:flex;gap:8px;padding:3px 0;font-size:11px;border-top:1px solid rgba(255,255,255,0.05)">
+                        <span style="color:${sevColor(it.severity)};font-weight:700;flex-shrink:0">${it.severity === 'high' ? '●' : '▲'}</span>
+                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${escapeHtml(it.detail)}</span></span>
+                    </div>`).join('');
+                return `
+                    <div class="aim-sop-mrow" data-mid="${mid}" style="padding:7px 12px;border-bottom:1px solid #1f2430;cursor:pointer">
+                        <div style="font-weight:700;font-size:12px;color:#5fff5f">${escapeHtml(g.name)} <span style="color:#888;font-weight:400">· ${g.items.length} issue${g.items.length === 1 ? '' : 's'}</span></div>
+                        ${items}
+                    </div>`;
+            }).join('');
+            const summary = v.length === 0
+                ? `<span style="color:#5fff5f">✓ All ${state.missionCount} mission${state.missionCount === 1 ? '' : 's'} pass.</span>`
+                : `<strong style="color:#ff5252">${v.length}</strong> issue${v.length === 1 ? '' : 's'} (${highN} hard) across <strong>${missionsWith}</strong> mission${missionsWith === 1 ? '' : 's'} · <span style="color:#5fff5f">${clean} clean</span>`;
+            body = `
+                <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #1f2430">
+                    ${summary}<br><span style="color:#777">${state.ffzCount} FFZ${state.ffzCount === 1 ? '' : 's'} · preset ${escapeHtml(presetLabel)} · click a mission to open it</span>
+                </div>
+                <div style="overflow:auto">${rows || '<div style="padding:16px;color:#5fff5f">No violations 🎉</div>'}</div>`;
+        }
+        pop.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
+                <div style="flex:1;text-align:center;font-weight:700;color:#5fff5f;font-size:13px">🚩 Mission SOP Check</div>
+                <button data-sop-rerun style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">Re-run</button>
+                <button data-sop-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
+            </div>
+            ${body}`;
+        document.body.appendChild(pop);
+        pop.querySelector('[data-sop-x]').onclick = closeSopReport;
+        pop.querySelector('[data-sop-rerun]').onclick = runMissionSopAndReport;
+        pop.querySelectorAll('.aim-sop-mrow').forEach(r => {
+            r.onclick = () => { try { openPanelAndDrill(Number(r.dataset.mid)); } catch (e) { console.warn(`${TAG} drill failed`, e); } };
+        });
+    }
+
+    // --- Control Panel: SOP section --------------------------------------
+    function handleMissionSopToggle(msg) {
+        const id = msg.toggleId;
+        const val = msg.value !== undefined ? msg.value : msg.enabled;
+        if (id === 'sop-master') { sopMasterEnabled = !!val; return; }
+        if (id === 'preset') {
+            if (MISSION_SOP_PRESETS[val] && val !== sopPreset) {
+                sopPreset = val;
+                gmSet(MISSION_SOP_PRESET_KEY, sopPreset);
+                registerMissionSop(); // re-publish so CP shows this preset's thresholds
+            }
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopEnabled, id)) {
+            const v = !!val;
+            if (v === sopEnabled[id]) return;
+            sopEnabled[id] = v;
+            gmSet(MISSION_SOP_ENABLED_KEY, sopEnabled);
+            return;
+        }
+        if (typeof msg.value === 'number') {
+            const cur = effectiveSopThresholds();
+            if (Object.prototype.hasOwnProperty.call(cur, id) && msg.value !== cur[id]) {
+                setSopThreshold(id, msg.value);
+            }
+        }
+    }
+    function registerMissionSop() {
+        if (!controlChannel) return;
+        const th = effectiveSopThresholds();
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: MISSION_SOP_SCRIPT_ID, name: 'Mission SOP Validators',
+            description: 'Structural/geometric SOP checks over the site’s missions. Pick a site-type preset, then "Run check" to list every violation.',
+            version: SCRIPT_VERSION, group: 'Mission SOP', scope: 'mission-bank', priority: 30,
+            toggles: [
+                { id: 'sop-master', label: 'Enable mission SOP validators', type: 'boolean', default: true, master: true },
+                { id: 'preset', label: 'Site-type preset', type: 'select', default: sopPreset,
+                    options: Object.keys(MISSION_SOP_PRESETS).map(k => ({ value: k, label: MISSION_SOP_PRESETS[k].label })) },
+                { id: 'navInFfz', label: 'Check · Navigate inside an FFZ', type: 'boolean', default: sopEnabled.navInFfz },
+                { id: 'navAboveFfz', label: 'Check · Navigate ≥ FFZ floor', type: 'boolean', default: sopEnabled.navAboveFfz },
+                { id: 'navFloorTolFt', label: 'Navigate-vs-floor slack', type: 'number', min: 0, max: 100, step: 1, default: th.navFloorTolFt, unit: 'ft' },
+                { id: 'snapAgl', label: 'Check · Snapshot ≥ min AGL', type: 'boolean', default: sopEnabled.snapAgl },
+                { id: 'snapMinAglFt', label: 'Snapshot min AGL', type: 'number', min: -50, max: 200, step: 1, default: th.snapMinAglFt, unit: 'ft' },
+                { id: 'blockBalance', label: 'Check · Scan-block balance per snapshot', type: 'boolean', default: sopEnabled.blockBalance },
+                { id: 'navSnapDist', label: 'Check · Navigate↔Snapshot distance', type: 'boolean', default: sopEnabled.navSnapDist },
+                { id: 'navSnapMinFt', label: 'Navigate↔Snapshot min', type: 'number', min: 0, max: 1000, step: 1, default: th.navSnapMinFt, unit: 'ft' },
+                { id: 'navSnapMaxFt', label: 'Navigate↔Snapshot max', type: 'number', min: 0, max: 2000, step: 1, default: th.navSnapMaxFt, unit: 'ft' },
+                { id: 'mission-sop-run', label: '🚩 Run SOP check', type: 'button', action: 'mission-sop-run' },
+                { id: 'mission-sop-close', label: 'Close report', type: 'button', action: 'mission-sop-close' },
+            ],
+            hotkeys: [],
+        });
+    }
+
     // ========================================================
     // Init
     // ========================================================
@@ -3326,6 +6921,7 @@ ${placemarks}
         console.log(`${TAG} v${SCRIPT_VERSION} init (${CONTEXT})`);
         setupControlPanel();
         registerWithControlPanel();
+        registerMissionSop();
         // Inject the force-show-dots CSS rule into the iframe head.
         // We use a class instead of inline !important styles so cleanup
         // is just removing the class — survives Percepto DOM reuse.
@@ -3339,13 +6935,45 @@ ${placemarks}
             // to fire 30 times a minute.
             setInterval(runSumInjection, 4000);
             setTimeout(runSumInjection, 1000);
+            try { patchLeafletMap(); } catch (e) {}
+            // Live editor bridge: syncs MBT's display to the live mission-editor
+            // state + drives armed snapshot auto-AGL on GPS moves (700ms poll,
+            // early-returns unless a mission is open in the editor).
+            try { startLiveEditorSync(); } catch (e) {}
+            // Re-apply the native-editor collapse promptly as the instruction
+            // list mounts / virtualizes on scroll (the 4s interval is too slow
+            // to feel responsive). Debounced so a burst of mutations = 1 pass.
+            let collapseDebounce = null;
+            const editorObserver = new MutationObserver(() => {
+                if (collapseDebounce) return;
+                collapseDebounce = setTimeout(() => {
+                    collapseDebounce = null;
+                    try { applyNativeEditorCollapse(); } catch (e) {}
+                    try { injectEditorCollapseButton(); } catch (e) {}
+                    // Re-stamp the N#/S# marker badges too — Percepto re-renders a
+                    // step's marker after a per-step save, wiping our number until
+                    // the next style pass (the "S1 vanished but the circle stayed").
+                    try { composerStyleNativeMarkers(); } catch (e) {}
+                }, 150);
+            });
+            try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
             installRightClickHandler();
+            // READ-ONLY probe: logs + diffs each mission save vs the cached
+            // original (never modifies the save). Tells us whether the form
+            // recomputes dependent fields, which decides if a fast body-patch
+            // path is safe. Harmless to leave on.
+            installSaveDiffProbe();
+            installSaveHotkey();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
             const top = window.top || window;
             top.addEventListener('hashchange', () => {
                 hideSumButton();
+                // SAFETY: disarm snapshot auto-AGL on any navigation, so it never
+                // stays armed when you (re)enter the Mission Bank.
+                if (autoSnapAglEnabled) { autoSnapAglEnabled = false; try { updateAutoSnapAglUI(); } catch (e) {} }
+                Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]); // re-baseline next mission
                 runSumInjection();
             });
         } catch (e) {}
