@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Map Styler v34.74 (dev/latest) — new **Asset Shielding Check** (finds Unshielded assets)
+
+A second, independent validator alongside the FFZ/FP **Coverage Validator**. Where that one checks flight paths/FFZs against power lines, this one checks **assets**: an asset is **shielded** if its centroid sits within **power-line radius + asset radius** of any power-line KML (default **200 + 200 = 400 ft**, both editable in the panel). Assets beyond that get an **orange pin** labeled 1, 2, 3… with a 400 ft coverage circle and the nearest-line distance logged to the console — so you can see at a glance which assets the **SS Generator** needs to build FFZs on. Power-line KMLs are the only shielding source. Lives in its own **Asset Shielding Check** Control Panel section (Run / Clear / show-dismissed); click a pin to dismiss after confirming. Fully independent of the Coverage Validator (separate pins, separate run/clear) and works whether or not "color assets by state" is on. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools **PROMOTED TO PROD v1.46** — first real coworker release
 
 Mission Bank Tools goes live for everyone (coworkers jump **v0.51 → v1.46** at next Tampermonkey check). The whole dev arc reaches coworkers in one shot: the **SUM panel** (right-click step inspector, full step table with search/filter/sort/export), **inline altitude batch editing** with DEM elevation + **AGL view toggle**, the **Mission SOP checker**, **KML export** (flight path + N#/S# pins), **auto-AGL on save**, **➕ Stage steps**, **Shift+S** step-save, and **click-a-marker to save & switch steps**. The **Mission Generator** (⊕ Generate / ▣ Generate All — the only tool that *creates* missions) ships **locked off by default** and stays dev-only until a coworker trial; nobody sees or can trigger it. Verified zero content drift between dev and prod before promoting (only the 3 standard header lines differ).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.73
+// @version      34.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.73';
+    const SCRIPT_VERSION = '34.74';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -312,6 +312,28 @@
             ],
         },
         {
+            // Independent of the FFZ/FP Coverage Validator above: this one
+            // tests ASSETS. An asset is "shielded" if its centroid sits
+            // within (power-line radius + asset radius) of any power-line
+            // KML — default 200 + 200 = 400 ft. Assets beyond that get an
+            // orange pin so we know which ones the SS Generator must build
+            // FFZs on. Power-line KMLs are the only shielding source.
+            type: 'category',
+            id: 'asset-validator-cat',
+            label: 'Asset Shielding Check',
+            meta: '(on-demand · finds Unshielded assets)',
+            master: { id: 'asset-validator.show', default: true },
+            children: [
+                { id: 'asset-validator.powerline-radius', label: 'Power-line radius', type: 'number',
+                  min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
+                { id: 'asset-validator.asset-radius', label: 'Asset radius', type: 'number',
+                  min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
+                { id: 'asset-validator-run', label: 'Run asset check', type: 'button', action: 'run-asset-validator' },
+                { id: 'asset-validator-clear', label: 'Clear asset pins', type: 'button', action: 'clear-asset-validator' },
+                { id: 'asset-validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
+            ],
+        },
+        {
             type: 'advanced',
             id: 'styler-advanced',
             label: 'Advanced',
@@ -461,6 +483,10 @@
         results: [],
         lastRun: null,
     };
+    // Asset Shielding Check shares validatorState.results (each entry tagged
+    // kind:'gap' | 'asset') so it reuses the same persistence + pin-click +
+    // render machinery, but keeps its own last-run summary for the console.
+    let assetValidatorLastRun = null;
     const VALIDATOR_CACHE_PREFIX = 'aim-validator-';
     let leafletMapRef = null; // cached Leaflet map instance once we find it
     let leafletPatched = false; // true once we've monkey-patched L.Map.initialize
@@ -4504,22 +4530,7 @@
         // flagged spots that are right next to a power line but far from
         // either endpoint of the line — e.g. anywhere along the middle of
         // a 1000ft segment that's drawn as just two endpoints in the KML.
-        const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
-        KML_TYPES.forEach(t => {
-            const feats = kmlFeatures[kmlKey(siteID, t)] || [];
-            feats.forEach(f => {
-                const lps = [];
-                for (let i = 0; i < f.coords.length; i++) {
-                    try { lps.push(map.latLngToLayerPoint([f.coords[i].lat, f.coords[i].lng])); } catch (e) {}
-                }
-                for (let i = 0; i < lps.length - 1; i++) {
-                    segments.push({ ax: lps[i].x, ay: lps[i].y, bx: lps[i+1].x, by: lps[i+1].y });
-                }
-                // KML LinearRing already repeats its first point as the last,
-                // so the loop above naturally closes the ring. No extra
-                // closing segment needed.
-            });
-        });
+        const segments = buildShieldingSegments(siteID, map);
         if (!segments.length) {
             console.warn(`${TAG} validator: no shielding loaded for site ${siteID}`);
             validatorState.lastRun = { error: 'No shielding KMLs loaded for this site', at: Date.now() };
@@ -4528,16 +4539,7 @@
         }
 
         const thresholdFt = Number(toggleState['validator.distance']) || 200;
-        // Convert threshold from feet → layer-point units at this map state.
-        // Use a small latitude offset at the map's current center as the
-        // reference: same trick as renderValidatorPins. Web Mercator's scale
-        // varies with latitude, but within a single site the variation is
-        // negligible.
-        const centerLL = map.getCenter();
-        const latPerFt = 1 / 362776; // 1 deg lat ≈ 362,776 ft
-        const lpA = map.latLngToLayerPoint(centerLL);
-        const lpB = map.latLngToLayerPoint({ lat: centerLL.lat + thresholdFt * latPerFt, lng: centerLL.lng });
-        const thresholdPx = Math.hypot(lpB.x - lpA.x, lpB.y - lpA.y);
+        const thresholdPx = ftToPx(map, thresholdFt);
         const t2 = thresholdPx * thresholdPx;
 
         const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
@@ -4590,6 +4592,7 @@
             });
             const mid = segsLL[Math.floor(segsLL.length / 2)];
             return {
+                kind: 'gap',
                 number: i + 1,
                 midLat: mid.lat,
                 midLng: mid.lng,
@@ -4598,7 +4601,9 @@
             };
         });
 
-        validatorState.results = results;
+        // Replace ONLY the FFZ/FP gap pins; leave Asset Shielding Check pins
+        // (kind:'asset') untouched so the two tests stay independent.
+        validatorState.results = results.concat(validatorState.results.filter(r => r.kind === 'asset'));
         validatorState.lastRun = {
             count: results.length,
             at: Date.now(),
@@ -4614,11 +4619,182 @@
     }
 
     function clearCoverageValidator() {
-        const had = validatorState.results.length;
-        validatorState.results = [];
+        const before = validatorState.results.length;
+        // Clear gap pins only — keep Asset Shielding Check pins (kind:'asset').
+        validatorState.results = validatorState.results.filter(r => r.kind === 'asset');
         validatorState.lastRun = null;
         saveValidatorResults();
-        console.log(`${TAG} validator: cleared ${had} pin(s)`);
+        console.log(`${TAG} validator: cleared ${before - validatorState.results.length} pin(s)`);
+        runUpdate();
+    }
+
+    // ----- Shared shielding/geometry helpers (used by both Coverage Validator
+    // and Asset Shielding Check) -----
+
+    // Power-line KMLs as LINE SEGMENTS in layer-point space. Measuring against
+    // segments (not just vertices) is what stopped the validator from falsely
+    // flagging points near the MIDDLE of a long two-vertex segment (v32.2 bug).
+    function buildShieldingSegments(siteID, map) {
+        const segments = []; // [{ ax, ay, bx, by }] — layer-point coords
+        KML_TYPES.forEach(t => {
+            const feats = kmlFeatures[kmlKey(siteID, t)] || [];
+            feats.forEach(f => {
+                const lps = [];
+                for (let i = 0; i < f.coords.length; i++) {
+                    try { lps.push(map.latLngToLayerPoint([f.coords[i].lat, f.coords[i].lng])); } catch (e) {}
+                }
+                for (let i = 0; i < lps.length - 1; i++) {
+                    segments.push({ ax: lps[i].x, ay: lps[i].y, bx: lps[i+1].x, by: lps[i+1].y });
+                }
+                // KML LinearRing repeats its first point as the last, so the
+                // loop above naturally closes the ring — no extra segment.
+            });
+        });
+        return segments;
+    }
+
+    // Feet → layer-point pixels at the map's current center. Web Mercator scale
+    // varies with latitude, but within one site the variation is negligible.
+    function ftToPx(map, ft) {
+        const centerLL = map.getCenter();
+        const latPerFt = 1 / 362776; // 1 deg lat ≈ 362,776 ft
+        const lpA = map.latLngToLayerPoint(centerLL);
+        const lpB = map.latLngToLayerPoint({ lat: centerLL.lat + ft * latPerFt, lng: centerLL.lng });
+        return Math.hypot(lpB.x - lpA.x, lpB.y - lpA.y);
+    }
+
+    // Fetch every asset (type 3) with its name + polygon centroid. Independent
+    // of the "color assets by state" feature so the Asset Shielding Check works
+    // whether or not that toggle is on. Cookie auth, same endpoint.
+    function fetchAssetCentroids(siteID) {
+        return fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const out = [];
+                list.forEach(e => {
+                    if (!e || e.type !== 3) return;
+                    const raw = Array.isArray(e.coords) ? e.coords
+                              : (Array.isArray(e.points) ? e.points : []);
+                    const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                    if (pts.length < 3) return;
+                    let sLat = 0, sLng = 0;
+                    pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    out.push({
+                        name: e.name || (e.custom && e.custom.name) || `asset ${e.id}`,
+                        cLat: sLat / pts.length,
+                        cLng: sLng / pts.length,
+                    });
+                });
+                return out;
+            });
+    }
+
+    // Asset Shielding Check: an asset is "shielded" if its centroid sits within
+    // (power-line radius + asset radius) ft of any power-line KML — default
+    // 200 + 200 = 400 ft. Assets beyond that are flagged Unshielded so we know
+    // which ones the SS Generator must build FFZs on. Power-line KMLs are the
+    // only shielding source. Fully independent of the FFZ/FP Coverage Validator.
+    async function runAssetCoverageValidator() {
+        const map = getLeafletMap();
+        if (!map) {
+            const containers = document.querySelectorAll('.leaflet-container');
+            console.warn(`${TAG} asset-validator: Leaflet map not accessible (patched=${leafletPatched}, .leaflet-container count=${containers.length})`);
+            assetValidatorLastRun = { error: 'Leaflet map not accessible — see console for diagnostics', at: Date.now() };
+            return;
+        }
+        const siteID = getCurrentSiteID();
+        if (!siteID) {
+            assetValidatorLastRun = { error: 'No site ID in URL', at: Date.now() };
+            return;
+        }
+
+        const segments = buildShieldingSegments(siteID, map);
+        if (!segments.length) {
+            console.warn(`${TAG} asset-validator: no shielding loaded for site ${siteID}`);
+            assetValidatorLastRun = { error: 'No power-line KMLs loaded for this site', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        let assets;
+        try {
+            assets = await fetchAssetCentroids(siteID);
+        } catch (err) {
+            console.warn(`${TAG} asset-validator: asset fetch failed for site ${siteID}:`, err);
+            assetValidatorLastRun = { error: 'Asset fetch failed — see console', at: Date.now() };
+            return;
+        }
+        // The user may have navigated away while the fetch was in flight.
+        if (getCurrentSiteID() !== siteID) return;
+        if (!assets.length) {
+            console.warn(`${TAG} asset-validator: no assets found on site ${siteID}`);
+            assetValidatorLastRun = { error: 'No assets found on this site', at: Date.now() };
+            runUpdate();
+            return;
+        }
+
+        const plRadiusFt = Number(toggleState['asset-validator.powerline-radius']);
+        const assetRadiusFt = Number(toggleState['asset-validator.asset-radius']);
+        const thresholdFt = (isFinite(plRadiusFt) ? plRadiusFt : 200)
+                          + (isFinite(assetRadiusFt) ? assetRadiusFt : 200);
+        const thresholdPx = ftToPx(map, thresholdFt);
+        const t2 = thresholdPx * thresholdPx;
+        const ftPerPx = thresholdPx > 0 ? thresholdFt / thresholdPx : 0;
+
+        const startTime = Date.now();
+        const unshielded = [];
+        assets.forEach(a => {
+            let lp;
+            try { lp = map.latLngToLayerPoint([a.cLat, a.cLng]); } catch (e) { return; }
+            let best2 = Infinity;
+            for (let j = 0; j < segments.length; j++) {
+                const s = segments[j];
+                const d2 = pointToSegmentDist2(lp.x, lp.y, s.ax, s.ay, s.bx, s.by);
+                if (d2 < best2) best2 = d2;
+            }
+            if (best2 > t2) unshielded.push({ a, distFt: Math.round(Math.sqrt(best2) * ftPerPx) });
+        });
+
+        // Asset pin numbers live in a separate range (1000+) so they never
+        // collide with gap pins (1..N); label shows a clean 1..M sequence.
+        const ASSET_NUM_BASE = 1000;
+        const assetResults = unshielded.map((u, i) => ({
+            kind: 'asset',
+            number: ASSET_NUM_BASE + i + 1,
+            label: String(i + 1),
+            midLat: u.a.cLat,
+            midLng: u.a.cLng,
+            assetName: u.a.name,
+            distFt: u.distFt,
+            thresholdFt,
+            dismissed: false,
+        }));
+
+        // Replace ONLY asset pins; leave FFZ/FP gap pins untouched.
+        validatorState.results = validatorState.results.filter(r => r.kind !== 'asset').concat(assetResults);
+        assetValidatorLastRun = {
+            count: assetResults.length,
+            total: assets.length,
+            at: Date.now(),
+            durationMs: Date.now() - startTime,
+        };
+        saveValidatorResults();
+        if (assetResults.length === 0) {
+            console.log(`${TAG} asset-validator: ✓ all ${assets.length} assets shielded (centroid within ${thresholdFt}ft of a power line) (${assetValidatorLastRun.durationMs}ms)`);
+        } else {
+            console.warn(`${TAG} asset-validator: ${assetResults.length}/${assets.length} assets UNSHIELDED (centroid >${thresholdFt}ft from any power line) in ${assetValidatorLastRun.durationMs}ms`);
+            assetResults.forEach(r => console.warn(`${TAG} asset-validator:   • ${r.assetName} — nearest power line ${r.distFt}ft`));
+        }
+        runUpdate();
+    }
+
+    function clearAssetCoverageValidator() {
+        const before = validatorState.results.length;
+        validatorState.results = validatorState.results.filter(r => r.kind !== 'asset');
+        assetValidatorLastRun = null;
+        saveValidatorResults();
+        console.log(`${TAG} asset-validator: cleared ${before - validatorState.results.length} pin(s)`);
         runUpdate();
     }
 
@@ -4690,7 +4866,9 @@
     }
 
     function renderValidatorPins() {
-        if (!toggleState['validator.show']) return;
+        // Either test's master being on is enough to draw — each result is
+        // filtered per-kind inside the loop by its own show toggle.
+        if (!toggleState['validator.show'] && !toggleState['asset-validator.show']) return;
         if (!validatorState.results.length) return;
         const map = getLeafletMap();
         if (!map || typeof map.latLngToContainerPoint !== 'function') return;
@@ -4714,12 +4892,24 @@
             return sp.matrixTransform(inv);
         };
 
-        const thresholdFt = Number(toggleState['validator.distance']) || 200;
-        const latOffsetDeg = thresholdFt / 362776;
-        const showDismissed = !!toggleState['validator.show-dismissed'];
+        const gapThresholdFt = Number(toggleState['validator.distance']) || 200;
 
         validatorState.results.forEach(r => {
+            // Per-kind: asset pins (orange, centroid + stored threshold) vs
+            // FFZ/FP gap pins (red, outline + the live validator.distance).
+            const isAsset = r.kind === 'asset';
+            if (isAsset && !toggleState['asset-validator.show']) return;
+            if (!isAsset && !toggleState['validator.show']) return;
+            const showDismissed = isAsset
+                ? !!toggleState['asset-validator.show-dismissed']
+                : !!toggleState['validator.show-dismissed'];
             if (r.dismissed && !showDismissed) return;
+
+            const thresholdFt = isAsset ? (Number(r.thresholdFt) || 400) : gapThresholdFt;
+            const latOffsetDeg = thresholdFt / 362776;
+            const ringColor = isAsset ? '#ff8c00' : '#ff0033';
+            const pinFill = isAsset ? '#e67300' : '#cc0029';
+            const pinLabel = (r.label != null) ? String(r.label) : String(r.number);
 
             const c = latLngToSVG(r.midLat, r.midLng);
             const c2 = latLngToSVG(r.midLat + latOffsetDeg, r.midLng);
@@ -4741,7 +4931,7 @@
                     hl.setAttribute('data-buffer-kind', 'validator-highlight');
                     hl.setAttribute('d', d);
                     hl.setAttribute('fill', 'none');
-                    hl.setAttribute('stroke', '#ff0033');
+                    hl.setAttribute('stroke', ringColor);
                     hl.setAttribute('stroke-opacity', '0.85');
                     hl.setAttribute('stroke-width', String(Math.max(4, pinR * 0.7)));
                     hl.setAttribute('stroke-linecap', 'round');
@@ -4750,16 +4940,18 @@
                     g.appendChild(hl);
                 }
 
-                // 2. 200ft coverage circle (translucent red, dashed border)
+                // 2. Coverage circle (translucent, dashed border) — radius is
+                //    the gap threshold (200ft) for gaps, or the asset shielding
+                //    threshold (centroid radius, default 400ft) for assets.
                 const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
                 circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
                 circle.setAttribute('data-buffer-kind', 'validator-coverage');
                 circle.setAttribute('cx', String(c.x));
                 circle.setAttribute('cy', String(c.y));
                 circle.setAttribute('r', String(radiusUnits));
-                circle.setAttribute('fill', '#ff0033');
+                circle.setAttribute('fill', ringColor);
                 circle.setAttribute('fill-opacity', '0.08');
-                circle.setAttribute('stroke', '#ff0033');
+                circle.setAttribute('stroke', ringColor);
                 circle.setAttribute('stroke-opacity', '0.45');
                 circle.setAttribute('stroke-width', String(Math.max(1, radiusUnits * 0.015)));
                 circle.setAttribute('stroke-dasharray', `${radiusUnits * 0.04} ${radiusUnits * 0.04}`);
@@ -4783,7 +4975,7 @@
                 pin.setAttribute('stroke', '#aaa');
                 pin.setAttribute('stroke-opacity', '0.8');
             } else {
-                pin.setAttribute('fill', '#cc0029');
+                pin.setAttribute('fill', pinFill);
                 pin.setAttribute('stroke', '#ffffff');
                 pin.setAttribute('stroke-opacity', '1');
             }
@@ -4811,7 +5003,7 @@
             text.setAttribute('font-weight', 'bold');
             text.setAttribute('font-family', 'sans-serif');
             text.setAttribute('pointer-events', 'none');
-            text.textContent = String(r.number);
+            text.textContent = pinLabel;
             g.appendChild(text);
         });
     }
@@ -5560,6 +5752,8 @@
                 }
                 if (msg.actionId === 'run-validator') runCoverageValidator();
                 else if (msg.actionId === 'clear-validator') clearCoverageValidator();
+                else if (msg.actionId === 'run-asset-validator') runAssetCoverageValidator();
+                else if (msg.actionId === 'clear-asset-validator') clearAssetCoverageValidator();
                 else if (msg.actionId === 'clear-hides-distro') clearLocalHides('distro');
                 else if (msg.actionId === 'clear-hides-trans') clearLocalHides('trans');
                 else if (msg.actionId === 'unhide-file-distro') unhideAllFileHidden('distro');
