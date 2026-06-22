@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.40
+// @version      1.41
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.40';
+    const SCRIPT_VERSION = '1.41';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -5864,6 +5864,33 @@ ${snapPlacemarks}
         return working === bodyStr ? null : working;
     }
 
+    // Shift+S → save the open mission (the same saveApp the native Save button
+    // calls). The save POST runs through handleMissionSave, so armed auto-AGL
+    // still applies. Universal input guard so it doesn't fire while typing a name.
+    let saveHotkeyBusy = false;
+    function installSaveHotkey() {
+        if (CONTEXT !== 'IFRAME') return;
+        window.addEventListener('keydown', (e) => {
+            if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.key !== 'S' && e.key !== 's') return;
+            const t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable ||
+                (t.closest && t.closest('.ant-input,.ant-select,.ant-select-selection-search-input,[role="textbox"]')))) return;
+            if (!document.querySelector('.mission-edit__content')) return; // only with a mission open
+            const ctx = findMissionAppCtx();
+            if (!ctx || typeof ctx.saveApp !== 'function' || !ctx.currentApp) return;
+            e.preventDefault(); e.stopPropagation();
+            if (saveHotkeyBusy) return;
+            saveHotkeyBusy = true;
+            const app = ctx.currentApp, name = (app.name || 'Mission');
+            showToast(`Saving "${name}"…`, '#9ad', 1500);
+            Promise.resolve(app && ctx.saveApp(app, name))
+                .then(() => showToast(`✓ Saved "${name}" (Shift+S)`, '#5fff5f', 2500))
+                .catch(err => { console.warn(`${TAG} [save-hotkey] failed`, err); showToast('Save failed — see console.', '#ff5252', 3500); })
+                .finally(() => { saveHotkeyBusy = false; });
+        }, true);
+    }
+
     let saveProbeInstalled = false;
     function installSaveDiffProbe() {
         if (saveProbeInstalled) return;
@@ -6768,6 +6795,7 @@ ${snapPlacemarks}
             // recomputes dependent fields, which decides if a fast body-patch
             // path is safe. Harmless to leave on.
             installSaveDiffProbe();
+            installSaveHotkey();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
