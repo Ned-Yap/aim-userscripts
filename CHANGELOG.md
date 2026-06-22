@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Asset Inspector v4.87 (dev/latest) — fix: right-click subtype edits vanished when you opened the Summary
+
+Editing an asset's **Subtype** from the right-click inspector popup queued the change (you saw the "Queued: …" toast), but opening the **Summary** panel to apply it silently wiped the queue — so there was no Apply button and the change never showed. Cause: a popup-only edit never "claimed" the queue for the current site, so the Summary's site-change guard treated the queue as stale and cleared it on the way in. Now the queue claims the site the moment any edit is added, so popup edits survive until you open SUM and hit **▶ Apply queue**. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Map Styler v34.77 (dev/latest) — Asset Shielding Check skips already-Unshielded assets
 
 The asset check now cross-references each asset's Percepto state: if it's **already marked Unshielded** (the `is_unshielded` flag or "… - Unshielded" in its subtype), there's no point geometrically re-flagging it, so it's **skipped** by default. New **Skip already-Unshielded assets** toggle (on) to turn that off. The console run marks skipped assets with a ⊘ and reports the skip count; pins now only highlight assets that are *geometrically* far from a power line but *not* already known-unshielded — i.e. the ones the SS Generator actually needs to act on. Dev-only (latest/).
