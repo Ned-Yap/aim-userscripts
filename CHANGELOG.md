@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.48 (dev/latest) — Section + Battery merge (build merged missions in MBT)
+
+New **⛟ Merge** button (next to ⊕ Generate, generator-unlock only): groups the site's solo missions into **battery-tiered merged missions per compass section** (8-way + Central), ordered **furthest→closest from base**. Routed distances are computed with Asset Inspector's exact routing core (flight-path graph + Dijkstra + FFZ-bridging), so the Tattu (≤14k ft) / Tulip (≤18k) tiers match its Battery column. Groups are named `North 1` (Tattu subset) / `North 2` (+Tulip) / `Central 1-2` (all-Tattu). A preview panel shows each group's ordered stops with per-stop **section override**; **Create** builds each merged mission directly in MBT via `saveApp` (ordered concatenation of the solos' bodies wrapped in one takeoff/return — verified faithful to Percepto's official merge) and refreshes the list — no admin-page paste. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Map Styler **PROMOTED TO PROD v34.77** — Asset Shielding Check + Color assets by state
 
 Map Styler goes from prod v34.70 → **v34.77** for everyone. Two features that were dev-only reach coworkers, both **additive and off-by-default**, so nothing changes unless you opt in:

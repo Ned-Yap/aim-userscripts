@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.47
+// @version      1.48
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.47';
+    const SCRIPT_VERSION = '1.48';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1955,7 +1955,14 @@
                 const baseEnt = list.find(e => e && e.type === 8 && (e.location || (Array.isArray(e.coords) && e.coords.length)));
                 if (baseEnt) base = baseEnt.location ? { lat: baseEnt.location.lat, lng: baseEnt.location.lng } : { lat: baseEnt.coords[0].lat, lng: baseEnt.coords[0].lng };
                 if (!base && assets.length) { let la = 0, ln = 0; assets.forEach(a => { const c = genCentroid(a.ring); la += c.lat; ln += c.lng; }); base = { lat: la / assets.length, lng: ln / assets.length }; }
-                const data = { assets, ffzs, base };
+                // For the Section+Battery MERGE: flight-path entities (type 15, arcs)
+                // for the routing graph, and base candidates (type 8 installs, else
+                // type-19 GMs named /base/i) for resolveBasesMB. Kept raw — the merge
+                // routing core consumes arcs + coords directly.
+                const fps = list.filter(e => e && e.type === 15 && Array.isArray(e.arcs));
+                const baseEnts = list.filter(e => e && e.type === 8 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+                const gmBaseEnts = list.filter(e => e && e.type === 19 && e.name && /base/i.test(e.name) && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+                const data = { assets, ffzs, base, fps, baseEnts: baseEnts.length ? baseEnts : gmBaseEnts };
                 genEntCache[siteID] = data; genBase = base;
                 return data;
             });
@@ -2087,7 +2094,9 @@
             if (!generatorUnlocked) {
                 const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
                 const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+                const mr = document.getElementById('aim-mb-gen-merge-btn'); if (mr) mr.remove();
                 genCloseBulkPanel();
+                try { mbCloseMergePanel(); } catch (e) {}
                 try { if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; } } catch (e) {} // tear down any drawn asset overlay
             } else {
                 genEnsureButton();
@@ -2123,6 +2132,17 @@
             'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
         mapC.appendChild(all);
+        // "⛟ Merge" — group solo missions into battery-tiered merged missions per
+        // section. Independent of the asset overlay (operates on missions), so it
+        // stays visible whenever the generator is unlocked.
+        const mrg = document.createElement('button');
+        mrg.id = 'aim-mb-gen-merge-btn'; mrg.type = 'button';
+        mrg.textContent = '⛟ Merge';
+        mrg.title = 'Group this site\'s solo missions into battery-tiered merged missions per section (furthest→closest from base).';
+        mrg.style.cssText = 'position:absolute;top:72px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #ffb74d;background:#241a0d;color:#ffce80;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
+        mrg.onclick = e => { e.preventDefault(); e.stopPropagation(); mbOpenMergePanel(); };
+        mapC.appendChild(mrg);
         genUpdateBtn();
     }
 
@@ -2441,6 +2461,241 @@
         const refreshed = ok ? refreshMissionList() : false;
         showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
         console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
+        if (goBtn) goBtn.disabled = false;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SECTION + BATTERY MERGE (v1.48) — group the site's SOLO missions into
+    // battery-tiered merged missions per compass section (8-way + Central),
+    // ordered furthest→closest from base. Routing core PORTED from Asset Inspector
+    // (graph + Dijkstra + FFZ-bridging + batteryFor) so routed distances + Tattu/
+    // Tulip tiers MATCH its Battery column. Merge = ordered concatenation of the
+    // solos' bodies (strip each takeoff/returnHome, wrap ONE takeoff + ONE return);
+    // the server computes route_points/app_data (verified vs a real merged mission).
+    // Gated behind the generator unlock (it CREATES missions).
+    // ════════════════════════════════════════════════════════════════════════
+    const MB_BATTERY = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    const MB_REACH_FFZ_FT = 70, MB_ENTRY_FFZ_FT = 25;
+    const MB_CENTRAL_FT = 750;   // asset within this straight-line of base → "Central"
+    const MB_SECTION_NAMES = { N: 'North', NE: 'Northeast', E: 'East', SE: 'Southeast', S: 'South', SW: 'Southwest', W: 'West', NW: 'Northwest', C: 'Central' };
+    const MB_SECTION_ORDER = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'C'];
+
+    function mbApproxMeters(lat1, lng1, lat2, lng2) { const R = 6371000; const p1 = lat1 * Math.PI / 180; const dp = (lat2 - lat1) * Math.PI / 180; const dl = (lng2 - lng1) * Math.PI / 180; const x = dl * Math.cos(p1), y = dp; return Math.sqrt(x * x + y * y) * R; }
+    function mbVkey(p) { return `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`; }
+    function mbSimplifyPolygon(poly) { if (!poly || poly.length < 3) return poly || []; let cl = 0, cn = 0; for (const p of poly) { cl += p.lat; cn += p.lng; } cl /= poly.length; cn /= poly.length; return poly.slice().sort((a, b) => Math.atan2(a.lat - cl, a.lng - cn) - Math.atan2(b.lat - cl, b.lng - cn)); }
+    function mbPointToSegMeters(lat, lng, a, b) { const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat; const dx = bx - ax, dy = by - ay; const l2 = dx * dx + dy * dy; let t = l2 === 0 ? 0 : ((lng - ax) * dx + (lat - ay) * dy) / l2; t = Math.max(0, Math.min(1, t)); return mbApproxMeters(lat, lng, ay + t * dy, ax + t * dx); }
+    function mbPointToPolygonMeters(lat, lng, ring) { if (!ring || ring.length < 3) return Infinity; if (genPointInPoly({ lat, lng }, ring)) return 0; let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = mbPointToSegMeters(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; }
+    function mbBuildGraph(fps) {
+        const adj = new Map(), verts = new Map();
+        const addV = p => { const k = mbVkey(p); if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng }); if (!adj.has(k)) adj.set(k, []); return k; };
+        (fps || []).forEach(e => { (e.arcs || []).forEach(arc => { if (!arc.point_a || !arc.point_b) return; if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return; const ka = addV(arc.point_a), kb = addV(arc.point_b); if (ka === kb) return; const w = (typeof arc.distance === 'number' && arc.distance > 0) ? arc.distance : mbApproxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng); adj.get(ka).push({ to: kb, w }); adj.get(kb).push({ to: ka, w }); }); });
+        return { adj, verts };
+    }
+    function mbDijkstra(graph, startKey) { const dist = new Map(); if (!graph.adj.has(startKey)) return dist; dist.set(startKey, 0); const vis = new Set(); const pq = [{ k: startKey, d: 0 }]; while (pq.length) { let mi = 0; for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i; const { k, d } = pq.splice(mi, 1)[0]; if (vis.has(k)) continue; vis.add(k); (graph.adj.get(k) || []).forEach(({ to, w }) => { const nd = d + w; if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); pq.push({ k: to, d: nd }); } }); } return dist; }
+    function mbNearestVertex(graph, lat, lng) { let best = null; graph.verts.forEach((v, k) => { const d = mbApproxMeters(lat, lng, v.lat, v.lng); if (!best || d < best.dist) best = { key: k, dist: d, vert: v }; }); return best; }
+    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; if (ft <= MB_BATTERY.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= MB_BATTERY.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${MB_BATTERY.tulipMaxFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
+
+    // 8-way + Central section from base. atan2(dLat,dLng): 0=E, 90=N.
+    function mbSection(pt, base) {
+        if (!base) return 'C';
+        if (mbApproxMeters(base.lat, base.lng, pt.lat, pt.lng) * 3.28084 <= MB_CENTRAL_FT) return 'C';
+        const dLat = pt.lat - base.lat, dLng = pt.lng - base.lng;
+        let deg = Math.atan2(dLat, dLng) * 180 / Math.PI; if (deg < 0) deg += 360; // 0=E,90=N,180=W,270=S
+        const idx = Math.round(deg / 45) % 8;
+        return ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE'][idx];
+    }
+
+    // Build a router for the site: bridged FP graph + base Dijkstra maps. routeFor
+    // (a list of asset points) returns one-way routeM (base→FFZ far edge) — the
+    // EXACT Asset-Inspector algorithm. Reusable across all assets on the site.
+    function mbBuildRouter(ent) {
+        const graph = mbBuildGraph(ent.fps);
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) }));
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        ffzs.forEach(f => { const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM); for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) { const w = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng); graph.adj.get(inside[i].key).push({ to: inside[j].key, w }); graph.adj.get(inside[j].key).push({ to: inside[i].key, w }); } });
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseRuns = bases.map(b => { const bv = mbNearestVertex(graph, b.lat, b.lng); if (!bv) return null; return { baseConn: bv.dist, dist: mbDijkstra(graph, bv.key) }; }).filter(Boolean);
+        const reachM = MB_REACH_FFZ_FT / 3.28084;
+        return {
+            ready: graph.verts.size > 0 && baseRuns.length > 0,
+            verts: graph.verts.size,
+            routeFor(pts) {
+                if (!pts || !pts.length) return null;
+                let ffz = null, ffzD = Infinity;
+                ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+                if (!ffz || ffzD > reachM) return null;
+                const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                if (!entries.length) return null;
+                let best = null;
+                baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
+                return best;
+            }
+        };
+    }
+
+    // The asset point(s) a solo inspects = its snapshot (type 6) locations (asset
+    // center). Falls back to navigate (type 1) locations. Used for section + routing.
+    function mbSoloPoints(mission) {
+        const ins = (mission && mission.instructions) || [];
+        const snaps = ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        if (snaps.length) return snaps;
+        return ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+    }
+    // The mission "body" = everything except the leading takeoff + trailing
+    // returnHome (types 0 / 99). These get concatenated in the merge.
+    function mbMissionBody(mission) {
+        return ((mission && mission.instructions) || []).filter(i => i && i.type !== 0 && i.type !== 99);
+    }
+
+    // Compute the merge plan for a site: per-solo {mission, pts, ring, routeM,
+    // section, battery}, then grouped into battery-tiered, furthest→closest sets.
+    // `overrides` = {missionId: sectionCode} manual section reassignments.
+    function mbComputeMerge(siteID, missions, ent, overrides) {
+        const router = mbBuildRouter(ent);
+        const base = ent.base;
+        const solos = missions.map(m => {
+            const pts = mbSoloPoints(m);
+            if (!pts.length) return { mission: m, routeM: null, reason: 'no-location', section: 'C', battery: null };
+            // Match to an asset entity (pad ring contains the snapshot point) for an
+            // accurate pad-edge → FFZ distance; else route from the point itself.
+            const c = pts[0];
+            let ring = null;
+            for (const a of (ent.assets || [])) { if (genPointInPoly(c, a.ring)) { ring = a.ring; break; } }
+            const routePts = ring || pts;
+            const routeM = router.ready ? router.routeFor(routePts) : null;
+            const ov = overrides && overrides[String(m.id)];
+            const section = ov || mbSection(c, base);
+            return { mission: m, pt: c, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
+        });
+        // Group by section → battery-tier sets.
+        const bySection = {};
+        solos.forEach(s => { (bySection[s.section] = bySection[s.section] || []).push(s); });
+        const groups = [];
+        MB_SECTION_ORDER.forEach(code => {
+            const list = (bySection[code] || []).slice();
+            if (!list.length) return;
+            // order furthest→closest by routeM (null routes sink to the bottom).
+            list.sort((a, b) => (b.routeM == null ? -1 : b.routeM) - (a.routeM == null ? -1 : a.routeM));
+            const routable = list.filter(s => s.routeM != null);
+            const tattu = routable.filter(s => s.battery && s.battery.level === 0);
+            const tulip = routable.filter(s => s.battery && s.battery.level === 1);
+            const over = routable.filter(s => s.battery && s.battery.level === 2);
+            const name = MB_SECTION_NAMES[code];
+            if (tulip.length) {
+                // East 1 = Tattu subset; East 2 = Tattu + Tulip (East 2 ⊇ East 1).
+                if (tattu.length) groups.push({ code, name: `${name} 1`, battery: 'Tattu', solos: tattu.slice() });
+                groups.push({ code, name: `${name} 2`, battery: 'Tulip', solos: tattu.concat(tulip) });
+            } else if (tattu.length) {
+                groups.push({ code, name: `${name} 1-2`, battery: 'Tattu/Tulip', solos: tattu.slice() });
+            }
+            // over-range + unroutable solos are surfaced in the panel but not merged.
+            if (over.length || list.some(s => s.routeM == null)) {
+                const excluded = over.concat(list.filter(s => s.routeM == null));
+                groups.push({ code, name: `${name} — excluded`, excluded });
+            }
+        });
+        return { solos, groups, routerReady: router.ready, verts: router.verts };
+    }
+
+    // ── Merge panel + commit ─────────────────────────────────────────────────
+    const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
+    let mbMergeBusy = false;
+    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
+    function mbCurrentSiteID() { const m = (location.hash || '').match(/#\/site\/(\d+)\//); return m ? m[1] : null; }
+    function mbFetchMissionsFull(siteID) {
+        return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => Array.isArray(arr) ? arr : []);
+    }
+    function mbOpenMergePanel() {
+        if (!generatorUnlocked) return;
+        if (CONTEXT !== 'IFRAME') return;
+        const siteID = mbCurrentSiteID();
+        if (!siteID) { showToast('No site loaded.', '#ff9800', 3000); return; }
+        showToast('⛟ Loading missions + map for the merge…', '#9ad', 2500);
+        Promise.all([mbFetchMissionsFull(siteID), genFetchEntities(siteID)])
+            .then(([missions, ent]) => {
+                const overrides = {};
+                const rerender = () => { const data = mbComputeMerge(siteID, missions, ent, overrides); mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender); };
+                rerender();
+            })
+            .catch(e => { console.warn(`${TAG} [merge] load failed`, e); showToast('Merge: failed to load (see console).', '#ff5252', 4000); });
+    }
+    function mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender) {
+        mbCloseMergePanel();
+        const ft = m => m == null ? '—' : `${Math.round(m * 3.28084).toLocaleString()} ft`;
+        const secOpts = (cur) => MB_SECTION_ORDER.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${MB_SECTION_NAMES[c]}</option>`).join('');
+        const mergeGroups = data.groups.filter(g => g.solos);
+        const exclGroups = data.groups.filter(g => g.excluded);
+        const chip = (b) => b ? `<span style="background:${b.color}22;color:${b.color};border:1px solid ${b.color}66;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700;white-space:nowrap;">${b.label}</span>` : '';
+        const soloRow = (s) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+            <span style="flex:1;color:#e6e6e6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span>
+            <span style="color:#9ad;font-size:10px;white-space:nowrap;">${ft(s.routeM)}</span>
+            ${chip(s.battery)}
+            <select data-mb-ov="${s.mission.id}" title="Reassign section" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:1px 2px;">${secOpts(s.section)}</select>
+        </div>`;
+        const groupBlock = (g) => `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:rgba(95,255,95,0.08);">
+                <span style="font-weight:800;color:#7dff7d;font-size:12px;">⛟ ${escapeHtml(g.name)}</span>
+                <span style="color:#9ad;font-size:10px;">${g.solos.length} stops · ${g.battery}</span>
+            </div>
+            <div style="padding:2px 4px;">${g.solos.map(soloRow).join('')}</div>
+        </div>`;
+        const exclBlock = (g) => `<div style="margin:5px 0;padding:4px 8px;border:1px solid #3a2a2a;border-radius:6px;">
+            <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)}</div>
+            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${s.reason === 'unreachable' ? 'no route' : (s.reason || (s.battery && s.battery.level === 2 ? 'over range' : ''))}</span><select data-mb-ov="${s.mission.id}" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;">${secOpts(s.section)}</select></div>`).join('')}
+        </div>`;
+        const routable = data.solos.filter(s => s.routeM != null).length;
+        const p = document.createElement('div');
+        p.id = MB_MERGE_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
+            'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">⛟ Merge by Section + Battery</span>
+                <button data-mb-merge-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
+                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}
+                <div style="margin-top:3px;color:#789;">Furthest→closest from base. East 1 = Tattu subset, East 2 = + Tulip. Reassign a stop's section with the dropdown.</div>
+            </div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">
+                ${mergeGroups.length ? mergeGroups.map(groupBlock).join('') : '<div style="padding:12px;color:#888;">No mergeable groups (need routable solos).</div>'}
+                ${exclGroups.length ? `<div style="margin-top:6px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Excluded (not merged)</div>${exclGroups.map(exclBlock).join('')}` : ''}
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mb-merge-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mb-merge-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${mergeGroups.length && !mbMergeBusy ? '' : 'disabled'}>⛟ Create ${mergeGroups.length} merged</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-mb-merge-close]').onclick = mbCloseMergePanel;
+        p.querySelectorAll('[data-mb-ov]').forEach(sel => sel.onchange = () => { overrides[sel.getAttribute('data-mb-ov')] = sel.value; rerender(); });
+        p.querySelector('[data-mb-merge-go]').onclick = () => mbCommitAllMerges(mergeGroups, p.querySelector('[data-mb-merge-status]'), p.querySelector('[data-mb-merge-go]'));
+    }
+    function mbMakeStep(type, value1) { return { type, value1: value1 === undefined ? null : value1, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }; }
+    async function mbCommitAllMerges(groups, statusEl, goBtn) {
+        if (!generatorUnlocked || mbMergeBusy) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        mbMergeBusy = true; if (goBtn) goBtn.disabled = true;
+        const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+        let ok = 0, fail = 0;
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i];
+            setStatus(`Creating "${g.name}" (${i + 1}/${groups.length})…`);
+            // takeoff + each solo's body (no takeoff/return) furthest→closest + returnHome
+            const body = [];
+            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(st)));
+            const instrs = [mbMakeStep(0, 20)].concat(body, [mbMakeStep(99)]);
+            try { await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, g.name); ok++; }
+            catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}"`, e); }
+        }
+        mbMergeBusy = false;
+        const refreshed = ok ? refreshMissionList() : false;
+        setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
+        showToast(`⛟ Merge: created ${ok} merged mission${ok === 1 ? '' : 's'}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
+        console.log(`${TAG} [merge] created ${ok}, failed ${fail}`);
         if (goBtn) goBtn.disabled = false;
     }
 
