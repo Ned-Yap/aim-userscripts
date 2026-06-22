@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.32
+// @version      1.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.32';
+    const SCRIPT_VERSION = '1.33';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2196,19 +2196,34 @@
         };
     }
     function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    // Existing mission names (lowercased) for the site — so bulk skips assets
+    // that already have a mission. Always a FRESH fetch (catches ones you just made).
+    function genFetchMissionNames(siteID) {
+        return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
+            .then(r => r.ok ? r.json() : [])
+            .then(arr => (Array.isArray(arr) ? arr : []).map(m => ((m && m.name) || '').trim().toLowerCase()).filter(Boolean))
+            .catch(() => []);
+    }
+    function genHasMission(asset, names) {
+        const an = (asset.name || '').trim().toLowerCase();
+        if (!an) return false;
+        const gen = `${genSection(genCentroid(asset.ring))} - ${asset.name}`.trim().toLowerCase();
+        return names.some(nm => nm === gen || nm === an || nm.endsWith(' - ' + an));
+    }
     function genOpenBulkPanel() {
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('Generator: no site.', '#ff9800'); return; }
-        showToast('Loading assets + elevations…', '#9ad', 2000);
-        genFetchEntities(siteID).then(({ assets, ffzs }) => {
-            const valid = assets.filter(a => !genSkipReason(a));
-            const skipped = assets.filter(a => genSkipReason(a));
+        showToast('Loading assets + missions + elevations…', '#9ad', 2200);
+        Promise.all([genFetchEntities(siteID), genFetchMissionNames(siteID)]).then(([{ assets, ffzs }, names]) => {
+            const stateSkip = assets.filter(a => genSkipReason(a));
+            const haveMission = assets.filter(a => !genSkipReason(a) && genHasMission(a, names));
+            const valid = assets.filter(a => !genSkipReason(a) && !genHasMission(a, names));
             const pts = valid.map(a => genCentroid(a.ring));
-            const render = () => genRenderBulkPanel(valid, skipped, ffzs);
+            const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs);
             try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
         }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
     }
-    function genRenderBulkPanel(valid, skipped, ffzs) {
+    function genRenderBulkPanel(valid, stateSkip, haveMission, ffzs) {
         genCloseBulkPanel();
         const rows = valid.map((a, i) => {
             const info = genPreviewInfo(a, ffzs);
@@ -2222,7 +2237,9 @@
                 <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
             </label>`;
         }).join('');
-        const skipRows = skipped.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
+        const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
+        const existRows = haveMission.map(a => `<div style="padding:3px 4px;color:#9ad;font-size:11px;border-bottom:1px solid #1b2430;">${nm(a)} <span style="color:#678;">· already has a mission</span></div>`).join('');
+        const skipRows = stateSkip.map(a => `<div style="padding:3px 4px;color:#ff8a8a;font-size:11px;border-bottom:1px solid #241b1b;">${nm(a)} <span style="color:#a66;">· ${escapeHtml(genSkipReason(a))}</span></div>`).join('');
         const p = document.createElement('div');
         p.id = GEN_BULK_PANEL_ID;
         p.style.cssText = 'position:fixed;top:60px;right:24px;width:380px;max-height:80vh;display:flex;flex-direction:column;z-index:2147483600;' +
@@ -2233,11 +2250,12 @@
                 <button data-gen-bulk-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
             </div>
             <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
-                <b style="color:#7dff7d;">${valid.length}</b> valid · <b style="color:#ff8a8a;">${skipped.length}</b> skipped (Empty/Unreachable/Unshielded)
+                <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
             </div>
-            <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No valid assets.</div>'}
-                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped</div>${skipRows}` : ''}
+            <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
+                ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have missions</div>${existRows}` : ''}
+                ${skipRows ? `<div style="margin-top:8px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Skipped (state)</div>${skipRows}` : ''}
             </div>
             <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
                 <span data-gen-bulk-status style="flex:1;font-size:11px;color:#9ad;"></span>
