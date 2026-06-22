@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.56 (dev/latest) — M1 on the step you're editing is fully native (no self re-open)
+
+Fixes the marker-switch colliding with the step you're currently editing: left-clicking the marker of the step **you're already in** now does **nothing** on our side — fully native, so you can drag/reposition it (including dropping it right next to itself). Every **other** marker still saves the current step and switches to it, as before. Made the "which step is open" detection reliable (tracks the step we opened) so the same-step exemption is precise — only the edited one, never the others. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.55 (dev/latest) — reassign which Nav a Snapshot belongs to (M2 on a snapshot)
 
 Right-clicking a **snapshot** badge on the map now shows two fields: its capture order (**S# →**, as before) **and which Navigate it's attached to** (**Nav N# →**). Type a different nav number and the snapshot's whole block (snapshot + its Thermal/GEM/Wait wrap) is re-homed under that nav as its last capture — the snapshot's own GPS/altitude is unchanged, only which nav the drone flies to before shooting it. Hit SAVE in the editor to persist. Dev-only (latest/).

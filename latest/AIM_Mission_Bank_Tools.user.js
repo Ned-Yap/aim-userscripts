@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.55
+// @version      1.56
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.55';
+    const SCRIPT_VERSION = '1.56';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1536,6 +1536,7 @@
     const COMPOSER_ROW_ID = 'aim-mb-composer-row';
     let composerMission = null;    // the matched mission (id→data source; order read from DOM)
     let composerBusy = false;      // guard against concurrent reorders
+    let composerEditingStepId = null; // id of the step whose editor we last opened (reliable "current step" for marker-switch)
     // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
     // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
     // same spot+size. Left-click (M1) stays native (opens the step); right-click
@@ -1808,7 +1809,9 @@
             if (!document.querySelector('[data-testid="btn-save-instruction"]')) return null; // no editor open
             const id = m.getAttribute('data-aim-id');
             const curId = getOpenStepId();
-            if (curId != null && String(curId) === String(id)) return null; // same step → leave native
+            // ONLY the step you're currently editing is native (drag/reposition).
+            // Every OTHER marker is a switch (save current + open it).
+            if (curId != null && String(curId) === String(id)) return null;
             return id;
         };
         const blockSwitchDown = (e) => {
@@ -1820,22 +1823,28 @@
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
             const id = m.getAttribute('data-aim-id');
-            const switchId = switchTargetFor(e);
-            if (switchId) {
-                // Switching steps mid-edit: suppress the native move, then
-                // openInstructionEditor saves the open step + opens this one.
-                e.preventDefault(); e.stopImmediatePropagation();
-                try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
-                catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+            const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
+            if (editorOpen) {
+                const switchId = switchTargetFor(e);
+                if (switchId) {
+                    // DIFFERENT step → suppress the native move, save current + open it.
+                    e.preventDefault(); e.stopImmediatePropagation();
+                    composerEditingStepId = String(switchId); // we're now editing this one
+                    try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
+                    catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+                }
+                // SAME step you're editing (or can't tell): do NOTHING — leave M1
+                // fully native so you can drag the marker without re-opening it.
                 return;
             }
-            // No editor open (or the same step): native scroll + open the clicked step.
+            // No editor open → open the clicked step's editor.
             setTimeout(() => composerOpenStepEdit(id), 320);
         }, true);
     }
     function composerOpenStepEdit(id) {
         const draggable = document.querySelector(`[data-rfd-draggable-id="${id}"]`);
         if (!draggable) { showToast('Could not find that step to edit.', '#ff9800', 3000); return; }
+        composerEditingStepId = String(id); // remember which step we opened
         try {
             const ok = triggerInstructionAction(draggable, 'edit');
             if (!ok) forceOpenInstructionEdit(draggable);
@@ -6555,6 +6564,10 @@ ${snapPlacemarks}
     function getOpenStepId() {
         const fid = findFocusedInstrId();
         if (fid != null) return fid;
+        // Fall back to the step WE last opened (marker-click / switch) — makes the
+        // "is this the step I'm editing?" check reliable even if Percepto's
+        // focusedInstructionId can't be read, so only that one stays native.
+        if (composerEditingStepId != null) return composerEditingStepId;
         return saveNextLastOpenedId;
     }
 
