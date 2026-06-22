@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.46
+// @version      1.47
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.46';
+    const SCRIPT_VERSION = '1.47';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2186,6 +2186,57 @@
         }
         return null;
     }
+    // Find Percepto's mission-LIST refetch — the zero-arg fn that re-GETs
+    // /available_app/ (the sidebar list query, projected to only:"id,name") and
+    // pushes the result into the list's setState. Found via the AIM_Mission_List_Probe:
+    // its source uniquely contains BOTH "/available_app/" and an `only:` projection,
+    // which distinguishes it from saveApp(2)/deleteApp(1). Walk the Mission Bank fiber
+    // for a 0-arg function matching that signature. Re-walk fresh each call
+    // (per-render closures).
+    function findMissionListRefetch() {
+        const anchors = ['a[href*="/mission-bank/"]', '.mission-bank__content', '.mission-bank', '.mission-bank__map-container', '[data-rfd-draggable-id]'];
+        const seen = new Set();
+        const scan = (obj) => {
+            if (!obj || typeof obj !== 'object' || seen.has(obj)) return null; seen.add(obj);
+            let keys = []; try { keys = Object.keys(obj); } catch (e) { return null; }
+            for (const k of keys) {
+                let v; try { v = obj[k]; } catch (e) { continue; }
+                if (typeof v === 'function' && v.length === 0) {
+                    let s = ''; try { s = String(v); } catch (e) {}
+                    if (/available_app/.test(s) && /only\s*:/.test(s)) return v;
+                }
+            }
+            return null;
+        };
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 200) {
+                    let r = null;
+                    try { r = scan(node.memoizedProps && node.memoizedProps.value); } catch (e) {} if (r) return r;
+                    try { r = scan(node.memoizedProps); } catch (e) {} if (r) return r;
+                    try { r = scan(node.stateNode); } catch (e) {} if (r) return r;
+                    try { let h = node.memoizedState, i = 0; while (h && i < 40) { let rr = scan(h.memoizedState); if (rr) return rr; h = h.next; i++; } } catch (e) {}
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
+    // Refresh Percepto's sidebar mission list in place (no page reload) after a
+    // generate/bulk create. Best-effort: if the refetch fn can't be found, the new
+    // missions still exist on the server — they just need a manual reload to show.
+    function refreshMissionList() {
+        try {
+            const fn = findMissionListRefetch();
+            if (typeof fn === 'function') { fn(); console.log(`${TAG} [gen] mission list refreshed`); return true; }
+            console.warn(`${TAG} [gen] list-refetch fn not found — list may need a manual reload`);
+        } catch (e) { console.warn(`${TAG} [gen] list refresh failed`, e); }
+        return false;
+    }
+
     async function genGenerateForAsset(asset, ffzs, opts) {
         if (!generatorUnlocked) return;   // generator locked off on this install
         const ctx = findMissionAppCtx();
@@ -2199,6 +2250,7 @@
             const saved = (res && res.app) ? res.app : res;
             console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
             showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
+            try { refreshMissionList(); } catch (e) {} // sidebar shows the new mission (no reload)
             try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
             // Navigate to the new mission's editor URL so it shows without a page
             // refresh. Use THIS frame's own hash (the editor is in the react-pages
@@ -2385,10 +2437,10 @@
         }
         genBulkBusy = false;
         setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
-        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}. Refresh the mission list to see them.`, ok ? '#5fff5f' : '#ff5252', 7000);
+        // Refresh Percepto's sidebar list in place so the new missions appear now.
+        const refreshed = ok ? refreshMissionList() : false;
+        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
         console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
-        // Soft-refresh the list so the new missions appear (iframe's own hash).
-        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)/); if (mm && cur !== mm[1]) location.hash = mm[1]; } catch (e) {}
         if (goBtn) goBtn.disabled = false;
     }
 
