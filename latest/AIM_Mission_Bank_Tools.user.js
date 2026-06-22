@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.30
+// @version      1.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.30';
+    const SCRIPT_VERSION = '1.31';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2135,7 +2135,7 @@
         pop.style.cssText += 'position:fixed;z-index:2147483600;min-width:250px;background:#1f2228;' +
             'border:1px solid #14d2dc;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
         pop.innerHTML = `
-            <div class="aim-mb-menu-head"><span class="aim-mb-menu-title">⊕ Generate mission</span><button class="aim-mb-menu-close" data-gp-close>✕</button></div>
+            <div class="aim-mb-menu-head" style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.12);"><span class="aim-mb-menu-title" style="font-weight:800;color:#7adfe6;font-size:13px;">⊕ Generate mission</span><button class="aim-mb-menu-close" data-gp-close style="flex:0 0 auto;background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:13px;line-height:1;">✕</button></div>
             <div style="padding:10px 12px;font-size:11px;color:#cfe;">
                 <div style="font-weight:800;color:#7adfe6;margin-bottom:6px;font-size:12px;">${escapeHtml(name)}</div>
                 <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
