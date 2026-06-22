@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.39
+// @version      1.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.39';
+    const SCRIPT_VERSION = '1.40';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -426,6 +426,8 @@
     let elevQueue = [];           // pending fetch tasks
     let elevActive = 0;           // currently in-flight fetches
     let elevBackoffUntil = 0;     // pause the queue until this time on a 429
+    const elevFailedAt = {};      // key → last failure time (don't re-request for the cooldown)
+    const ELEV_FAIL_COOLDOWN = 30000;
     const elevInFlight = {};      // key → Promise (so duplicate requests for same point share one fetch)
 
     function loadElevationCache() {
@@ -491,6 +493,9 @@
         const cache = loadElevationCache();
         if (cache[key] != null) return Promise.resolve(cache[key]);
         if (elevInFlight[key]) return elevInFlight[key];
+        // Don't re-request a position that just failed (429/error) — this is what
+        // turned rate-limits into a request STORM (fail → uncached → re-request).
+        if (elevFailedAt[key] && Date.now() - elevFailedAt[key] < ELEV_FAIL_COOLDOWN) return Promise.resolve(null);
         const p = new Promise(resolve => {
             elevQueue.push({ lat, lng, key, resolve });
             pumpElevQueue();
@@ -517,10 +522,11 @@
                         const cache = loadElevationCache();
                         cache[task.key] = meters;
                         saveElevationCache();
-                    }
+                        delete elevFailedAt[task.key];
+                    } else { elevFailedAt[task.key] = Date.now(); } // 429/miss → cool down before retry
                     task.resolve(meters);
                 })
-                .catch(() => task.resolve(null))
+                .catch(() => { elevFailedAt[task.key] = Date.now(); task.resolve(null); })
                 .finally(() => { elevActive--; pumpElevQueue(); });
         }
     }
@@ -1682,14 +1688,6 @@
             seen++;
             const ll = layer._latlng;
             if (!ll) return;
-            // When auto-AGL is armed, warm the DEM cache for marker positions —
-            // but ONLY if uncached and not already requested in the last 20s, so
-            // this style pass (which runs often) doesn't hammer /location_altitude/
-            // into 429s.
-            if (autoSnapAglEnabled && getElevationFromCache(ll.lat, ll.lng) == null) {
-                const ek = `${(+ll.lat).toFixed(5)},${(+ll.lng).toFixed(5)}`, now = Date.now();
-                if (!genElevReqAt[ek] || now - genElevReqAt[ek] > 20000) { genElevReqAt[ek] = now; try { fetchElevation(ll.lat, ll.lng); } catch (e) {} }
-            }
             const info = lookup[K(ll.lat, ll.lng)];
             if (!info) return;
             matched++;
@@ -1860,10 +1858,9 @@
         // AGL view depends on DEM that loads async — re-render cards each tick so
         // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
         else if (showAglInEditor && collapseEditorCards) { try { applyNativeEditorCollapse(); } catch (e) {} }
-        // (2) Auto-AGL (armed only): re-float snapshots that MOVED to ground+AGL,
-        //     live, via updateInstruction. First sighting = baseline (no change),
-        //     so existing snapshots aren't clobbered until you actually move them.
-        if (autoSnapAglEnabled) liveAutoSnapAgl(ctx);
+        // NOTE: auto-AGL is SAVE-ONLY now (applySnapAglToBodyStr) — we no longer
+        // re-float snapshots on every move (it hammered the DEM endpoint into
+        // 429s, and you only need it correct at save time).
     }
     function liveAutoSnapAgl(ctx) {
         const aglM = defaultSnapAglFt / 3.28084;
