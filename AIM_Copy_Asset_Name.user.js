@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -34,7 +34,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.2';
+    const SCRIPT_VERSION = '4.3';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2376,6 +2376,17 @@
         return pendingSegmentEdits[pendingEditKey(entityId, arcId, field)];
     }
     function queuePendingEdit(entry) {
+        // Claim the queue for the current site the instant an edit lands.
+        // Popup-originated edits (right-click → edit subtype/name) don't go
+        // through renderSummaryPanel, so without this pendingEditsSite stays
+        // null — and the next SUM-panel open calls ensurePendingForSite(),
+        // sees null !== siteID, treats it as a site change, and WIPES the
+        // queue (along with the only Apply-queue button). Claiming here keeps
+        // popup edits alive until the user opens SUM to commit them. Idempotent
+        // for table-originated edits (renderSummaryPanel already claimed it),
+        // and correctly clears a stale cross-site queue when the site changed.
+        const sid = getCurrentSiteID();
+        if (sid) ensurePendingForSite(sid);
         pendingSegmentEdits[pendingEditKey(entry.entityId, entry.arcId, entry.field)] = entry;
     }
     function discardPendingEdit(entityId, arcId, field) {

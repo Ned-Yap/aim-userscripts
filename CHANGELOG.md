@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Asset Inspector v4.3 (PROD) — fix: right-click subtype edits vanished when you opened the Summary
+
+If you right-clicked an asset, edited its **Subtype**, and saw the "Queued: …" toast, then opened the **Summary** panel to apply it — the change was silently gone (no Apply button, no pending highlight). The popup-only edit never registered which site it belonged to, so the Summary's site-change guard treated the queue as stale and cleared it on open. Now the queue records its site the moment any edit is added, so popup edits survive until you open SUM and hit **▶ Apply queue**. Surgical fix backported to prod ahead of the larger dev bundle.
+
+---
+
 ## 2026-06-22 — Asset Inspector v4.87 (dev/latest) — fix: right-click subtype edits vanished when you opened the Summary
 
 Editing an asset's **Subtype** from the right-click inspector popup queued the change (you saw the "Queued: …" toast), but opening the **Summary** panel to apply it silently wiped the queue — so there was no Apply button and the change never showed. Cause: a popup-only edit never "claimed" the queue for the current site, so the Summary's site-change guard treated the queue as stale and cleared it on the way in. Now the queue claims the site the moment any edit is added, so popup edits survive until you open SUM and hit **▶ Apply queue**. Dev-only (latest/).
