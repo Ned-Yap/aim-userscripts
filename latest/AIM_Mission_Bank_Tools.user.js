@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.34';
+    const SCRIPT_VERSION = '1.35';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2310,19 +2310,12 @@
     // near the existing nav/snap so you can drag them into position. Navigates
     // keep shouldUseFreezoneMinAlt (FFZ-min); snapshots auto-set to ground+AGL on
     // drop via the live Auto-AGL. Uses the editor's createInstruction.
-    function genStripId(o) { const c = Object.assign({}, o); delete c.id; return c; }
-    function genWrapTemplates(instrs) {
-        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
-        const out = [];
-        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) {
-            const t = instrs[i] && instrs[i].type_name;
-            if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') out.push(genStripId(instrs[i]));
-            else break;
-        }
-        if (out.length) return out;
-        // fallback: build the canonical wrap with type_name so it renders
-        const W = (type, type_name, value1, v1n) => ({ type, type_name, value1, value2: null, value1_name: v1n || null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
-        return [W(7, 'cameraSelect', true), W(24, 'gemMode', 1), W(5, 'wait', 10, 'Sec'), W(24, 'gemMode', 0), W(7, 'cameraSelect', false)];
+    // Build a fresh instruction with a NUMERIC type. createInstruction's h() +
+    // the server expect a number; the LIVE editor instructions carry a normalized
+    // type OBJECT which must NOT be copied (copying it = "No instruction component
+    // for type [object Object]" + save fails). Same minimal shape buildMissionForAsset uses.
+    function genInstr(type, value1, value2, location, extra) {
+        return { type, value1: value1 == null ? null : value1, value2: value2 == null ? null : value2, location: location || null, extra_options: extra || {}, polygon_points: null, snapshot_points: null };
     }
     async function genStageSteps(navCount, snapCount, inspectionScan) {
         let ctx = findMissionAppCtx();
@@ -2332,12 +2325,14 @@
         const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
         if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
         const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
-        const wrap = inspectionScan ? genWrapTemplates(instrs) : null;
+        const navExtra = Object.assign({ shouldUseFreezoneMinAlt: true }, (navRef && navRef.extra_options) || {});
+        const snapExtra = Object.assign({ pitch: 1001 }, (snapRef && snapRef.extra_options) || {});
+        const buildWrap = () => [genInstr(7, true, null, null, {}), genInstr(24, 1, null, null, {}), genInstr(5, 10, null, null, {}), genInstr(24, 0, null, null, {}), genInstr(7, false, null, null, {})];
         const newSteps = [];
-        for (let i = 0; i < navCount; i++) newSteps.push(genStripId(Object.assign({}, navRef, { location: offEast(navRef, i) })));
+        for (let i = 0; i < navCount; i++) newSteps.push(genInstr(1, navRef ? navRef.value1 : 0, 12, offEast(navRef, i), Object.assign({}, navExtra)));
         for (let j = 0; j < snapCount; j++) {
-            newSteps.push(genStripId(Object.assign({}, snapRef, { location: offEast(snapRef, j) })));
-            if (wrap) wrap.forEach(w => newSteps.push(genStripId(w)));
+            newSteps.push(genInstr(6, snapRef ? snapRef.value1 : 0, 1, offEast(snapRef, j), Object.assign({}, snapExtra)));
+            if (inspectionScan) buildWrap().forEach(w => newSteps.push(w));
         }
         let added = 0;
         for (const step of newSteps) {
