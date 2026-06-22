@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-22 — Mission Bank Tools v1.44 (dev/latest) — "Save & Next" step (rip through finetuning)
+## 2026-06-22 — Mission Bank Tools v1.45 (dev/latest) — click a marker to save & switch steps (the native way)
 
-New **Save ⏭** button **inside the step editor** (next to Percepto's Save) and a **Shift+D** hotkey: saves the open step, then automatically opens the **next** step's editor — so you can finetune a generated mission step-by-step (move snapshot → Save ⏭ → next snapshot → …) **without clicking the next marker on the map** (which Percepto treats as "move the open step"). "Next" skips the bundled camera/GEM toggles so you land on real nav/snapshot/wait steps; stops with a "last step" toast at the end. Pairs with **Shift+S** (save the open step in place). Dev-only (latest/). *(v1.43→1.44: moved the button into the step editor — it was previously placed in the list toolbar, which Percepto hides while editing a step, and switched "next" detection to React state since the instruction cards aren't in the DOM mid-edit.)*
+Finetuning steps now works the way you'd expect: while editing a step, **click a different step's marker on the map** and it **saves the current step (Shift+S) and opens the clicked one** — no buttons. Crucially it **blocks Percepto's native "move the open step to where you clicked"**, which was sliding snapshots to the wrong spot. Clicking the marker of the step you're already editing stays fully native (drag to reposition); with no editor open, a marker click just opens that step. Nothing auto-saves on reload/close — only switching steps commits (and only the in-session step draft, not the server). The on-step **Save ⏭** button from v1.44 is gone; the **Shift+D** hotkey (save + advance to the next step in order) stays as an optional shortcut. Dev-only (latest/).
 
 ---
 

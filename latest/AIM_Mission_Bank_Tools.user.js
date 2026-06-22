@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.44
+// @version      1.45
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.44';
+    const SCRIPT_VERSION = '1.45';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1756,10 +1756,41 @@
             const n = parseInt(lbl.replace(/[^0-9]/g, ''), 10) || 1;
             composerEditOrder(kind, id, n, m.__aimLL);
         }, true);
+        // Left-click (M1) on a marker:
+        //  • No step editor open → native scroll + open that step's editor (as before).
+        //  • A DIFFERENT step's editor IS open → this is a STEP SWITCH. Block Percepto's
+        //    native "move the open step to this point" (the cause of a snapshot sliding
+        //    to the wrong spot), SAVE the current step (Shift+S), then open the clicked
+        //    step. We block at pointerdown/mousedown too (left-button only) so Leaflet
+        //    never even starts the move.
+        //  • The marker of the step you're ALREADY editing → fully native (drag/reposition).
+        const switchTargetFor = (e) => {
+            const m = badge(e); if (!m) return null;
+            if (!document.querySelector('[data-testid="btn-save-instruction"]')) return null; // no editor open
+            const id = m.getAttribute('data-aim-id');
+            const curId = getOpenStepId();
+            if (curId != null && String(curId) === String(id)) return null; // same step → leave native
+            return id;
+        };
+        const blockSwitchDown = (e) => {
+            if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
+            if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
+        };
+        window.addEventListener('pointerdown', blockSwitchDown, true);
+        window.addEventListener('mousedown', blockSwitchDown, true);
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
-            // Don't stop native scroll; additionally open the edit form.
             const id = m.getAttribute('data-aim-id');
+            const switchId = switchTargetFor(e);
+            if (switchId) {
+                // Switching steps mid-edit: suppress the native move, then
+                // openInstructionEditor saves the open step + opens this one.
+                e.preventDefault(); e.stopImmediatePropagation();
+                try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
+                catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+                return;
+            }
+            // No editor open (or the same step): native scroll + open the clicked step.
             setTimeout(() => composerOpenStepEdit(id), 320);
         }, true);
     }
@@ -5986,32 +6017,6 @@ ${snapPlacemarks}
         catch (err) { console.warn(`${TAG} [save-next] open-next failed`, err); showToast('Saved, but couldn’t open the next step — open it manually.', '#ff9800', 4000); }
     }
 
-    // The Save ⏭ button lives INSIDE the step editor (next to Percepto's own Save),
-    // because the editor replaces the instruction list (and our toolbar row) while a
-    // step is open. A light interval re-injects it each time a step editor opens.
-    const STEP_SAVE_NEXT_BTN_ID = 'aim-mb-step-savenext';
-    function ensureStepSaveNextBtn() {
-        if (CONTEXT !== 'IFRAME') return;
-        const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
-        if (!saveBtn) return;                                   // no step editor open
-        if (document.getElementById(STEP_SAVE_NEXT_BTN_ID)) return; // already injected
-        const btn = document.createElement('button');
-        btn.id = STEP_SAVE_NEXT_BTN_ID;
-        btn.type = 'button';
-        btn.textContent = 'Save ⏭';
-        btn.title = 'Save this step, then open the next step’s editor (Shift+D). Use this instead of clicking the next marker on the map.';
-        btn.style.cssText = 'margin-left:8px;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
-            'background:#2faa2f;color:#fff;border:none;';
-        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); saveAndNextStep(); };
-        try { saveBtn.parentNode.insertBefore(btn, saveBtn.nextSibling); }
-        catch (e) { try { saveBtn.parentNode.appendChild(btn); } catch (e2) {} }
-    }
-    let stepSaveNextTimer = null;
-    function startStepSaveNextSync() {
-        if (stepSaveNextTimer || CONTEXT !== 'IFRAME') return;
-        stepSaveNextTimer = setInterval(() => { try { ensureStepSaveNextBtn(); } catch (e) {} }, 500);
-    }
-
     let saveProbeInstalled = false;
     function installSaveDiffProbe() {
         if (saveProbeInstalled) return;
@@ -6917,7 +6922,6 @@ ${snapPlacemarks}
             // path is safe. Harmless to leave on.
             installSaveDiffProbe();
             installSaveHotkey();
-            startStepSaveNextSync();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
