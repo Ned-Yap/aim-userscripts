@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.54
+// @version      1.55
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.54';
+    const SCRIPT_VERSION = '1.55';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3128,7 +3128,40 @@
         showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
     }
 
-    // Inline number editor for a Nav (blue) or Snapshot (pink) badge.
+    // Which Nav (by N#, 1-based) a snapshot is currently attached to = the nav
+    // group whose steps include it. null if it's before the first nav.
+    function composerSnapParentNavNum(snapId) {
+        const groups = composerNavGroups(composerCurrentOrdered());
+        for (let i = 0; i < groups.length; i++) { if (groups[i].ids.includes(String(snapId))) return i + 1; }
+        return null;
+    }
+    // Re-home a snapshot (its whole block: snapshot + trailing scan steps) under a
+    // different Navigate (by N#). It lands as that nav's LAST capture. The snapshot's
+    // own GPS/alt is unchanged — only which nav the drone flies to before shooting.
+    async function composerAttachSnapToNav(snapId, navNum) {
+        if (composerBusy) return;
+        const ordered = composerCurrentOrdered();
+        const groups = composerNavGroups(ordered);
+        const block = composerSnapBlocks(ordered).find(b => b.snapId === String(snapId));
+        if (!block || !groups.length) { showToast('Couldn’t resolve the snapshot block.', '#ff9800', 3000); return; }
+        const t = Math.max(1, Math.min(groups.length, navNum)) - 1;
+        if (composerSnapParentNavNum(snapId) === t + 1) { showToast(`Snapshot is already under N${t + 1}.`, '#9ad', 2500); return; }
+        if (!composerFindReorderFn()) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
+        // Insert right after the target nav group's last step (so it becomes that
+        // nav's last capture). composerMoveIdsToIndex handles the up/down shift.
+        const lastId = groups[t].ids[groups[t].ids.length - 1];
+        const dest = composerIndexById(lastId) + 1;
+        if (dest <= 0) { showToast('Couldn’t locate the target nav.', '#ff9800', 3000); return; }
+        composerBusy = true;
+        try { await composerMoveIdsToIndex(block.ids, dest); }
+        catch (e) { console.warn(`${TAG} [composer] attach-to-nav failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Snapshot re-homed under N${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
+    }
+
+    // Inline number editor for a Nav (blue) or Snapshot (pink) badge. For a
+    // snapshot it also shows + lets you change which Nav it's attached to.
     function composerEditOrder(kind, id, currentNum, ll) {
         if (composerBusy) return;
         const map = getLeafletMap(); if (!map) return;
@@ -3137,23 +3170,38 @@
         try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
         catch (e) { return; }
         const color = kind === 'nav' ? stepColor('nav') : stepColor('snap');
+        const navColor = stepColor('nav');
         const label = kind === 'nav' ? 'N' : 'S';
+        const parentNav = kind === 'snap' ? composerSnapParentNavNum(id) : null;
         const wrap = document.createElement('div');
         wrap.id = 'aim-cmp-num-edit';
         wrap.style.cssText = `position:fixed;left:${rect.left + pt.x}px;top:${rect.top + pt.y - 16}px;z-index:2147483640;` +
-            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:4px 6px;` +
-            'display:flex;gap:5px;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,0.6)';
-        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">${label}${currentNum}→</span>` +
-            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid ${color};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
+            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:5px 7px;` +
+            'display:flex;flex-direction:column;gap:5px;box-shadow:0 4px 14px rgba(0,0,0,0.6);font-family:sans-serif';
+        const inStyle = (c) => `width:48px;background:#1a1f27;border:1px solid ${c};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif`;
+        wrap.innerHTML =
+            `<div style="display:flex;gap:5px;align-items:center;"><span style="color:#9ad;font-size:10px;">${label}${currentNum}→</span>` +
+            `<input data-ord type="number" min="1" value="${currentNum}" title="Capture order" style="${inStyle(color)}"></div>` +
+            (kind === 'snap'
+                ? `<div style="display:flex;gap:5px;align-items:center;"><span style="color:#9ad;font-size:10px;white-space:nowrap;">Nav N${parentNav || '?'}→</span>` +
+                  `<input data-nav type="number" min="1" value="${parentNav || ''}" title="Attach this snapshot to a different Navigate (by N#)" style="${inStyle(navColor)}"></div>`
+                : '');
         document.body.appendChild(wrap);
-        const input = wrap.querySelector('input');
-        input.focus(); input.select();
+        const ordInput = wrap.querySelector('[data-ord]');
+        const navInput = wrap.querySelector('[data-nav]');
+        ordInput.focus(); ordInput.select();
         const commit = () => {
-            const v = parseInt(input.value, 10); wrap.remove();
-            if (!isNaN(v)) { if (kind === 'nav') composerApplyNavOrder(id, v); else composerApplySnapOrder(id, v); }
+            const ov = parseInt(ordInput.value, 10);
+            const nv = navInput ? parseInt(navInput.value, 10) : NaN;
+            wrap.remove();
+            // A nav re-home (changed) takes priority; otherwise apply capture order.
+            if (navInput && !isNaN(nv) && nv !== parentNav) { composerAttachSnapToNav(id, nv); return; }
+            if (!isNaN(ov)) { if (kind === 'nav') composerApplyNavOrder(id, ov); else composerApplySnapOrder(id, ov); }
         };
-        input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
-        input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
+        const onKey = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
+        ordInput.onkeydown = onKey; if (navInput) navInput.onkeydown = onKey;
+        const blurClose = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w && !w.contains(document.activeElement)) w.remove(); }, 150); };
+        ordInput.onblur = blurClose; if (navInput) navInput.onblur = blurClose;
     }
 
     function ensureEditorCollapseStyle(on) {

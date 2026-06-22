@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.55 (dev/latest) — reassign which Nav a Snapshot belongs to (M2 on a snapshot)
+
+Right-clicking a **snapshot** badge on the map now shows two fields: its capture order (**S# →**, as before) **and which Navigate it's attached to** (**Nav N# →**). Type a different nav number and the snapshot's whole block (snapshot + its Thermal/GEM/Wait wrap) is re-homed under that nav as its last capture — the snapshot's own GPS/altitude is unchanged, only which nav the drone flies to before shooting it. Hit SAVE in the editor to persist. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.54 (dev/latest) — natively-added navs/snaps get their N#/S# number immediately
 
 Adding a Navigate (or Snapshot) the normal way (Percepto's **Add Instruction**) no longer leaves the on-map marker blank until you save + reopen. The badge numbering now reads the **live editor order** (which includes the un-saved step in its real position) instead of the last-fetched mission cache — and a live nav/snap count change forces an immediate re-number. (🔄 Refresh couldn't help before because it re-pulls the *server*, which doesn't have the unsaved step yet.) Dev-only (latest/).
