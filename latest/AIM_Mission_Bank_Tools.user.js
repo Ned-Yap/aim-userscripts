@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.52
+// @version      1.53
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.52';
+    const SCRIPT_VERSION = '1.53';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4749,16 +4749,21 @@
     function kickOffElevationFetch(missionId, allSteps) {
         const points = [];
         const seen = new Set();
+        const now = Date.now();
         allSteps.forEach(s => {
             if (!s || !s.location || s.location.lat == null) return;
             const lat = Number(s.location.lat), lng = Number(s.location.lng);
             const key = elevCacheKey(lat, lng);
             if (seen.has(key)) return;
             seen.add(key);
-            const cache = loadElevationCache();
-            if (cache[key] != null) return; // already cached
-            // Skip if another iteration already requested this point
-            if (elevInFlight[key]) return;
+            // Cache check MUST be bridge-aware (getElevationFromCache) — bulk routes
+            // through the OTD bridge which caches in Asset Inspector's store, not
+            // MBT's local one. Checking only the local cache made every re-render
+            // see the point as "uncached" → fetch → re-render → fetch forever (the
+            // "fetching 1 elevations" runaway).
+            if (getElevationFromCache(lat, lng) != null) return; // already cached
+            if (elevInFlight[key]) return;                       // already requested
+            if (elevFailedAt[key] && now - elevFailedAt[key] < ELEV_FAIL_COOLDOWN) return; // recently failed — don't hammer
             points.push({ lat, lng, id: key });
         });
         if (points.length === 0) return;
@@ -4767,10 +4772,18 @@
         updateElevProgressLabel();
         bulkFetchElevations(points, (done, total) => {
             if (elevFetchActive) { elevFetchActive.done = done; updateElevProgressLabel(); }
-        }).then(() => {
+        }).then((result) => {
             elevFetchActive = null;
-            // ONE re-render after everything completes
-            if (panelState && panelState.drillId === missionId) {
+            // Mark points that DIDN'T resolve so we don't re-request them every
+            // re-render (the bridge path bypasses the per-point cooldown), and only
+            // re-render if something actually resolved — otherwise a fully-
+            // unresolvable mission would render→fetch→render endlessly.
+            let resolved = 0;
+            points.forEach(p => {
+                const got = (result && result[p.id] != null) || getElevationFromCache(p.lat, p.lng) != null;
+                if (got) resolved++; else elevFailedAt[p.id] = Date.now();
+            });
+            if (resolved > 0 && panelState && panelState.drillId === missionId) {
                 renderDetailView(missionId);
             }
         });

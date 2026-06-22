@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.53 (dev/latest) — fix the real page-hang: runaway elevation re-fetch on detail view
+
+**The actual cause of the crash** (RESULT_CODE_HUNG, `fetching 1 elevations` climbing forever): opening a mission's detail view checked **MBT's local** elevation cache to decide what to fetch, but fetches now route through the OTD bridge which caches in **Asset Inspector's** store — so the point never appeared "cached," and each completion re-rendered → re-fetched → re-rendered, endlessly. Now the cache check is **bridge-aware** (so a resolved point counts as cached and the loop stops), unresolvable points get a cooldown so they aren't re-requested every render, and the detail view only re-renders when something actually resolved. (Supersedes the v1.52 edit-pan theory — the hang was on row-click, not Edit.)
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.52 (dev/latest) — fixes: edit-pan crash, generator buttons mission-bank-only, Stage ergonomics
 
 - **Fixed the Edit ✏️ crash** (RESULT_CODE_HUNG): the map pan now fires *after* the editor finishes opening instead of during the navigation (plus finite-coordinate guards).
