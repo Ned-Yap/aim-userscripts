@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.51 (dev/latest) — Summary panel parity with Site Setup SUM
+
+The Mission Bank Summary panel now matches the Site Setup SUM's window behavior: **resize from any edge or corner** (was bottom-right only), the panel stays **locked to the AIM map** (drag/resize clamped to the map region so it can't wander over the sidebar or off-screen), and **clicking a row pans/zooms the map to that mission** — and **Edit ✏️** pans to the pad as it opens the editor. Checkbox selection still stays put (no map jump). Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.50 (dev/latest) — reuse already-cached elevations (stop re-fetching)
 
 Builds on v1.49: instead of re-requesting each asset centroid by exact coordinate, MBT now **reuses a nearby cached DEM point** (within ~50 ft — the same flat-pad ground) via the Inspector bridge's `getNearest`, and the bulk-generate prefetch now **only fetches centroids we don't already have**. Since Asset Inspector already samples every asset's vertices + edge midpoints, most centroids resolve from cache and the generator typically fetches **nothing** — no network, no rate limit. Console logs how many uncached elevations it actually needs. Dev-only (latest/).

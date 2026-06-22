@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.50
+// @version      1.51
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.50';
+    const SCRIPT_VERSION = '1.51';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3790,17 +3790,15 @@
         body.id = 'aim-mb-body';
         panelEl.appendChild(body);
 
-        // Resize handle
-        const resize = document.createElement('div');
-        resize.className = 'aim-mb-resize';
-        panelEl.appendChild(resize);
-        makeResizable(panelEl, resize);
+        // Resize handles — all four edges + four corners (clamped to the map).
+        addResizeHandles(panelEl);
 
         document.body.appendChild(panelEl);
 
         // Re-apply a saved dock (now that the panel is in the DOM and we can
-        // measure the map), and re-fit it when the window/sidebar resizes.
+        // measure the map), else clamp the floating panel into the map region.
         if (panelGeom.snap) snapPanel(panelGeom.snap);
+        else clampPanelIntoMap();
         if (!panelResizeBound) {
             panelResizeBound = true;
             window.addEventListener('resize', () => {
@@ -3829,8 +3827,9 @@
         });
         handle.addEventListener('pointermove', (e) => {
             if (!dragging || e.pointerId !== pointerId) return;
-            el.style.left = `${startLeft + e.clientX - startX}px`;
-            el.style.top = `${startTop + e.clientY - startY}px`;
+            const c = clampToMap(startLeft + e.clientX - startX, startTop + e.clientY - startY, el.offsetWidth, el.offsetHeight);
+            el.style.left = `${c.x}px`;
+            el.style.top = `${c.y}px`;
             panelGeom.snap = null; // manual move un-docks
         });
         const stop = (e) => {
@@ -3969,6 +3968,108 @@
         container.appendChild(makeSnapButton('◨', 'Dock to right of map', () => { snapPanel('right'); savePanelGeom(); }));
         container.appendChild(makeSnapButton('⬓', 'Dock to bottom of map', () => { snapPanel('bottom'); savePanelGeom(); }));
         container.appendChild(makeSnapButton('❐', 'Float / restore', () => { floatPanel(); savePanelGeom(); }));
+    }
+
+    // Keep the panel "locked to the AIM map" — clamp a floating position/size so it
+    // stays within the map region (.leaflet-container), never wandering over the
+    // sidebar or off-screen.
+    function clampToMap(x, y, w, h) {
+        const m = getMapRect();
+        const maxX = m.left + m.width - Math.min(w, m.width);
+        const maxY = m.top + m.height - Math.min(h, m.height);
+        return { x: Math.max(m.left, Math.min(maxX, x)), y: Math.max(m.top, Math.min(maxY, y)) };
+    }
+    function clampPanelIntoMap() {
+        if (!panelEl) return;
+        const r = panelEl.getBoundingClientRect();
+        const m = getMapRect();
+        const w = Math.min(r.width, m.width), h = Math.min(r.height, m.height);
+        const c = clampToMap(r.left, r.top, w, h);
+        panelEl.style.right = 'auto';
+        panelEl.style.left = c.x + 'px'; panelEl.style.top = c.y + 'px';
+        panelEl.style.width = w + 'px'; panelEl.style.height = h + 'px';
+        panelGeom.x = Math.round(c.x); panelGeom.y = Math.round(c.y);
+        panelGeom.w = Math.round(w); panelGeom.h = Math.round(h);
+    }
+
+    // 8-way resize — all four edges + four corners, ported from the Site Setup SUM
+    // (v4.76). Each handle declares which edges it moves; the opposite edge stays
+    // anchored. Clamped to the map (min 480×300) so the panel stays locked to it.
+    function addResizeHandles(panel) {
+        const MINW = 480, MINH = 300;
+        let rz = null;
+        const onMove = (e) => {
+            if (!rz) return;
+            const m = getMapRect();
+            const dx = e.clientX - rz.startX, dy = e.clientY - rz.startY;
+            const rightX = rz.L + rz.W, bottomY = rz.T + rz.H;
+            let L = rz.L, T = rz.T, W = rz.W, H = rz.H;
+            if (rz.edges.e) W = rz.W + dx;
+            if (rz.edges.w) W = rz.W - dx;
+            if (rz.edges.s) H = rz.H + dy;
+            if (rz.edges.n) H = rz.H - dy;
+            W = Math.max(MINW, Math.min(m.width, W));
+            H = Math.max(MINH, Math.min(m.height, H));
+            if (rz.edges.w) { L = rightX - W; if (L < m.left) { L = m.left; W = rightX - m.left; } }
+            if (rz.edges.n) { T = bottomY - H; if (T < m.top) { T = m.top; H = bottomY - m.top; } }
+            if (rz.edges.e && L + W > m.left + m.width) W = m.left + m.width - L;
+            if (rz.edges.s && T + H > m.top + m.height) H = m.top + m.height - T;
+            panel.style.right = 'auto';
+            panel.style.left = L + 'px'; panel.style.top = T + 'px';
+            panel.style.width = W + 'px'; panel.style.height = H + 'px';
+            panelGeom.x = Math.round(L); panelGeom.y = Math.round(T);
+            panelGeom.w = Math.round(W); panelGeom.h = Math.round(H);
+            panelGeom.snap = null; // manual resize un-docks
+        };
+        const onUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; savePanelGeom(); } };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        const mk = (css, edges) => {
+            const h = document.createElement('div');
+            h.style.cssText = 'position:absolute;z-index:6;' + css;
+            h.addEventListener('mousedown', (e) => {
+                const r = panel.getBoundingClientRect();
+                rz = { edges, startX: e.clientX, startY: e.clientY, L: r.left, T: r.top, W: r.width, H: r.height };
+                document.body.style.userSelect = 'none';
+                e.preventDefault(); e.stopPropagation();
+            });
+            panel.appendChild(h);
+        };
+        const EDGE = 6, CRN = 14;
+        mk(`top:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { n: true });
+        mk(`bottom:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { s: true });
+        mk(`left:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { w: true });
+        mk(`right:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { e: true });
+        mk(`top:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nwse-resize`, { n: true, w: true });
+        mk(`top:0;right:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { n: true, e: true });
+        mk(`bottom:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { s: true, w: true });
+        mk(`right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,#14d2dc 50%);border-bottom-right-radius:6px;opacity:0.6`, { s: true, e: true });
+        const prevRemove = panel.remove.bind(panel);
+        panel.remove = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); prevRemove(); };
+    }
+
+    // Representative map point for a mission = centroid of its snapshot (asset)
+    // points, falling back to nav points (reuses the merge's mbSoloPoints). Pan
+    // the AIM map there.
+    function missionLatLng(mission) {
+        try {
+            const pts = mbSoloPoints(mission);
+            if (!pts.length) return null;
+            let la = 0, ln = 0; pts.forEach(p => { la += p.lat; ln += p.lng; });
+            return { lat: la / pts.length, lng: ln / pts.length };
+        } catch (e) { return null; }
+    }
+    function panToMission(missionId) {
+        try {
+            const sid = getCurrentSiteID();
+            const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = ms.find(x => String(x.id) === String(missionId));
+            if (!m) return;
+            const ll = missionLatLng(m);
+            if (!ll) return;
+            const map = getLeafletMap();
+            if (map) map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
+        } catch (e) { console.warn(`${TAG} [pan] failed`, e); }
     }
 
     // ========================================================
@@ -4147,6 +4248,7 @@
                 const id = Number(tr.dataset.id);
                 const tw = panelEl.querySelector('#aim-mb-table-wrap');
                 if (tw) panelState.tableScrollY = tw.scrollTop;
+                panToMission(id); // jump the map to the mission (checkbox-select stays put)
                 renderDetailView(id);
             };
         });
@@ -4706,6 +4808,7 @@
         if (editBtn) editBtn.onclick = () => {
             const mid = editBtn.dataset.openEditor;
             if (!mid) return;
+            panToMission(mid); // pan/zoom to the pad as the editor opens
             const link = document.querySelector(`a[href*="/mission-bank/${mid}"]`);
             if (link) {
                 link.click();
