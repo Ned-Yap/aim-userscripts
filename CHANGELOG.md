@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-22 — Mission Bank Tools v1.43 (dev/latest) — "Save & Next" step (rip through finetuning)
+## 2026-06-22 — Mission Bank Tools v1.44 (dev/latest) — "Save & Next" step (rip through finetuning)
 
-New **Save ⏭** button in the mission editor (and **Shift+D** hotkey): saves the open step, then automatically opens the **next** step's editor — so you can finetune a generated mission step-by-step (move snapshot → save → next snapshot → …) without hunting the sidebar each time. "Next" skips the bundled camera/GEM toggles so you land on real nav/snapshot/wait steps; stops with a "last step" toast at the end. Pairs with **Shift+S** (save the open step in place). Dev-only (latest/).
+New **Save ⏭** button **inside the step editor** (next to Percepto's Save) and a **Shift+D** hotkey: saves the open step, then automatically opens the **next** step's editor — so you can finetune a generated mission step-by-step (move snapshot → Save ⏭ → next snapshot → …) **without clicking the next marker on the map** (which Percepto treats as "move the open step"). "Next" skips the bundled camera/GEM toggles so you land on real nav/snapshot/wait steps; stops with a "last step" toast at the end. Pairs with **Shift+S** (save the open step in place). Dev-only (latest/). *(v1.43→1.44: moved the button into the step editor — it was previously placed in the list toolbar, which Percepto hides while editing a step, and switched "next" detection to React state since the instruction cards aren't in the DOM mid-edit.)*
 
 ---
 

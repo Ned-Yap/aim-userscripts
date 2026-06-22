@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.43
+// @version      1.44
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.43';
+    const SCRIPT_VERSION = '1.44';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1574,14 +1574,7 @@
         stageBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
             'background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);color:#9cf;';
         stageBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); genStagePopup(stageBtn); };
-        const saveNextBtn = document.createElement('button');
-        saveNextBtn.type = 'button';
-        saveNextBtn.textContent = 'Save ⏭';
-        saveNextBtn.title = 'Save this step, then open the next step’s editor (Shift+D) — for finetuning steps one after another.';
-        saveNextBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
-            'background:rgba(95,255,95,0.16);border:1px solid rgba(95,255,95,0.6);color:#7dff7d;';
-        saveNextBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); saveAndNextStep(); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(saveNextBtn);
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn);
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
         if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); }
         else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
@@ -5896,39 +5889,76 @@ ${snapPlacemarks}
         }, true);
     }
 
-    // "Save & Next" — save the currently-open step, wait for its editor to close,
-    // then auto-open the NEXT step's editor. Lets you rip through per-step finetuning
-    // of a generated mission (move snapshot → save → next snapshot → …) without
-    // hunting the sidebar. "Next" = next instruction card in list order, skipping the
-    // bundled camera/GEM toggles (no useful editor). Bound to the ⏭ button + Shift+D.
-    const SAVE_NEXT_SKIP_TYPES = new Set([7, 24]); // cameraSelect, gemMode
+    // "Save & Next" — save the currently-open step, then auto-open the NEXT step's
+    // editor. Lets you rip through per-step finetuning of a generated mission (move
+    // snapshot → Save ⏭ → next snapshot → …) WITHOUT clicking the next marker on the
+    // map (which Percepto would interpret as "move the open step" — the cause of the
+    // snapshot sliding to the wrong spot). Surfaced as a button INSIDE the step editor
+    // (next to Percepto's own Save) + the Shift+D hotkey.
+    //
+    // KEY: while a step editor is open, Percepto REPLACES the instruction-card list,
+    // so the [data-rfd-draggable-id] cards are GONE. We therefore compute "next" from
+    // REACT STATE (the ordered instructions array), not the DOM — then hand the next
+    // id to openInstructionEditor(), which itself saves the open step, waits for the
+    // editor to close + the list to re-render, and opens the target.
+    const SAVE_NEXT_SKIP_TYPES = new Set([7, 24]); // cameraSelect, gemMode — no useful editor
     let saveNextLastOpenedId = null; // fallback "current step" when focus id is unavailable
 
-    // The id of the step whose editor is currently open. Prefer Percepto's own
-    // focusedInstructionId (authoritative); fall back to the last one we opened.
+    // The ordered instructions array from React state (survives the editor being open;
+    // findMissionAppCtx anchors on stable DOM, not the [data-rfd-draggable-id] cards).
+    function getMissionInstrsState() {
+        try { const ac = findMissionAppCtx(); if (ac && ac.currentApp && Array.isArray(ac.currentApp.instructions) && ac.currentApp.instructions.length) return ac.currentApp.instructions; } catch (e) {}
+        try { const ec = findMissionEditorCtx(); if (ec && Array.isArray(ec.instrs) && ec.instrs.length) return ec.instrs; } catch (e) {}
+        return null;
+    }
+
+    // The id of the step whose editor is open — Percepto's own focusedInstructionId,
+    // found by a broad fiber walk (the value can live on a different provider than
+    // saveApp). Anchors include .edit-instruction so it works mid step-edit. Falls
+    // back to the last step we opened in a Save & Next chain.
+    function findFocusedInstrId() {
+        const anchors = ['.edit-instruction', '[data-rfd-draggable-id]', '.mission-edit__content', '.mission-bank__map-container', '.mission-bank'];
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 170) {
+                    let v; try { v = node.memoizedProps && node.memoizedProps.value; } catch (e) { v = null; }
+                    if (v && typeof v === 'object' && v.focusedInstructionId != null &&
+                        (typeof v.saveApp === 'function' || typeof v.setCurrentApp === 'function' || Array.isArray(v.instructions))) {
+                        return String(v.focusedInstructionId);
+                    }
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
     function getOpenStepId() {
-        try { const ctx = findMissionAppCtx(); if (ctx && ctx.focusedInstructionId != null) return String(ctx.focusedInstructionId); }
-        catch (e) {}
+        const fid = findFocusedInstrId();
+        if (fid != null) return fid;
         return saveNextLastOpenedId;
     }
 
-    // The next editable instruction card after `currentId` in list order (or the
-    // first editable card if currentId is unknown). Skips camera/GEM toggles.
-    function nextEditableDraggable(currentId) {
-        const cards = [...document.querySelectorAll('[data-rfd-draggable-id]')];
-        if (!cards.length) return null;
-        const idx = currentId != null
-            ? cards.findIndex(c => c.getAttribute('data-rfd-draggable-id') === String(currentId))
-            : -1;
-        const byId = {};
-        try { const ec = findMissionEditorCtx(); if (ec) ec.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; }); }
-        catch (e) {}
-        for (let j = idx + 1; j < cards.length; j++) {
-            const instr = byId[cards[j].getAttribute('data-rfd-draggable-id')];
-            if (instr && SAVE_NEXT_SKIP_TYPES.has(instr.type)) continue;
-            return cards[j];
+    // The next editable instruction id after `currentId` in the mission order
+    // (skips camera/GEM toggles). Pure React-state — no DOM cards needed.
+    function nextEditableInstrId(currentId) {
+        const instrs = getMissionInstrsState();
+        if (!instrs) return null;
+        const idx = currentId != null ? instrs.findIndex(s => s && String(s.id) === String(currentId)) : -1;
+        for (let j = idx + 1; j < instrs.length; j++) {
+            const s = instrs[j];
+            if (!s || s.id == null) continue;
+            if (SAVE_NEXT_SKIP_TYPES.has(s.type)) continue;
+            return String(s.id);
         }
         return null;
+    }
+
+    function currentMissionIdFromHash() {
+        const m = (location.hash || '').match(/mission-bank\/(\d+)/);
+        return m ? m[1] : null;
     }
 
     function saveAndNextStep() {
@@ -5938,36 +5968,48 @@ ${snapPlacemarks}
             showToast('Open a step’s editor first — Save & Next saves it, then opens the next.', '#ff9800', 3500);
             return;
         }
-        // Lock in the "next" target from the CURRENT DOM/order BEFORE saving, so a
-        // re-render can't move it on us. Step-save is a client-side draft (no reorder).
         const curId = getOpenStepId();
-        const nextCard = nextEditableDraggable(curId);
-        const nextId = nextCard ? nextCard.getAttribute('data-rfd-draggable-id') : null;
-        try { stepBtn.click(); }
-        catch (err) { console.warn(`${TAG} [save-next] step save failed`, err); showToast('Save failed — see console.', '#ff5252', 3000); return; }
-        if (!nextId) { showToast('✓ Step saved — last step (no next).', '#5fff5f', 2400); return; }
-        showToast('✓ Saved — opening next step…', '#5fff5f', 1400);
-        // Wait for the step editor to close (.edit-instruction gone), then open next.
-        let waited = 0;
-        const iv = setInterval(() => {
-            waited++;
-            if (waited > 25) { clearInterval(iv); openNextStepNow(nextId); return; } // ~3s safety
-            if (!document.querySelector('.edit-instruction')) {
-                clearInterval(iv);
-                setTimeout(() => openNextStepNow(nextId), 250);
-            }
-        }, 120);
+        const nextId = nextEditableInstrId(curId);
+        const missionId = currentMissionIdFromHash();
+        if (!nextId) {
+            // Nothing after this one — just save the open step in place.
+            try { stepBtn.click(); showToast('✓ Step saved — last step (no next).', '#5fff5f', 2600); }
+            catch (err) { console.warn(`${TAG} [save-next] save failed`, err); showToast('Save failed — see console.', '#ff5252', 3000); }
+            saveNextLastOpenedId = null;
+            return;
+        }
+        // openInstructionEditor saves the OPEN step (clicks btn-save-instruction),
+        // waits for the editor to close + the list to re-render, then opens nextId.
+        saveNextLastOpenedId = nextId;
+        showToast('✓ Saving — opening next step…', '#5fff5f', 1600);
+        try { openInstructionEditor(nextId, missionId); }
+        catch (err) { console.warn(`${TAG} [save-next] open-next failed`, err); showToast('Saved, but couldn’t open the next step — open it manually.', '#ff9800', 4000); }
     }
 
-    function openNextStepNow(nextId) {
-        const card = document.querySelector(`[data-rfd-draggable-id="${nextId}"]`);
-        if (!card) { showToast('Next step not found (list re-rendered).', '#ff9800', 3000); return; }
-        saveNextLastOpenedId = String(nextId);
-        try { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
-        setTimeout(() => {
-            const ok = triggerInstructionAction(card, 'edit');
-            if (!ok) { dlog(`${TAG} [save-next] fiber edit failed — falling back`); forceOpenInstructionEdit(card); }
-        }, 200);
+    // The Save ⏭ button lives INSIDE the step editor (next to Percepto's own Save),
+    // because the editor replaces the instruction list (and our toolbar row) while a
+    // step is open. A light interval re-injects it each time a step editor opens.
+    const STEP_SAVE_NEXT_BTN_ID = 'aim-mb-step-savenext';
+    function ensureStepSaveNextBtn() {
+        if (CONTEXT !== 'IFRAME') return;
+        const saveBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+        if (!saveBtn) return;                                   // no step editor open
+        if (document.getElementById(STEP_SAVE_NEXT_BTN_ID)) return; // already injected
+        const btn = document.createElement('button');
+        btn.id = STEP_SAVE_NEXT_BTN_ID;
+        btn.type = 'button';
+        btn.textContent = 'Save ⏭';
+        btn.title = 'Save this step, then open the next step’s editor (Shift+D). Use this instead of clicking the next marker on the map.';
+        btn.style.cssText = 'margin-left:8px;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+            'background:#2faa2f;color:#fff;border:none;';
+        btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); saveAndNextStep(); };
+        try { saveBtn.parentNode.insertBefore(btn, saveBtn.nextSibling); }
+        catch (e) { try { saveBtn.parentNode.appendChild(btn); } catch (e2) {} }
+    }
+    let stepSaveNextTimer = null;
+    function startStepSaveNextSync() {
+        if (stepSaveNextTimer || CONTEXT !== 'IFRAME') return;
+        stepSaveNextTimer = setInterval(() => { try { ensureStepSaveNextBtn(); } catch (e) {} }, 500);
     }
 
     let saveProbeInstalled = false;
@@ -6875,6 +6917,7 @@ ${snapPlacemarks}
             // path is safe. Harmless to leave on.
             installSaveDiffProbe();
             installSaveHotkey();
+            startStepSaveNextSync();
         }
         // Re-evaluate injection on hashchange (URL → Mission Bank)
         try {
