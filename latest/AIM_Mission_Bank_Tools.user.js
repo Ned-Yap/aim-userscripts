@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.29';
+    const SCRIPT_VERSION = '1.30';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1925,33 +1925,34 @@
         for (const f of ffzs) { const d = sopHaversineFt(assetC, genCentroid(f.ring)); if (d < bd) { bd = d; best = f; } }
         return best;
     }
-    // Closest point on the FFZ boundary whose standoff to the asset is nearest
-    // the target (~100 ft) — densify each edge and pick the best sample.
+    // Nav point: walk the FFZ boundary, and for each sample step ~1 m along the
+    // edge's INWARD normal (the offset point that tests INSIDE the polygon), then
+    // pick the inside point whose standoff to the asset is nearest ~100 ft. This
+    // guarantees the nav lands inside the FFZ (not on the edge, where Percepto can
+    // read it as outside) regardless of the FFZ's shape.
     function genNavPoint(assetC, ffz) {
-        let best = null, bestErr = Infinity, bestDist = 0;
-        const consider = pt => { const d = sopHaversineFt(assetC, pt); const err = Math.abs(d - GEN_TARGET_STANDOFF_FT); if (err < bestErr) { bestErr = err; best = pt; bestDist = d; } };
         const ring = ffz.ring;
+        const lat0 = (assetC.lat || ring[0].lat) * Math.PI / 180;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0);
+        const toXY = p => ({ x: p.lng * mLng, y: p.lat * mLat });
+        const toLL = q => ({ lng: q.x / mLng, lat: q.y / mLat });
+        let best = null, bestErr = Infinity, bestDist = 0;
+        const consider = ll => {
+            if (!genPointInPoly(ll, ring)) return;          // must land INSIDE
+            const d = sopHaversineFt(assetC, ll), err = Math.abs(d - GEN_TARGET_STANDOFF_FT);
+            if (err < bestErr) { bestErr = err; best = ll; bestDist = d; }
+        };
         for (let i = 0; i < ring.length; i++) {
-            const a = ring[i], b = ring[(i + 1) % ring.length];
-            for (let k = 0; k <= 6; k++) { const t = k / 6; consider({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }); }
+            const ax = toXY(ring[i]), bx = toXY(ring[(i + 1) % ring.length]);
+            let nx = -(bx.y - ax.y), ny = (bx.x - ax.x); const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl; // unit edge normal
+            for (let k = 0; k <= 6; k++) {
+                const t = k / 6, px = ax.x + (bx.x - ax.x) * t, py = ax.y + (bx.y - ax.y) * t;
+                consider(toLL({ x: px + nx * GEN_FFZ_INSET_M, y: py + ny * GEN_FFZ_INSET_M })); // one normal
+                consider(toLL({ x: px - nx * GEN_FFZ_INSET_M, y: py - ny * GEN_FFZ_INSET_M })); // the other (inside one wins)
+            }
         }
-        // The best point sits ON the FFZ boundary, where Percepto can read it as
-        // OUTSIDE the FFZ (the SOP checker would flag it). Nudge it ~1 m toward
-        // the FFZ interior so it lands safely inside.
-        const inside = genPushInside(best, ring, GEN_FFZ_INSET_M);
-        return { point: inside, standoffFt: sopHaversineFt(assetC, inside) };
-    }
-    // Move a point `meters` toward the polygon's centroid (= inward for the
-    // convex FFZ boxes), in lat/lng.
-    function genPushInside(pt, ring, meters) {
-        if (!pt) return pt;
-        const c = genCentroid(ring);
-        const dLat = c.lat - pt.lat, dLng = c.lng - pt.lng;
-        const latM = dLat * 111320, lngM = dLng * 111320 * Math.cos(pt.lat * Math.PI / 180);
-        const dist = Math.hypot(latM, lngM);
-        if (dist < 1e-6) return pt;
-        const f = meters / dist;
-        return { lat: pt.lat + dLat * f, lng: pt.lng + dLng * f };
+        if (!best) { const c = genCentroid(ring); best = c; bestDist = sopHaversineFt(assetC, c); } // fallback
+        return { point: best, standoffFt: bestDist };
     }
 
     function genClearOverlay() {
