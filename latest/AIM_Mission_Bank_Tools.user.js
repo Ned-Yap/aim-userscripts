@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.45
+// @version      1.46
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.45';
+    const SCRIPT_VERSION = '1.46';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2062,8 +2062,46 @@
         if (all) all.style.display = genOverlayOn ? 'block' : 'none';
     }
     const GEN_ALL_BTN_ID = 'aim-mb-gen-all-btn';
+
+    // ── Generator lock ────────────────────────────────────────────────────────
+    // The mission GENERATOR (⊕ Generate / ▣ Generate All) CREATES real missions on
+    // the live site via saveApp — by far the highest blast-radius tool here. It is
+    // therefore LOCKED OFF by default for everyone; only an install that has flipped
+    // the local flag below shows or runs it. Coworkers never run the unlock, so they
+    // never see the buttons and can't trigger it. (Per-install GM flag — effectively
+    // "just my machine"; nothing identity-bound, but undocumented + default-off.)
+    // Unlock on your own install from the Mission Bank iframe console:
+    //     __aimMBGenerator(true)     // unlock (persists across reloads)
+    //     __aimMBGenerator(false)    // re-lock
+    //     __aimMBGenerator()         // report current state
+    // Everything else (SUM panel, inspector, altitude editing, SOP check, KML,
+    // auto-AGL, ➕ Stage, marker-switch) is unaffected by this lock.
+    const GEN_LOCK_KEY = 'aim-mb-generator-unlocked';
+    let generatorUnlocked = false;
+    try { generatorUnlocked = gmGet(GEN_LOCK_KEY, false) === true; } catch (e) {}
+    function setGeneratorUnlocked(on) {
+        if (on === undefined) { console.log(`${TAG} [generator] ${generatorUnlocked ? 'UNLOCKED' : 'LOCKED'} on this install`); return generatorUnlocked; }
+        generatorUnlocked = !!on;
+        try { gmSet(GEN_LOCK_KEY, generatorUnlocked); } catch (e) {}
+        try {
+            if (!generatorUnlocked) {
+                const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
+                const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+                genCloseBulkPanel();
+                try { if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; } } catch (e) {} // tear down any drawn asset overlay
+            } else {
+                genEnsureButton();
+            }
+        } catch (e) {}
+        console.log(`${TAG} [generator] ${generatorUnlocked ? 'UNLOCKED' : 'LOCKED'} on this install`);
+        showToast(`Mission Generator ${generatorUnlocked ? 'unlocked' : 'locked'} on this install.`, generatorUnlocked ? '#5fff5f' : '#ff9800', 3500);
+        return generatorUnlocked;
+    }
+    try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; w.__aimMBGenerator = setGeneratorUnlocked; } catch (e) {}
+
     function genEnsureButton() {
         if (CONTEXT !== 'IFRAME') return;
+        if (!generatorUnlocked) return;   // generator locked off on this install
         const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
         if (!mapC) return;
         if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
@@ -2149,6 +2187,7 @@
         return null;
     }
     async function genGenerateForAsset(asset, ffzs, opts) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
         const ctx = findMissionAppCtx();
         if (!ctx) { showToast('Mission context not found — make sure you\'re on the Mission Bank page.', '#ff5252', 4000); return; }
         const built = buildMissionForAsset(asset, ffzs, opts);
@@ -2181,6 +2220,7 @@
     function genCloseGenPopup() { if (genPopupEl) { genPopupEl.remove(); genPopupEl = null; } document.removeEventListener('mousedown', genPopupOutside, true); }
     function genPopupOutside(e) { if (genPopupEl && !genPopupEl.contains(e.target)) genCloseGenPopup(); }
     function genShowGeneratePopup(asset, ffzs, ev) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
         genCloseGenPopup();
         const aC = genCentroid(asset.ring);
         const ffz = genAssetFFZ(aC, ffzs);
@@ -2262,6 +2302,7 @@
         return names.some(nm => nm === gen || nm === an || nm.endsWith(' - ' + an));
     }
     function genOpenBulkPanel() {
+        if (!generatorUnlocked) return;   // generator locked off on this install
         const siteID = getCurrentSiteID();
         if (!siteID) { showToast('Generator: no site.', '#ff9800'); return; }
         showToast('Loading assets + missions + elevations…', '#9ad', 2200);
@@ -2329,6 +2370,7 @@
         };
     }
     async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
+        if (!generatorUnlocked) return;   // generator locked off on this install
         const ctx = findMissionAppCtx();
         if (!ctx) { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
         genBulkBusy = true; if (goBtn) goBtn.disabled = true;

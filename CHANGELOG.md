@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.46 (dev/latest) — Mission Generator locked off by default (pre-promotion)
+
+Ahead of pushing Mission Bank Tools live, the **Mission Generator** (⊕ Generate / ▣ Generate All — the only tool that *creates* real missions on a site) is now **locked off by default for everyone**: the buttons don't appear and the generate actions no-op unless an install explicitly unlocks it. Everything else (SUM panel, inspector, altitude editing, SOP check, KML export, auto-AGL, ➕ Stage, click-marker step-switch) is unaffected. Unlock on your own install from the Mission Bank iframe console: `__aimMBGenerator(true)` (persists), `__aimMBGenerator(false)` to re-lock, `__aimMBGenerator()` to check. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.45 (dev/latest) — click a marker to save & switch steps (the native way)
 
 Finetuning steps now works the way you'd expect: while editing a step, **click a different step's marker on the map** and it **saves the current step (Shift+S) and opens the clicked one** — no buttons. Crucially it **blocks Percepto's native "move the open step to where you clicked"**, which was sliding snapshots to the wrong spot. Clicking the marker of the step you're already editing stays fully native (drag to reposition); with no editor open, a marker click just opens that step. Nothing auto-saves on reload/close — only switching steps commits (and only the in-session step draft, not the server). The on-step **Save ⏭** button from v1.44 is gone; the **Shift+D** hotkey (save + advance to the next step in order) stays as an optional shortcut. Dev-only (latest/).
