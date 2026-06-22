@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.50 (dev/latest) — reuse already-cached elevations (stop re-fetching)
+
+Builds on v1.49: instead of re-requesting each asset centroid by exact coordinate, MBT now **reuses a nearby cached DEM point** (within ~50 ft — the same flat-pad ground) via the Inspector bridge's `getNearest`, and the bulk-generate prefetch now **only fetches centroids we don't already have**. Since Asset Inspector already samples every asset's vertices + edge midpoints, most centroids resolve from cache and the generator typically fetches **nothing** — no network, no rate limit. Console logs how many uncached elevations it actually needs. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.49 (dev/latest) — fix bulk-generate "Elevation Not Loaded" (429 storm)
 
 Bulk **Generate All** (and the AGL view / auto-AGL) no longer choke on Percepto's `/location_altitude/` rate limit. MBT now routes its DEM elevation through Asset Inspector's **`__aimAIElevation` bridge** when present — the Open-Topo-Data source (batched, no rate limit) the Inspector already uses — instead of hammering Percepto per-point and getting 429s (which left assets un-built and forced the reload-and-rerun-til-it-catches-up grind). Falls back to MBT's own Percepto fetch if the bridge isn't installed. Requires the **Latest Asset Inspector** (the one with OTD) running. Dev-only (latest/).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.49
+// @version      1.50
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.49';
+    const SCRIPT_VERSION = '1.50';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -487,9 +487,22 @@
         catch (e) { return null; }
     }
 
+    // Reuse an already-cached DEM point within this radius instead of re-fetching.
+    // Ground over a flat pad is constant, and OTD's ned10m is a 10 m dataset, so any
+    // sample within ~50 ft is the same ground — this is what stops the generator from
+    // re-requesting centroids we effectively already have (Asset Inspector samples
+    // every asset vertex + edge midpoints, so a nearby cached hit is almost always
+    // present).
+    const MB_ELEV_NEAR_M = 15;
     function getElevationFromCache(lat, lng) {
         const br = aiElev();
-        if (br) { try { const v = br.getCached(lat, lng); if (v != null) return v; } catch (e) {} }
+        if (br) {
+            try {
+                const v = br.getCached(lat, lng);
+                if (v != null) return v;
+                if (typeof br.getNearest === 'function') { const n = br.getNearest(lat, lng, MB_ELEV_NEAR_M); if (n != null) return n; }
+            } catch (e) {}
+        }
         const cache = loadElevationCache();
         return cache[elevCacheKey(lat, lng)];
     }
@@ -2400,8 +2413,13 @@
             const stateSkip = assets.filter(a => genSkipReason(a));
             const haveMission = assets.filter(a => !genSkipReason(a) && genHasMission(a, names));
             const valid = assets.filter(a => !genSkipReason(a) && !genHasMission(a, names));
-            const pts = valid.map(a => genCentroid(a.ring));
+            // Only fetch centroids we DON'T already have (exact or a nearby cached
+            // DEM point) — most are already cached from Asset Inspector's sampling,
+            // so this typically fetches nothing and never touches the rate limit.
+            const pts = valid.map(a => genCentroid(a.ring)).filter(p => getElevationFromCache(p.lat, p.lng) == null);
             const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs);
+            if (!pts.length) { render(); return; }
+            console.log(`${TAG} [gen-bulk] fetching ${pts.length} uncached elevations (of ${valid.length} assets)`);
             try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
         }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
     }
