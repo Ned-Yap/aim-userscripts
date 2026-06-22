@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.52 (dev/latest) — fixes: edit-pan crash, generator buttons mission-bank-only, Stage ergonomics
+
+- **Fixed the Edit ✏️ crash** (RESULT_CODE_HUNG): the map pan now fires *after* the editor finishes opening instead of during the navigation (plus finite-coordinate guards).
+- **⊕ Generate / ⛟ Merge now appear ONLY on the Mission Bank page** (they were leaking onto Site Setup via a fallback selector), and **Merge moved beside Generate** instead of stacking into the Summary button.
+- **Stage steps**: new Navigates/Snapshots now **copy the LAST** nav/snap's settings (not the first), and are placed in the **middle of the current map view** (fanned out) so you don't have to hunt for them.
+
+Dev-only (latest/). *(Known issue still under investigation: staged Navigates can show a blank N# badge and aren't draggable until you save + reopen the mission.)*
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.51 (dev/latest) — Summary panel parity with Site Setup SUM
 
 The Mission Bank Summary panel now matches the Site Setup SUM's window behavior: **resize from any edge or corner** (was bottom-right only), the panel stays **locked to the AIM map** (drag/resize clamped to the map region so it can't wander over the sidebar or off-screen), and **clicking a row pans/zooms the map to that mission** — and **Edit ✏️** pans to the pad as it opens the editor. Checkbox selection still stays put (no map jump). Dev-only (latest/).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.51
+// @version      1.52
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.51';
+    const SCRIPT_VERSION = '1.52';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2139,10 +2139,18 @@
     }
     try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; w.__aimMBGenerator = setGeneratorUnlocked; } catch (e) {}
 
+    function genRemoveButtons() {
+        const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
+        const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+        const mr = document.getElementById('aim-mb-gen-merge-btn'); if (mr) mr.remove();
+    }
     function genEnsureButton() {
         if (CONTEXT !== 'IFRAME') return;
         if (!generatorUnlocked) return;   // generator locked off on this install
-        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        // Generate / Merge are MISSION-BANK-only — never inject on Site Setup (the
+        // old .pr-map-container fallback matched there). Remove them if we navigated away.
+        if (!isOnMissionBank()) { genRemoveButtons(); return; }
+        const mapC = document.querySelector('.mission-bank__map-container');
         if (!mapC) return;
         if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
         if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
@@ -2170,7 +2178,7 @@
         mrg.id = 'aim-mb-gen-merge-btn'; mrg.type = 'button';
         mrg.textContent = '⛟ Merge';
         mrg.title = 'Group this site\'s solo missions into battery-tiered merged missions per section (furthest→closest from base).';
-        mrg.style.cssText = 'position:absolute;top:72px;left:8px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
+        mrg.style.cssText = 'position:absolute;top:8px;left:118px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
             'font:800 12px "Lato",sans-serif;border:1.5px solid #ffb74d;background:#241a0d;color:#ffce80;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         mrg.onclick = e => { e.preventDefault(); e.stopPropagation(); mbOpenMergePanel(); };
         mapC.appendChild(mrg);
@@ -2749,28 +2757,39 @@
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
         const instrs = app.instructions || [];
-        const navRef = instrs.find(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
-        const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
+        // Copy settings from the LAST nav/snap (you finetune the most recent one;
+        // new staged steps should inherit THOSE settings, not the original first).
+        const navs = instrs.filter(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
+        const snaps = instrs.filter(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
+        const navRef = navs.length ? navs[navs.length - 1] : null;
+        const snapRef = snaps.length ? snaps[snaps.length - 1] : null;
         if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
-        // wrap template = the scan steps trailing the first snapshot (copied as-is)
+        // wrap template = the scan steps trailing the LAST snapshot (copied as-is)
         const wrapTpl = [];
-        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
+        let si = -1; for (let i = instrs.length - 1; i >= 0; i--) { if (instrs[i] && instrs[i].type_name === 'snapshot') { si = i; break; } }
         if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
-        const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
+        // Place new steps in the MIDDLE OF THE CURRENT MAP VIEW (so they're easy to
+        // find), fanned out in a small grid by index so multiples don't overlap.
+        // Falls back to an offset from the ref if the map center isn't available.
+        const map = getLeafletMap();
+        const ctr = (map && typeof map.getCenter === 'function') ? map.getCenter() : null;
+        const placeAt = (ref, i) => {
+            const base = ctr ? { lat: ctr.lat, lng: ctr.lng } : { lat: ref.location.lat, lng: ref.location.lng };
+            const col = i % 4, row = Math.floor(i / 4);
+            const mPerLat = 110540, mPerLng = 111320 * Math.cos(base.lat * Math.PI / 180);
+            return { lat: base.lat + (row * 12) / mPerLat, lng: base.lng + (col * 12) / mPerLng };
+        };
         // copy a step (preserve type object + all fields) with a UNIQUE id —
         // Percepto uses instruction.id as the React key (id.toString()), so a
         // missing/duplicate id crashes the editor (blank screen). The save strips
         // ids (server assigns real ones), so any unique client id is fine.
         let idSeq = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100);
         const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); c.id = idSeq++; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
-        // Spread new steps PAST any nav/snap already in the mission (incl. ones
-        // staged earlier this session) so a 2nd Stage doesn't stack on the 1st.
-        const baseNav = instrs.filter(s => s && s.type_name === 'navigate').length;   // includes the original (1) + prior staged
-        const baseSnap = instrs.filter(s => s && s.type_name === 'snapshot').length;
         const staged = [];
-        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, (baseNav - 1) + i)));
+        let placeIdx = 0;
+        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, placeAt(navRef, placeIdx++)));
         for (let j = 0; j < snapCount; j++) {
-            staged.push(copyStep(snapRef, offEast(snapRef, (baseSnap - 1) + j)));
+            staged.push(copyStep(snapRef, placeAt(snapRef, placeIdx++)));
             if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
@@ -4056,7 +4075,9 @@
             const pts = mbSoloPoints(mission);
             if (!pts.length) return null;
             let la = 0, ln = 0; pts.forEach(p => { la += p.lat; ln += p.lng; });
-            return { lat: la / pts.length, lng: ln / pts.length };
+            la /= pts.length; ln /= pts.length;
+            if (!isFinite(la) || !isFinite(ln)) return null;
+            return { lat: la, lng: ln };
         } catch (e) { return null; }
     }
     function panToMission(missionId) {
@@ -4066,9 +4087,9 @@
             const m = ms.find(x => String(x.id) === String(missionId));
             if (!m) return;
             const ll = missionLatLng(m);
-            if (!ll) return;
+            if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) return;
             const map = getLeafletMap();
-            if (map) map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
+            if (map && typeof map.setView === 'function') map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
         } catch (e) { console.warn(`${TAG} [pan] failed`, e); }
     }
 
@@ -4808,10 +4829,12 @@
         if (editBtn) editBtn.onclick = () => {
             const mid = editBtn.dataset.openEditor;
             if (!mid) return;
-            panToMission(mid); // pan/zoom to the pad as the editor opens
             const link = document.querySelector(`a[href*="/mission-bank/${mid}"]`);
             if (link) {
                 link.click();
+                // Pan to the pad AFTER the editor finishes opening — panning during
+                // the navigation re-render hung the renderer (RESULT_CODE_HUNG).
+                setTimeout(() => { try { panToMission(mid); } catch (e) {} }, 800);
             } else {
                 showToast('Mission link not found in sidebar — try scrolling to it first', '#ff9800');
             }
