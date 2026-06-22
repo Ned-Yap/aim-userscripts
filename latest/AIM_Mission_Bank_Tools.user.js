@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.28
+// @version      1.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.28';
+    const SCRIPT_VERSION = '1.29';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1871,6 +1871,18 @@
     // ====================================================================
     const GEN_BTN_ID = 'aim-mb-gen-btn';
     const GEN_TARGET_STANDOFF_FT = 100; // ideal nav↔asset distance
+    const GEN_FFZ_INSET_M = 1;          // push the nav this far inside the FFZ edge
+    const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
+    // Skip-state reason for an asset (unreachable/unshielded/empty) or null if
+    // it's valid to generate. Ported from the Asset Inspector's assetSkipReason:
+    // is_unshielded flag, else the state suffix after " - " in poi_type_str.
+    function genSkipReason(asset) {
+        if (asset.unshielded) return 'unshielded';
+        const p = asset.poi || '';
+        const i = p.indexOf(' - ');
+        const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
+        return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
+    }
     const genEntCache = {};
     let genLayer = null, genPreviewLayer = null, genOverlayOn = false, genBase = null, genPopupEl = null;
 
@@ -1923,7 +1935,23 @@
             const a = ring[i], b = ring[(i + 1) % ring.length];
             for (let k = 0; k <= 6; k++) { const t = k / 6; consider({ lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }); }
         }
-        return { point: best, standoffFt: bestDist };
+        // The best point sits ON the FFZ boundary, where Percepto can read it as
+        // OUTSIDE the FFZ (the SOP checker would flag it). Nudge it ~1 m toward
+        // the FFZ interior so it lands safely inside.
+        const inside = genPushInside(best, ring, GEN_FFZ_INSET_M);
+        return { point: inside, standoffFt: sopHaversineFt(assetC, inside) };
+    }
+    // Move a point `meters` toward the polygon's centroid (= inward for the
+    // convex FFZ boxes), in lat/lng.
+    function genPushInside(pt, ring, meters) {
+        if (!pt) return pt;
+        const c = genCentroid(ring);
+        const dLat = c.lat - pt.lat, dLng = c.lng - pt.lng;
+        const latM = dLat * 111320, lngM = dLng * 111320 * Math.cos(pt.lat * Math.PI / 180);
+        const dist = Math.hypot(latM, lngM);
+        if (dist < 1e-6) return pt;
+        const f = meters / dist;
+        return { lat: pt.lat + dLat * f, lng: pt.lng + dLng * f };
     }
 
     function genClearOverlay() {
@@ -1940,17 +1968,20 @@
             genClearOverlay();
             const group = L.layerGroup();
             ffzs.forEach(f => { try { L.polygon(f.ring.map(p => [p.lat, p.lng]), { color: '#39ff14', weight: 1, fill: false, interactive: false }).addTo(group); } catch (e) {} });
-            let drawn = 0;
+            let valid = 0, skipped = 0;
             assets.forEach(a => {
                 try {
-                    const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: '#fff', weight: 1.5, fillColor: '#fff', fillOpacity: 0.08, className: 'aim-gen-asset' });
+                    const skip = genSkipReason(a);             // red = would be skipped (bad state)
+                    if (skip) skipped++; else valid++;
+                    const col = skip ? '#ff6b6b' : '#fff';
+                    const poly = L.polygon(a.ring.map(p => [p.lat, p.lng]), { color: col, weight: 1.5, fillColor: col, fillOpacity: skip ? 0.05 : 0.08, className: 'aim-gen-asset' });
                     poly.on('contextmenu', ev => { try { L.DomEvent.stop(ev); } catch (e) {} genShowGeneratePopup(a, ffzs, ev); });
-                    poly.addTo(group); drawn++;
+                    poly.addTo(group);
                 } catch (e) {}
             });
             group.addTo(map);
             genLayer = group; genOverlayOn = true; genUpdateBtn();
-            showToast(`Generator: ${drawn} assets · ${ffzs.length} FFZs drawn. Right-click an asset to preview its scan.`, '#5fff5f', 5500);
+            showToast(`Generator: ${valid} valid · ${skipped} skip-state (red) · ${ffzs.length} FFZs. Right-click an asset to generate.`, '#5fff5f', 5500);
         }).catch(e => { console.warn(`${TAG} [gen] fetch/draw failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
     }
     function genToggleOverlay() {
@@ -2108,7 +2139,7 @@
                 <div style="font-weight:800;color:#7adfe6;margin-bottom:6px;font-size:12px;">${escapeHtml(name)}</div>
                 <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
                 <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
-                ${asset.unshielded ? '<div style="color:#ff7a00;margin-top:4px;">⚠ asset flagged unshielded</div>' : ''}
+                ${genSkipReason(asset) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset))}</b> — bulk would SKIP this one.</div>` : ''}
                 <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
                 <div style="display:flex;gap:6px;justify-content:flex-end;">
                     <button class="aim-mb-tbtn" data-gp-cancel>Cancel</button>

@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.29 (dev/latest) — Generator: nav nudged inside FFZ + skip-state coloring
+
+Two refinements to the Mission Generator. The generated **Navigate** is now nudged **~1 m inside the FFZ edge** (it was landing right on the boundary, where Percepto could read it as *outside* the FFZ — which the SOP checker flags). And the overlay now reflects **skip-state**: assets that are Unreachable / Unshielded / Empty draw **red**, valid ones white; the right-click popup warns if an asset is in a skip-state (you can still generate it manually). This is the predicate the upcoming bulk "generate all" will use to auto-skip bad-state assets.
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.26 (dev/latest) — Mission Generator, Increment 2 (actually creates the mission)
 
 Right-clicking an asset on the Mission Bank map now opens a small **⊕ Generate mission** popup (preview + an **Inspection scan** checkbox), and **Generate** actually builds and creates the mission via the editor's own `saveApp` — then opens it so you can nudge the points. The mission is named **`<section> - <asset>`** (N/E/S/W from the base station) and contains takeoff → Navigate (in the FFZ, "Based on FFZ min alt") → Snapshot (asset center, ground + your AGL) → optional Thermal/GEM/Wait wrap → returnHome — the server computes the flight route. Built as a reusable per-asset function so the future "generate all assets" batch drops on top. Test on a TEST site first. Dev-only (latest/).
