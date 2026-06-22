@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.41
+// @version      1.42
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.41';
+    const SCRIPT_VERSION = '1.42';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -5864,10 +5864,10 @@ ${snapPlacemarks}
         return working === bodyStr ? null : working;
     }
 
-    // Shift+S → save the open mission (the same saveApp the native Save button
-    // calls). The save POST runs through handleMissionSave, so armed auto-AGL
-    // still applies. Universal input guard so it doesn't fire while typing a name.
-    let saveHotkeyBusy = false;
+    // Shift+S → click the open STEP's "Save" button (data-testid=btn-save-instruction
+    // in the edit-instruction panel). Input-guarded so it doesn't fire while typing.
+    // (Saving the whole mission via saveApp fails while a step editor is open — and
+    // the per-step save is what's actually wanted in the editing workflow.)
     function installSaveHotkey() {
         if (CONTEXT !== 'IFRAME') return;
         window.addEventListener('keydown', (e) => {
@@ -5876,18 +5876,11 @@ ${snapPlacemarks}
             const t = e.target;
             if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable ||
                 (t.closest && t.closest('.ant-input,.ant-select,.ant-select-selection-search-input,[role="textbox"]')))) return;
-            if (!document.querySelector('.mission-edit__content')) return; // only with a mission open
-            const ctx = findMissionAppCtx();
-            if (!ctx || typeof ctx.saveApp !== 'function' || !ctx.currentApp) return;
+            const stepBtn = document.querySelector('[data-testid="btn-save-instruction"]');
+            if (!stepBtn || stepBtn.disabled) return;   // only when a step editor is open
             e.preventDefault(); e.stopPropagation();
-            if (saveHotkeyBusy) return;
-            saveHotkeyBusy = true;
-            const app = ctx.currentApp, name = (app.name || 'Mission');
-            showToast(`Saving "${name}"…`, '#9ad', 1500);
-            Promise.resolve(app && ctx.saveApp(app, name))
-                .then(() => showToast(`✓ Saved "${name}" (Shift+S)`, '#5fff5f', 2500))
-                .catch(err => { console.warn(`${TAG} [save-hotkey] failed`, err); showToast('Save failed — see console.', '#ff5252', 3500); })
-                .finally(() => { saveHotkeyBusy = false; });
+            try { stepBtn.click(); showToast('✓ Step saved (Shift+S)', '#5fff5f', 1800); }
+            catch (err) { console.warn(`${TAG} [save-hotkey] click failed`, err); }
         }, true);
     }
 
