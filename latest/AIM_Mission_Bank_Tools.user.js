@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.37
+// @version      1.38
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.37';
+    const SCRIPT_VERSION = '1.38';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1834,10 +1834,17 @@
         let changed = false;
         if (composerMission && Array.isArray(composerMission.instructions)) {
             const byId = {}; ctx.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; });
+            const cmIds = {}; composerMission.instructions.forEach(ci => { cmIds[String(ci.id)] = true; });
             composerMission.instructions.forEach(ci => {
                 const live = byId[String(ci.id)]; if (!live) return;
                 if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; changed = true; }
                 if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; changed = true; }
+            });
+            // ADD instructions present live but not in the cache (e.g. ➕ Stage
+            // steps with client-only ids) so the compact view + N#/S# badges
+            // recognize them before a save.
+            ctx.instrs.forEach(live => {
+                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); changed = true; }
             });
         }
         if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
