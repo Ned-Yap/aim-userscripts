@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.74
+// @version      34.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.74';
+    const SCRIPT_VERSION = '34.75';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4744,6 +4744,7 @@
 
         const startTime = Date.now();
         const unshielded = [];
+        const allDistances = []; // every asset's nearest-line distance, for calibration
         assets.forEach(a => {
             let lp;
             try { lp = map.latLngToLayerPoint([a.cLat, a.cLng]); } catch (e) { return; }
@@ -4753,8 +4754,17 @@
                 const d2 = pointToSegmentDist2(lp.x, lp.y, s.ax, s.ay, s.bx, s.by);
                 if (d2 < best2) best2 = d2;
             }
-            if (best2 > t2) unshielded.push({ a, distFt: Math.round(Math.sqrt(best2) * ftPerPx) });
+            const distFt = Math.round(Math.sqrt(best2) * ftPerPx);
+            allDistances.push({ name: a.name, distFt });
+            if (best2 > t2) unshielded.push({ a, distFt });
         });
+
+        // Full distance spread (farthest first) so the threshold can be tuned
+        // when a run flags nothing — "all shielded" alone hides whether 400ft
+        // was generous (everything sits at 50ft) or tight (farthest is 390ft).
+        allDistances.sort((x, y) => y.distFt - x.distFt);
+        console.log(`${TAG} asset-validator: nearest-power-line distance for all ${allDistances.length} assets (farthest first, threshold ${thresholdFt}ft, ${segments.length} line segs):`);
+        allDistances.forEach(d => console.log(`${TAG} asset-validator:   ${d.distFt > thresholdFt ? '✗' : '✓'} ${d.distFt}ft  ${d.name}`));
 
         // Asset pin numbers live in a separate range (1000+) so they never
         // collide with gap pins (1..N); label shows a clean 1..M sequence.
