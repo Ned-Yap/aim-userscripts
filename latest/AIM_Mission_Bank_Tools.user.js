@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.56
+// @version      1.57
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.56';
+    const SCRIPT_VERSION = '1.57';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4143,7 +4143,18 @@
     // the AIM map there.
     function missionLatLng(mission) {
         try {
-            const pts = mbSoloPoints(mission);
+            // 1) snapshot/nav points (GPS snapshots + navs)
+            let pts = mbSoloPoints(mission);
+            // 2) ANY instruction with a location (covers missions whose snapshots are
+            //    "In Place" / no-GPS but still have located navs)
+            if (!pts.length) {
+                const ins = (mission && mission.instructions) || [];
+                pts = ins.filter(i => i && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+            }
+            // 3) server-computed route points (last resort)
+            if (!pts.length && mission && Array.isArray(mission.route_points)) {
+                pts = mission.route_points.filter(p => p && typeof p.lat === 'number').map(p => ({ lat: p.lat, lng: p.lng }));
+            }
             if (!pts.length) return null;
             let la = 0, ln = 0; pts.forEach(p => { la += p.lat; ln += p.lng; });
             la /= pts.length; ln /= pts.length;
@@ -4156,11 +4167,12 @@
             const sid = getCurrentSiteID();
             const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
             const m = ms.find(x => String(x.id) === String(missionId));
-            if (!m) return;
+            if (!m) { console.warn(`${TAG} [pan] mission ${missionId} not in cache (site ${sid}) — open/refresh the SUM panel`); return; }
             const ll = missionLatLng(m);
-            if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) return;
+            if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) { console.warn(`${TAG} [pan] mission ${missionId} has no usable GPS (all "In Place" snapshots / no located steps?)`); return; }
             const map = getLeafletMap();
-            if (map && typeof map.setView === 'function') map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
+            if (!map || typeof map.setView !== 'function') { console.warn(`${TAG} [pan] Leaflet map not found`); return; }
+            map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
         } catch (e) { console.warn(`${TAG} [pan] failed`, e); }
     }
 

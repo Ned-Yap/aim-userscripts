@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.57 (dev/latest) — row-click pan more robust (handles In-Place / no-GPS missions)
+
+Row-click map pan now falls back through snapshot/nav points → **any located instruction** → the server's route points, so a mission whose snapshots are "In Place" (no GPS) still pans to its navs/route instead of silently doing nothing. When it genuinely can't pan, it now logs the reason (`[pan] …`) so we can see why (not-in-cache / no usable GPS / no map). Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.56 (dev/latest) — M1 on the step you're editing is fully native (no self re-open)
 
 Fixes the marker-switch colliding with the step you're currently editing: left-clicking the marker of the step **you're already in** now does **nothing** on our side — fully native, so you can drag/reposition it (including dropping it right next to itself). Every **other** marker still saves the current step and switches to it, as before. Made the "which step is open" detection reliable (tracks the step we opened) so the same-step exemption is precise — only the edited one, never the others. Dev-only (latest/).
