@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-21 — Mission Bank Tools v1.34 (dev/latest) — "Stage steps" (add N navs + M snaps to a mission) + bulk skips existing
+
+New **➕ Stage** button in the mission editor: say how many **Navigates** and **Snapshots** you want (with optional inspection-scan wrap), and it adds them to the open mission, **placed next to the existing ones** so you can drag each into position. Navigates keep "Based on FFZ min alt"; snapshots auto-set their elevation on drop if 📷 Auto-AGL is armed — much faster than hand-adding steps. Also: the bulk **Generate All** now **skips assets that already have a mission** (split into to-create / already-have / skip-state). Dev-only (latest/).
+
+---
+
 ## 2026-06-21 — Mission Bank Tools v1.32 (dev/latest) — Generator: bulk "Generate All"
 
 With the ⊕ Generate overlay on, a **▣ Generate All** button opens a panel listing every **valid** asset (Empty/Unreachable/Unshielded skipped + shown separately), each with its mission name + nav/snap preview and a checkbox. Toggle **Inspection scan** for the whole batch, pick which to include, and **⊕ Create** generates them all in one go (sequential `saveApp`, progress readout, server-routed). Reuses the same per-asset build as the single-asset path. Dev-only (latest/) — test on a TEST site.

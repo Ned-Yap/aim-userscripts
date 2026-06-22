@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.33
+// @version      1.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.33';
+    const SCRIPT_VERSION = '1.34';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1558,7 +1558,14 @@
         autoBtn.type = 'button';
         autoBtn.style.cssText = 'flex:1;padding:5px 8px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px;font-weight:700;';
         autoBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); setAutoSnapAgl(!autoSnapAglEnabled); };
-        row2.appendChild(autoBtn);
+        const stageBtn = document.createElement('button');
+        stageBtn.type = 'button';
+        stageBtn.textContent = '➕ Stage';
+        stageBtn.title = 'Add N Navigates + M Snapshots to this mission, staged near the existing ones — then drag them into place (snapshots auto-set elevation if Auto-AGL is on; navigates use FFZ-min).';
+        stageBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
+            'background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);color:#9cf;';
+        stageBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); genStagePopup(stageBtn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn);
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
         if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); }
         else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
@@ -2297,6 +2304,86 @@
         // Soft-refresh the list so the new missions appear (iframe's own hash).
         try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)/); if (mm && cur !== mm[1]) location.hash = mm[1]; } catch (e) {}
         if (goBtn) goBtn.disabled = false;
+    }
+
+    // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
+    // near the existing nav/snap so you can drag them into position. Navigates
+    // keep shouldUseFreezoneMinAlt (FFZ-min); snapshots auto-set to ground+AGL on
+    // drop via the live Auto-AGL. Uses the editor's createInstruction.
+    function genStripId(o) { const c = Object.assign({}, o); delete c.id; return c; }
+    function genWrapTemplates(instrs) {
+        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
+        const out = [];
+        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) {
+            const t = instrs[i] && instrs[i].type_name;
+            if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') out.push(genStripId(instrs[i]));
+            else break;
+        }
+        if (out.length) return out;
+        // fallback: build the canonical wrap with type_name so it renders
+        const W = (type, type_name, value1, v1n) => ({ type, type_name, value1, value2: null, value1_name: v1n || null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null });
+        return [W(7, 'cameraSelect', true), W(24, 'gemMode', 1), W(5, 'wait', 10, 'Sec'), W(24, 'gemMode', 0), W(7, 'cameraSelect', false)];
+    }
+    async function genStageSteps(navCount, snapCount, inspectionScan) {
+        let ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.createInstruction !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
+        const instrs = ctx.currentApp.instructions || [];
+        const navRef = instrs.find(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
+        const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
+        if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
+        const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
+        const wrap = inspectionScan ? genWrapTemplates(instrs) : null;
+        const newSteps = [];
+        for (let i = 0; i < navCount; i++) newSteps.push(genStripId(Object.assign({}, navRef, { location: offEast(navRef, i) })));
+        for (let j = 0; j < snapCount; j++) {
+            newSteps.push(genStripId(Object.assign({}, snapRef, { location: offEast(snapRef, j) })));
+            if (wrap) wrap.forEach(w => newSteps.push(genStripId(w)));
+        }
+        let added = 0;
+        for (const step of newSteps) {
+            ctx = findMissionAppCtx(); // per-render closure — re-walk each call
+            if (!ctx || typeof ctx.createInstruction !== 'function' || !ctx.currentApp) break;
+            const cur = ctx.currentApp.instructions || [];
+            let idx = cur.findIndex(s => s && s.type_name === 'returnHome');
+            if (idx < 0) idx = cur.length;
+            try { ctx.createInstruction(step, idx); added++; } catch (e) { console.warn(`${TAG} [stage] createInstruction failed`, e); }
+            await new Promise(r => setTimeout(r, 130));
+        }
+        try { composerStyleNativeMarkers(); } catch (e) {}
+        showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) near the existing ones — drag them into place.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+    }
+    let genStagePopEl = null;
+    function genStagePopup(anchorBtn) {
+        if (genStagePopEl) { genStagePopEl.remove(); genStagePopEl = null; return; }
+        const pop = document.createElement('div');
+        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:210px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
+            'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        pop.innerHTML = `
+            <div style="font-weight:800;color:#9cf;font-size:13px;margin-bottom:8px;">➕ Stage steps</div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="0" data-st-nav style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="1" data-st-snap style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan checked> Inspection scan wrap per snapshot</label>
+            <div style="display:flex;gap:6px;justify-content:flex-end;">
+                <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
+                <button data-st-add style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;">Stage</button>
+            </div>`;
+        document.body.appendChild(pop);
+        genStagePopEl = pop;
+        const r = anchorBtn.getBoundingClientRect();
+        pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + 'px';
+        pop.style.top = (r.bottom + 4) + 'px';
+        const close = () => { pop.remove(); genStagePopEl = null; document.removeEventListener('mousedown', outside, true); };
+        const outside = e => { if (genStagePopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
+        pop.querySelector('[data-st-cancel]').onclick = close;
+        pop.querySelector('[data-st-add]').onclick = () => {
+            const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
+            const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
+            const scan = pop.querySelector('[data-st-scan]').checked;
+            close();
+            if (!nav && !snap) { showToast('Set a Navigate and/or Snapshot count.', '#ff9800'); return; }
+            genStageSteps(nav, snap, scan);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
     // The on-screen instruction ids, in current editor order.
