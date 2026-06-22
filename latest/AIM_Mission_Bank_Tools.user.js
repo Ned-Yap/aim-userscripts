@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.53
+// @version      1.54
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.53';
+    const SCRIPT_VERSION = '1.54';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1703,12 +1703,20 @@
         composerBindMapEvents();
         installComposerMarkerEvents();
         composerEnsureBadgeCSS();
-        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
-        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        // Number from the LIVE editor instruction order when available — it includes
+        // un-saved, natively-added navs/snaps in their real position (the cached
+        // composerMission doesn't, and 🔄 refresh re-pulls the server which also
+        // lacks them, so a new nav stayed blank until save). Fall back to the cache.
+        let ordered = null;
+        try { const lctx = findMissionEditorCtx(); if (lctx && Array.isArray(lctx.instrs) && lctx.instrs.length) ordered = lctx.instrs; } catch (e) {}
+        if (!ordered) {
+            const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+            ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        }
         const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
         const lookup = {}; let navN = 0, snapN = 0;
         ordered.forEach(s => {
-            if (!s.location || s.location.lat == null) return;
+            if (!s || !s.location || s.location.lat == null) return;
             if (s.type_name === 'navigate') { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
             else if (s.type_name === 'snapshot') { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
         });
@@ -1886,6 +1894,7 @@
 
     // Per-snapshot last-handled position (so we act on MOVES, not every tick).
     const liveSnapLastLoc = {};
+    let composerLastNSCount = -1; // live nav+snap count — change ⇒ native add/remove ⇒ restyle
     const genElevReqAt = {}; // throttle DEM prefetch per marker position (anti-429)
     let liveEditorTimer = null;
     function startLiveEditorSync() {
@@ -1916,6 +1925,11 @@
                 if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); changed = true; }
             });
         }
+        // Native add/remove of a nav/snap (e.g. "Add Instruction → Navigate") shows
+        // up as a live nav+snap COUNT change — force a restyle so the new marker gets
+        // its N#/S# number immediately (numbering reads the live order now).
+        const liveNS = ctx.instrs.filter(s => s && (s.type_name === 'navigate' || s.type_name === 'snapshot')).length;
+        if (liveNS !== composerLastNSCount) { composerLastNSCount = liveNS; changed = true; }
         if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
         // AGL view depends on DEM that loads async — re-render cards each tick so
         // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
