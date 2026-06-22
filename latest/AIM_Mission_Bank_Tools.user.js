@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.57
+// @version      1.58
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.57';
+    const SCRIPT_VERSION = '1.58';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1172,14 +1172,7 @@
                 renderLogDetail(Number(tr.dataset.id));
             };
         });
-        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
-            cb.onclick = (e) => {
-                e.stopPropagation();
-                const id = Number(cb.dataset.row);
-                if (cb.checked) panelState.selectedIds.add(id); else panelState.selectedIds.delete(id);
-                renderTableView();
-            };
-        });
+        wireRowSelectCheckboxes(rows);
         const selAll = panelEl.querySelector('[data-select-all]');
         if (selAll) selAll.onclick = (e) => {
             e.stopPropagation();
@@ -4176,6 +4169,43 @@
         } catch (e) { console.warn(`${TAG} [pan] failed`, e); }
     }
 
+    // Spreadsheet-style multi-select on the row checkboxes (parity with the Site
+    // Setup SUM):
+    //   • plain / Ctrl(Cmd)+click → toggle just this mission (others stay selected)
+    //   • Shift+click → apply this click's NEW state to the whole range from the
+    //     last-clicked row (anchor) to here, in current display order.
+    // `rows` = the display-ordered row list; selection lives in panelState.selectedIds,
+    // the anchor in panelState._lastSelId.
+    function wireRowSelectCheckboxes(rows) {
+        if (!panelEl) return;
+        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const id = Number(cb.dataset.row);
+                const target = cb.checked; // checkbox already flipped to its new state
+                const anchorId = panelState._lastSelId;
+                if (e.shiftKey && anchorId != null && anchorId !== id) {
+                    const ai = rows.findIndex(r => r.id === anchorId);
+                    const ci = rows.findIndex(r => r.id === id);
+                    if (ai >= 0 && ci >= 0) {
+                        const lo = Math.min(ai, ci), hi = Math.max(ai, ci);
+                        for (let i = lo; i <= hi; i++) {
+                            if (target) panelState.selectedIds.add(rows[i].id);
+                            else panelState.selectedIds.delete(rows[i].id);
+                        }
+                        panelState._lastSelId = id;
+                        renderTableView();
+                        return;
+                    }
+                }
+                if (target) panelState.selectedIds.add(id);
+                else panelState.selectedIds.delete(id);
+                panelState._lastSelId = id;
+                renderTableView();
+            };
+        });
+    }
+
     // ========================================================
     // Render states
     // ========================================================
@@ -4356,16 +4386,8 @@
                 renderDetailView(id);
             };
         });
-        // Checkbox per row
-        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
-            cb.onclick = (e) => {
-                e.stopPropagation();
-                const id = Number(cb.dataset.row);
-                if (cb.checked) panelState.selectedIds.add(id);
-                else panelState.selectedIds.delete(id);
-                renderTableView();
-            };
-        });
+        // Checkbox per row — Shift = contiguous range, plain/Ctrl = individual.
+        wireRowSelectCheckboxes(rows);
         // Select all
         const selAll = panelEl.querySelector('[data-select-all]');
         if (selAll) {

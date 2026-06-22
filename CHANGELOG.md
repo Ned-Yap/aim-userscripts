@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.58 (dev/latest) — spreadsheet-style multi-select in the Summary table
+
+The Summary table's row checkboxes now do **Shift+click range select** (parity with the Site Setup SUM): plain or **Ctrl/Cmd+click** toggles one mission (others stay selected), and **Shift+click** applies that click's new state to the whole range from the last-clicked row to here — like selecting cells in a spreadsheet. Works in both the Mission Bank and Mission Log tables. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.57 (dev/latest) — row-click pan more robust (handles In-Place / no-GPS missions)
 
 Row-click map pan now falls back through snapshot/nav points → **any located instruction** → the server's route points, so a mission whose snapshots are "In Place" (no GPS) still pans to its navs/route instead of silently doing nothing. When it genuinely can't pan, it now logs the reason (`[pan] …`) so we can see why (not-in-cache / no usable GPS / no map). Dev-only (latest/).
