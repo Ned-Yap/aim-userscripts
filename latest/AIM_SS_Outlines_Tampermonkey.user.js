@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.76
+// @version      34.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.76';
+    const SCRIPT_VERSION = '34.77';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -330,6 +330,7 @@
                 { id: 'asset-validator.asset-radius', label: 'Asset radius', type: 'number',
                   min: 0, max: 1000, step: 10, default: 200, unit: 'ft' },
                 { id: 'asset-validator.pin-color', label: 'Pin / ring color', type: 'color', default: '#ff1493' },
+                { id: 'asset-validator.skip-unshielded', label: 'Skip already-Unshielded assets', type: 'boolean', default: true },
                 { id: 'asset-validator-run', label: 'Run asset check', type: 'button', action: 'run-asset-validator' },
                 { id: 'asset-validator-clear', label: 'Clear asset pins', type: 'button', action: 'clear-asset-validator' },
                 { id: 'asset-validator.show-dismissed', label: 'Show dismissed pins', type: 'boolean', default: false },
@@ -4682,10 +4683,14 @@
                     if (pts.length < 3) return;
                     let sLat = 0, sLng = 0;
                     pts.forEach(p => { sLat += p.lat; sLng += p.lng; });
+                    // Already-Unshielded per Percepto's own data: the is_unshielded
+                    // flag OR "...- Unshielded" in the subtype string (poi_type_str).
+                    const sub = (e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
                     out.push({
                         name: e.name || (e.custom && e.custom.name) || `asset ${e.id}`,
                         cLat: sLat / pts.length,
                         cLng: sLng / pts.length,
+                        alreadyUnshielded: !!e.is_unshielded || /unshielded/i.test(sub),
                     });
                 });
                 return out;
@@ -4744,8 +4749,13 @@
         const t2 = thresholdPx * thresholdPx;
         const ftPerPx = thresholdPx > 0 ? thresholdFt / thresholdPx : 0;
 
+        // Skip assets Percepto already marks Unshielded (no point re-flagging
+        // what we already know) — on by default, toggleable in the panel.
+        const skipUnshielded = toggleState['asset-validator.skip-unshielded'] !== false;
+
         const startTime = Date.now();
         const unshielded = [];
+        let skipped = 0;
         const allDistances = []; // every asset's nearest-line distance, for calibration
         assets.forEach(a => {
             let lp;
@@ -4757,16 +4767,19 @@
                 if (d2 < best2) best2 = d2;
             }
             const distFt = Math.round(Math.sqrt(best2) * ftPerPx);
-            allDistances.push({ name: a.name, distFt });
-            if (best2 > t2) unshielded.push({ a, distFt });
+            const skip = skipUnshielded && a.alreadyUnshielded;
+            if (skip) skipped++;
+            allDistances.push({ name: a.name, distFt, skip, far: best2 > t2 });
+            if (!skip && best2 > t2) unshielded.push({ a, distFt });
         });
 
         // Full distance spread (farthest first) so the threshold can be tuned
         // when a run flags nothing — "all shielded" alone hides whether 400ft
         // was generous (everything sits at 50ft) or tight (farthest is 390ft).
+        // Mark assets skipped for being already-Unshielded with a ⊘.
         allDistances.sort((x, y) => y.distFt - x.distFt);
-        console.log(`${TAG} asset-validator: nearest-power-line distance for all ${allDistances.length} assets (farthest first, threshold ${thresholdFt}ft, ${segments.length} line segs):`);
-        allDistances.forEach(d => console.log(`${TAG} asset-validator:   ${d.distFt > thresholdFt ? '✗' : '✓'} ${d.distFt}ft  ${d.name}`));
+        console.log(`${TAG} asset-validator: nearest-power-line distance for all ${allDistances.length} assets (farthest first, threshold ${thresholdFt}ft, ${segments.length} line segs${skipped ? `, ${skipped} skipped as already-Unshielded` : ''}):`);
+        allDistances.forEach(d => console.log(`${TAG} asset-validator:   ${d.skip ? '⊘' : (d.far ? '✗' : '✓')} ${d.distFt}ft  ${d.name}${d.skip ? '  (already Unshielded)' : ''}`));
 
         // Asset pin numbers live in a separate range (1000+) so they never
         // collide with gap pins (1..N); label shows a clean 1..M sequence.
@@ -4788,14 +4801,16 @@
         assetValidatorLastRun = {
             count: assetResults.length,
             total: assets.length,
+            skipped,
             at: Date.now(),
             durationMs: Date.now() - startTime,
         };
         saveValidatorResults();
+        const skipNote = skipped ? ` (${skipped} skipped as already-Unshielded)` : '';
         if (assetResults.length === 0) {
-            console.log(`${TAG} asset-validator: ✓ all ${assets.length} assets shielded (centroid within ${thresholdFt}ft of a power line) (${assetValidatorLastRun.durationMs}ms)`);
+            console.log(`${TAG} asset-validator: ✓ all ${assets.length - skipped} checked assets shielded (centroid within ${thresholdFt}ft of a power line)${skipNote} (${assetValidatorLastRun.durationMs}ms)`);
         } else {
-            console.warn(`${TAG} asset-validator: ${assetResults.length}/${assets.length} assets UNSHIELDED (centroid >${thresholdFt}ft from any power line) in ${assetValidatorLastRun.durationMs}ms`);
+            console.warn(`${TAG} asset-validator: ${assetResults.length}/${assets.length - skipped} checked assets UNSHIELDED (centroid >${thresholdFt}ft from any power line)${skipNote} in ${assetValidatorLastRun.durationMs}ms`);
             assetResults.forEach(r => console.warn(`${TAG} asset-validator:   • ${r.assetName} — nearest power line ${r.distFt}ft`));
         }
         runUpdate();

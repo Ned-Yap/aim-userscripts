@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Map Styler v34.77 (dev/latest) — Asset Shielding Check skips already-Unshielded assets
+
+The asset check now cross-references each asset's Percepto state: if it's **already marked Unshielded** (the `is_unshielded` flag or "… - Unshielded" in its subtype), there's no point geometrically re-flagging it, so it's **skipped** by default. New **Skip already-Unshielded assets** toggle (on) to turn that off. The console run marks skipped assets with a ⊘ and reports the skip count; pins now only highlight assets that are *geometrically* far from a power line but *not* already known-unshielded — i.e. the ones the SS Generator actually needs to act on. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Map Styler v34.76 (dev/latest) — Asset Shielding Check pin contrast + color control
 
 Asset pins were hard to see (orange washed out on tan well-pads). Now they default to a high-contrast **deep pink** with a **dark outline**, render **larger**, and the coverage ring is bolder. New **Pin / ring color** picker in the Asset Shielding Check panel lets you set any color; the pin number auto-switches black/white so it stays legible on whatever you pick. (v34.75: each run also logs every asset's nearest-power-line distance, sorted, for threshold calibration.) Dev-only (latest/).
