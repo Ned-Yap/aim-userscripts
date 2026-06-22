@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.36
+// @version      1.37
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.36';
+    const SCRIPT_VERSION = '1.37';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2328,8 +2328,12 @@
         const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
         if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
         const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
-        // copy a step (preserve type object + all fields); drop id; optional new location
-        const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); delete c.id; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
+        // copy a step (preserve type object + all fields) with a UNIQUE id —
+        // Percepto uses instruction.id as the React key (id.toString()), so a
+        // missing/duplicate id crashes the editor (blank screen). The save strips
+        // ids (server assigns real ones), so any unique client id is fine.
+        let idSeq = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100);
+        const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); c.id = idSeq++; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
         const staged = [];
         for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, i)));
         for (let j = 0; j < snapCount; j++) {
