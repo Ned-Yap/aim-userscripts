@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.58
+// @version      1.59
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -110,7 +110,7 @@
     'use strict';
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.58';
+    const SCRIPT_VERSION = '1.59';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4178,6 +4178,13 @@
     // the anchor in panelState._lastSelId.
     function wireRowSelectCheckboxes(rows) {
         if (!panelEl) return;
+        // Re-render WITHOUT losing scroll — save the table scrollTop first so
+        // renderTableView restores it (else a checkbox click jumps the list to top).
+        const rerenderKeepScroll = () => {
+            const tw = panelEl.querySelector('#aim-mb-table-wrap');
+            if (tw) panelState.tableScrollY = tw.scrollTop;
+            renderTableView();
+        };
         panelEl.querySelectorAll('input[data-row]').forEach(cb => {
             cb.onclick = (e) => {
                 e.stopPropagation();
@@ -4194,14 +4201,14 @@
                             else panelState.selectedIds.delete(rows[i].id);
                         }
                         panelState._lastSelId = id;
-                        renderTableView();
+                        rerenderKeepScroll();
                         return;
                     }
                 }
                 if (target) panelState.selectedIds.add(id);
                 else panelState.selectedIds.delete(id);
                 panelState._lastSelId = id;
-                renderTableView();
+                rerenderKeepScroll();
             };
         });
     }

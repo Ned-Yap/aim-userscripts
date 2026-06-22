@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.59 (dev/latest) — selecting a checkbox no longer jumps the list to the top
+
+Fixes the annoyance from v1.58: ticking a checkbox re-rendered the table without preserving scroll, so the list jumped back to the top. It now saves the scroll position before the re-render and restores it — the list stays put as you keep selecting. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.58 (dev/latest) — spreadsheet-style multi-select in the Summary table
 
 The Summary table's row checkboxes now do **Shift+click range select** (parity with the Site Setup SUM): plain or **Ctrl/Cmd+click** toggles one mission (others stay selected), and **Shift+click** applies that click's new state to the whole range from the last-clicked row to here — like selecting cells in a spreadsheet. Works in both the Mission Bank and Mission Log tables. Dev-only (latest/).
