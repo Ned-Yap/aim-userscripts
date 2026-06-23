@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -34,7 +34,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.3';
+    const SCRIPT_VERSION = '4.31';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5975,8 +5975,12 @@
             const opts = readOpts();
             const kml = buildSiteKML(siteID, opts);
             if (!kml) { showToast('Failed to build KML'); return; }
-            // Filename: Site_<id>_Map_(<mode>).kml — matches Python pattern
-            const fname = `Site_${siteID}_Map_(${opts.mode}).kml`;
+            // Filename: mirror the in-KML document name, e.g.
+            // "Site 1605 Map - Exxon - Lille Midkiff 5 - OFFLINE (3D).kml".
+            // Strip characters illegal in filenames (/ \ : * ? " < > |) so the
+            // download doesn't get rejected or silently mangled by the OS.
+            const base = (opts.siteName || `Site ${siteID} Map`).replace(/[/\\:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+            const fname = `${base} (${opts.mode}).kml`;
             if (downloadKMLFile(fname, kml)) {
                 showToast(`Downloaded ${fname}`, 'rgba(95,255,95,0.6)');
             } else {

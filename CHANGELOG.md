@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-23 — Asset Inspector v4.31 (prod) / v4.88 (dev/latest) — Analyzer KML download now uses the site name
+
+The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID only (`Site_1605_Map_(3D).kml`), even though the KML's internal document name already carried the full site name. The download filename now mirrors that document name — e.g. `Site 1605 Map - Exxon - Lille Midkiff 5 - OFFLINE (3D).kml`. Filesystem-illegal characters (`/ \ : * ? " < > |`) are stripped so the download isn't rejected or mangled.
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.59 (dev/latest) — selecting a checkbox no longer jumps the list to the top
 
 Fixes the annoyance from v1.58: ticking a checkbox re-rendered the table without preserving scroll, so the list jumped back to the top. It now saves the scroll position before the re-render and restores it — the list stays put as you keep selecting. Dev-only (latest/).
