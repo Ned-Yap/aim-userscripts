@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,12 +55,28 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.29';
+    const VERSION = '1.30';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PREFS_KEY = 'aim-control-prefs';
     const HOTKEYS_KEY = 'aim-control-hotkeys';
+    // v1.30 — PILOT MODE. A shared localStorage flag (readable by ALL
+    // userscripts on percepto.app, unlike per-script GM storage) that puts the
+    // suite into a consumer-only profile for pilots / regulators. When set,
+    // every "builder" script (SUM/SOP/bulk/macros/editors) stays fully inert
+    // at init via its own guard, so NO observers/intervals/hotkeys start —
+    // the hard requirement that a pilot is never impacted mid-flight. The
+    // consumer scripts below stay active. This is a runtime toggle, NOT a
+    // separate distribution — pilots install the same scripts everyone else does.
+    const PILOT_KEY = 'aim-pilot-mode';
+    // Scripts that REMAIN ACTIVE in Pilot mode (by scriptId). Everything not
+    // listed is a builder and goes inert. Used to (a) hide any older builder
+    // that lacks the init guard and (b) mute it via master-off, as defense.
+    const PILOT_SAFE = new Set([
+        'aim-defaults', 'aim-styler', 'aim-styler-powerlines',
+        'aim-perf-shield', 'aim-map-nav', 'aim-issues',
+    ]);
     const REBIND_ERROR_TIMEOUT_MS = 6000;
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
@@ -174,6 +190,16 @@
     function savePrefs() {
         try { localStorage.setItem(PREFS_KEY, JSON.stringify(state.prefs)); } catch (e) {}
         try { localStorage.setItem(HOTKEYS_KEY, JSON.stringify(state.hotkeys)); } catch (e) {}
+    }
+    // v1.30 — Pilot mode flag (shared localStorage, see PILOT_KEY note above).
+    function isPilotMode() {
+        try { return localStorage.getItem(PILOT_KEY) === '1'; } catch (e) { return false; }
+    }
+    function setPilotMode(on) {
+        try {
+            if (on) localStorage.setItem(PILOT_KEY, '1');
+            else localStorage.removeItem(PILOT_KEY);
+        } catch (e) {}
     }
     function getToggle(scriptId, toggleId, def) {
         const s = state.prefs[scriptId];
@@ -378,6 +404,15 @@
 
     function handleRegister(msg) {
         if (!msg.scriptId) return;
+        // v1.30 — defense in depth: if Pilot mode is on and a BUILDER still
+        // registered (an older install without the init guard), mute it by
+        // forcing its master toggle off. Guarded builders never get here.
+        if (isPilotMode() && !PILOT_SAFE.has(msg.scriptId) && state.channel) {
+            state.channel.postMessage({
+                type: 'SET_TOGGLE', scriptId: msg.scriptId,
+                toggleId: 'master', value: false, enabled: false,
+            });
+        }
         const prev = state.registry.get(msg.scriptId);
         const sig = registrationSignature(msg);
         const isIdentical = prev && prev.__sig === sig;
@@ -769,6 +804,29 @@
                 e.stopPropagation();
                 setRebindError(null);
                 renderPanel();
+                return;
+            }
+            // v1.30 — Pilot mode toggle. Flips the shared flag, then offers a
+            // reload (builders read the flag at INIT, so a reload is the clean
+            // way to (de)activate them — nothing to tear down mid-session).
+            const pilotBtn = t.closest && t.closest('[data-pilot-toggle]');
+            if (pilotBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                const turningOn = !isPilotMode();
+                setPilotMode(turningOn);
+                // Tell any live listeners (defense for older builders that watch
+                // for it); the authoritative effect happens on reload via guards.
+                if (state.channel) state.channel.postMessage({ type: 'PILOT_MODE', enabled: turningOn });
+                renderPanel();
+                const msg = turningOn
+                    ? 'Pilot mode ON — builder tools (SUM / SOP / bulk / macros / editors) will be disabled. Navigation, outlines, power lines, issues, defaults and performance stay active.'
+                    : 'Pilot mode OFF — all tools restored.';
+                if (confirm(`${msg}\n\nReload the page now to apply?`)) {
+                    location.reload();
+                }
                 return;
             }
             // v1.27 — clear the search box.
@@ -1510,7 +1568,12 @@
         // so out-of-scope scripts disappear entirely from the panel.
         // Groups whose members all get filtered out simply won't be created,
         // so their section header doesn't render either.
-        const visibleScripts = scripts.filter(s => scopeMatches(s.scope));
+        // v1.30 — in Pilot mode, hide any builder that still registered (an
+        // older install without the init guard). Guarded builders never reach
+        // here because they return before registering.
+        const visibleScripts = scripts
+            .filter(s => scopeMatches(s.scope))
+            .filter(s => !isPilotMode() || PILOT_SAFE.has(s.scriptId));
 
         // v1.26 — CENTRAL TAXONOMY. One source of truth for how the panel is
         // organized, keyed by scriptId so we can re-group everything WITHOUT
@@ -1659,10 +1722,24 @@
             </div>
         ` : '';
 
-        // Layout order: header, error, sections, then PAT at the bottom.
-        // PAT is a config item that the user only touches occasionally —
+        // v1.30 — Pilot mode banner/toggle. Rendered just under the header so
+        // it's the first thing a pilot/reg sees. Implemented as a delegated
+        // BUTTON (not a checkbox) so it rides the same click/pointerdown path
+        // as the other action buttons — no separate change-event wiring.
+        const pilotOn = isPilotMode();
+        const pilotHtml = `
+            <div style="padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.10);background:${pilotOn ? 'rgba(20,120,180,0.22)' : 'transparent'};display:flex;align-items:center;gap:8px">
+                <span style="flex:1;color:${pilotOn ? '#7fd4ff' : '#e6e6e6'};font-weight:600">🛩️ Pilot mode</span>
+                <span style="font-size:10px;color:#888">${pilotOn ? 'builders inert' : 'for pilots / regs'}</span>
+                <button data-pilot-toggle title="Consumer-only profile: hides builder tools (SUM/SOP/bulk/macros). Reloads to apply."
+                        style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 12px;border-radius:4px;border:1px solid ${pilotOn ? '#7fd4ff' : 'rgba(255,255,255,0.25)'};background:${pilotOn ? 'rgba(20,160,220,0.35)' : 'rgba(255,255,255,0.06)'};color:${pilotOn ? '#cfeeff' : '#bbb'}">${pilotOn ? 'ON' : 'OFF'}</button>
+            </div>
+        `;
+
+        // Layout order: header, pilot banner, error, sections, then PAT at the
+        // bottom. PAT is a config item that the user only touches occasionally —
         // putting it at the bottom keeps active controls front-and-center.
-        state.panelEl.innerHTML = headerHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
+        state.panelEl.innerHTML = headerHtml + pilotHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
         wireTokenSection();
         // NOTE: per-element click/change listeners moved to delegated
         // handlers in createPanel() — see panel.addEventListener calls

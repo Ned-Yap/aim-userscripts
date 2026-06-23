@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Bulk Mission Adder
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Bulk_Mission_Adder.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Bulk_Mission_Adder.user.js
 // @description  Bulk add missions via Shift+B or Green Button. Turbo speed + Auto-Clone + High Contrast List.
@@ -13,6 +13,17 @@
 
 (function() {
     'use strict';
+
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-pilot-mode') === '1') {
+            console.log('[AIM BULK] Pilot mode ON — builder inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
 
     console.log("[AIM BULK] 🛰️ Script attempting to load...");
 
@@ -31,7 +42,7 @@
         const IS_TOP = window === window.top;
         const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
         const SCRIPT_ID = 'aim-bulk-mission-adder';
-        const SCRIPT_VERSION = '1.13';
+        const SCRIPT_VERSION = '1.14';
         let controlChannel = null;
         let controlPanelDetected = false;
         let masterEnabled = true;

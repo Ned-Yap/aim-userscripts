@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Quick Mission Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Quick_Mission_Editor.user.js
 // @description  Bulk-reorder mission instructions via React fiber walk. Ctrl+Click handles to select, Enter to open the move dialog.
@@ -43,8 +43,19 @@
 (function () {
     'use strict';
 
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-pilot-mode') === '1') {
+            console.log('[AIM MB EDITOR] Pilot mode ON — builder inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
+
     const SCRIPT_ID = 'aim-quick-mission-editor';
-    const SCRIPT_VERSION = '0.4';
+    const SCRIPT_VERSION = '0.5';
     const LARGE_MOVE_THRESHOLD = 20; // moves of this many or more get a confirm() prompt
     const TAG = '[AIM MB EDITOR]';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';

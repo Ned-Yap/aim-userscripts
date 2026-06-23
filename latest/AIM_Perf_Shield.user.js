@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -32,6 +32,14 @@
     'use strict';
 
     const TAG = '[AIM PERF SHIELD]';
+
+    // v1.15 — Pilot mode (shared localStorage flag, set by the Control Panel).
+    // Perf Shield STAYS ACTIVE for pilots, but the weather block must NEVER
+    // apply while Pilot mode is on — pilots depend on the live weather
+    // indicator in flight. See shouldBlock() + the init force below.
+    function isPilotMode() {
+        try { return localStorage.getItem('aim-pilot-mode') === '1'; } catch (e) { return false; }
+    }
 
     // Each block category is a peer toggle. The install* hooks (fetch/XHR/script-tag
     // overrides) are installed unconditionally below — they're cheap when no
@@ -84,6 +92,10 @@
         try { blockEnabled[id] = GM_getValue(g.storageKey, g.defaultEnabled) === true; }
         catch (e) { blockEnabled[id] = g.defaultEnabled; }
     });
+    // v1.15 — in Pilot mode, hard-off the weather block at init so the panel
+    // reflects the safe state. shouldBlock() also refuses to block weather in
+    // pilot mode, so this is belt-and-suspenders.
+    if (isPilotMode()) blockEnabled['block-weather'] = false;
 
     // Hide-satellite isn't a network block — it's a Map Styler instruction —
     // but lives here so all perf toggles are in one panel section. Broadcast
@@ -261,8 +273,12 @@
     function shouldBlock(url) {
         if (!url) return false;
         const s = typeof url === 'string' ? url : (url.url || String(url));
+        const pilot = isPilotMode();
         for (const id of Object.keys(BLOCK_GROUPS)) {
             if (!blockEnabled[id]) continue;
+            // Pilot mode: never block weather, even if the toggle is on. A
+            // pilot must always have the live weather indicator in flight.
+            if (pilot && id === 'block-weather') continue;
             const g = BLOCK_GROUPS[id];
             if (g.patterns.some(p => p.test(s))) return true;
         }
@@ -274,7 +290,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.14';
+    const SCRIPT_VERSION = '1.15';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per

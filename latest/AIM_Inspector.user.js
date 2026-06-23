@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Inspector
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Inspector.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Inspector.user.js
 // @description  Cross-frame Leaflet / AIM investigation & control panel. Toggle with Shift+I. Snapshot with Shift+Alt+I.
@@ -28,6 +28,17 @@
 
 (function() {
     'use strict';
+
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-pilot-mode') === '1') {
+            console.log('[AIM INSPECT] Pilot mode ON — builder inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
 
     // ============================================================
     // 1. CONSTANTS
