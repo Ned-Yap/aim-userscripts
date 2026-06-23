@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. No hotkeys.
