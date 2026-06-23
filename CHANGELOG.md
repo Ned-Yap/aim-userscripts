@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-23 — Asset Inspector v4.32 (prod) / v4.89 (dev/latest) — Analyzer KML now includes Base Stations & Safe Zones
+
+The Site Setup SUM → Analyzer KML export skipped Base Stations (type 8) and Safe Zones (type 98) entirely. They now export as their own top-level folders ("Base Station" / "Safe Zone") with point markers, each toggleable in the "Include folders" list (with counts) like every other entity type. Default ON.
+
+---
+
 ## 2026-06-23 — Asset Inspector v4.31 (prod) / v4.88 (dev/latest) — Analyzer KML download now uses the site name
 
 The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID only (`Site_1605_Map_(3D).kml`), even though the KML's internal document name already carried the full site name. The download filename now mirrors that document name — e.g. `Site 1605 Map - Exxon - Lille Midkiff 5 - OFFLINE (3D).kml`. Filesystem-illegal characters (`/ \ : * ? " < > |`) are stripped so the download isn't rejected or mangled.

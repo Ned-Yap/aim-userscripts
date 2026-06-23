@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.31
+// @version      4.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -34,7 +34,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.31';
+    const SCRIPT_VERSION = '4.32';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5213,6 +5213,10 @@
             '<Style id="generalmarker-general_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-tower_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/flag.png</href></Icon></IconStyle></Style>',
             '<Style id="generalmarker-hazard_style"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/shapes/caution.png</href></Icon></IconStyle></Style>',
+            // Base Station (type 8) — yellow-tinted icon (matches TYPE_REG
+            // #ffd54f). Safe Zone (type 98) — pink (matches #ff9eb5).
+            '<Style id="basestation_style"><IconStyle><color>ff4fd5ff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/heliport.png</href></Icon></IconStyle></Style>',
+            '<Style id="safezone_style"><IconStyle><color>ffb59eff</color><Icon><href>http://maps.google.com/mapfiles/kml/shapes/parking_lot.png</href></Icon></IconStyle></Style>',
             // GM radius circles — purple outline (ties to the purple GM
             // icon), faint purple fill so the ring reads without hiding
             // what's underneath. KML aabbggrr: ff f020a0 = full-alpha
@@ -5532,7 +5536,7 @@
         const opts = { siteDatumM };
 
         // Bucket entities by type for folder construction
-        const byType = { 3: [], 4: [], 15: [], 16: [], 19: { general: [], tower: [], hazard: [] } };
+        const byType = { 3: [], 4: [], 8: [], 15: [], 16: [], 19: { general: [], tower: [], hazard: [] }, 98: [] };
         entities.forEach(e => {
             if (e.type === 19) {
                 const t = (e.general_marker_type || 'general').toLowerCase();
@@ -5622,6 +5626,27 @@
                 });
                 xml.push('</Folder>');
             });
+        }
+        // Base Stations (type 8) + Safe Zones (type 98) — single-point
+        // entities, same Point geometry as General Markers. Their own
+        // top-level folders so the Google Earth tree lists them explicitly.
+        if (include.base && byType[8].length > 0) {
+            xml.push('<Folder><name>Base Station</name>');
+            byType[8].forEach(e => {
+                const geom = kmlMarkerGeometry(e, mode);
+                if (!geom) return;
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#basestation_style</styleUrl>${geom}</Placemark>`);
+            });
+            xml.push('</Folder>');
+        }
+        if (include.safe && byType[98].length > 0) {
+            xml.push('<Folder><name>Safe Zone</name>');
+            byType[98].forEach(e => {
+                const geom = kmlMarkerGeometry(e, mode);
+                if (!geom) return;
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#safezone_style</styleUrl>${geom}</Placemark>`);
+            });
+            xml.push('</Folder>');
         }
         // General Marker radius circles — OFF by default. One or more
         // horizontal buffer rings (clamped to ground) around every GM
@@ -5770,6 +5795,8 @@
             ffzs: entities.filter(e => e.type === 16).length,
             nfzs: entities.filter(e => e.type === 4).length,
             markers: entities.filter(e => e.type === 19).length,
+            base: entities.filter(e => e.type === 8).length,
+            safe: entities.filter(e => e.type === 98).length,
         };
         const m = document.createElement('div');
         m.id = ANALYZER_MODAL_ID;
@@ -5793,6 +5820,8 @@
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="ffzs" checked style="accent-color:#7adfe6"> Free-Fly Zones (${counts.ffzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="nfzs" checked style="accent-color:#7adfe6"> No-Fly Zones (${counts.nfzs})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="markers" checked style="accent-color:#7adfe6"> General Markers (${counts.markers})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="base" checked style="accent-color:#7adfe6"> Base Stations (${counts.base})</label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" data-inc="safe" checked style="accent-color:#7adfe6"> Safe Zones (${counts.safe})</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-gmcircles-label"><input type="checkbox" data-inc="gmCircles" style="accent-color:#7adfe6"> GM Radius Circles</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-vbuffers-label"><input type="checkbox" data-inc="vbuffers" checked style="accent-color:#7adfe6"> Vertical Buffers (3D only)</label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer" id="aim-ai-powerlines-label"><input type="checkbox" data-inc="powerlines" checked style="accent-color:#7adfe6"> Power Lines <span id="aim-ai-pl-status" style="color:#888;font-size:10px">(requesting…)</span></label>
