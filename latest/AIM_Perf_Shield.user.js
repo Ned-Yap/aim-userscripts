@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.16
+// @version      1.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -33,12 +33,14 @@
 
     const TAG = '[AIM PERF SHIELD]';
 
-    // v1.15 — Pilot mode (shared localStorage flag, set by the Control Panel).
-    // Perf Shield STAYS ACTIVE for pilots, but the weather block must NEVER
-    // apply while Pilot mode is on — pilots depend on the live weather
-    // indicator in flight. See shouldBlock() + the init force below.
-    function isPilotMode() {
-        try { return localStorage.getItem('aim-pilot-mode') === '1'; } catch (e) { return false; }
+    // v1.17 — Lite/Full mode (shared localStorage 'aim-mode', set by the Control
+    // Panel from the CSM whitelist). Perf Shield runs for EVERYONE, but the
+    // weather block must NEVER apply in LITE mode (regs/pilots — they depend on
+    // the live weather indicator in flight). Only Full (CSM) installs can block
+    // weather. Anything other than 'full' is Lite (the safe default). See
+    // shouldBlock() + the init force below.
+    function isLiteMode() {
+        try { return localStorage.getItem('aim-mode') !== 'full'; } catch (e) { return true; }
     }
 
     // Each block category is a peer toggle. The install* hooks (fetch/XHR/script-tag
@@ -95,7 +97,7 @@
     // v1.15 — in Pilot mode, hard-off the weather block at init so the panel
     // reflects the safe state. shouldBlock() also refuses to block weather in
     // pilot mode, so this is belt-and-suspenders.
-    if (isPilotMode()) blockEnabled['block-weather'] = false;
+    if (isLiteMode()) blockEnabled['block-weather'] = false;
 
     // Hide-satellite isn't a network block — it's a Map Styler instruction —
     // but lives here so all perf toggles are in one panel section. Broadcast
@@ -273,12 +275,12 @@
     function shouldBlock(url) {
         if (!url) return false;
         const s = typeof url === 'string' ? url : (url.url || String(url));
-        const pilot = isPilotMode();
+        const lite = isLiteMode();
         for (const id of Object.keys(BLOCK_GROUPS)) {
             if (!blockEnabled[id]) continue;
-            // Pilot mode: never block weather, even if the toggle is on. A
-            // pilot must always have the live weather indicator in flight.
-            if (pilot && id === 'block-weather') continue;
+            // Lite mode (regs/pilots): never block weather, even if the toggle
+            // is on. They must always have the live weather indicator in flight.
+            if (lite && id === 'block-weather') continue;
             const g = BLOCK_GROUPS[id];
             if (g.patterns.some(p => p.test(s))) return true;
         }
@@ -290,7 +292,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.16';
+    const SCRIPT_VERSION = '1.17';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -610,12 +612,12 @@
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
-                // v1.16 — Pilot mode hard-locks the weather block OFF. Ignore
+                // v1.17 — Lite mode hard-locks the weather block OFF. Ignore
                 // any echoed/stored block-weather=true (the Control Panel echoes
                 // the user's stored pref on REGISTER) so blockEnabled, the panel,
                 // and the 'active blocks' line stay truthful. shouldBlock() also
-                // never blocks weather in pilot mode, so weather always flows.
-                if (isPilotMode() && groupId === 'block-weather') {
+                // never blocks weather in Lite mode, so weather always flows.
+                if (isLiteMode() && groupId === 'block-weather') {
                     if (blockEnabled[groupId]) blockEnabled[groupId] = false;
                     return;
                 }

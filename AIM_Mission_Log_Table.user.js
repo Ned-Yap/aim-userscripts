@@ -34,8 +34,8 @@
     // script runs a document-wide MutationObserver + 1.5s interval — exactly
     // the flight-map work a pilot must not carry.) ---
     try {
-        if (localStorage.getItem('aim-pilot-mode') === '1') {
-            console.log('[AIM MLOG] Pilot mode ON — builder inert, init skipped.');
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM MLOG] Lite mode — CSM tool inert, init skipped.');
             return;
         }
     } catch (e) {}

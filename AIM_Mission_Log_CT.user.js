@@ -32,8 +32,8 @@
     // script's document-wide MutationObserver is exactly the kind of flight-map
     // work pilots must not carry, so it goes inert.) ---
     try {
-        if (localStorage.getItem('aim-pilot-mode') === '1') {
-            console.log('[AIM CT] Pilot mode ON — builder inert, init skipped.');
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM CT] Lite mode — CSM tool inert, init skipped.');
             return;
         }
     } catch (e) {}

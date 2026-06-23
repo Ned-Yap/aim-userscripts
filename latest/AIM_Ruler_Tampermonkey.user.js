@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Measure / Ruler
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Ruler_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Ruler_Tampermonkey.user.js
 // @description  Adds Shift+R hotkey for the Measure tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -14,17 +14,6 @@
 // ==/UserScript==
 
 (function() {
-    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
-    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
-    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
-    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
-    try {
-        if (localStorage.getItem('aim-pilot-mode') === '1') {
-            console.log('[AIM RULER] Pilot mode ON — builder inert, init skipped.');
-            return;
-        }
-    } catch (e) {}
-
     const SYNC_CHANNEL = "AIM_RULER_SYNC";
     const sync = new BroadcastChannel(SYNC_CHANNEL);
     
@@ -94,7 +83,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-ruler';
-    const SCRIPT_VERSION = '2.8';
+    const SCRIPT_VERSION = '2.9';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;

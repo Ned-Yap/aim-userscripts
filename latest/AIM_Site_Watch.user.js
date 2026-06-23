@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.12
+// @version      0.13
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -58,8 +58,8 @@
     // mode reloads the page, so this re-evaluates cleanly each load. (Site Watch
     // is heavy background polling — exactly what a pilot must not carry.) ---
     try {
-        if (localStorage.getItem('aim-pilot-mode') === '1') {
-            console.log('[AIM WATCH] Pilot mode ON — builder inert, init skipped.');
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM WATCH] Lite mode — CSM tool inert, init skipped.');
             return;
         }
     } catch (e) {}
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.12';
+    const SCRIPT_VERSION = '0.13';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
