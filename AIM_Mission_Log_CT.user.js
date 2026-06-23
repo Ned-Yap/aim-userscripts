@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Log CT
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_CT.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_CT.user.js
 // @description  Rewrites the Mission Log TIME column from the site's fixed GMT-5 stamps into real local Central Time. "Jun 11, 2026 13:28" -> "06/11/2026 - 1:28pm CT". Also relabels the header site clock to CT. No hotkeys.
@@ -24,6 +24,19 @@
 
 (function() {
     'use strict';
+
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/DOM injection start past this point. Toggling Pilot
+    // mode reloads the page, so this re-evaluates cleanly each load. (This
+    // script's document-wide MutationObserver is exactly the kind of flight-map
+    // work pilots must not carry, so it goes inert.) ---
+    try {
+        if (localStorage.getItem('aim-pilot-mode') === '1') {
+            console.log('[AIM CT] Pilot mode ON — builder inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const TAG = `[AIM CT ${CONTEXT}]`;

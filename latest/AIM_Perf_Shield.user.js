@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.15
+// @version      1.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -290,7 +290,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.15';
+    const SCRIPT_VERSION = '1.16';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -610,6 +610,15 @@
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
+                // v1.16 — Pilot mode hard-locks the weather block OFF. Ignore
+                // any echoed/stored block-weather=true (the Control Panel echoes
+                // the user's stored pref on REGISTER) so blockEnabled, the panel,
+                // and the 'active blocks' line stay truthful. shouldBlock() also
+                // never blocks weather in pilot mode, so weather always flows.
+                if (isPilotMode() && groupId === 'block-weather') {
+                    if (blockEnabled[groupId]) blockEnabled[groupId] = false;
+                    return;
+                }
                 // IDEMPOTENT no-op for group toggles too — was a major
                 // source of redundant work (every echoed SET_TOGGLE
                 // wrote GM, applied chat CSS, etc).
