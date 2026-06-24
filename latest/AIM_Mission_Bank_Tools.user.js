@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.61
+// @version      1.62
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.61';
+    const SCRIPT_VERSION = '1.62';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2779,7 +2779,7 @@
     // h() mangles the type (number OR object → "No instruction component for type
     // [object Object]"), so we avoid it: copied steps already have valid types and
     // setCurrentApp is the same path normal edits use → renders + saves cleanly.
-    function genStageSteps(navCount, snapCount, inspectionScan) {
+    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav) {
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
@@ -2821,16 +2821,27 @@
         }
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
         // Rebuild the instruction list (shallow-copy existing so we don't mutate
-        // live objects), insert staged steps before returnHome, re-index.
+        // live objects), insert the staged steps, re-index.
         const newInstrs = instrs.map(s => Object.assign({}, s));
-        let rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome');
-        if (rh < 0) rh = newInstrs.length;
-        newInstrs.splice(rh, 0, ...staged);
+        const endIdx = () => { const rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome'); return rh < 0 ? newInstrs.length : rh; };
+        // Insert position: before the Nth existing Navigate (so the new nav BECOMES
+        // N#, pushing the old N#..end down by one) when insertAtNav is set; else at
+        // the end (before returnHome).
+        let insertIdx;
+        if (insertAtNav && insertAtNav >= 1) {
+            const navIdxs = [];
+            newInstrs.forEach((s, k) => { if (s && s.type_name === 'navigate') navIdxs.push(k); });
+            insertIdx = (insertAtNav <= navIdxs.length) ? navIdxs[insertAtNav - 1] : endIdx();
+        } else {
+            insertIdx = endIdx();
+        }
+        newInstrs.splice(insertIdx, 0, ...staged);
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        const posMsg = (insertAtNav && insertAtNav >= 1) ? ` at N${insertAtNav}` : '';
         try {
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
-            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s)${posMsg} — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
         } catch (e) { console.warn(`${TAG} [stage] setCurrentApp failed`, e); showToast('Stage failed — see console.', '#ff5252', 4000); }
     }
     let genStagePopEl = null;
@@ -2843,6 +2854,8 @@
             <div style="font-weight:800;color:#9cf;font-size:13px;margin-bottom:8px;">➕ Stage steps</div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="0" data-st-nav style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="1" data-st-snap style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Insert at Nav #</label><input type="number" min="1" max="200" placeholder="end" data-st-at style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank = end. e.g. 6 → new nav becomes N6, the rest shift down.</div>
             <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan checked> Inspection scan wrap per snapshot</label>
             <div style="display:flex;gap:6px;justify-content:flex-end;">
                 <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
@@ -2860,9 +2873,11 @@
             const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
             const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
             const scan = pop.querySelector('[data-st-scan]').checked;
+            const atRaw = parseInt(pop.querySelector('[data-st-at]').value, 10);
+            const at = (!isNaN(atRaw) && atRaw >= 1) ? atRaw : null; // null = end
             close();
             if (!nav && !snap) { showToast('Set a Navigate and/or Snapshot count.', '#ff9800'); return; }
-            genStageSteps(nav, snap, scan);
+            genStageSteps(nav, snap, scan, at);
         };
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }

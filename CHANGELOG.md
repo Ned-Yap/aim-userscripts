@@ -84,6 +84,12 @@ The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.62 (dev/latest) — Stage steps: choose where to insert (push the rest down)
+
+Stage steps now has an **"Insert at Nav #"** field. Leave it blank to append at the end (as before), or set it to e.g. **6** and the new Navigate is dropped in as **N6** with everything from the old N6 onward pushed down by one. Because the new block lands in the middle of the list, **the snapshots renumber too** (the new snapshot becomes S6, the old S6→S7, …) — so you no longer have to right-click and renumber by hand. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.59 (dev/latest) — selecting a checkbox no longer jumps the list to the top
 
 Fixes the annoyance from v1.58: ticking a checkbox re-rendered the table without preserving scroll, so the list jumped back to the top. It now saves the scroll position before the re-render and restores it — the list stays put as you keep selecting. Dev-only (latest/).
