@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.91
+// @version      4.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.91';
+    const SCRIPT_VERSION = '4.92';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10329,9 +10329,17 @@
         ensurePendingForSite(siteID);
         ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
-        // v3.88: annotate asset rows with route-from-base distance (one graph
-        // build + one Dijkstra). routeSummary feeds the 📍 Base picker below.
-        const routeSummary = annotateRoutes(siteID, allRows);
+        // v4.92 PERF: routing is EXPENSIVE on large sites (graph build + FFZ
+        // connector pairwise loops + per-base Dijkstra + per-asset FFZ match) —
+        // enough to freeze the tab for 60s+ and trip the browser's "page
+        // unresponsive" dialog. The route/battery columns are OFF by default, so
+        // computing this on EVERY open was pure waste. Only annotate routes when
+        // the user is actually showing the Route or Battery column (or whenever
+        // they enable it / pick the routing preset, which re-renders). When
+        // skipped, the 📍 Base picker shows a "routing off" state.
+        const needRoutes = sumPanelState.columnOrder.includes('route')
+                        || sumPanelState.columnOrder.includes('battery');
+        const routeSummary = needRoutes ? annotateRoutes(siteID, allRows) : null;
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
@@ -10728,7 +10736,9 @@
         baseBtn.type = 'button';
         baseBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
         const bases = (routeSummary && routeSummary.bases) || [];
+        const routingOff = routeSummary === null; // v4.92: skipped (route/battery cols hidden)
         const baseLabelText = () => {
+            if (routingOff) return '📍 Base: routing off ▾';
             if (!bases.length) return '📍 Base: (none) ▾';
             if (bases.length === 1) {
                 const raw = bases[0].name || `#${bases[0].id}`;
@@ -10738,7 +10748,9 @@
             return `📍 Base: ${bases.length} bases${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
         };
         baseBtn.textContent = baseLabelText();
-        baseBtn.title = bases.length
+        baseBtn.title = routingOff
+            ? 'Routing is off (skipped for speed). Add the Route or Battery column to compute basestation→asset routing.'
+            : bases.length
             ? `Routing from ${bases.length === 1 ? `"${bases[0].name}"` : bases.length + ' bases (closest wins)'} — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
             : (routeSummary && routeSummary.reason === 'no-flight-paths'
                 ? 'No flight paths on this site — routing unavailable.'
