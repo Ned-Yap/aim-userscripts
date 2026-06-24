@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.31
+// @version      1.32
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.31';
+    const VERSION = '1.32';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -229,9 +229,10 @@
     // cached mode untouched, so a resolved CSM isn't knocked back to Lite by a
     // transient blip, and an unresolved user simply stays Lite (safe default).
     let modeResolving = false;
+    let modeResolveDone = false; // run-once per page load (reset only on token CHANGE)
     function resolveMode() {
         const token = getToken();
-        if (!token || typeof GM_xmlhttpRequest !== 'function' || modeResolving) return;
+        if (!token || typeof GM_xmlhttpRequest !== 'function' || modeResolving || modeResolveDone) return;
         modeResolving = true;
         ghJson('https://api.github.com/user', token, (me) => {
             const login = me && me.login;
@@ -240,6 +241,7 @@
             const url = `https://api.github.com/repos/${KMLS_REPO}/contents/${CSM_WHITELIST_PATH}?ref=${KMLS_BRANCH}`;
             ghJson(url, token, (file) => {
                 modeResolving = false;
+                modeResolveDone = true;
                 let list = null;
                 try {
                     // contents API returns base64 in .content; decode then parse.
@@ -268,7 +270,10 @@
                 }
                 const newMode = getMode();
                 console.log(`${TAG} mode resolved: ${login} → CSM=${isCsm}, mode=${newMode}${newMode !== prev ? ` (was ${prev}; reload to apply)` : ''}`);
-                if ((newMode !== prev || true) && state.panelOpen) renderPanel();
+                // Deliberately NO renderPanel() here — the cached mode only
+                // matters on the next reload, and re-rendering an OPEN panel from
+                // an async callback wipes checkboxes mid-click + flickers the
+                // panel. The banner reflects the new mode on the next render.
             });
         });
     }
@@ -379,6 +384,7 @@
         }
         // v1.31 — a new/changed token means we can (re-)resolve CSM status.
         modeResolving = false;
+        modeResolveDone = false;
         if (value) resolveMode();
     }
     // Verifies the PAT by hitting the contents API for the KMLs repo root.
