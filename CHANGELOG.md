@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — AIM Mission Log Table v1.5 — fix: waypoint AGL now resolves (DEM retry/backoff)
+
+The per-waypoint **Altitude AGL** was showing "n/a (DEM unavailable)" for every pin. Percepto's terrain endpoint rate-limits with a 429 while a site's elevation tiles are cold — and on the mission-log page they're always cold because the map isn't loaded — so the single-shot lookup always failed. It now retries with backoff (warming the first lookup generously) so AGL fills in, and short-circuits if the endpoint is genuinely unavailable so the download can't hang.
+
+---
+
 ## 2026-06-24 — AIM Mission Log Table v1.4 — download any mission's 3D flight path as KML (with waypoints + summary)
 
 Every row in the Mission Log now has a 📥 button in the right-hand actions column. Click it to download that mission's actual drone flight path as a KML — the drone's recorded LAT/LNG/altitude over the whole flight. Opens in Google Earth as a 3D path you can fly through, plus a **time-animated track** (hit ▶ on the time slider to play the flight back). Altitude is true meters-above-sea-level (absolute), so the path sits at the right height over terrain. On top of the line, it drops a **labeled waypoint every 10% of the flight** (plus Takeoff/Landing) — click any pin for altitude (m + ft), **AGL** (derived from terrain), speed (m/s + mph), heading (° + compass), battery %, and the site-local time. The file's top-level description is a **flight summary**: duration, distance flown, altitude range, max AGL, max speed, and battery used. Idle hover points are de-duplicated to keep the file small. No clicks into the mission needed — just the button on the log row.

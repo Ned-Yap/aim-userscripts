@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML — path + time-animated track + a labeled waypoint every 10% (alt m/ft, AGL, speed, heading, battery, local time) + a flight summary. No hotkeys.
@@ -465,19 +465,49 @@
         return 2 * R * Math.asin(Math.sqrt(x));
     }
 
-    // DEM ground elevation (m) at a point via Percepto's own endpoint. Used to
-    // derive AGL since mission_positions altitude_agl is typically null.
-    function fetchGroundM(lat, lng) {
+    // DEM ground elevation (m) via Percepto's own endpoint. Used to derive AGL
+    // since mission_positions altitude_agl is typically null. This endpoint is
+    // touchy: it 429s ("Elevation Not Loaded") while the site's terrain tiles
+    // are cold — which they always are on the mission-log page, since the map
+    // isn't loaded. So a single attempt reliably fails. We retry with backoff
+    // to give the tiles time to warm (mirrors how Percepto's own UI behaves).
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    function fetchGroundOnce(lat, lng) {
         const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat, lng }))}`;
         return fetch(url, { credentials: 'include' })
-            .then(r => (r.ok ? r.json() : null))
-            .then(d => (d && typeof d.altitude === 'number') ? d.altitude : null)
-            .catch(() => null);
+            .then(r => {
+                if (r.status === 429) return { retry: true, m: null };   // throttled / tiles loading
+                if (!r.ok) return { retry: false, m: null };             // hard failure — don't spin
+                return r.json().then(d => {
+                    const m = (d && typeof d.altitude === 'number') ? d.altitude : null;
+                    return { retry: m == null, m };                       // ok-but-null => still loading
+                });
+            })
+            .catch(() => ({ retry: true, m: null }));
     }
-    // Sequential (avoids the /location_altitude/ 429 storm) — only ~11 pins.
+    async function fetchGroundM(lat, lng, maxTries) {
+        for (let i = 0; i < maxTries; i++) {
+            const res = await fetchGroundOnce(lat, lng);
+            if (res.m != null) return res.m;
+            if (!res.retry) return null;
+            await sleep(i < 2 ? 900 : 2000); // back off; cold DEM tiles need time
+        }
+        return null;
+    }
+    // Sequential (avoids the 429 storm) — only ~11 pins. Retry the FIRST lookup
+    // generously to warm the tiles; if even that never resolves, the endpoint is
+    // unavailable for this site, so skip the rest rather than hang ~2 min.
     async function fetchGroundsSeq(coords) {
         const out = [];
-        for (const c of coords) out.push(await fetchGroundM(c.lat, c.lng));
+        for (let i = 0; i < coords.length; i++) {
+            const g = await fetchGroundM(coords[i].lat, coords[i].lng, i === 0 ? 8 : 3);
+            if (i === 0 && g == null) { // DEM cold/unavailable — don't hammer the other 10
+                console.warn(`${TAG} DEM /location_altitude/ unavailable (429/empty) — AGL skipped`);
+                for (let j = 0; j < coords.length; j++) out.push(null);
+                return out;
+            }
+            out.push(g);
+        }
         return out;
     }
 
