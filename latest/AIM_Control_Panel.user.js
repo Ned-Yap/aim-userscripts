@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.32
+// @version      1.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.32';
+    const VERSION = '1.33';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -507,15 +507,12 @@
 
     function handleRegister(msg) {
         if (!msg.scriptId) return;
-        // v1.31 — defense in depth: in LITE mode, if a CSM-only tool still
-        // registered (an older install without the init guard), mute it by
-        // forcing its master toggle off. Guarded CSM tools never get here.
-        if (!isFull() && !LITE_ALLOWED.has(msg.scriptId) && state.channel) {
-            state.channel.postMessage({
-                type: 'SET_TOGGLE', scriptId: msg.scriptId,
-                toggleId: 'master', value: false, enabled: false,
-            });
-        }
+        // NOTE: a v1.31 "defense" broadcast master=false to any CSM-only tool
+        // that registered in Lite. REMOVED in v1.33 — every CSM tool now
+        // self-guards (inert in Lite, never registers), so it was unnecessary
+        // AND could leave a tool's master toggle stuck OFF after a Lite↔Full
+        // round-trip (it muted FPE's smart-altitude). Lite already hides CSM
+        // sections via the visibleScripts filter; no master-poking needed.
         const prev = state.registry.get(msg.scriptId);
         const sig = registrationSignature(msg);
         const isIdentical = prev && prev.__sig === sig;
