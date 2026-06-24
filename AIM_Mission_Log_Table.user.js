@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
-// @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML. No hotkeys.
+// @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML — path + time-animated track + a labeled waypoint every 10% (alt m/ft, AGL, speed, heading, battery, local time) + a flight summary. No hotkeys.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -23,11 +23,18 @@
 // Reset: Shift + double-click any column header clears the saved layout.
 // Flight-path KML: each mission row gets a 📥 button (in the sticky-right
 //   action cell). Click it to fetch GET /mission_positions/<id>/ (cookie auth,
-//   same-origin) and download the drone's path as a KML with both an
-//   absolute-altitude LineString (3D path) and a time-stamped gx:Track
-//   (Google Earth time-animated playback). Points use altitude_asl (meters ASL,
-//   falling back to alt), are sorted chronologically, and consecutive duplicate
-//   fixes (idle hover) are dropped to keep the file lean.
+//   same-origin) and download the drone's path as a KML containing:
+//     • an absolute-altitude LineString (static 3D path)
+//     • a time-stamped gx:Track (Google Earth time-animated playback)
+//     • a labeled waypoint at every 10% of distance flown (+ Takeoff/Landing),
+//       each carrying alt (m + ft), AGL (m + ft, derived from the DEM endpoint
+//       /location_altitude/ since altitude_agl is usually null), speed (m/s +
+//       mph from velocity mm/s), heading (° + compass), battery %, and the
+//       site-local time (tz offset parsed from the row's time-cell title)
+//     • a flight-summary table on the Document (duration, distance, alt range,
+//       max AGL, max speed, battery used).
+//   Points use altitude_asl (meters ASL, falling back to alt), are sorted
+//   chronologically, and consecutive duplicate fixes (idle hover) are dropped.
 // Hotkeys: none.
 // Log tag: [AIM MLOG]
 
@@ -376,12 +383,12 @@
         btn.textContent = '⏳';
         const nameEl = tr.querySelector('.missions-page__mission-name');
         const missionName = nameEl ? (nameEl.textContent || '').trim() : '';
-        console.log(`${TAG} fetching positions for mission ${missionId}`);
+        const offMin = siteOffsetMinFromRow(tr); // site-local tz, parsed off the row
+        console.log(`${TAG} fetching positions for mission ${missionId} (tz offset ${offMin} min)`);
         fetch(`/mission_positions/${encodeURIComponent(missionId)}/`, { credentials: 'include' })
             .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-            .then(data => {
-                const positions = (data && data.positions) || [];
-                const kml = buildKml(positions, missionId, missionName);
+            .then(data => buildKml((data && data.positions) || [], missionId, missionName, offMin))
+            .then(kml => {
                 if (!kml) {
                     console.warn(`${TAG} mission ${missionId}: no usable positions`);
                     flash(btn, '∅', 2500);
@@ -399,14 +406,94 @@
             .finally(() => { btn.dataset.busy = '0'; });
     }
 
+    // --- unit + time + geo helpers ----------------------------------------
+
+    const M_TO_FT = 3.28084;
+    const MPS_TO_MPH = 2.2369363;
+
+    // Site-local tz offset (minutes) parsed from the row's time-cell title,
+    // e.g. "Jun 23, 2026 23:08 (site GMT-5)". null => fall back to viewer local.
+    function siteOffsetMinFromRow(tr) {
+        try {
+            const el = tr.querySelector('[title*="GMT"]');
+            const title = el ? (el.getAttribute('title') || '') : '';
+            const m = title.match(/GMT\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?/i);
+            if (!m) return null;
+            const sign = m[1] === '-' ? -1 : 1;
+            return sign * (parseInt(m[2], 10) * 60 + (m[3] ? parseInt(m[3], 10) : 0));
+        } catch (e) { return null; }
+    }
+
+    function tzLabel(offMin) {
+        if (offMin == null) return 'local';
+        const s = offMin < 0 ? '-' : '+';
+        const a = Math.abs(offMin);
+        return `GMT${s}${Math.floor(a / 60)}${a % 60 ? ':' + String(a % 60).padStart(2, '0') : ''}`;
+    }
+
+    // Format a UTC ISO timestamp in the site-local wall clock.
+    function fmtLocal(iso, offMin, withDate) {
+        const ms = Date.parse(iso);
+        if (isNaN(ms)) return '';
+        if (offMin == null) {
+            const d = new Date(ms);
+            return withDate ? d.toLocaleString() : d.toLocaleTimeString();
+        }
+        const d = new Date(ms + offMin * 60000);
+        const p2 = n => String(n).padStart(2, '0');
+        let h = d.getUTCHours();
+        const ap = h >= 12 ? 'pm' : 'am';
+        const h12 = ((h + 11) % 12) + 1;
+        const time = `${h12}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}${ap}`;
+        if (!withDate) return time;
+        const mo = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+        return `${mo} ${d.getUTCDate()}, ${d.getUTCFullYear()} ${time}`;
+    }
+
+    function cardinal(deg) {
+        if (deg == null) return '';
+        const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+        return dirs[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+    }
+
+    // Horizontal great-circle distance (meters) between two {lat,lng}.
+    function havM(a, b) {
+        const R = 6371000, toR = Math.PI / 180;
+        const la1 = a.lat * toR, la2 = b.lat * toR;
+        const dla = (b.lat - a.lat) * toR, dlo = (b.lng - a.lng) * toR;
+        const x = Math.sin(dla / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dlo / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(x));
+    }
+
+    // DEM ground elevation (m) at a point via Percepto's own endpoint. Used to
+    // derive AGL since mission_positions altitude_agl is typically null.
+    function fetchGroundM(lat, lng) {
+        const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat, lng }))}`;
+        return fetch(url, { credentials: 'include' })
+            .then(r => (r.ok ? r.json() : null))
+            .then(d => (d && typeof d.altitude === 'number') ? d.altitude : null)
+            .catch(() => null);
+    }
+    // Sequential (avoids the /location_altitude/ 429 storm) — only ~11 pins.
+    async function fetchGroundsSeq(coords) {
+        const out = [];
+        for (const c of coords) out.push(await fetchGroundM(c.lat, c.lng));
+        return out;
+    }
+
     function xmlEsc(s) {
         return String(s).replace(/[&<>"']/g, c =>
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
     }
 
-    // Build a KML with an absolute-altitude LineString (3D path) + a timestamped
-    // gx:Track. Prefers altitude_asl (meters ASL); falls back to alt.
-    function buildKml(positions, missionId, missionName) {
+    // Build a KML (async — fetches DEM for the pins):
+    //   • absolute-altitude LineString (static 3D path)
+    //   • timestamped gx:Track (Google Earth time playback)
+    //   • a pin at every 10% of distance flown + Takeoff/Landing, each with
+    //     alt (m/ft), AGL (m/ft via DEM), speed, heading, battery, local time
+    //   • a flight-summary description on the Document
+    // Prefers altitude_asl (m ASL); falls back to alt.
+    async function buildKml(positions, missionId, missionName, offMin) {
         const pts = [];
         for (const p of positions) {
             const pos = p && p.position;
@@ -414,7 +501,12 @@
             const alt = (p.altitude_asl != null) ? p.altitude_asl
                 : (p.alt != null ? p.alt : null);
             if (alt == null) continue;
-            pts.push({ lat: pos.lat, lng: pos.lng, alt, t: p.timestamp || null });
+            pts.push({
+                lat: pos.lat, lng: pos.lng, alt, t: p.timestamp || null,
+                vmm: (typeof p.velocity === 'number') ? p.velocity : null, // mm/s
+                hdg: (typeof p.heading === 'number') ? p.heading : null,    // deg
+                batt: (typeof p.battery === 'number') ? p.battery : null    // %
+            });
         }
         if (!pts.length) return null;
         // Chronological order so the track plays back correctly.
@@ -426,6 +518,30 @@
             if (last && last.lat === p.lat && last.lng === p.lng && last.alt === p.alt) continue;
             clean.push(p);
         }
+
+        // Cumulative 3D distance (m) along the cleaned path.
+        const cum = new Array(clean.length).fill(0);
+        for (let i = 1; i < clean.length; i++) {
+            const h = havM(clean[i - 1], clean[i]);
+            const dz = clean[i].alt - clean[i - 1].alt;
+            cum[i] = cum[i - 1] + Math.sqrt(h * h + dz * dz);
+        }
+        const total = cum[cum.length - 1];
+
+        // Pick pin indices at 0,10,…,100% of distance flown (dedup, ordered).
+        const pinIdx = [];
+        for (let pct = 0; pct <= 100; pct += 10) {
+            const target = total * (pct / 100);
+            let idx = 0;
+            while (idx < cum.length - 1 && cum[idx] < target) idx++;
+            if (!pinIdx.length || pinIdx[pinIdx.length - 1].idx !== idx) pinIdx.push({ pct, idx });
+            else pinIdx[pinIdx.length - 1].pct = pct; // collapse dupes onto highest pct
+        }
+
+        // DEM ground for each pin → AGL.
+        const grounds = await fetchGroundsSeq(pinIdx.map(pi => clean[pi.idx]));
+
+        // ---- geometry strings ----
         const line = clean.map(p => `${p.lng},${p.lat},${p.alt}`).join(' ');
         const track = [];
         for (const p of clean) {
@@ -433,13 +549,83 @@
             track.push(`        <when>${p.t}</when>`);
             track.push(`        <gx:coord>${p.lng} ${p.lat} ${p.alt}</gx:coord>`);
         }
+
+        // ---- pins ----
+        const fmtM = (m) => `${Math.round(m)} m / ${Math.round(m * M_TO_FT)} ft`;
+        const fmtSpeed = (vmm) => {
+            if (vmm == null) return '—';
+            const mps = vmm / 1000;
+            return `${mps.toFixed(1)} m/s / ${(mps * MPS_TO_MPH).toFixed(1)} mph`;
+        };
+        const fmtDist = (m) => `${Math.round(m).toLocaleString()} m / ${(m / 1609.344).toFixed(2)} mi`;
+
+        const pinPlacemarks = pinIdx.map((pi, i) => {
+            const p = clean[pi.idx];
+            const g = grounds[i];
+            const agl = (g != null) ? (p.alt - g) : null;
+            const isStart = pi.pct === 0, isEnd = pi.pct === 100;
+            const style = isStart ? '#pin-start' : (isEnd ? '#pin-end' : '#pin-mid');
+            const label = isStart ? 'Takeoff' : (isEnd ? 'Landing' : `${pi.pct}%`);
+            const rows = [
+                ['Progress', `${pi.pct}% · point ${pi.idx + 1}/${clean.length}`],
+                ['Time', p.t ? `${fmtLocal(p.t, offMin)} (${tzLabel(offMin)})` : '—'],
+                ['Altitude ASL', fmtM(p.alt)],
+                ['Altitude AGL', agl != null ? fmtM(agl) : 'n/a (DEM unavailable)'],
+                ['Speed', fmtSpeed(p.vmm)],
+                ['Heading', p.hdg != null ? `${Math.round(p.hdg)}° ${cardinal(p.hdg)}` : '—'],
+                ['Battery', p.batt != null ? `${p.batt}%` : '—'],
+                ['Distance flown', fmtDist(cum[pi.idx])]
+            ];
+            const tbl = '<table>' + rows.map(r =>
+                `<tr><td style="padding:1px 8px 1px 0;color:#888">${r[0]}</td><td><b>${r[1]}</b></td></tr>`).join('') + '</table>';
+            return `    <Placemark>
+      <name>${xmlEsc(label)}</name>
+      <styleUrl>${style}</styleUrl>
+      <description><![CDATA[${tbl}]]></description>
+      <Point>
+        <extrude>1</extrude>
+        <altitudeMode>absolute</altitudeMode>
+        <coordinates>${p.lng},${p.lat},${p.alt}</coordinates>
+      </Point>
+    </Placemark>`;
+        }).join('\n');
+
+        // ---- flight summary ----
+        const t0 = clean.find(p => p.t), tN = [...clean].reverse().find(p => p.t);
+        const durMs = (t0 && tN) ? (Date.parse(tN.t) - Date.parse(t0.t)) : 0;
+        const durS = Math.max(0, Math.round(durMs / 1000));
+        const durStr = `${Math.floor(durS / 60)}:${String(durS % 60).padStart(2, '0')}`;
+        const alts = clean.map(p => p.alt);
+        const maxAsl = Math.max(...alts), minAsl = Math.min(...alts);
+        const aglVals = grounds.map((g, i) => g != null ? clean[pinIdx[i].idx].alt - g : null).filter(v => v != null);
+        const speeds = clean.map(p => p.vmm).filter(v => v != null);
+        const maxMph = speeds.length ? (Math.max(...speeds) / 1000 * MPS_TO_MPH) : null;
+        const batts = clean.map(p => p.batt).filter(v => v != null);
+        const sRows = [
+            ['Mission', `${missionId}${missionName ? ' — ' + xmlEsc(missionName) : ''}`],
+            ['Start', t0 ? `${fmtLocal(t0.t, offMin, true)} (${tzLabel(offMin)})` : '—'],
+            ['End', tN ? `${fmtLocal(tN.t, offMin, true)} (${tzLabel(offMin)})` : '—'],
+            ['Duration', `${durStr} (mm:ss)`],
+            ['Distance flown', fmtDist(total)],
+            ['Altitude ASL range', `${fmtM(minAsl)} → ${fmtM(maxAsl)}`],
+            ['Max AGL', aglVals.length ? fmtM(Math.max(...aglVals)) : 'n/a'],
+            ['Max speed', maxMph != null ? `${maxMph.toFixed(1)} mph` : '—'],
+            ['Battery', batts.length ? `${batts[0]}% → ${batts[batts.length - 1]}% (used ${batts[0] - batts[batts.length - 1]}%)` : '—'],
+            ['Points', `${clean.length} (from ${positions.length} samples)`]
+        ];
+        const summary = '<table>' + sRows.map(r =>
+            `<tr><td style="padding:1px 10px 1px 0;color:#888">${r[0]}</td><td><b>${r[1]}</b></td></tr>`).join('') + '</table>';
+
         const title = `Mission ${missionId}${missionName ? ' — ' + missionName : ''}`;
         return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
   <Document>
     <name>${xmlEsc(title)}</name>
-    <description>${clean.length} points · altitude in meters ASL (absolute)</description>
+    <description><![CDATA[${summary}]]></description>
     <Style id="fp"><LineStyle><color>ff00aaff</color><width>3</width></LineStyle></Style>
+    <Style id="pin-start"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/grn-pushpin.png</href></Icon></IconStyle></Style>
+    <Style id="pin-mid"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png</href></Icon></IconStyle></Style>
+    <Style id="pin-end"><IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/pushpin/red-pushpin.png</href></Icon></IconStyle></Style>
     <Placemark>
       <name>Flight path (3D)</name>
       <styleUrl>#fp</styleUrl>
@@ -456,6 +642,10 @@
 ${track.join('\n')}
       </gx:Track>
     </Placemark>
+    <Folder>
+      <name>Waypoints (every 10%)</name>
+${pinPlacemarks}
+    </Folder>
   </Document>
 </kml>`;
     }

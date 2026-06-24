@@ -6,9 +6,9 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-24 — AIM Mission Log Table v1.3 — download any mission's 3D flight path as KML
+## 2026-06-24 — AIM Mission Log Table v1.4 — download any mission's 3D flight path as KML (with waypoints + summary)
 
-Every row in the Mission Log now has a 📥 button in the right-hand actions column. Click it to download that mission's actual drone flight path as a KML — the drone's recorded LAT/LNG/altitude over the whole flight. The file opens in Google Earth (or any KML viewer) as a 3D path you can fly through, plus a time-animated track so you can scrub the flight by time. Altitude is true meters-above-sea-level (absolute), so the path sits at the right height over the terrain. Idle hover points are de-duplicated to keep the file small. No clicks into the mission needed — just the button on the log row.
+Every row in the Mission Log now has a 📥 button in the right-hand actions column. Click it to download that mission's actual drone flight path as a KML — the drone's recorded LAT/LNG/altitude over the whole flight. Opens in Google Earth as a 3D path you can fly through, plus a **time-animated track** (hit ▶ on the time slider to play the flight back). Altitude is true meters-above-sea-level (absolute), so the path sits at the right height over terrain. On top of the line, it drops a **labeled waypoint every 10% of the flight** (plus Takeoff/Landing) — click any pin for altitude (m + ft), **AGL** (derived from terrain), speed (m/s + mph), heading (° + compass), battery %, and the site-local time. The file's top-level description is a **flight summary**: duration, distance flown, altitude range, max AGL, max speed, and battery used. Idle hover points are de-duplicated to keep the file small. No clicks into the mission needed — just the button on the log row.
 
 ---
 
