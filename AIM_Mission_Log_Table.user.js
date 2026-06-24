@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML — path + time-animated track + a labeled waypoint every 10% (alt m/ft, AGL, speed, heading, battery, local time) + a flight summary. No hotkeys.
@@ -476,38 +476,39 @@
         const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat, lng }))}`;
         return fetch(url, { credentials: 'include' })
             .then(r => {
-                if (r.status === 429) return { retry: true, m: null };   // throttled / tiles loading
-                if (!r.ok) return { retry: false, m: null };             // hard failure — don't spin
-                return r.json().then(d => {
+                if (r.ok) return r.json().then(d => {
                     const m = (d && typeof d.altitude === 'number') ? d.altitude : null;
-                    return { retry: m == null, m };                       // ok-but-null => still loading
+                    return { retry: m == null, m };          // ok-but-null => still loading, retry
                 });
+                if (r.status === 429 || r.status >= 500) return { retry: true, m: null }; // transient
+                return { retry: false, m: null };            // 401/403/404 etc — retrying won't help
             })
-            .catch(() => ({ retry: true, m: null }));
+            .catch(() => ({ retry: true, m: null }));        // network blip — retry
     }
     async function fetchGroundM(lat, lng, maxTries) {
         for (let i = 0; i < maxTries; i++) {
             const res = await fetchGroundOnce(lat, lng);
             if (res.m != null) return res.m;
             if (!res.retry) return null;
-            await sleep(i < 2 ? 900 : 2000); // back off; cold DEM tiles need time
+            await sleep(i < 2 ? 600 : 1500); // brief backoff for the rare transient
         }
         return null;
     }
-    // Sequential (avoids the 429 storm) — only ~11 pins. Retry the FIRST lookup
-    // generously to warm the tiles; if even that never resolves, the endpoint is
-    // unavailable for this site, so skip the rest rather than hang ~2 min.
+    // Sequential (one bad call must not poison the rest). Each pin retries on its
+    // own; we only stop hitting the endpoint after several CONSECUTIVE failures
+    // (truly down) so a single transient can't wipe every AGL, and a healthy
+    // endpoint resolves all ~11 in ~1s.
     async function fetchGroundsSeq(coords) {
         const out = [];
+        let consecFail = 0;
         for (let i = 0; i < coords.length; i++) {
-            const g = await fetchGroundM(coords[i].lat, coords[i].lng, i === 0 ? 8 : 3);
-            if (i === 0 && g == null) { // DEM cold/unavailable — don't hammer the other 10
-                console.warn(`${TAG} DEM /location_altitude/ unavailable (429/empty) — AGL skipped`);
-                for (let j = 0; j < coords.length; j++) out.push(null);
-                return out;
-            }
+            if (consecFail >= 3) { out.push(null); continue; } // endpoint unhealthy — stop hammering
+            const g = await fetchGroundM(coords[i].lat, coords[i].lng, 4);
             out.push(g);
+            consecFail = (g == null) ? consecFail + 1 : 0;
         }
+        const ok = out.filter(v => v != null).length;
+        console.log(`${TAG} DEM ground resolved ${ok}/${coords.length}`, out);
         return out;
     }
 
