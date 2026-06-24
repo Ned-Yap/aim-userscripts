@@ -12,6 +12,12 @@ The Control Panel now resolves your GitHub login against a CSM whitelist and sho
 
 ---
 
+## 2026-06-24 — AIM Issues v1.27 (prod + dev/latest) — Slack notifications self-heal + stop failing silently
+
+A status change that synced to GitHub but never reached Slack used to look identical to a successful one — the post was skipped or errored with zero feedback. Now, on a normal (non-validator, non-local) issue, if Slack isn't ready when you act, the script attempts one on-demand reload of the Slack config (fixes the case where the config didn't finish loading that session). If it still can't post — or the Slack API rejects it — you get a visible ⚠ toast saying it saved + synced to GitHub but Slack was **not** notified, with the likely reason. No more silent misses, no console digging required.
+
+---
+
 ## 2026-06-23 — AIM Issues v1.26 (prod + dev/latest) — View & reinstate deleted issues (approvers)
 
 Deleted issues are no longer gone for good. Approvers get a new **🗑 Deleted** filter chip in the Issues panel that lists tombstoned issues (struck-through, with who/when deleted). Open one and there's a **♻ Reinstate this issue** button (approver-only, two-stage confirm) that restores it to the status it held before deletion. The reinstate is sync-safe: the deleted/live state is now derived from each issue's full history (last delete-vs-reinstate event wins), so a restore survives merging against a coworker's still-deleted copy instead of being silently re-deleted. Slack threads get a `♻ reinstated` reply and the parent message un-strikes. CSMs don't see the Deleted chip or the Reinstate button.

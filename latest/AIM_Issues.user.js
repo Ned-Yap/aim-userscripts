@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.26
+// @version      1.27
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.26';
+    const SCRIPT_VERSION = '1.27';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -979,7 +979,25 @@
     //  • approver approves/rejects pending  → cc the original proposer
     //  • direct resolve / reopen / un-ignore → no mention
     async function postSlackTransition(issue, fromStatus, transition, note, by) {
-        if (!slackPostable(issue)) return;
+        // Intentionally-silent cases (no warning): local-only issues never
+        // sync, and opted-out validator findings are silent by design.
+        if (!issue || issue.createdBy === 'local-only') return;
+        if (issue.source === 'validator' && !issue.slackNotifyOptIn) return;
+        // v1.27: this is a NORMAL issue that should notify. If Slack isn't ready
+        // (config didn't load or raced this session), try ONE on-demand refetch
+        // — postSlackTransition runs in the IFRAME (the GitHub commit already
+        // succeeded), so fetchSlackConfig actually executes here. If it's STILL
+        // unavailable, tell the actor instead of failing silently: the prior
+        // behaviour skipped Slack with zero feedback, so a missed notification
+        // looked identical to a successful one (the bug Chris hit on 06-23).
+        if (!slackEnabled() && cachedToken) {
+            try { await fetchSlackConfig(); } catch (e) {}
+        }
+        if (!slackEnabled()) {
+            console.warn(`${TAG} Slack NOT notified for ${issue.id} — config unavailable this session`);
+            showToast('⚠ Saved + synced to GitHub, but Slack was NOT notified — Slack config didn\'t load this session. A page reload usually fixes it.', 7000);
+            return;
+        }
         try {
             await ensureSlackThread(issue);   // v1.18: adopt pre-Slack issues
             const actor = slackPlain(by);
@@ -1013,7 +1031,14 @@
             if (mention) lines.push(`cc ${mention}`);
             const text = issue.slackThreadTs ? lines.join('\n')
                        : `${lines.join('\n')}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
-            await slackPost(text, issue.slackThreadTs || null);
+            // v1.27: capture the result. slackPost returns the message ts on
+            // success, null on any API failure (bad token, not_in_channel,
+            // rate limit — all of which slackPost logs). Surface a failure to
+            // the actor so a dropped notification isn't silent.
+            const replyTs = await slackPost(text, issue.slackThreadTs || null);
+            if (!replyTs) {
+                showToast('⚠ Saved + synced to GitHub, but the Slack post failed (Slack API error — check the bot token / channel). See console for the reason.', 7000);
+            }
             // v1.08: parent is a live status board — reflect EVERY transition
             // (pending/resolved/ignored/reopen). issue.status is already the
             // new status here (applyTransition set it before calling us).
@@ -1022,6 +1047,7 @@
             }
         } catch (e) {
             console.warn(`${TAG} postSlackTransition threw:`, e);
+            showToast('⚠ Saved + synced, but the Slack notification threw an error (see console).', 7000);
         }
     }
 
