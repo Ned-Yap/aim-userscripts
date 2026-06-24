@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.24
+// @version      1.26
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.24';
+    const SCRIPT_VERSION = '1.26';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -305,6 +305,7 @@
     const panelPriorityFilters = new Set(['high', 'medium', 'low', 'none']);
     let panelSearch = '';
     let panelAssignedToMe = false;   // v1.12: "Assigned to me" filter toggle
+    let panelShowDeleted = false;    // v1.26: approver-only "Deleted" view toggle
     // v0.16: persisted size + position. Loaded from localStorage on open,
     // saved on drag/resize release. Use viewport-anchored top/left so the
     // panel sticks wherever the user left it across reloads.
@@ -960,6 +961,19 @@
         }
     }
 
+    // v1.26: reinstate → threaded reply + un-strike the parent message (its
+    // text reverts to the restored status since issue.status is already set).
+    async function postSlackReinstate(issue, by) {
+        if (!slackPostable(issue) || !issue.slackThreadTs) return;
+        try {
+            const actor = slackPlain(by);
+            await slackPost(`♻ ${actor} *reinstated* this issue`, issue.slackThreadTs);
+            await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+        } catch (e) {
+            console.warn(`${TAG} postSlackReinstate threw:`, e);
+        }
+    }
+
     // Status transition → threaded reply. Role-aware mention:
     //  • CSM proposes (→ pending_*)         → ping approvers to review
     //  • approver approves/rejects pending  → cc the original proposer
@@ -1127,6 +1141,26 @@
         return out;
     }
 
+    // v1.26: derive the deleted flag from a (union-merged) history. Scans for
+    // the last delete (toStatus==='deleted') vs reinstate (kind==='reinstate')
+    // event; whichever is chronologically latest decides. Returns the stored
+    // fallback flag when the history carries no delete/reinstate event at all
+    // (legacy tombstones whose delete predates history entries). This is the
+    // single source of truth for "is this issue deleted" after a merge.
+    function deletedFromHistory(history, fallbackDeleted) {
+        let state = null, stateAt = -Infinity;
+        (history || []).forEach(h => {
+            if (!h) return;
+            const isDel = h.toStatus === 'deleted';
+            const isReinst = h.kind === 'reinstate';
+            if (!isDel && !isReinst) return;
+            const at = new Date(h.at).getTime();
+            const t = isNaN(at) ? 0 : at;
+            if (t >= stateAt) { stateAt = t; state = isDel; }
+        });
+        return state === null ? !!fallbackDeleted : state;
+    }
+
     function mergeIssueObjects(a, b) {
         const history = mergeHistoryArrays(a.history, b.history);
         const status = history.length
@@ -1146,21 +1180,26 @@
         // the same values — taking from either side is fine. Use spread
         // with `a` first for stable ordering of fields.
         const merged = { ...a, ...b, history, status };
-        // v0.25: delete-wins. If EITHER copy is tombstoned, the merged
-        // result is tombstoned. Keep whichever tombstone happened first
-        // (canonical record of when the delete actually occurred).
-        if (a.deleted || b.deleted) {
-            merged.deleted = true;
-            // Prefer earliest deletedAt — first delete is the canonical one
+        // v1.26: deleted state is DERIVED from the union-merged history so a
+        // reinstate can survive sync. Was v0.25 "delete-wins" (any tombstoned
+        // copy → tombstoned), which made reinstate impossible — the next merge
+        // against a coworker's stale copy re-deleted it. Now the chronologically
+        // LAST delete-vs-reinstate event in the merged history wins, so
+        // delete → reinstate → delete in any tab order resolves correctly.
+        merged.deleted = deletedFromHistory(history, a.deleted || b.deleted);
+        // Preserve the audit fields. deletedAt = earliest delete (canonical
+        // first-delete time); reinstatedAt = latest reinstate.
+        if (a.deletedAt || b.deletedAt) {
             const aAt = a.deletedAt ? new Date(a.deletedAt).getTime() : Infinity;
             const bAt = b.deletedAt ? new Date(b.deletedAt).getTime() : Infinity;
-            if (aAt <= bAt) {
-                merged.deletedAt = a.deletedAt || b.deletedAt;
-                merged.deletedBy = a.deletedBy || b.deletedBy;
-            } else {
-                merged.deletedAt = b.deletedAt;
-                merged.deletedBy = b.deletedBy;
-            }
+            merged.deletedAt = aAt <= bAt ? (a.deletedAt || b.deletedAt) : b.deletedAt;
+            merged.deletedBy = aAt <= bAt ? (a.deletedBy || b.deletedBy) : b.deletedBy;
+        }
+        if (a.reinstatedAt || b.reinstatedAt) {
+            const aR = a.reinstatedAt ? new Date(a.reinstatedAt).getTime() : -Infinity;
+            const bR = b.reinstatedAt ? new Date(b.reinstatedAt).getTime() : -Infinity;
+            merged.reinstatedAt = aR >= bR ? a.reinstatedAt : b.reinstatedAt;
+            merged.reinstatedBy = aR >= bR ? a.reinstatedBy : b.reinstatedBy;
         }
         return merged;
     }
@@ -2507,8 +2546,13 @@
         // v0.7: anyone can delete a local-only issue regardless of token
         // state — they're throwaway entries with no real owner.
         const isLocalOnly = (issue.createdBy === 'local-only');
-        if (!isCreator && !isLocalOnly) {
-            showToast(`Only @${issue.createdBy} can delete this issue.`, 4500);
+        // v1.25: approvers can delete ANY issue (oversight power, matches their
+        // approve/reject/direct-resolve role). Lets them clean up TEST/junk
+        // issues they didn't create. The deletion is attributed to the
+        // approver in history + tombstone, so the audit log stays honest.
+        const canModerate = isApprover();
+        if (!isCreator && !isLocalOnly && !canModerate) {
+            showToast(`Only @${issue.createdBy} or an approver can delete this issue.`, 4500);
             return;
         }
         // Drop visual layers
@@ -2561,6 +2605,61 @@
             postSlackDelete(issue, by);
         } else {
             showToast('Issue deleted locally (no GitHub token).', 3000);
+        }
+    }
+
+    // v1.26: approver-only reinstate. Reverses a tombstone by flipping deleted
+    // off + recording a 'reinstate' history entry. Because the merge derives
+    // the deleted flag from the union history (latest delete-vs-reinstate
+    // wins), this SURVIVES sync against a coworker's still-tombstoned copy —
+    // unlike a naive deleted=false, which the old delete-wins merge re-killed.
+    function reinstateIssue(id) {
+        const issue = currentSiteIssues.find(i => i.id === id);
+        if (!issue) return;
+        // Belt-and-suspenders — the UI only shows the button to approvers, but
+        // re-assert here in case a future entry point forgets.
+        if (!isApprover()) {
+            showToast('Only an approver can reinstate a deleted issue.', 4500);
+            return;
+        }
+        if (!issue.deleted) {
+            showToast('That issue is not deleted.', 3000);
+            return;
+        }
+        // Restore the status the issue held immediately before its deletion —
+        // the fromStatus on the most recent delete history entry.
+        let restoreStatus = issue.status || 'open';
+        const h0 = issue.history || [];
+        for (let i = h0.length - 1; i >= 0; i--) {
+            if (h0[i].toStatus === 'deleted') { restoreStatus = h0[i].fromStatus || 'open'; break; }
+        }
+        const nowIso = new Date().toISOString();
+        const by = cachedUsername || 'local-only';
+        issue.deleted = false;
+        issue.reinstatedAt = nowIso;
+        issue.reinstatedBy = by;
+        issue.status = restoreStatus;
+        if (!Array.isArray(issue.history)) issue.history = [];
+        issue.history.push({
+            at: nowIso,
+            by,
+            kind: 'reinstate',
+            fromStatus: 'deleted',
+            toStatus: restoreStatus,
+            note: '(reinstated)',
+        });
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        // Redraw map layers (the issue is live again) + refresh panel/badge.
+        renderAllIssues();
+        renderButtonState();
+        renderIssuesPanel();
+        console.log(`${TAG} reinstated issue ${id} by @${by} → ${restoreStatus}`);
+        if (cachedToken) {
+            showToast('Issue reinstated — pushing to GitHub…', 2500);
+            commitIssuesToGitHub(`reinstate issue by @${by}`);
+            postSlackReinstate(issue, by);
+        } else {
+            showToast('Issue reinstated locally (no GitHub token).', 3000);
         }
     }
 
@@ -3940,11 +4039,28 @@
 
             const isCreator = !!(liveIssue.createdBy && cachedUsername && liveIssue.createdBy === cachedUsername);
             const isLocalOnly = (liveIssue.createdBy === 'local-only');
-            const canDelete = isCreator || isLocalOnly;
+            // v1.25: approvers can delete any issue (see deleteIssue). The
+            // label flags WHY the button is available so the deleter knows
+            // they're acting as an approver on someone else's issue.
+            const canModerate = isApprover();
+            // v1.26: a tombstoned issue shows Reinstate (approver-only) instead
+            // of Delete, and suppresses all transition/comment/priority actions.
+            const isDeleted = !!liveIssue.deleted;
+            const canDelete = (isCreator || isLocalOnly || canModerate) && !isDeleted;
+            const canReinstate = isDeleted && canModerate;
+            const deleteLabel = isCreator ? ' (you created this)'
+                : isLocalOnly ? ' (local-only)'
+                : ` (approver — @${escHtml(liveIssue.createdBy || '?')}'s issue)`;
             const deleteBtnHtml = canDelete
                 ? `<button id="aim-issues-modal-delete"
                        style="padding:7px 14px;background:#5a2222;color:#ff8585;border:1px solid #ff4d4d;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;margin-right:auto">
-                       🗑 Delete${isCreator ? ' (you created this)' : ' (local-only)'}
+                       🗑 Delete${deleteLabel}
+                   </button>`
+                : '';
+            const reinstateBtnHtml = canReinstate
+                ? `<button id="aim-issues-modal-reinstate"
+                       style="padding:7px 14px;background:#10331f;color:#5fff5f;border:1px solid #5fff5f;border-radius:4px;cursor:pointer;font:inherit;font-weight:700;margin-right:auto">
+                       ♻ Reinstate this issue
                    </button>`
                 : '';
 
@@ -3954,7 +4070,22 @@
             //   { kind: 'priority', to: 'high' | 'medium' | 'low' | null } — priority change (optional note)
             //   null — show all action buttons (transitions + comment + priority chips)
             let actionSectionHtml = '';
-            if (armed && armed.kind === 'comment') {
+            if (isDeleted) {
+                // v1.26: deleted issues show a banner + (for approvers) the
+                // Reinstate button in the footer. No transitions/comments —
+                // the issue must be reinstated before it can be acted on.
+                const delBy = escHtml(liveIssue.deletedBy || '?');
+                const delWhen = liveIssue.deletedAt ? fmtDateTime(liveIssue.deletedAt) : 'unknown time';
+                actionSectionHtml = `
+                    <div style="margin-top:14px;padding:12px;background:#1a1010;border:1px solid rgba(255,77,77,0.45);border-radius:6px">
+                        <div style="color:#ff8585;font-size:13px;font-weight:700;margin-bottom:4px">🗑 This issue was deleted</div>
+                        <div style="color:#bbb;font-size:11px">by <b>@${delBy}</b> · ${delWhen}</div>
+                        <div style="color:#888;font-size:11px;margin-top:6px;font-style:italic">${canReinstate
+                            ? 'Use ♻ Reinstate below to restore it (returns to its pre-delete status).'
+                            : 'Only an approver can reinstate a deleted issue.'}</div>
+                    </div>
+                `;
+            } else if (armed && armed.kind === 'comment') {
                 // v1.10: tag teammates on a comment — chip picker (reliable)
                 // plus inline @login in the text auto-converts (see
                 // slackifyMentions). Only shown when Slack is configured.
@@ -4216,8 +4347,8 @@
                         ${confLabel}
                     </button>
                 </div>`;
-            } else if (canDelete) {
-                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}</div>`;
+            } else if (canDelete || canReinstate) {
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}</div>`;
             }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
@@ -4551,6 +4682,26 @@
                     }, 5000);
                 };
             }
+            // v1.26: Reinstate (two-stage confirm, mirrors Delete).
+            const reinstateBtn = card.querySelector('#aim-issues-modal-reinstate');
+            if (reinstateBtn) {
+                reinstateBtn.onclick = () => {
+                    if (reinstateBtn.dataset.armed === '1') {
+                        reinstateIssue(liveIssue.id);
+                        closeStatusModal();
+                        return;
+                    }
+                    reinstateBtn.dataset.armed = '1';
+                    reinstateBtn.textContent = '♻ Click again to confirm reinstate';
+                    reinstateBtn.style.background = '#5fff5f';
+                    reinstateBtn.style.color = '#06210f';
+                    setTimeout(() => {
+                        if (!reinstateBtn || reinstateBtn.dataset.armed !== '1') return;
+                        reinstateBtn.dataset.armed = '0';
+                        render();
+                    }, 5000);
+                };
+            }
         }
 
         // v0.30: drag/resize for the modal. Closure-scoped so it sees `card`,
@@ -4731,7 +4882,14 @@
         // v0.25: filter tombstones from the panel — sort + per-status counts
         // both operate on the live list.
         const liveSiteIssues = liveIssues(currentSiteIssues);
-        const issuesSorted = liveSiteIssues
+        // v1.26: approver-only "Deleted" view. When toggled on, the row list is
+        // built from tombstoned issues (excluding ephemeral validator ones)
+        // instead of the live list; counts/chips below still reflect live.
+        const deletedSiteIssues = currentSiteIssues.filter(i =>
+            i && i.deleted && i.source !== 'validator');
+        const showingDeleted = panelShowDeleted && isApprover();
+        const baseList = showingDeleted ? deletedSiteIssues : liveSiteIssues;
+        const issuesSorted = baseList
             .slice()
             .sort((a, b) => new Date(lastEventAt(b)).getTime() - new Date(lastEventAt(a)).getTime());
         const visibleIssues = issuesSorted.filter(panelMatchesIssue);
@@ -4821,6 +4979,23 @@
                              color:${pendingCount > 0 ? '#000' : '#bbb'};
                              padding:1px 5px;border-radius:8px;font-size:10px">${pendingCount}</span>
             </button>` : '';
+        // v1.26: approver-only "Deleted" toggle chip. Switches the row list to
+        // tombstoned issues (struck-through) so an approver can review + ♻
+        // reinstate them. Hidden entirely for CSMs.
+        const deletedCount = deletedSiteIssues.length;
+        const deletedChipHtml = (role === 'approver') ? `
+            <button id="aim-issues-panel-deleted-toggle"
+                title="${showingDeleted ? 'Back to active issues' : 'Show deleted (tombstoned) issues — click one to reinstate'}"
+                style="
+                    padding:5px 10px;border-radius:14px;font:inherit;font-size:11px;font-weight:700;
+                    border:1.5px dashed #ff8585;
+                    background:${showingDeleted ? '#ff8585' : 'transparent'};
+                    color:${showingDeleted ? '#2a0d0d' : '#ff8585'};
+                    cursor:pointer;opacity:${(deletedCount > 0 || showingDeleted) ? 1 : 0.7};
+                    display:inline-flex;align-items:center;gap:6px">
+                <span>🗑 Deleted</span>
+                <span style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:8px;font-size:10px">${deletedCount}</span>
+            </button>` : '';
         // v0.29: priority filter chips. Same M1 toggle / M2 solo semantics.
         // 'none' represents issues with no priority set.
         const priCountsByKey = { high: 0, medium: 0, low: 0, none: 0 };
@@ -4851,9 +5026,11 @@
 
         // Rows
         let rowsHtml;
-        if (liveSiteIssues.length === 0) {
+        if (baseList.length === 0) {
             rowsHtml = `<div style="padding:30px 12px;color:#888;text-align:center;font-style:italic">
-                No issues on this site yet. Toggle 🚩 → flag mode → click-drag to create one.
+                ${showingDeleted
+                    ? 'No deleted issues on this site.'
+                    : 'No issues on this site yet. Toggle 🚩 → flag mode → click-drag to create one.'}
             </div>`;
         } else if (visibleIssues.length === 0) {
             rowsHtml = `<div style="padding:30px 12px;color:#888;text-align:center;font-style:italic">
@@ -4969,6 +5146,7 @@
                                      background:${meta.color};color:${darkText ? '#000' : '#fff'};
                                      font-size:10px;font-weight:700">${meta.text}</span>
                         ${priChip}
+                        ${issue.deleted ? `<div style="font-size:9px;color:#ff8585;margin-top:2px;font-weight:700" title="Deleted by @${escHtml(issue.deletedBy || '?')}">🗑 DELETED</div>` : ''}
                         ${sessionHidden ? '<div style="font-size:9px;color:#5fff5f;margin-top:2px">HIDDEN</div>' : ''}
                     </div>
                     <div style="color:#a8c4ff;font-size:11px;font-weight:600">
@@ -4977,6 +5155,7 @@
                     </div>
                     <div>
                         <div style="color:#e6e6e6;font-size:12px;line-height:1.35;
+                                    ${issue.deleted ? 'text-decoration:line-through;color:#999;' : ''}
                                     overflow:hidden;text-overflow:ellipsis;display:-webkit-box;
                                     -webkit-line-clamp:2;-webkit-box-orient:vertical">${safeNote}</div>
                         ${affectsHtml}
@@ -5014,6 +5193,7 @@
                         border-bottom:1px solid rgba(255,255,255,0.06);background:#181b21">
                 ${chipsHtml}
                 ${pendingShortcutHtml}
+                ${deletedChipHtml}
                 ${assignedToMeChipHtml}
                 <div style="margin-left:auto;display:flex;gap:6px">
                     ${hiddenIds.size > 0
@@ -5113,6 +5293,13 @@
         if (assignedToMeBtn) {
             assignedToMeBtn.onclick = () => {
                 panelAssignedToMe = !panelAssignedToMe;
+                renderIssuesPanel();
+            };
+        }
+        const deletedToggle = panelEl.querySelector('#aim-issues-panel-deleted-toggle');
+        if (deletedToggle) {
+            deletedToggle.onclick = () => {
+                panelShowDeleted = !panelShowDeleted;
                 renderIssuesPanel();
             };
         }

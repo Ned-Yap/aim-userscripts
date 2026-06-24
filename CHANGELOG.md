@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-23 — AIM Issues v1.26 (prod + dev/latest) — View & reinstate deleted issues (approvers)
+
+Deleted issues are no longer gone for good. Approvers get a new **🗑 Deleted** filter chip in the Issues panel that lists tombstoned issues (struck-through, with who/when deleted). Open one and there's a **♻ Reinstate this issue** button (approver-only, two-stage confirm) that restores it to the status it held before deletion. The reinstate is sync-safe: the deleted/live state is now derived from each issue's full history (last delete-vs-reinstate event wins), so a restore survives merging against a coworker's still-deleted copy instead of being silently re-deleted. Slack threads get a `♻ reinstated` reply and the parent message un-strikes. CSMs don't see the Deleted chip or the Reinstate button.
+
+---
+
+## 2026-06-23 — AIM Issues v1.25 (prod + dev/latest) — Approvers can delete any issue
+
+Until now, deleting an issue was creator-only (anyone could also delete throwaway local-only flags). Approvers can now delete **any** issue regardless of who created it — handy for clearing out "TEST" flags and other junk you didn't create. The deletion is still tombstoned and attributed to the approver in the issue history, so the audit log stays honest, and the Delete button's label flags whose issue you're removing (e.g. `🗑 Delete (approver — @someone's issue)`).
+
+---
+
 ## 2026-06-23 — Asset Inspector v4.32 (prod) / v4.89 (dev/latest) — Analyzer KML now includes Base Stations & Safe Zones
 
 The Site Setup SUM → Analyzer KML export skipped Base Stations (type 8) and Safe Zones (type 98) entirely. They now export as their own top-level folders ("Base Station" / "Safe Zone") with point markers, each toggleable in the "Include folders" list (with counts) like every other entity type. Default ON.
