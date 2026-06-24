@@ -84,6 +84,12 @@ The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.63 (dev/latest) — Stage steps works on J2A / In-Place missions
+
+Fixes "Need an existing Navigate + Snapshot to copy from" on missions built from a **J2A** (Jump-to-Alert) flight, whose snapshots are **"In Place"** (yaw/tilt, no GPS). Stage now: matches steps by `type_name` **or** type number, sources instructions from the live editor if the cached app is empty, and accepts an In-Place snapshot as a settings template (no GPS required). The staged snapshot itself is forced to a proper **GPS** snapshot (since you place + drag it into position), so it shows on the map and exports/validates correctly. Logs a diagnostic if it still can't find a template. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.62 (dev/latest) — Stage steps: choose where to insert (push the rest down)
 
 Stage steps now has an **"Insert at Nav #"** field. Leave it blank to append at the end (as before), or set it to e.g. **6** and the new Navigate is dropped in as **N6** with everything from the old N6 onward pushed down by one. Because the new block lands in the middle of the list, **the snapshots renumber too** (the new snapshot becomes S6, the old S6→S7, …) — so you no longer have to right-click and renumber by hand. Dev-only (latest/).

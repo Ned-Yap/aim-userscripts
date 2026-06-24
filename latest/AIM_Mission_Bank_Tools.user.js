@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.62
+// @version      1.63
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.62';
+    const SCRIPT_VERSION = '1.63';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2783,25 +2783,46 @@
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
-        const instrs = app.instructions || [];
-        // Copy settings from the LAST nav/snap (you finetune the most recent one;
-        // new staged steps should inherit THOSE settings, not the original first).
-        const navs = instrs.filter(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
-        const snaps = instrs.filter(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
-        const navRef = navs.length ? navs[navs.length - 1] : null;
-        const snapRef = snaps.length ? snaps[snaps.length - 1] : null;
-        if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
+        // Source the instruction list from the cached app, falling back to the LIVE
+        // editor state if that's empty/stale (so Stage works even when currentApp
+        // hasn't populated yet).
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        // Match by type_name OR type number — live editor steps don't always carry
+        // type_name. (navigate=1, snapshot=6, cameraSelect=7, gemMode=24, wait=5,
+        // returnHome=99.)
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const isWrap = s => s && (s.type_name === 'cameraSelect' || s.type === 7 || s.type_name === 'gemMode' || s.type === 24 || s.type_name === 'wait' || s.type === 5);
+        // Copy settings from the LAST nav/snap (you finetune the most recent one).
+        // Prefer one WITH a GPS location as the template, but fall back to ANY (an
+        // "In Place" snapshot has no location yet still works as a settings template).
+        const pickRef = (pred) => {
+            const list = instrs.filter(pred);
+            if (!list.length) return null;
+            for (let i = list.length - 1; i >= 0; i--) { if (list[i].location && list[i].location.lat != null) return list[i]; }
+            return list[list.length - 1];
+        };
+        const navRef = pickRef(isNav);
+        const snapRef = pickRef(isSnap);
+        if ((navCount && !navRef) || (snapCount && !snapRef)) {
+            console.warn(`${TAG} [stage] no template — instrs:${instrs.length} navs:${instrs.filter(isNav).length} snaps:${instrs.filter(isSnap).length} (open a mission with a Navigate + Snapshot)`);
+            showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return;
+        }
         // wrap template = the scan steps trailing the LAST snapshot (copied as-is)
         const wrapTpl = [];
-        let si = -1; for (let i = instrs.length - 1; i >= 0; i--) { if (instrs[i] && instrs[i].type_name === 'snapshot') { si = i; break; } }
-        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
+        let si = -1; for (let i = instrs.length - 1; i >= 0; i--) { if (isSnap(instrs[i])) { si = i; break; } }
+        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { if (isWrap(instrs[i])) wrapTpl.push(instrs[i]); else break; }
         // Place new steps in the MIDDLE OF THE CURRENT MAP VIEW (so they're easy to
         // find), fanned out in a small grid by index so multiples don't overlap.
         // Falls back to an offset from the ref if the map center isn't available.
         const map = getLeafletMap();
         const ctr = (map && typeof map.getCenter === 'function') ? map.getCenter() : null;
         const placeAt = (ref, i) => {
-            const base = ctr ? { lat: ctr.lat, lng: ctr.lng } : { lat: ref.location.lat, lng: ref.location.lng };
+            const refLoc = (ref && ref.location && ref.location.lat != null) ? ref.location : null;
+            const base = ctr ? { lat: ctr.lat, lng: ctr.lng } : refLoc;
+            if (!base) return null; // no map center + no ref GPS (In-Place ref) → leave location unset
             const col = i % 4, row = Math.floor(i / 4);
             const mPerLat = 110540, mPerLng = 111320 * Math.cos(base.lat * Math.PI / 180);
             return { lat: base.lat + (row * 12) / mPerLat, lng: base.lng + (col * 12) / mPerLng };
@@ -2816,21 +2837,28 @@
         let placeIdx = 0;
         for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, placeAt(navRef, placeIdx++)));
         for (let j = 0; j < snapCount; j++) {
-            staged.push(copyStep(snapRef, placeAt(snapRef, placeIdx++)));
+            // A staged snapshot is placed on the map + dragged into position, so it
+            // must be a proper GPS ("To GPS") snapshot even if the template was an
+            // "In Place" (yaw/tilt, no-GPS) one from a J2A mission. Force GPS mode +
+            // a real location so it shows on the map and exports/validates correctly.
+            const sc = copyStep(snapRef, placeAt(snapRef, placeIdx++));
+            sc.value2 = 1; // "To GPS" mode
+            sc.extra_options = Object.assign({}, sc.extra_options || {}, { pitch: 1001 });
+            staged.push(sc);
             if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
         // Rebuild the instruction list (shallow-copy existing so we don't mutate
         // live objects), insert the staged steps, re-index.
         const newInstrs = instrs.map(s => Object.assign({}, s));
-        const endIdx = () => { const rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome'); return rh < 0 ? newInstrs.length : rh; };
+        const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
         // Insert position: before the Nth existing Navigate (so the new nav BECOMES
         // N#, pushing the old N#..end down by one) when insertAtNav is set; else at
         // the end (before returnHome).
         let insertIdx;
         if (insertAtNav && insertAtNav >= 1) {
             const navIdxs = [];
-            newInstrs.forEach((s, k) => { if (s && s.type_name === 'navigate') navIdxs.push(k); });
+            newInstrs.forEach((s, k) => { if (isNav(s)) navIdxs.push(k); });
             insertIdx = (insertAtNav <= navIdxs.length) ? navIdxs[insertAtNav - 1] : endIdx();
         } else {
             insertIdx = endIdx();
