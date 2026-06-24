@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.32
+// @version      4.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -34,7 +34,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.32';
+    const SCRIPT_VERSION = '4.33';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5205,8 +5205,19 @@
         const fillFreezone   = m3 ? '<color>3300ff00</color>' : '<fill>0</fill>';
         const fillNFZ        = m3 ? '<color>330000ff</color>' : '<fill>0</fill>';
         const fillAsset      = m3 ? '<color>33ffffff</color>' : '<fill>0</fill>';
+        // Asset state fills (3D only) — colour-coded per health state.
+        // KML colour is aabbggrr (alpha, blue, green, red).
+        const fillUnshielded  = m3 ? '<color>3300a5ff</color>' : '<fill>0</fill>'; // orange
+        const fillUnreachable = m3 ? '<color>33ffaf5f</color>' : '<fill>0</fill>'; // light blue
+        const fillEmpty       = m3 ? '<color>26ffffff</color>' : '<fill>0</fill>'; // faint white
         return [
+            // Regular asset — WHITE.
             '<Style id="asset_style"><LineStyle><color>ffffffff</color><width>1</width></LineStyle><PolyStyle>' + fillAsset + '</PolyStyle></Style>',
+            // Asset by state — ORANGE unshielded / LIGHT-BLUE unreachable /
+            // 30%-alpha WHITE empty. Outline carries the colour in 2D (no fill).
+            '<Style id="asset_unshielded_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle>' + fillUnshielded + '</PolyStyle></Style>',
+            '<Style id="asset_unreachable_style"><LineStyle><color>ffffaf5f</color><width>2</width></LineStyle><PolyStyle>' + fillUnreachable + '</PolyStyle></Style>',
+            '<Style id="asset_empty_style"><LineStyle><color>4dffffff</color><width>1</width></LineStyle><PolyStyle>' + fillEmpty + '</PolyStyle></Style>',
             '<Style id="freezone_style"><LineStyle><color>ff00ff00</color><width>2</width></LineStyle><PolyStyle>' + fillFreezone + '</PolyStyle></Style>',
             '<Style id="nofly_style"><LineStyle><color>ff0000ff</color><width>2</width></LineStyle><PolyStyle>' + fillNFZ + '</PolyStyle></Style>',
             '<Style id="flightpath_style"><LineStyle><color>ffffff00</color><width>3</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>',
@@ -5496,6 +5507,19 @@
         const alt = arc.min_alt - (KML_BUFFER_OFFSET_FT / KML_FT);
         return `<LineString><altitudeMode>absolute</altitudeMode><coordinates>${kmlCoords([arc.point_a, arc.point_b], alt)}</coordinates></LineString>`;
     }
+    // Asset style by health state, parsed from the subtype string
+    // (e.g. "battery - empty", "v-well - unreachable") + the is_unshielded
+    // flag. Mirrors the SUM table's state parsing: modifiers come after
+    // " - ". Priority: Unshielded (safety) > Unreachable > Empty > regular.
+    function kmlAssetStyleId(item) {
+        const sub = (item.custom && item.custom.poi_type_str) || '';
+        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase());
+        const hasMod = (m) => mods.some(x => x.includes(m));
+        if (item.is_unshielded || hasMod('unshielded')) return 'asset_unshielded_style';
+        if (hasMod('unreachable')) return 'asset_unreachable_style';
+        if (hasMod('empty')) return 'asset_empty_style';
+        return 'asset_style';
+    }
     // Mark-pin marker style by general_marker_type.
     function kmlMarkerStyleId(item) {
         const t = (item.general_marker_type || 'general').toLowerCase();
@@ -5566,7 +5590,7 @@
             byType[3].forEach(e => {
                 const geom = kmlAssetGeometry(e, mode);
                 if (!geom) return;
-                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#asset_style</styleUrl>${geom}</Placemark>`);
+                xml.push(`<Placemark id="pm_${e.id}"><name>${xmlEscape(e.name)}</name><description>${kmlDescription(e, opts)}</description><styleUrl>#${kmlAssetStyleId(e)}</styleUrl>${geom}</Placemark>`);
             });
             xml.push('</Folder>');
         }

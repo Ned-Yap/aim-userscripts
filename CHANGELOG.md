@@ -66,6 +66,12 @@ Until now, deleting an issue was creator-only (anyone could also delete throwawa
 
 ---
 
+## 2026-06-23 — Asset Inspector v4.33 (prod) / v4.90 (dev/latest) — Analyzer KML colours assets by health state
+
+Asset polygons in the exported KML are now colour-coded by state (parsed from the subtype, same as the SUM table): **white** for regular, **orange** for unshielded, **light blue** for unreachable, and **30%-opacity white** for empty. Unshielded takes priority when an asset has more than one modifier. Other states (HY, Inactive, normal) stay white.
+
+---
+
 ## 2026-06-23 — Asset Inspector v4.32 (prod) / v4.89 (dev/latest) — Analyzer KML now includes Base Stations & Safe Zones
 
 The Site Setup SUM → Analyzer KML export skipped Base Stations (type 8) and Safe Zones (type 98) entirely. They now export as their own top-level folders ("Base Station" / "Safe Zone") with point markers, each toggleable in the "Include folders" list (with counts) like every other entity type. Default ON.
