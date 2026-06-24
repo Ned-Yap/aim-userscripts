@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.27
+// @version      1.28
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.27';
+    const SCRIPT_VERSION = '1.28';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -2934,10 +2934,82 @@
         return inside;
     }
 
-    // For each entity, "affected" means at least one of its vertices /
-    // arc endpoints / center sits inside the issue polygon. Doesn't catch
-    // the rare case where the entity surrounds the issue without any
-    // vertex inside — uncommon for typical issue rectangles.
+    // v1.28: geometry helpers for TRUE polygon overlap. The old vertex-only
+    // test missed the common case where the issue polygon is drawn INSIDE a
+    // larger asset (none of the asset's corners land in the small issue poly).
+    // Normalize both formats — issue.polygon is [lat,lng] pairs, entity coords
+    // are {lat,lng} objects — to [[lat,lng]] rings, then test overlap as:
+    // any vertex of either ring inside the other, OR any pair of edges crossing.
+    function normRing(ring) {
+        const out = [];
+        for (const p of (ring || [])) {
+            if (!p) continue;
+            const lat = Array.isArray(p) ? p[0] : p.lat;
+            const lng = Array.isArray(p) ? p[1] : p.lng;
+            if (Number.isFinite(lat) && Number.isFinite(lng)) out.push([lat, lng]);
+        }
+        return out;
+    }
+    // point-in-ring on a normalized [[lat,lng]] ring (lat=y, lng=x).
+    function pointInRing(lat, lng, ring) {
+        if (!ring || ring.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const yi = ring[i][0], xi = ring[i][1];
+            const yj = ring[j][0], xj = ring[j][1];
+            const intersect = ((yi > lat) !== (yj > lat))
+                && (lng < (xj - xi) * (lat - yi) / (yj - yi + 1e-12) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+    // Do segments p1->p2 and p3->p4 intersect? Points are [lat,lng] (y,x).
+    function segsCross(p1, p2, p3, p4) {
+        const orient = (a, b, c) => {
+            const v = (b[1] - a[1]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[1] - a[1]);
+            return v > 1e-12 ? 1 : (v < -1e-12 ? 2 : 0);
+        };
+        const onSeg = (a, b, c) =>
+            Math.min(a[1], c[1]) <= b[1] && b[1] <= Math.max(a[1], c[1]) &&
+            Math.min(a[0], c[0]) <= b[0] && b[0] <= Math.max(a[0], c[0]);
+        const o1 = orient(p1, p2, p3), o2 = orient(p1, p2, p4);
+        const o3 = orient(p3, p4, p1), o4 = orient(p3, p4, p2);
+        if (o1 !== o2 && o3 !== o4) return true;
+        if (o1 === 0 && onSeg(p1, p3, p2)) return true;
+        if (o2 === 0 && onSeg(p1, p4, p2)) return true;
+        if (o3 === 0 && onSeg(p3, p1, p4)) return true;
+        if (o4 === 0 && onSeg(p3, p2, p4)) return true;
+        return false;
+    }
+    // Full overlap test for two normalized closed rings.
+    function ringsOverlap(a, b) {
+        if (a.length < 3 || b.length < 3) return false;
+        for (const p of a) if (pointInRing(p[0], p[1], b)) return true;
+        for (const p of b) if (pointInRing(p[0], p[1], a)) return true;
+        for (let i = 0; i < a.length; i++) {
+            const a1 = a[i], a2 = a[(i + 1) % a.length];
+            for (let j = 0; j < b.length; j++) {
+                const b1 = b[j], b2 = b[(j + 1) % b.length];
+                if (segsCross(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+    // Does any segment of an (open) polyline cross/enter the closed ring?
+    function polylineHitsRing(pts, ring) {
+        if (pts.length < 1 || ring.length < 3) return false;
+        for (const p of pts) if (pointInRing(p[0], p[1], ring)) return true;
+        for (let i = 0; i < pts.length - 1; i++) {
+            for (let j = 0; j < ring.length; j++) {
+                const b1 = ring[j], b2 = ring[(j + 1) % ring.length];
+                if (segsCross(pts[i], pts[i + 1], b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+
+    // For each entity, "affected" means its geometry OVERLAPS the issue
+    // polygon (v1.28: true overlap, not just a vertex landing inside).
     function affectedEntitiesFor(issue) {
         if (!issue || !Array.isArray(issue.polygon) || issue.polygon.length < 3) return [];
         if (issueAffectedCache.has(issue.id)) return issueAffectedCache.get(issue.id);
@@ -2946,34 +3018,33 @@
             return out;
         }
         const poly = issue.polygon;
+        const polyRing = normRing(poly);   // issue polygon as [[lat,lng]], once
         for (const e of mapObjects.entities) {
             if (!e || typeof e.type !== 'number') continue;
             let hit = false;
             if (e.type === 3 || e.type === 4 || e.type === 16) {
-                // Polygon entities — any vertex inside
+                // Polygon entities (asset / FFZ / NFZ) — TRUE polygon overlap so
+                // an issue drawn inside a larger asset is still captured.
                 if (Array.isArray(e.coords)) {
-                    for (const c of e.coords) {
-                        if (c && Number.isFinite(c.lat) && Number.isFinite(c.lng)
-                            && pointInPolygon(c.lat, c.lng, poly)) { hit = true; break; }
-                    }
+                    hit = ringsOverlap(normRing(e.coords), polyRing);
                 }
             } else if (e.type === 15) {
-                // Flight path — any arc endpoint or coord vertex inside
-                if (Array.isArray(e.arcs)) {
+                // Flight path — polyline crosses/enters the issue polygon.
+                // Build an ordered point list from coords (preferred) or arcs.
+                let pts = Array.isArray(e.coords) ? normRing(e.coords) : [];
+                if (pts.length < 2 && Array.isArray(e.arcs)) {
+                    const ap = [];
                     for (const a of e.arcs) {
                         if (!a) continue;
-                        if (a.point_a && pointInPolygon(a.point_a.lat, a.point_a.lng, poly)) { hit = true; break; }
-                        if (a.point_b && pointInPolygon(a.point_b.lat, a.point_b.lng, poly)) { hit = true; break; }
+                        if (a.point_a && Number.isFinite(a.point_a.lat)) ap.push([a.point_a.lat, a.point_a.lng]);
+                        if (a.point_b && Number.isFinite(a.point_b.lat)) ap.push([a.point_b.lat, a.point_b.lng]);
                     }
+                    pts = ap;
                 }
-                if (!hit && Array.isArray(e.coords)) {
-                    for (const c of e.coords) {
-                        if (c && pointInPolygon(c.lat, c.lng, poly)) { hit = true; break; }
-                    }
-                }
+                hit = polylineHitsRing(pts, polyRing);
             } else if (e.type === 19) {
                 if (Array.isArray(e.coords) && e.coords[0]) {
-                    if (pointInPolygon(e.coords[0].lat, e.coords[0].lng, poly)) hit = true;
+                    hit = pointInRing(e.coords[0].lat, e.coords[0].lng, polyRing);
                 }
             }
             if (hit) {

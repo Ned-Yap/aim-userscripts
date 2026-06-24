@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — AIM Issues v1.28 (prod + dev/latest) — Affected-entity detection now catches assets the issue is drawn inside
+
+Drawing an issue polygon *inside* a larger asset (or FFZ/NFZ) used to capture nothing — the detection only fired when one of the asset's own corners landed inside your issue polygon, which never happens when your polygon is smaller than the asset. It now does a true polygon-overlap test (either shape's vertices inside the other, **or** their edges crossing), so an issue drawn anywhere on top of an asset captures it. Flight paths get the same treatment — a polygon drawn across a flight-path segment (between its vertices) is now detected too.
+
+---
+
 ## 2026-06-23 — Lite/Full mode shipped to prod — Control Panel v1.33, Map Nav v0.9, Perf Shield v1.17, Power Line Editor v0.17
 
 The Control Panel now resolves your GitHub login against a CSM whitelist and shows a **🛠️ Full (CSM) / 🪶 Lite** badge in its header (CSMs get a Lite/Full preview toggle). This is the foundation for a separate **Lite install** for regulators/pilots. **For CSMs nothing changes** — your building tools keep working exactly as before (they are not gated in prod). **Map Nav** (WASD pan / Q-E zoom / Alt sprint) and the **Power Line Editor** are now in prod, and **Perf Shield** keeps the weather indicator alive for anyone in Lite. If after updating the panel says you're in Lite but you're a CSM, reload once (or check the console for `mode resolved: <you> → CSM=true`).
