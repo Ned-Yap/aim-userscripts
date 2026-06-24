@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — AIM Issues v1.29 (prod + dev/latest) — Slack catch-up on site-open + manual resend
+
+Building on v1.27, Slack notifications now have a safety net. Each issue tracks a watermark of how much of its history has reached Slack (advanced only after a confirmed post). When you open a site, your session checks every issue and, if any changed while Slack was offline, posts a short 🔄 *Catch-up* reply in the thread and refreshes the status board — automatically, no action needed. Existing issues are migrated to "already caught up" on first open so the backlog isn't re-posted. For a notification that was missed *before* this shipped (like the 06-23 approvals), open the issue and use the new approver-only **📣 Resend to Slack** button to re-post its current status (it creates the Slack thread if one was never made).
+
+---
+
 ## 2026-06-24 — AIM Issues v1.28 (prod + dev/latest) — Affected-entity detection now catches assets the issue is drawn inside
 
 Drawing an issue polygon *inside* a larger asset (or FFZ/NFZ) used to capture nothing — the detection only fired when one of the asset's own corners landed inside your issue polygon, which never happens when your polygon is smaller than the asset. It now does a true polygon-overlap test (either shape's vertices inside the other, **or** their edges crossing), so an issue drawn anywhere on top of an asset captures it. Flight paths get the same treatment — a polygon drawn across a flight-path segment (between its vertices) is now detected too.

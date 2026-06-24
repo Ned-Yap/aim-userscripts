@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Issues
 // @namespace    http://tampermonkey.net/
-// @version      1.28
+// @version      1.29
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Issues.user.js
 // @description  CSM-collaborative issue flagging w/ approver oversight. 🚩 button in .map-tools. CSMs PROPOSE ignore/fix (purple/yellow); approvers APPROVE (→ resolved/ignored grey) or REJECT (→ open red). Approvers can direct-resolve without going through pending. Per-user activity indicator (green ?) flags unseen comments/transitions. Approvers list lives in aim-userscripts-data/approvers.json.
@@ -57,7 +57,7 @@
     'use strict';
 
     const TAG = '[AIM ISSUES]';
-    const SCRIPT_VERSION = '1.28';
+    const SCRIPT_VERSION = '1.29';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -880,6 +880,7 @@
                 // entities, then transitions append after.
                 await postSlackOriginalRequest(live, ts);
                 await postSlackAffectedEntities(live, ts);
+                markSlackPosted(live);   // v1.29: created issue is caught up
             }
         } catch (e) {
             console.warn(`${TAG} postSlackNewIssue threw:`, e);
@@ -956,6 +957,7 @@
             const actor = slackPlain(by);
             await slackPost(`🗑 ${actor} *deleted* this issue`, issue.slackThreadTs);
             await slackUpdate(issue.slackThreadTs, slackParentText(issue, 'deleted'));
+            markSlackPosted(issue);   // v1.29: advance watermark on success
         } catch (e) {
             console.warn(`${TAG} postSlackDelete threw:`, e);
         }
@@ -969,6 +971,7 @@
             const actor = slackPlain(by);
             await slackPost(`♻ ${actor} *reinstated* this issue`, issue.slackThreadTs);
             await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+            markSlackPosted(issue);   // v1.29: advance watermark on success
         } catch (e) {
             console.warn(`${TAG} postSlackReinstate threw:`, e);
         }
@@ -1045,6 +1048,7 @@
             if (issue.slackThreadTs) {
                 await slackUpdate(issue.slackThreadTs, slackParentText(issue));
             }
+            if (replyTs) markSlackPosted(issue);   // v1.29: advance watermark on success
         } catch (e) {
             console.warn(`${TAG} postSlackTransition threw:`, e);
             showToast('⚠ Saved + synced, but the Slack notification threw an error (see console).', 7000);
@@ -1070,6 +1074,7 @@
                        : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
             if (issue.slackThreadTs) await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+            markSlackPosted(issue);   // v1.29: advance watermark on success
         } catch (e) {
             console.warn(`${TAG} postSlackAssignment threw:`, e);
         }
@@ -1100,9 +1105,130 @@
             const text = issue.slackThreadTs ? head
                        : `${head}\n_(${slackEsc((issue.note || '').slice(0, 80))} — ${siteLabelForSlack()})_`;
             await slackPost(text, issue.slackThreadTs || null);
+            markSlackPosted(issue);
         } catch (e) {
             console.warn(`${TAG} postSlackComment threw:`, e);
         }
+    }
+
+    // ===== v1.29: Slack watermark + on-open reconcile + manual resend =====
+    //
+    // The watermark `slackPostedHistoryLen` records how many history entries
+    // have been reflected to Slack. It advances ONLY after a confirmed post
+    // (so a silent failure leaves it behind) and is committed to GitHub so
+    // every session shares it. On site-open the IFRAME compares each issue's
+    // history length to its watermark; anything ahead means a transition never
+    // reached Slack while the actor's Slack was down — we post a catch-up reply
+    // and refresh the parent board. Pre-watermark issues are migrated to
+    // "already caught up" (watermark = current length) so we never spam the
+    // whole backlog — use the manual 📣 Resend button to recover those.
+
+    // Advance + persist the watermark after a confirmed Slack post. Commits so
+    // other sessions don't re-backfill what we just posted.
+    function markSlackPosted(issue) {
+        if (!issue) return;
+        const live = currentSiteIssues.find(i => i.id === issue.id) || issue;
+        if (!live || live.source === 'validator' || live.createdBy === 'local-only') return;
+        const len = Array.isArray(live.history) ? live.history.length : 0;
+        if ((live.slackPostedHistoryLen || 0) >= len) return;   // already current
+        live.slackPostedHistoryLen = len;
+        saveIssuesToStorage(siteID, currentSiteIssues);
+        if (cachedToken) commitIssuesToGitHub(`slack watermark ${live.id.slice(0, 14)}→${len}`);
+    }
+
+    // Plain Slack-mrkdwn one-liner describing a history entry (for catch-up).
+    function slackHistLine(h) {
+        const by = slackPlain(h.by || '?');
+        if (h.kind === 'reinstate') return `${by} reinstated`;
+        if (h.toStatus === 'deleted') return `${by} deleted`;
+        if (h.kind === 'assign') return h.toAssignee ? `${by} assigned → ${slackMention(h.toAssignee) || ('@' + slackEsc(h.toAssignee))}` : `${by} unassigned`;
+        if (h.kind === 'priority') return `${by} set priority → ${slackEsc((h.toPriority || 'none'))}`;
+        if (h.kind === 'comment' || (h.fromStatus && h.fromStatus === h.toStatus)) return `${by} commented: ${slackEsc((h.note || '').slice(0, 80))}`;
+        if (!h.fromStatus) return `${by} created`;
+        const f = (STATUS_LABEL[h.fromStatus] || { text: h.fromStatus }).text;
+        const t = (STATUS_LABEL[h.toStatus] || { text: h.toStatus }).text;
+        return `${by}: ${f} → ${t}`;
+    }
+
+    // Post a single consolidated catch-up reply for the missed history entries,
+    // then refresh the parent board to the current status.
+    async function backfillSlackForIssue(issue) {
+        try {
+            const wm = issue.slackPostedHistoryLen || 0;
+            const missed = (issue.history || []).slice(wm);
+            if (!missed.length || !issue.slackThreadTs) return;
+            const lines = missed.map(h => `• ${slackHistLine(h)}`);
+            const txt = `🔄 *Catch-up* — these updates happened while Slack was unreachable:\n${lines.join('\n')}`;
+            const ts = await slackPost(txt, issue.slackThreadTs);
+            await slackUpdate(issue.slackThreadTs, slackParentText(issue));
+            if (ts) markSlackPosted(issue);
+        } catch (e) {
+            console.warn(`${TAG} backfillSlackForIssue threw:`, e);
+        }
+    }
+
+    // Run once per site after issues are loaded. Migrates pre-watermark issues
+    // to caught-up, and backfills any issue whose history ran ahead of Slack.
+    let slackReconciledSite = null;
+    async function reconcileSlackOnOpen() {
+        if (IS_TOP) return;                 // IFRAME owns Slack
+        if (!siteID || !cachedToken) return;
+        if (slackReconciledSite === siteID) return;
+        if (!slackEnabled()) { try { await fetchSlackConfig(); } catch (e) {} }
+        if (!slackEnabled()) return;        // can't reconcile without Slack
+        slackReconciledSite = siteID;
+        let migrated = 0;
+        const behind = [];
+        for (const issue of currentSiteIssues) {
+            if (!issue || issue.source === 'validator' || issue.createdBy === 'local-only' || issue.deleted) continue;
+            if (!slackPostable(issue)) continue;
+            const len = (issue.history || []).length;
+            if (issue.slackPostedHistoryLen == null) {
+                issue.slackPostedHistoryLen = len;   // migrate — assume caught up
+                migrated++;
+            } else if (len > issue.slackPostedHistoryLen && issue.slackThreadTs) {
+                behind.push(issue);
+            }
+        }
+        if (migrated) {
+            saveIssuesToStorage(siteID, currentSiteIssues);
+            if (cachedToken) commitIssuesToGitHub(`init slack watermarks (${migrated})`);
+        }
+        if (behind.length) {
+            console.warn(`${TAG} Slack reconcile: ${behind.length} issue(s) behind Slack — backfilling`);
+            showToast(`🔄 Catching Slack up on ${behind.length} issue${behind.length === 1 ? '' : 's'} that changed while Slack was offline…`, 5000);
+            for (const issue of behind) await backfillSlackForIssue(issue);
+        }
+    }
+
+    // Manual approver action: re-post the current status to Slack (creating the
+    // thread if missing). Recovers a notification that silently failed before
+    // the watermark existed (e.g. the 06-23 miss).
+    function resendIssueToSlack(id) {
+        const issue = currentSiteIssues.find(i => i.id === id);
+        if (!issue) return;
+        if (!isApprover()) { showToast('Only an approver can resend to Slack.', 4000); return; }
+        if (issue.createdBy === 'local-only' || issue.source === 'validator') {
+            showToast('This issue type doesn\'t post to Slack.', 4000); return;
+        }
+        (async () => {
+            if (!slackEnabled() && cachedToken) { try { await fetchSlackConfig(); } catch (e) {} }
+            if (!slackEnabled()) { showToast('Slack config not available this session — reload and retry.', 5000); return; }
+            try {
+                const ts = await ensureSlackThread(issue);   // creates parent if missing
+                const threadTs = ts || issue.slackThreadTs;
+                if (!threadTs) { showToast('Could not create/find the Slack thread.', 5000); return; }
+                const actor = slackPlain(cachedUsername || '?');
+                const stat = (STATUS_LABEL[issue.status || 'open'] || { text: (issue.status || 'open').toUpperCase() }).text;
+                const reply = await slackPost(`📣 ${actor} re-sent the current status: *${stat}*`, threadTs);
+                await slackUpdate(threadTs, slackParentText(issue));
+                if (reply) markSlackPosted(issue);
+                showToast(reply ? 'Re-sent to Slack ✓' : '⚠ Slack resend failed (see console).', 4000);
+            } catch (e) {
+                console.warn(`${TAG} resendIssueToSlack threw:`, e);
+                showToast('⚠ Slack resend threw an error (see console).', 4000);
+            }
+        })();
     }
 
     // ------- Remote read / write -------
@@ -1206,6 +1332,14 @@
         // the same values — taking from either side is fine. Use spread
         // with `a` first for stable ordering of fields.
         const merged = { ...a, ...b, history, status };
+        // v1.29: the Slack watermark must merge by MAX — a stale copy with a
+        // lower (or missing) watermark must not win, or we'd re-backfill what
+        // another session already posted. Keep undefined only if BOTH are unset
+        // (so first-open migration still runs). Also never lose a known thread.
+        if (a.slackPostedHistoryLen != null || b.slackPostedHistoryLen != null) {
+            merged.slackPostedHistoryLen = Math.max(a.slackPostedHistoryLen || 0, b.slackPostedHistoryLen || 0);
+        }
+        merged.slackThreadTs = a.slackThreadTs || b.slackThreadTs;
         // v1.26: deleted state is DERIVED from the union-merged history so a
         // reinstate can survive sync. Was v0.25 "delete-wins" (any tombstoned
         // copy → tombstoned), which made reinstate impossible — the next merge
@@ -1566,6 +1700,10 @@
             // v1.20: after we have authoritative synced data, check for stale
             // issues to bump (fire-and-forget).
             runStaleBumpCheck();
+            // v1.29: reconcile Slack — backfill any issue whose history ran
+            // ahead of its Slack watermark (a transition that never posted
+            // because the actor's Slack was down). Runs once per site.
+            reconcileSlackOnOpen();
         } catch (e) {
             setSyncStatus('error');
             console.warn(`${TAG} refetchIssues failed:`, e);
@@ -4160,6 +4298,18 @@
                        ♻ Reinstate this issue
                    </button>`
                 : '';
+            // v1.29: approver-only "Resend to Slack" — recovers a notification
+            // that silently failed (e.g. before the watermark existed). Shown
+            // for normal, non-deleted, Slack-eligible issues.
+            const canResend = canModerate && !isDeleted
+                && liveIssue.createdBy !== 'local-only' && liveIssue.source !== 'validator';
+            const resendBtnHtml = canResend
+                ? `<button id="aim-issues-modal-resend"
+                       title="Re-post this issue's current status to its Slack thread (creates the thread if missing)"
+                       style="padding:7px 14px;background:#13294a;color:#5fb3ff;border:1px solid #5fb3ff;border-radius:4px;cursor:pointer;font:inherit;font-weight:700">
+                       📣 Resend to Slack
+                   </button>`
+                : '';
 
             // v0.28: armed can be one of:
             //   transition object: { to, color, textColor, noteRequired, notePrompt, label } — status change
@@ -4444,8 +4594,12 @@
                         ${confLabel}
                     </button>
                 </div>`;
-            } else if (canDelete || canReinstate) {
-                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}</div>`;
+            } else if (canDelete || canReinstate || canResend) {
+                // deleteBtnHtml carries margin-right:auto, pushing resend to the
+                // right edge; if there's no delete button, resend still aligns
+                // right via the spacer.
+                const spacer = deleteBtnHtml ? '' : '<span style="margin-right:auto"></span>';
+                footerHtml = `<div style="${footerBase}">${deleteBtnHtml}${reinstateBtnHtml}${spacer}${resendBtnHtml}</div>`;
             }
             card.innerHTML = `
                 <div id="aim-issues-modal-header"
@@ -4797,6 +4951,18 @@
                         reinstateBtn.dataset.armed = '0';
                         render();
                     }, 5000);
+                };
+            }
+            // v1.29: Resend to Slack (single click — non-destructive).
+            const resendBtn = card.querySelector('#aim-issues-modal-resend');
+            if (resendBtn) {
+                resendBtn.onclick = () => {
+                    resendBtn.disabled = true;
+                    resendBtn.textContent = '📣 Sending…';
+                    resendIssueToSlack(liveIssue.id);
+                    // Re-render shortly so the button resets (the async resend
+                    // toasts its own outcome).
+                    setTimeout(() => { try { render(); } catch (e) {} }, 1500);
                 };
             }
         }
