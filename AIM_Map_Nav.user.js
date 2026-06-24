@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Nav
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.9
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Map_Nav.user.js
 // @description  Keyboard nav for the Percepto map. WASD pan / Q-E zoom out-in (always-on). ALT for sprint (3x). SPACE = zoom-to-fit entire site setup. Other Shift/Ctrl + nav keys pass through to existing macros (Shift+D Delete etc.) and browser shortcuts. For zoom-into-area use Leaflet's native Shift+drag box-zoom. Input-guarded so typing is unaffected.
@@ -61,7 +61,7 @@
     'use strict';
 
     const TAG = '[AIM NAV]';
-    const SCRIPT_VERSION = '0.7';
+    const SCRIPT_VERSION = '0.9';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 
@@ -288,9 +288,21 @@
 
     function onKeyDown(e) {
         // Track Alt (sprint modifier) regardless of master/gate state.
-        if (MOD_CODES_ALT.has(e.code)) { altHeld = true; return; }
+        // v0.8: preventDefault on Alt so the browser doesn't focus the menu
+        // bar and steal keyboard focus from the map — that's what made Alt +
+        // diagonal (e.g. W+A) hang until a mouse click-drag restored focus.
+        // Gated on masterEnabled so we only claim Alt when nav is actually on.
+        if (MOD_CODES_ALT.has(e.code)) {
+            altHeld = true;
+            if (masterEnabled) { try { e.preventDefault(); } catch (err) {} }
+            return;
+        }
 
         if (!masterEnabled) return;
+        // Release the keys while the Site Setup Generator is dragging an FFZ
+        // preview (it claims Q/E to rotate + WASD shouldn't pan). The flag is
+        // set on the page window by AIM Asset Inspector during a drag.
+        try { if (window.__AIM_FFZ_DRAG) return; } catch (e) {}
         if (shouldGate(e)) return;
 
         // v0.3: Shift + ANY nav key → pass through to existing macros
@@ -329,7 +341,16 @@
     }
 
     function onKeyUp(e) {
-        if (MOD_CODES_ALT.has(e.code)) { altHeld = false; return; }
+        if (MOD_CODES_ALT.has(e.code)) {
+            altHeld = false;
+            // v0.8: also clear motion on Alt-up. While Alt is held some
+            // browsers drop the keyup for the OTHER keys, so a diagonal could
+            // leave w/a/s/d stuck in the Set; clearing here guarantees the map
+            // stops when the user lets go of the sprint modifier.
+            motion.clear();
+            if (masterEnabled) { try { e.preventDefault(); } catch (err) {} }
+            return;
+        }
         const mapped = KEY_CODES[e.code];
         if (mapped) motion.delete(mapped);
     }

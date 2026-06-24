@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Power Line Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Power_Line_Editor.user.js
-// @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, 🗑 delete, ⇄ convert distro↔trans, ⛓ merge segments, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.70+ over AIM_POWER_LINE_EDIT channel.
+// @description  Power Lines editor. ⚡ at bottom of map-tools (below gear). M1 ⚡ toggles a small icon-button strip below it (+D, +T, 🗑 delete, ⇄ convert distro↔trans, ⛓ merge segments, plus ✓/✗ when changes pending). M2 ⚡ toggles edit mode. Master + edit-mode toggles also live in the gear dropdown. Drives Map Styler v34.73+ over AIM_POWER_LINE_EDIT channel.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -49,7 +49,7 @@
     'use strict';
 
     const TAG = '[AIM PLE]';
-    const SCRIPT_VERSION = '0.15';
+    const SCRIPT_VERSION = '0.17';
     const IS_TOP = window === window.top;
     const FRAME = IS_TOP ? 'TOP' : 'IFRAME';
 

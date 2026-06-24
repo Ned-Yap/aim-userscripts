@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -32,6 +32,16 @@
     'use strict';
 
     const TAG = '[AIM PERF SHIELD]';
+
+    // v1.17 — Lite/Full mode (shared localStorage 'aim-mode', set by the Control
+    // Panel from the CSM whitelist). Perf Shield runs for EVERYONE, but the
+    // weather block must NEVER apply in LITE mode (regs/pilots — they depend on
+    // the live weather indicator in flight). Only Full (CSM) installs can block
+    // weather. Anything other than 'full' is Lite (the safe default). See
+    // shouldBlock() + the init force below.
+    function isLiteMode() {
+        try { return localStorage.getItem('aim-mode') !== 'full'; } catch (e) { return true; }
+    }
 
     // Each block category is a peer toggle. The install* hooks (fetch/XHR/script-tag
     // overrides) are installed unconditionally below — they're cheap when no
@@ -84,6 +94,10 @@
         try { blockEnabled[id] = GM_getValue(g.storageKey, g.defaultEnabled) === true; }
         catch (e) { blockEnabled[id] = g.defaultEnabled; }
     });
+    // v1.15 — in Pilot mode, hard-off the weather block at init so the panel
+    // reflects the safe state. shouldBlock() also refuses to block weather in
+    // pilot mode, so this is belt-and-suspenders.
+    if (isLiteMode()) blockEnabled['block-weather'] = false;
 
     // Hide-satellite isn't a network block — it's a Map Styler instruction —
     // but lives here so all perf toggles are in one panel section. Broadcast
@@ -113,6 +127,38 @@
     const STORAGE_KEY_SUPPRESS_LOGS = 'aim-perf-suppress-debug-logs';
     let suppressDebugLogs = true;
     try { suppressDebugLogs = GM_getValue(STORAGE_KEY_SUPPRESS_LOGS, true) === true; } catch (e) {}
+
+    // Mission-notification kill. Percepto's pilot toasts ("Drone took off",
+    // "Snapshot taken", …) render in the TOP frame as
+    // pr-notifications > .popup-notifications > .notification-item. For site
+    // builders who aren't flying they're pure noise — they steal focus, block
+    // button clicks, and play a chime. OFF by default; CSS hides the toast and
+    // a play() patch silences the chime when ON.
+    const STORAGE_KEY_KILL_NOTIFS = 'aim-perf-kill-mission-notifs';
+    let killNotifs = false;
+    try { killNotifs = GM_getValue(STORAGE_KEY_KILL_NOTIFS, false) === true; } catch (e) {}
+    // Declared here (not next to their functions) so applyNotifBlockCss can run
+    // from the init block below without a temporal-dead-zone error — same rule
+    // as CHAT_BLOCK_* above. display:none also kills the focus-steal + click-
+    // blocking (a hidden element captures no pointer events).
+    const NOTIF_BLOCK_STYLE_ID = 'aim-perf-notif-block-css';
+    const NOTIF_DOM_SELECTOR = 'pr-notifications, .popup-notifications, .notification-item';
+    const NOTIF_BLOCK_CSS = `
+        pr-notifications,
+        .popup-notifications,
+        .notification-item {
+            display: none !important;
+            pointer-events: none !important;
+        }
+    `;
+    // Sound scoping: a mounting toast opens this forward window during which an
+    // audio play() is treated as the chime. Keeps unrelated audio playing.
+    let notifSoundWindowUntil = 0;
+    const NOTIF_SOUND_WINDOW_MS = 2500;
+    // Declared up here (not next to installNotifObserver) so the init block can
+    // call installNotifObserver() without a TDZ error — same rule as the consts
+    // above. (Regression fixed in v1.14.)
+    let notifObserverInstalled = false;
 
     // Predicate list. Each entry: [name, fn(args) → boolean]. v1.10 rewrite:
     // - Patterns use regex on either args[0] OR the joined-string form so
@@ -229,8 +275,12 @@
     function shouldBlock(url) {
         if (!url) return false;
         const s = typeof url === 'string' ? url : (url.url || String(url));
+        const lite = isLiteMode();
         for (const id of Object.keys(BLOCK_GROUPS)) {
             if (!blockEnabled[id]) continue;
+            // Lite mode (regs/pilots): never block weather, even if the toggle
+            // is on. They must always have the live weather indicator in flight.
+            if (lite && id === 'block-weather') continue;
             const g = BLOCK_GROUPS[id];
             if (g.patterns.some(p => p.test(s))) return true;
         }
@@ -242,7 +292,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.11';
+    const SCRIPT_VERSION = '1.17';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -268,6 +318,11 @@
     // already-rendered bubble — apply now so any pre-loaded launcher
     // disappears immediately.
     try { applyChatBlockCss(blockEnabled['block-intercom']); } catch (e) { console.warn(`${TAG} chat CSS apply failed:`, e); }
+    // Mission-notification kill — apply the CSS hide immediately (so a toast
+    // already on screen at load disappears) and install the chime suppressor.
+    try { applyNotifBlockCss(killNotifs); } catch (e) { console.warn(`${TAG} notif CSS apply failed:`, e); }
+    try { installNotifObserver(); } catch (e) { console.warn(`${TAG} notif observer failed:`, e); }
+    try { installNotifSoundSuppressor(); } catch (e) { console.warn(`${TAG} notif sound suppressor failed:`, e); }
     try { setupControlPanel(); } catch (e) { console.warn(`${TAG} panel setup failed:`, e); }
     try { registerWithControlPanel(); } catch (e) { console.warn(`${TAG} panel reg failed:`, e); }
 
@@ -409,6 +464,80 @@
         }
     }
 
+    // ---- Mission-notification kill (visual + sound) ----
+    // NOTE: NOTIF_BLOCK_STYLE_ID / NOTIF_BLOCK_CSS / sound-scoping state are
+    // declared up top (near killNotifs) so applyNotifBlockCss can run from the
+    // init block without hitting a temporal-dead-zone error. See the
+    // perf-shield-TDZ rule. The functions below are hoisted so their position
+    // doesn't matter.
+    function applyNotifBlockCss(on) {
+        if (on) {
+            if (document.getElementById(NOTIF_BLOCK_STYLE_ID)) return;
+            const style = document.createElement('style');
+            style.id = NOTIF_BLOCK_STYLE_ID;
+            style.textContent = NOTIF_BLOCK_CSS;
+            (document.head || document.documentElement).appendChild(style);
+        } else {
+            const el = document.getElementById(NOTIF_BLOCK_STYLE_ID);
+            if (el) el.remove();
+        }
+    }
+    // Watch for mission-toast insertions. When one mounts, open a short
+    // suppression window so the chime that fires on mount is muted WITHOUT
+    // muting the user's other audio. Cheap — only reacts to added nodes that
+    // match the notification selector. Installed once; gated on killNotifs.
+    function installNotifObserver() {
+        if (notifObserverInstalled) return;
+        const setup = () => {
+            const obs = new MutationObserver((muts) => {
+                if (!killNotifs) return;
+                for (const m of muts) {
+                    for (const node of m.addedNodes) {
+                        if (!node || node.nodeType !== 1) continue;
+                        const isNotif = (node.matches && node.matches(NOTIF_DOM_SELECTOR)) ||
+                                        (node.querySelector && node.querySelector(NOTIF_DOM_SELECTOR));
+                        if (isNotif) { notifSoundWindowUntil = Date.now() + NOTIF_SOUND_WINDOW_MS; return; }
+                    }
+                }
+            });
+            const root = document.documentElement || document.body || document;
+            obs.observe(root, { childList: true, subtree: true });
+        };
+        if (document.documentElement) setup();
+        else document.addEventListener('readystatechange', setup, { once: true });
+        notifObserverInstalled = true;
+    }
+    // Is this play() the notification chime (vs. audio the user wants)? True if:
+    //  (a) we're inside the post-toast window the observer opened, OR
+    //  (b) a notification node is currently in the DOM (covers a chime that
+    //      plays synchronously in the same tick the toast was appended, before
+    //      the observer microtask runs), OR
+    //  (c) the <audio> element lives inside the notification DOM subtree.
+    // Otherwise the audio is unrelated and plays normally.
+    function isNotifSound(el) {
+        if (Date.now() < notifSoundWindowUntil) return true;
+        try { if (document.querySelector(NOTIF_DOM_SELECTOR)) return true; } catch (e) {}
+        try { if (el && el.closest && el.closest(NOTIF_DOM_SELECTOR)) return true; } catch (e) {}
+        return false;
+    }
+    // Patch HTMLAudioElement.play once. Suppress ONLY when killNotifs is on AND
+    // isNotifSound() says this play coincides with a toast. Returns a resolved
+    // promise to honor play()'s contract so Percepto's caller doesn't throw.
+    function installNotifSoundSuppressor() {
+        const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+        const proto = win.HTMLAudioElement && win.HTMLAudioElement.prototype;
+        if (!proto || proto.__aim_notif_play_patched) return;
+        const origPlay = proto.play;
+        proto.play = function() {
+            if (killNotifs && isNotifSound(this)) {
+                try { this.muted = true; this.pause(); } catch (e) {}
+                return Promise.resolve();
+            }
+            return origPlay.apply(this, arguments);
+        };
+        proto.__aim_notif_play_patched = true;
+    }
+
     // Push current Perf Shield toggle state out to anyone listening (currently
     // just Map Styler, which mirrors `hide-satellite`). Called on init, on
     // toggle change, and in response to REQUEST_PERF_SETTINGS.
@@ -471,9 +600,27 @@
                     console.log(`${TAG} log suppressor ${newVal ? 'ON' : 'OFF'}`);
                     return;
                 }
+                if (msg.toggleId === 'kill-notifs') {
+                    if (newVal === killNotifs) return; // IDEMPOTENT no-op
+                    killNotifs = newVal;
+                    try { GM_setValue(STORAGE_KEY_KILL_NOTIFS, newVal); } catch (e) {}
+                    try { applyNotifBlockCss(newVal); } catch (e) {}
+                    // Sound suppressor reads killNotifs live; no re-patch needed.
+                    console.log(`${TAG} mission-notification kill ${newVal ? 'ON' : 'OFF'}`);
+                    return;
+                }
                 const groupId = toggleIdToGroup(msg.toggleId);
                 const group = BLOCK_GROUPS[groupId];
                 if (!group) return;
+                // v1.17 — Lite mode hard-locks the weather block OFF. Ignore
+                // any echoed/stored block-weather=true (the Control Panel echoes
+                // the user's stored pref on REGISTER) so blockEnabled, the panel,
+                // and the 'active blocks' line stay truthful. shouldBlock() also
+                // never blocks weather in Lite mode, so weather always flows.
+                if (isLiteMode() && groupId === 'block-weather') {
+                    if (blockEnabled[groupId]) blockEnabled[groupId] = false;
+                    return;
+                }
                 // IDEMPOTENT no-op for group toggles too — was a major
                 // source of redundant work (every echoed SET_TOGGLE
                 // wrote GM, applied chat CSS, etc).
@@ -512,6 +659,13 @@
                     label: 'Suppress noisy Percepto debug logs',
                     type: 'boolean',
                     default: true,
+                },
+                { type: 'header', label: 'Mission notifications' },
+                {
+                    id: 'kill-notifs',
+                    label: 'Kill mission toasts (takeoff / snapshot / etc — silences chime too)',
+                    type: 'boolean',
+                    default: false,
                 },
                 { type: 'header', label: 'Map performance' },
                 {

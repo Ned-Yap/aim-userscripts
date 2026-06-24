@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.29
+// @version      1.33
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,12 +55,36 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.29';
+    const VERSION = '1.33';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PREFS_KEY = 'aim-control-prefs';
     const HOTKEYS_KEY = 'aim-control-hotkeys';
+    // v1.31 — LITE / FULL MODE (CSM whitelist). A shared localStorage value
+    // (readable by ALL userscripts on percepto.app, unlike per-script GM
+    // storage) that gates the destructive/building tools. DEFAULT = LITE: every
+    // non-CSM (regs, pilots, any new GitHub user) gets the non-destructive QoL +
+    // viewing tools but NO building tools — they stay inert at init via their
+    // own guard. FULL mode unlocks the building tools, and is granted only to
+    // GitHub logins on the CSM whitelist (csm-whitelist.json in the private data
+    // repo). The Control Panel resolves your login (GET /user via your PAT) +
+    // the list, then caches MODE_KEY = 'full' | 'lite'. Pilots/regs HAVE PATs
+    // (for power-line KMLs + Issues), so PAT-presence can't be the gate — the
+    // whitelist is. Escape hatch for a CSM the list can't reach:
+    // localStorage.setItem('aim-mode','full') in the console, then reload.
+    const MODE_KEY = 'aim-mode';            // 'full' (CSM/builder) | 'lite' (default)
+    const MODE_CSM_KEY = 'aim-is-csm';      // '1' if whitelist-resolved as a CSM (UI: show Lite/Full toggle)
+    const MODE_LOGIN_KEY = 'aim-mode-login'; // cached resolved GitHub login (display only)
+    const CSM_WHITELIST_PATH = 'csm-whitelist.json'; // in KMLS_REPO (private data repo)
+    // Scripts allowed in LITE mode (everyone). Everything NOT listed is a
+    // CSM-only building tool that stays inert unless aim-mode==='full'. Used to
+    // hide CSM sections from the panel in Lite (defense for un-guarded installs).
+    const LITE_ALLOWED = new Set([
+        'aim-defaults', 'aim-styler', 'aim-styler-powerlines',
+        'aim-perf-shield', 'aim-map-nav', 'aim-issues',
+        'aim-ruler', 'aim-clear-all', 'aim-altitude', 'aim-power-line-editor',
+    ]);
     const REBIND_ERROR_TIMEOUT_MS = 6000;
     const TOKEN_KEY = 'aim-github-token';
     const KMLS_REPO = 'Ned-Yap/aim-userscripts-data';
@@ -175,6 +199,107 @@
         try { localStorage.setItem(PREFS_KEY, JSON.stringify(state.prefs)); } catch (e) {}
         try { localStorage.setItem(HOTKEYS_KEY, JSON.stringify(state.hotkeys)); } catch (e) {}
     }
+    // v1.31 — Lite/Full mode (shared localStorage, see MODE_KEY note above).
+    // Anything other than the literal 'full' is treated as LITE (the safe
+    // default), so an unset/garbage value never accidentally unlocks builders.
+    function getMode() {
+        try { return localStorage.getItem(MODE_KEY) === 'full' ? 'full' : 'lite'; }
+        catch (e) { return 'lite'; }
+    }
+    function isFull() { return getMode() === 'full'; }
+    function setMode(mode) {
+        try { localStorage.setItem(MODE_KEY, mode === 'full' ? 'full' : 'lite'); } catch (e) {}
+    }
+    function getModeLogin() {
+        try { return localStorage.getItem(MODE_LOGIN_KEY) || ''; } catch (e) { return ''; }
+    }
+    function isCsmUser() {
+        try { return localStorage.getItem(MODE_CSM_KEY) === '1'; } catch (e) { return false; }
+    }
+    // The mode the page actually LOADED with — i.e. what every script's init
+    // guard read. resolveMode() may change MODE_KEY later (async), but that
+    // only takes effect on the next reload, so the banner compares this against
+    // getMode() to decide whether to nudge a reload.
+    const ACTIVE_MODE = getMode();
+
+    // Resolve CSM status against the whitelist and cache the mode. Runs once a
+    // token is available. Writes MODE_KEY; guards read it at INIT so the change
+    // applies on the NEXT reload (we surface a reload nudge when it flips). On
+    // any failure (no token / network / parse) we DON'T downgrade — we leave the
+    // cached mode untouched, so a resolved CSM isn't knocked back to Lite by a
+    // transient blip, and an unresolved user simply stays Lite (safe default).
+    let modeResolving = false;
+    let modeResolveDone = false; // run-once per page load (reset only on token CHANGE)
+    function resolveMode() {
+        const token = getToken();
+        if (!token || typeof GM_xmlhttpRequest !== 'function' || modeResolving || modeResolveDone) return;
+        modeResolving = true;
+        ghJson('https://api.github.com/user', token, (me) => {
+            const login = me && me.login;
+            if (!login) { modeResolving = false; return; }
+            try { localStorage.setItem(MODE_LOGIN_KEY, login); } catch (e) {}
+            const url = `https://api.github.com/repos/${KMLS_REPO}/contents/${CSM_WHITELIST_PATH}?ref=${KMLS_BRANCH}`;
+            ghJson(url, token, (file) => {
+                modeResolving = false;
+                modeResolveDone = true;
+                let list = null;
+                try {
+                    // contents API returns base64 in .content; decode then parse.
+                    const txt = file && file.content ? atob(file.content.replace(/\n/g, '')) : null;
+                    list = txt ? (JSON.parse(txt).csms || []) : null;
+                } catch (e) { console.warn(`${TAG} csm-whitelist parse failed:`, e); }
+                if (!Array.isArray(list)) {
+                    console.warn(`${TAG} csm-whitelist unavailable — leaving mode as ${getMode()} (login ${login})`);
+                    return; // don't downgrade on a missing/garbled list
+                }
+                const isCsm = list.some(u => String(u).toLowerCase() === login.toLowerCase());
+                try { localStorage.setItem(MODE_CSM_KEY, isCsm ? '1' : '0'); } catch (e) {}
+                const prev = getMode();
+                let raw = null;
+                try { raw = localStorage.getItem(MODE_KEY); } catch (e) {}
+                if (!isCsm) {
+                    // Non-CSMs are always Lite — enforce it (overrides a stray
+                    // value). The console escape hatch only matters when the
+                    // list can't be fetched, which returns earlier without
+                    // reaching here, so this never strands a real CSM.
+                    setMode('lite');
+                } else if (raw !== 'full' && raw !== 'lite') {
+                    // First resolution for a CSM → default to Full. An explicit
+                    // prior choice (full, or a Lite "preview") is respected.
+                    setMode('full');
+                }
+                const newMode = getMode();
+                console.log(`${TAG} mode resolved: ${login} → CSM=${isCsm}, mode=${newMode}${newMode !== prev ? ` (was ${prev}; reload to apply)` : ''}`);
+                // Deliberately NO renderPanel() here — the cached mode only
+                // matters on the next reload, and re-rendering an OPEN panel from
+                // an async callback wipes checkboxes mid-click + flickers the
+                // panel. The banner reflects the new mode on the next render.
+            });
+        });
+    }
+    // Minimal GitHub GET → parsed JSON via GM_xmlhttpRequest (page-CORS-proof).
+    function ghJson(url, token, cb) {
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET', url,
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+                onload: (resp) => {
+                    if (resp.status >= 200 && resp.status < 300) {
+                        let data = null;
+                        try { data = JSON.parse(resp.responseText); } catch (e) {}
+                        cb(data);
+                    } else { console.warn(`${TAG} GET ${url} → HTTP ${resp.status}`); cb(null); }
+                },
+                onerror: () => { console.warn(`${TAG} GET ${url} network error`); cb(null); },
+                ontimeout: () => { console.warn(`${TAG} GET ${url} timed out`); cb(null); },
+                timeout: 8000,
+            });
+        } catch (e) { console.warn(`${TAG} GET ${url} threw:`, e); cb(null); }
+    }
     function getToggle(scriptId, toggleId, def) {
         const s = state.prefs[scriptId];
         if (s && Object.prototype.hasOwnProperty.call(s, toggleId)) return s[toggleId];
@@ -257,6 +382,10 @@
             state.channel.postMessage({ type: 'TOKEN_VALUE', token: value || '' });
             state.channel.postMessage({ type: 'REFETCH_KMLS' });
         }
+        // v1.31 — a new/changed token means we can (re-)resolve CSM status.
+        modeResolving = false;
+        modeResolveDone = false;
+        if (value) resolveMode();
     }
     // Verifies the PAT by hitting the contents API for the KMLs repo root.
     // Uses GM_xmlhttpRequest so the request bypasses page CORS rules.
@@ -378,6 +507,12 @@
 
     function handleRegister(msg) {
         if (!msg.scriptId) return;
+        // NOTE: a v1.31 "defense" broadcast master=false to any CSM-only tool
+        // that registered in Lite. REMOVED in v1.33 — every CSM tool now
+        // self-guards (inert in Lite, never registers), so it was unnecessary
+        // AND could leave a tool's master toggle stuck OFF after a Lite↔Full
+        // round-trip (it muted FPE's smart-altitude). Lite already hides CSM
+        // sections via the visibleScripts filter; no master-poking needed.
         const prev = state.registry.get(msg.scriptId);
         const sig = registrationSignature(msg);
         const isIdentical = prev && prev.__sig === sig;
@@ -769,6 +904,33 @@
                 e.stopPropagation();
                 setRebindError(null);
                 renderPanel();
+                return;
+            }
+            // v1.31 — Lite/Full mode toggle (CSMs only; the button only renders
+            // for whitelist-resolved CSMs). Lets a CSM preview Lite (what a
+            // pilot/reg sees) and switch back. Guards read aim-mode at INIT, so
+            // a reload is the clean way to apply.
+            const reloadBtn = t.closest && t.closest('[data-reload-mode]');
+            if (reloadBtn) {
+                e.stopPropagation();
+                location.reload();
+                return;
+            }
+            const modeBtn = t.closest && t.closest('[data-mode-toggle]');
+            if (modeBtn) {
+                const now = Date.now();
+                if (now - lastHandled < 250) return;
+                lastHandled = now;
+                e.stopPropagation();
+                const goFull = getMode() !== 'full';
+                setMode(goFull ? 'full' : 'lite');
+                renderPanel();
+                const msg = goFull
+                    ? 'Switching to FULL (CSM) mode — building tools (SUM / SOP / bulk / macros / editors) will be enabled.'
+                    : 'Switching to LITE mode — you will see what a reg / pilot sees: building tools hidden, QoL + viewing tools stay.';
+                if (confirm(`${msg}\n\nReload the page now to apply?`)) {
+                    location.reload();
+                }
                 return;
             }
             // v1.27 — clear the search box.
@@ -1510,9 +1672,14 @@
         // so out-of-scope scripts disappear entirely from the panel.
         // Groups whose members all get filtered out simply won't be created,
         // so their section header doesn't render either.
-        const visibleScripts = scripts.filter(s => scopeMatches(s.scope));
+        // v1.30 — in Pilot mode, hide any builder that still registered (an
+        // older install without the init guard). Guarded builders never reach
+        // here because they return before registering.
+        const visibleScripts = scripts
+            .filter(s => scopeMatches(s.scope))
+            .filter(s => isFull() || LITE_ALLOWED.has(s.scriptId));
 
-        // v1.24 — CENTRAL TAXONOMY. One source of truth for how the panel is
+        // v1.26 — CENTRAL TAXONOMY. One source of truth for how the panel is
         // organized, keyed by scriptId so we can re-group everything WITHOUT
         // editing the other scripts. SCRIPT_GROUP overrides each script's
         // self-declared `group`; SCRIPT_ORDER sets within-group order. A
@@ -1589,7 +1756,7 @@
         // section keys: `script:<scriptId>` for standalone, `group:<name>`
         // for groups. Edit this map to change the order.
         const SECTION_PRIORITY = {
-            // v1.24 — top-level group order (lower = higher up). Mirrors the
+            // v1.26 — top-level group order (lower = higher up). Mirrors the
             // SCRIPT_GROUP taxonomy above. Anything not listed → 999 (bottom).
             'group:Map Display': 10,
             'group:Power Lines': 20,
@@ -1615,9 +1782,11 @@
         });
         groups.forEach((members, name) => {
             const key = `group:${name}`;
-            // Sort members WITHIN the group by the central SCRIPT_ORDER (v1.24),
-            // falling back to REGISTER's optional `priority` (default 100), then
-            // alphabetical. Lets the taxonomy fix the order in one place.
+            // Sort members WITHIN the group by REGISTER's optional `priority`
+            // field (lower first, default 100), tiebreak by display name.
+            // Lets us order Hotkeys as "simple → macros → bulk tools" instead
+            // of pure alphabetical. Scripts that don't set priority just
+            // fall back to alphabetical ordering with everything else at 100.
             const sortedMembers = [...members].sort((a, b) => {
                 const pa = SCRIPT_ORDER[a.scriptId] !== undefined ? SCRIPT_ORDER[a.scriptId] : (typeof a.priority === 'number' ? a.priority : 100);
                 const pb = SCRIPT_ORDER[b.scriptId] !== undefined ? SCRIPT_ORDER[b.scriptId] : (typeof b.priority === 'number' ? b.priority : 100);
@@ -1657,10 +1826,33 @@
             </div>
         ` : '';
 
-        // Layout order: header, error, sections, then PAT at the bottom.
-        // PAT is a config item that the user only touches occasionally —
+        // v1.31 — Lite/Full mode banner. Shows the mode the page is RUNNING in
+        // (ACTIVE_MODE), the resolved GitHub login, and — only for whitelist-
+        // resolved CSMs — a Lite/Full toggle (to preview the pilot/reg view). A
+        // "reload to apply" nudge appears when resolveMode() has changed the
+        // cached mode since load (e.g. a CSM's first resolution).
+        const full = ACTIVE_MODE === 'full';
+        const login = getModeLogin();
+        const pending = getMode() !== ACTIVE_MODE; // resolved differs from what's running
+        const modeLabel = full ? '🛠️ Full (CSM)' : '🪶 Lite';
+        const sub = login
+            ? `${escapeHtml(login)}${isCsmUser() ? ' · CSM' : ''}`
+            : (isFull() ? '' : 'building tools hidden');
+        const pilotHtml = `
+            <div style="padding:7px 10px;border-bottom:1px solid rgba(255,255,255,0.10);background:${full ? 'rgba(120,90,200,0.20)' : 'rgba(20,120,180,0.18)'};display:flex;align-items:center;gap:8px">
+                <div style="flex:1;min-width:0">
+                    <div style="color:${full ? '#cdbcff' : '#7fd4ff'};font-weight:600">${modeLabel} mode</div>
+                    <div style="font-size:10px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sub}</div>
+                </div>
+                ${pending ? `<button data-reload-mode title="Reload to apply the resolved mode" style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 10px;border-radius:4px;border:1px solid #ffd591;background:rgba(173,104,0,0.25);color:#ffd591">reload</button>` : ''}
+                ${isCsmUser() ? `<button data-mode-toggle title="Switch between Full (CSM) and Lite (what regs/pilots see). Reloads to apply." style="cursor:pointer;font-size:11px;font-weight:700;padding:3px 12px;border-radius:4px;border:1px solid ${full ? '#cdbcff' : 'rgba(255,255,255,0.25)'};background:${full ? 'rgba(120,90,200,0.30)' : 'rgba(255,255,255,0.06)'};color:${full ? '#e6dcff' : '#bbb'}">${full ? 'Full' : 'Lite'}</button>` : ''}
+            </div>
+        `;
+
+        // Layout order: header, mode banner, error, sections, then PAT at the
+        // bottom. PAT is a config item that the user only touches occasionally —
         // putting it at the bottom keeps active controls front-and-center.
-        state.panelEl.innerHTML = headerHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
+        state.panelEl.innerHTML = headerHtml + pilotHtml + errorHtml + emptyHtml + sectionsHtml + tokenHtml;
         wireTokenSection();
         // NOTE: per-element click/change listeners moved to delegated
         // handlers in createPanel() — see panel.addEventListener calls
@@ -1678,6 +1870,9 @@
         // clicks Test (or another script reports success/failure).
         state.tokenStatus = getToken() ? 'unknown' : 'missing';
         setupChannel();
+        // v1.31 — if a token is already cached, resolve CSM status now so the
+        // mode is fresh for the NEXT reload (guards read aim-mode at init).
+        if (getToken()) resolveMode();
         installHotkeyRouter();
         installScopeWatcher();
         const start = () => {
