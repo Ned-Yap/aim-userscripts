@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         AIM Mission Log Table
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Log_Table.user.js
-// @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. No hotkeys.
+// @description  Makes the Mission Log table's columns drag-to-reorder and drag-edge-to-resize. Layout persists in localStorage and is continuously re-applied over Percepto's React re-renders. Shift+double-click any header resets. Also adds a per-row 📥 button that downloads that mission's drone flight path (LAT/LNG/ALT) as a 3D KML. No hotkeys.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/*
@@ -21,6 +21,13 @@
 //   each React render. All columns are made uniform (the native frozen/pinned
 //   columns are un-stuck) so any column can move anywhere.
 // Reset: Shift + double-click any column header clears the saved layout.
+// Flight-path KML: each mission row gets a 📥 button (in the sticky-right
+//   action cell). Click it to fetch GET /mission_positions/<id>/ (cookie auth,
+//   same-origin) and download the drone's path as a KML with both an
+//   absolute-altitude LineString (3D path) and a time-stamped gx:Track
+//   (Google Earth time-animated playback). Points use altitude_asl (meters ASL,
+//   falling back to alt), are sorted chronologically, and consecutive duplicate
+//   fixes (idle hover) are dropped to keep the file lean.
 // Hotkeys: none.
 // Log tag: [AIM MLOG]
 
@@ -318,6 +325,156 @@
         enforce();
     }
 
+    // --- flight-path KML download -----------------------------------------
+    // Each mission row carries `data-row-key="mission-<id>"`; we read the id
+    // from there (robust to column reorder/visibility) and inject a 📥 button
+    // into the sticky-right action cell.
+
+    const ROW_SEL = '.ant-table-body tbody > tr.ant-table-row';
+
+    function decorateRows() {
+        const container = document.querySelector(CONTAINER_SEL);
+        if (!container) return;
+        for (const tr of container.querySelectorAll(ROW_SEL)) {
+            if (tr.dataset.aimKml === '1') continue;
+            const m = (tr.getAttribute('data-row-key') || '').match(/mission-(\d+)/);
+            if (!m) continue;
+            const cell = tr.querySelector('.action-column-cell') || tr.lastElementChild;
+            if (!cell) continue;
+            tr.dataset.aimKml = '1';
+            cell.insertBefore(makeKmlButton(m[1], tr), cell.firstChild);
+        }
+    }
+
+    function makeKmlButton(missionId, tr) {
+        const btn = document.createElement('button');
+        btn.className = 'aim-kml-btn';
+        btn.type = 'button';
+        btn.textContent = '📥';
+        btn.title = `Download flight path KML (drone positions) — mission ${missionId}`;
+        // Row is clickable (navigates to the mission); stop our clicks from
+        // bubbling to React's delegated row handler.
+        const stop = (e) => e.stopPropagation();
+        btn.addEventListener('mousedown', stop);
+        btn.addEventListener('pointerdown', stop);
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            downloadMissionKml(missionId, tr, btn);
+        });
+        return btn;
+    }
+
+    function flash(btn, txt, ms) {
+        btn.textContent = txt;
+        setTimeout(() => { btn.textContent = '📥'; }, ms);
+    }
+
+    function downloadMissionKml(missionId, tr, btn) {
+        if (btn.dataset.busy === '1') return;
+        btn.dataset.busy = '1';
+        btn.textContent = '⏳';
+        const nameEl = tr.querySelector('.missions-page__mission-name');
+        const missionName = nameEl ? (nameEl.textContent || '').trim() : '';
+        console.log(`${TAG} fetching positions for mission ${missionId}`);
+        fetch(`/mission_positions/${encodeURIComponent(missionId)}/`, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(data => {
+                const positions = (data && data.positions) || [];
+                const kml = buildKml(positions, missionId, missionName);
+                if (!kml) {
+                    console.warn(`${TAG} mission ${missionId}: no usable positions`);
+                    flash(btn, '∅', 2500);
+                    return;
+                }
+                const safe = (missionName || 'mission').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 60);
+                downloadFile(kml, `mission_${missionId}_${safe}_flightpath.kml`);
+                console.log(`${TAG} mission ${missionId}: KML downloaded`);
+                flash(btn, '✅', 1500);
+            })
+            .catch(e => {
+                console.error(`${TAG} KML download failed for mission ${missionId}:`, e);
+                flash(btn, '❌', 2500);
+            })
+            .finally(() => { btn.dataset.busy = '0'; });
+    }
+
+    function xmlEsc(s) {
+        return String(s).replace(/[&<>"']/g, c =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+    }
+
+    // Build a KML with an absolute-altitude LineString (3D path) + a timestamped
+    // gx:Track. Prefers altitude_asl (meters ASL); falls back to alt.
+    function buildKml(positions, missionId, missionName) {
+        const pts = [];
+        for (const p of positions) {
+            const pos = p && p.position;
+            if (!pos || typeof pos.lat !== 'number' || typeof pos.lng !== 'number') continue;
+            const alt = (p.altitude_asl != null) ? p.altitude_asl
+                : (p.alt != null ? p.alt : null);
+            if (alt == null) continue;
+            pts.push({ lat: pos.lat, lng: pos.lng, alt, t: p.timestamp || null });
+        }
+        if (!pts.length) return null;
+        // Chronological order so the track plays back correctly.
+        pts.sort((a, b) => (a.t ? Date.parse(a.t) : 0) - (b.t ? Date.parse(b.t) : 0));
+        // Drop consecutive identical fixes (idle hover at base, etc.).
+        const clean = [];
+        for (const p of pts) {
+            const last = clean[clean.length - 1];
+            if (last && last.lat === p.lat && last.lng === p.lng && last.alt === p.alt) continue;
+            clean.push(p);
+        }
+        const line = clean.map(p => `${p.lng},${p.lat},${p.alt}`).join(' ');
+        const track = [];
+        for (const p of clean) {
+            if (!p.t) continue; // a when/coord pair must stay balanced
+            track.push(`        <when>${p.t}</when>`);
+            track.push(`        <gx:coord>${p.lng} ${p.lat} ${p.alt}</gx:coord>`);
+        }
+        const title = `Mission ${missionId}${missionName ? ' — ' + missionName : ''}`;
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
+  <Document>
+    <name>${xmlEsc(title)}</name>
+    <description>${clean.length} points · altitude in meters ASL (absolute)</description>
+    <Style id="fp"><LineStyle><color>ff00aaff</color><width>3</width></LineStyle></Style>
+    <Placemark>
+      <name>Flight path (3D)</name>
+      <styleUrl>#fp</styleUrl>
+      <LineString>
+        <altitudeMode>absolute</altitudeMode>
+        <coordinates>${line}</coordinates>
+      </LineString>
+    </Placemark>
+    <Placemark>
+      <name>Flight track (time-animated)</name>
+      <styleUrl>#fp</styleUrl>
+      <gx:Track>
+        <altitudeMode>absolute</altitudeMode>
+${track.join('\n')}
+      </gx:Track>
+    </Placemark>
+  </Document>
+</kml>`;
+    }
+
+    function downloadFile(text, filename) {
+        try {
+            const blob = new Blob([text], { type: 'application/vnd.google-earth.kml+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+        } catch (e) {
+            console.error(`${TAG} download failed:`, e);
+        }
+    }
+
     // --- styles ------------------------------------------------------------
 
     function injectStyle() {
@@ -339,6 +496,13 @@
             body.aim-mlog-resizing, body.aim-mlog-resizing * {
                 cursor: col-resize !important; user-select: none !important;
             }
+            .aim-kml-btn {
+                background: transparent; border: none; cursor: pointer;
+                font-size: 15px; line-height: 1; padding: 2px 4px; margin-right: 4px;
+                border-radius: 4px; vertical-align: middle;
+            }
+            .aim-kml-btn:hover { background: rgba(95,255,255,0.25); }
+            .aim-kml-btn[data-busy="1"] { cursor: default; }
         `;
         (document.head || document.documentElement).appendChild(s);
     }
@@ -353,6 +517,8 @@
             scheduled = false;
             try { enforce(); }
             catch (e) { console.error(`${TAG} enforce failed:`, e); }
+            try { decorateRows(); }
+            catch (e) { console.error(`${TAG} decorateRows failed:`, e); }
         });
     }
 

@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — AIM Mission Log Table v1.3 — download any mission's 3D flight path as KML
+
+Every row in the Mission Log now has a 📥 button in the right-hand actions column. Click it to download that mission's actual drone flight path as a KML — the drone's recorded LAT/LNG/altitude over the whole flight. The file opens in Google Earth (or any KML viewer) as a 3D path you can fly through, plus a time-animated track so you can scrub the flight by time. Altitude is true meters-above-sea-level (absolute), so the path sits at the right height over the terrain. Idle hover points are de-duplicated to keep the file small. No clicks into the mission needed — just the button on the log row.
+
+---
+
 ## 2026-06-24 — AIM Issues v1.29 (prod + dev/latest) — Slack catch-up on site-open + manual resend
 
 Building on v1.27, Slack notifications now have a safety net. Each issue tracks a watermark of how much of its history has reached Slack (advanced only after a confirmed post). When you open a site, your session checks every issue and, if any changed while Slack was offline, posts a short 🔄 *Catch-up* reply in the thread and refreshes the status board — automatically, no action needed. Existing issues are migrated to "already caught up" on first open so the backlog isn't re-posted. For a notification that was missed *before* this shipped (like the 06-23 approvals), open the issue and use the new approver-only **📣 Resend to Slack** button to re-post its current status (it creates the Slack thread if one was never made).
