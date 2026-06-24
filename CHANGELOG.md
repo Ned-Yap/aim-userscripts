@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — AIM Mission Log Table v1.6 — flight-path line is now hot pink, width 6
+
+Cosmetic: the KML flight path + track render in hot pink at width 6 (was orange, width 3) for better visibility over terrain.
+
+---
+
 ## 2026-06-24 — AIM Mission Log Table v1.5 — fix: waypoint AGL now resolves (DEM retry/backoff)
 
 The per-waypoint **Altitude AGL** was showing "n/a (DEM unavailable)" for every pin. Percepto's terrain endpoint rate-limits with a 429 while a site's elevation tiles are cold — and on the mission-log page they're always cold because the map isn't loaded — so the single-shot lookup always failed. It now retries with backoff (warming the first lookup generously) so AGL fills in, and short-circuits if the endpoint is genuinely unavailable so the download can't hang.
