@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.98
+// @version      4.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.98';
+    const SCRIPT_VERSION = '4.99';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9165,7 +9165,7 @@
     // to localStorage (survives crash/reload). DEM/altitude only at finish.
     // ============================================================
     const ADV_LS_KEY = 'aim_adv_draw';
-    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff5a5a', bufOpacity: 0.28 };
+    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff2d2d', bufOpacity: 0.3 };
     let advDraw = {
         active: false, drawing: false,
         verts: [],       // inner-edge polyline [{lat,lng}]
@@ -9313,10 +9313,10 @@
             const band = advBand(path, advDraw.offsetFt, advDraw.side);
             if (band) { try { const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: advDraw.bufColor, weight: 1, opacity: 0.5, fillColor: advDraw.bufColor, fillOpacity: advDraw.bufOpacity, interactive: false }); pb.addTo(map); advDraw.layers.push(pb); } catch (e) {} }
             const outline = advOutline(path, widthsFt, advDraw.side);
-            if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.16, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
+            if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#5fff5f', weight: 2, opacity: 0.95, fillColor: '#5fff5f', fillOpacity: 0.18, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
-            // grabbed outer edge highlight
-            if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffe14d', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
+            // grabbed outer edge highlight (white, neutral against the green FFZ)
+            if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
         }
         // Ctrl-snap guides — show the nearest asset's offset ring (magenta) + a marker at
         // the snap point, so Ctrl visibly does something. Only while Ctrl is held.
@@ -9330,7 +9330,7 @@
                 try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
             }
         }
-        advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#fff', weight: 1.5, fillColor: drag ? '#ffe14d' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
+        advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
     function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
@@ -10063,7 +10063,7 @@
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
                     <label style="display:inline-flex;align-items:center;gap:4px">Width <input type="number" id="aim-adv-width" value="30" min="5" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Offset <input type="number" id="aim-adv-offset" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
-                    <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff5a5a" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff2d2d" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
                 </div>
                 <div style="font-size:10px;color:#7a8794;margin-top:6px">Click inner edge · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen that segment · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo</div>
