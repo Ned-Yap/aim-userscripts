@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Site Watch: stop the daily digest going silent (history-wipe fix) — Site Watch v0.14 (dev/latest, personal)
+
+Fix: the daily Slack digest had been silent for ~a week even though sites were changing. Root cause: on 2026-06-20, `appendCsvRows` (rewritten in v0.11 to read `changes.csv` via the raw media type) hit a blank read of the *existing* file and treated it as "file is empty" — recreating it from a bare header, **wiping ~3000 rows of audit history**, then re-wiping every cycle (every CSV commit since wrote only the 2 newest rows). With the log perpetually near-empty, the digest read found nothing new and stayed silent. Site Watch's polling/snapshotting never stopped — only the CSV the digest reads was being destroyed. Fix: a new `readCsv()` that **never** rewrites an existing file (sha present) on a blank/short/wrong-header read — it retries, then aborts with history intact rather than overwriting it; reads base64 from the Contents API for the normal <1 MB case (the proven path) and falls back to raw only when base64 is blanked >1 MB. The digest read goes through the same path, so a transient read failure now defers the digest (and its cutoff) instead of being mistaken for "no changes." The wiped history (through 2026-06-21) is recoverable from git and will be restored once the update lands.
+
+---
+
+## 2026-06-25 — Hide-ortho keep-alive runs with Outlines ON too — Map Styler v34.80/v34.81 (dev/latest)
+
+v34.80 added a `__aim_styler_debug()` / `__aim_styler_applyPerf()` console probe (cross-frame via `iframe.contentWindow`). v34.81: the perf keep-alive tick now re-applies regardless of the styler's active state — previously it skipped when Outlines was ON, so an ortho layer Percepto re-added on pan/zoom/nav could flicker back until the hash-gated heartbeat caught it. Confirmed working on site 1153 (39 DroneDeploy orthos removed, `removedStash=39`).
+
+---
+
 ## 2026-06-25 — Map-performance toggles now work with Outlines OFF — Map Styler v34.79 (dev/latest)
 
 Fix: the three Map-performance levers (hide ortho, hide satellite, low-res) are implemented inside Map Styler and used to do nothing unless the **Outlines master was ON** — they gated on `if (isActive) runUpdate()`. So turning Outlines off (e.g. to cut load) silently disabled the very toggles that cut load. They now apply **independently of the styler master**, via a direct idempotent applier + a slow keep-alive tick that also catches ortho/satellite layers Percepto adds later. Perf toggles work regardless of whether Outlines is on.

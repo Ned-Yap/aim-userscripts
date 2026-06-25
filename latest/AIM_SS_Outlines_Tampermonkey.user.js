@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.80
+// @version      34.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.80';
+    const SCRIPT_VERSION = '34.81';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1231,15 +1231,16 @@
         try { applyOrthoVisibility(); } catch (e) {}
     }
 
-    // Independent keep-alive: while any Map-performance lever is ON and the
-    // styler is NOT active (so runUpdate's heartbeat isn't running), re-apply
+    // Independent keep-alive: while any Map-performance lever is ON, re-apply
     // on a slow tick. Catches ortho/satellite layers Percepto adds later (on
-    // pan / mission open / nav) and re-suppresses any it re-adds. When the
-    // styler IS active, runUpdate already does this every heartbeat, so we
-    // skip to avoid doubling the work.
+    // pan / mission open / nav) and re-suppresses any it re-adds. Runs
+    // regardless of isActive: when Outlines is ON, runUpdate's heartbeat is
+    // hash-gated and may not re-fire after Percepto re-adds an ortho layer,
+    // letting suppressed imagery flicker back. The appliers are idempotent and
+    // cheap (a few eachLayer sweeps), so re-applying unconditionally is safe.
     setInterval(() => {
         try {
-            if (!isActive && (perfHideOrtho || perfHideSatellite || perfOrthoLowRes)) {
+            if (perfHideOrtho || perfHideSatellite || perfOrthoLowRes) {
                 applyPerfMapSettings();
             }
         } catch (e) {}
