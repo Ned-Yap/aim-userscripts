@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.97
+// @version      4.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.97';
+    const SCRIPT_VERSION = '4.98';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9173,7 +9173,9 @@
         tentative: null, // snapped cursor for live preview
         widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
         bufColor: ADV_DEFAULTS.bufColor, bufOpacity: ADV_DEFAULTS.bufOpacity,
+        segWidth: [],    // per-segment width (ft); edge-drag overrides, Width field resets all
         dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
+        dragEdge: null,  // index of the segment whose outer edge is being dragged (widen)
         ctrlHeld: false, // for the live Ctrl-snap guides
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
@@ -9185,34 +9187,87 @@
         advDraw.verts.forEach((v, i) => { try { const p = map.latLngToContainerPoint(v); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bestD) { bestD = d; best = i; } } catch (e) {} });
         return best;
     }
-    function advSegNormals(pathM, side) {
-        const segN = [];
-        for (let i = 0; i < pathM.length - 1; i++) {
-            const dx = pathM[i + 1].x - pathM[i].x, dy = pathM[i + 1].y - pathM[i].y, L = Math.hypot(dx, dy) || 1;
-            segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); // left normal, side-flipped
+    // Per-segment widths (ft) — one entry per segment, default to the global width.
+    // Edge-drag overrides individual segments; the Width field resets them all.
+    function advSegWidthsFt(nSeg) {
+        while (advDraw.segWidth.length < nSeg) advDraw.segWidth.push(advDraw.widthFt);
+        if (advDraw.segWidth.length > nSeg) advDraw.segWidth.length = nSeg;
+        return advDraw.segWidth.map(w => (w && w > 0) ? w : advDraw.widthFt);
+    }
+    // Offset a meters polyline by per-segment offsets (array, meters) OR a scalar,
+    // mitering at corners (so different-width segments meet cleanly). side = ±1.
+    function advOffsetMiter(m, side, off) {
+        const N = m.length, segN = [];
+        for (let i = 0; i < N - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); }
+        if (!segN.length) return m.slice();
+        const w = (i) => Array.isArray(off) ? (off[Math.min(i, off.length - 1)]) : off;
+        const out = [];
+        for (let i = 0; i < N; i++) {
+            if (i === 0) { const o = w(0); out.push({ x: m[0].x + segN[0].nx * o, y: m[0].y + segN[0].ny * o }); continue; }
+            if (i === N - 1) { const k = N - 2, o = w(k); out.push({ x: m[i].x + segN[k].nx * o, y: m[i].y + segN[k].ny * o }); continue; }
+            const o0 = w(i - 1), o1 = w(i);
+            const a0 = { x: m[i].x + segN[i - 1].nx * o0, y: m[i].y + segN[i - 1].ny * o0 };
+            const a1 = { x: m[i].x + segN[i].nx * o1, y: m[i].y + segN[i].ny * o1 };
+            const d0 = { x: m[i].x - m[i - 1].x, y: m[i].y - m[i - 1].y };
+            const d1 = { x: m[i + 1].x - m[i].x, y: m[i + 1].y - m[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            if (X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= Math.max(Math.abs(o0), Math.abs(o1)) * 4) out.push(X);
+            else { out.push(a0); out.push(a1); }
         }
-        if (!segN.length) segN.push({ nx: 0, ny: 1 });
-        return segN;
+        return out;
     }
-    // Corridor FFZ outline (lat/lng ring) = inner polyline + outer offset reversed.
-    function advOutline(verts, widthFt, side) {
+    // Corridor FFZ outline = inner polyline + outer (per-segment widths) reversed.
+    function advOutline(verts, widthsFt, side) {
         if (!verts || verts.length < 2) return null;
-        const cen = ringCentroid(verts);
-        const proj = genProjector(cen.lat, cen.lng);
-        const pathM = verts.map(v => proj.fwd(v));
-        const segN = advSegNormals(pathM, side);
-        const outer = offsetPolylineMiter(pathM, segN, widthFt * GEN_FT_TO_M);
-        return pathM.concat(outer.slice().reverse()).map(p => proj.inv(p));
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const offM = widthsFt.map(w => w * GEN_FT_TO_M);
+        const outer = advOffsetMiter(m, side, offM);
+        return m.concat(outer.slice().reverse()).map(p => proj.inv(p));
     }
-    // Inner-side shielding band polygon (offset INWARD by offsetFt, opposite the width).
+    // Inner-side shielding band (uniform offsetFt, opposite the width side).
     function advBand(verts, offsetFt, side) {
         if (!verts || verts.length < 2) return null;
-        const cen = ringCentroid(verts);
-        const proj = genProjector(cen.lat, cen.lng);
-        const pathM = verts.map(v => proj.fwd(v));
-        const segN = advSegNormals(pathM, side);
-        const band = offsetPolylineMiter(pathM, segN, -offsetFt * GEN_FT_TO_M);
-        return pathM.concat(band.slice().reverse()).map(p => proj.inv(p));
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const band = advOffsetMiter(m, side, -offsetFt * GEN_FT_TO_M);
+        return m.concat(band.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Outer edges (lat/lng) per PLACED segment, for grab-to-widen hit-testing.
+    function advOuterEdges() {
+        const verts = advDraw.verts;
+        if (verts.length < 2) return [];
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const widthsM = advSegWidthsFt(verts.length - 1).map(w => w * GEN_FT_TO_M);
+        const edges = [];
+        for (let i = 0; i < m.length - 1; i++) {
+            const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1;
+            const nx = advDraw.side * (-dy / L), ny = advDraw.side * (dx / L), wm = widthsM[i];
+            edges.push({ a: proj.inv({ x: m[i].x + nx * wm, y: m[i].y + ny * wm }), b: proj.inv({ x: m[i + 1].x + nx * wm, y: m[i + 1].y + ny * wm }), seg: i });
+        }
+        return edges;
+    }
+    function ptSegPx(p, A, B) {
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (A.x + t * dx), p.y - (A.y + t * dy));
+    }
+    function advHitEdge(ll) {
+        const map = getLeafletMap(); if (!map || advDraw.verts.length < 2) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = 11;
+        for (const e of advOuterEdges()) { try { const A = map.latLngToContainerPoint(e.a), B = map.latLngToContainerPoint(e.b); const d = ptSegPx(cp, A, B); if (d < bestD) { bestD = d; best = e.seg; } } catch (er) {} }
+        return best;
+    }
+    // New width (ft) for segment i from the cursor's perpendicular distance off its inner edge.
+    function advWidthFromCursor(i, ll) {
+        const A = advDraw.verts[i], B = advDraw.verts[i + 1];
+        const proj = genProjector(A.lat, A.lng);
+        const a = proj.fwd(A), b = proj.fwd(B), c = proj.fwd(ll);
+        const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
+        const nx = advDraw.side * (-dy / L), ny = advDraw.side * (dx / L);
+        const wm = (c.x - a.x) * nx + (c.y - a.y) * ny; // signed perpendicular on the width side
+        return Math.max(5, Math.round(wm / GEN_FT_TO_M));
     }
     // Ctrl-snap: nearest point on the nearest asset's offset ring (offsetFt off it).
     function advSnapToAsset(cursor) {
@@ -9247,14 +9302,21 @@
         const map = getLeafletMap(), L = getLeafletL();
         if (!map || !L) return;
         advClearLayers();
-        // Rubber-band the live segment to the cursor only while drawing AND not dragging a vertex.
-        const path = (advDraw.drawing && advDraw.tentative && advDraw.dragVert == null) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
+        // Rubber-band the live segment to the cursor only while drawing AND not editing a vertex/edge.
+        const editing = (advDraw.dragVert != null || advDraw.dragEdge != null);
+        const path = (advDraw.drawing && advDraw.tentative && !editing) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
         if (path.length >= 2) {
+            // per-segment widths: placed segments from segWidth, a live tentative segment = global width
+            const placed = advSegWidthsFt(advDraw.verts.length - 1);
+            const widthsFt = [];
+            for (let i = 0; i < path.length - 1; i++) widthsFt.push(i < placed.length ? placed[i] : advDraw.widthFt);
             const band = advBand(path, advDraw.offsetFt, advDraw.side);
             if (band) { try { const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: advDraw.bufColor, weight: 1, opacity: 0.5, fillColor: advDraw.bufColor, fillOpacity: advDraw.bufOpacity, interactive: false }); pb.addTo(map); advDraw.layers.push(pb); } catch (e) {} }
-            const outline = advOutline(path, advDraw.widthFt, advDraw.side);
+            const outline = advOutline(path, widthsFt, advDraw.side);
             if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.16, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
+            // grabbed outer edge highlight
+            if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffe14d', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
         }
         // Ctrl-snap guides — show the nearest asset's offset ring (magenta) + a marker at
         // the snap point, so Ctrl visibly does something. Only while Ctrl is held.
@@ -9271,7 +9333,7 @@
         advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#fff', weight: 1.5, fillColor: drag ? '#ffe14d' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
-    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
+    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
     function advClearPersist() { try { localStorage.removeItem(advStoreKey()); } catch (e) {} }
     function advRestore() {
         try {
@@ -9279,6 +9341,7 @@
             const o = JSON.parse(raw);
             if (o && Array.isArray(o.verts) && o.verts.length) {
                 advDraw.verts = o.verts.filter(v => v && typeof v.lat === 'number');
+                advDraw.segWidth = Array.isArray(o.segWidth) ? o.segWidth.slice() : [];
                 advDraw.side = o.side || 1;
                 if (o.widthFt) advDraw.widthFt = o.widthFt;
                 if (o.offsetFt) advDraw.offsetFt = o.offsetFt;
@@ -9302,6 +9365,12 @@
             if (!advDraw.active) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
             advDraw.ctrlHeld = !!ev.ctrlKey;
+            if (advDraw.dragEdge != null) {
+                // Widen/narrow just this segment by the cursor's perpendicular distance off its inner edge.
+                advDraw.segWidth[advDraw.dragEdge] = advWidthFromCursor(advDraw.dragEdge, ll);
+                advRender();
+                return;
+            }
             if (advDraw.dragVert != null) {
                 // Move the grabbed vertex live (Ctrl still snaps it to an asset offset; angle-snap N/A for interior).
                 advDraw.verts[advDraw.dragVert] = ev.ctrlKey ? advSnapToAsset(ll) : ll;
@@ -9315,16 +9384,19 @@
             if (!advDraw.active || ev.button !== 0) return;
             ev.preventDefault(); ev.stopPropagation();
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            // Click ON an existing vertex → GRAB it to fix it (no Enter needed); else add a point.
-            const hit = advHitVert(ll);
-            if (hit >= 0) { advDraw.dragVert = hit; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+            // Priority: grab a VERTEX (fix the shape) → grab an outer EDGE (widen that
+            // segment) → otherwise ADD a point. No Enter needed to edit.
+            const hitV = advHitVert(ll);
+            if (hitV >= 0) { advDraw.dragVert = hitV; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+            const hitE = advHitEdge(ll);
+            if (hitE >= 0) { advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
             advDraw.drawing = true;
             advDraw.verts.push(advSnapCursor(ll, ev));
             advDraw.tentative = null;
             advPersist(); advRender();
         };
         advDraw._onUp = (ev) => {
-            if (advDraw.dragVert != null) { advDraw.dragVert = null; try { map.dragging.enable(); } catch (e) {} advPersist(); advRender(); }
+            if (advDraw.dragVert != null || advDraw.dragEdge != null) { advDraw.dragVert = null; advDraw.dragEdge = null; try { map.dragging.enable(); } catch (e) {} advPersist(); advRender(); }
         };
         advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing || advDraw.dragVert != null) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
         advDraw._onKey = (ev) => {
@@ -9373,8 +9445,8 @@
     async function finalizeAdvDraw() {
         advDraw.drawing = false;
         const verts = advDraw.verts.slice();
-        const outline = advOutline(verts, advDraw.widthFt, advDraw.side);
-        advDraw.verts = []; advDraw.tentative = null;
+        const outline = advOutline(verts, advSegWidthsFt(Math.max(0, verts.length - 1)), advDraw.side);
+        advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
         advClearLayers(); advClearPersist();
         if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
         const cen = ringCentroid(outline);
@@ -9994,7 +10066,7 @@
                     <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff5a5a" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
                 </div>
-                <div style="font-size:10px;color:#7a8794;margin-top:6px">Click the inner edge point-to-point · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to offset off asset · <b style="color:#fff">F</b>=flip side · <b style="color:#fff">dbl-click</b>/Enter=finish · <b style="color:#fff">Esc</b>=undo point</div>
+                <div style="font-size:10px;color:#7a8794;margin-top:6px">Click inner edge · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen that segment · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo</div>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
@@ -10294,7 +10366,7 @@
         };
         // Advanced Draw live controls
         const advW = box.querySelector('#aim-adv-width'), advO = box.querySelector('#aim-adv-offset'), advC = box.querySelector('#aim-adv-color'), advOp = box.querySelector('#aim-adv-opacity');
-        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advPersist(); advRender(); } }; }
+        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advDraw.segWidth = advDraw.segWidth.map(() => v); advPersist(); advRender(); } }; }
         if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advRender(); } }; }
         if (advC) { advC.value = advDraw.bufColor; advC.oninput = () => { advDraw.bufColor = advC.value; advRender(); }; }
         if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advRender(); } }; }

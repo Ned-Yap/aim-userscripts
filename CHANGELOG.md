@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Advanced Draw — per-segment width (drag an outer edge) — Asset Inspector v4.98 (dev/latest)
+
+Each corridor segment now has its **own width**. Grab a segment's **outer edge and drag it** to widen/narrow just that box (e.g. push past 30 ft on one stretch) — the corridor re-mitres cleanly at the width change, neighbors stay attached. The **Width** field still sets all segments at once (a global reset); edge-drag overrides individuals. Per-segment widths autosave with the rest of the draw. (Priority on click: grab a vertex → grab an outer edge → else add a point.)
+
+---
+
 ## 2026-06-24 — Advanced Draw — visible Ctrl-snap + grab/fix vertices mid-draw — Asset Inspector v4.97 (dev/latest)
 
 Two follow-ups to Advanced Draw: (1) **Ctrl now shows what it's doing** — holding it draws the nearest asset's offset ring in magenta + a marker at the snap point, and the magnet radius is much more generous so it actually catches. (2) **Grab and fix vertices without finishing** — click any placed vertex and drag it (like editing a flight path) to fix the shape mid-draw; the corridor + band update live, no Enter/double-click needed. (Esc still removes the last point; double-click/Enter still finishes.)
