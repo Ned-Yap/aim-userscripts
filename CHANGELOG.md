@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — shielding band on both sides + measure label — Asset Inspector v4.104 (dev/latest)
+
+The shielding band now shows on **both sides** of the line you draw — **red on the front** (away from the FFZ box) and **yellow on the back** (the box side, drawn on top so you can still see it). Each band carries a small **"25 ft" measure label** so the standoff distance is visible at a glance (uses your offset value). Back-band color is customizable.
+
+---
+
 ## 2026-06-25 — Advanced Draw — branch a corridor from an existing FFZ edge — Asset Inspector v4.103 (dev/latest)
 
 You can now **start or connect a corridor on an existing FFZ's edge**. While drawing, when the cursor gets close to any existing FFZ edge (a real one on the map, or another corridor you've drawn but not committed), it snaps onto that edge — a **cyan marker** shows where it'll lock. Click to drop the point exactly on the edge so the new corridor lines up flush with what's already there, instead of eyeballing it. The FFZ-edge snap takes priority over Shift (angle) and Ctrl (asset standoff) snapping.

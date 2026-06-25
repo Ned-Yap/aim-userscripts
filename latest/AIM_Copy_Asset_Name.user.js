@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.103
+// @version      4.104
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.103';
+    const SCRIPT_VERSION = '4.104';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9182,14 +9182,14 @@
     // to localStorage (survives crash/reload). DEM/altitude only at finish.
     // ============================================================
     const ADV_LS_KEY = 'aim_adv_draw';
-    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff2d2d', bufOpacity: 0.3 };
+    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff2d2d', bufColor2: '#ffd400', bufOpacity: 0.3 };
     let advDraw = {
         active: false, drawing: false,
         verts: [],       // inner-edge polyline [{lat,lng}]
         side: 1,         // +1 / -1 — which side the box width extends (F flips)
         tentative: null, // snapped cursor for live preview
         widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
-        bufColor: ADV_DEFAULTS.bufColor, bufOpacity: ADV_DEFAULTS.bufOpacity,
+        bufColor: ADV_DEFAULTS.bufColor, bufColor2: ADV_DEFAULTS.bufColor2, bufOpacity: ADV_DEFAULTS.bufOpacity,
         segWidth: [],    // per-segment width (ft); edge-drag overrides, Width field resets all
         dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
         dragEdge: null,  // index of the segment whose outer edge is being dragged (widen)
@@ -9247,13 +9247,25 @@
         const outer = advOffsetMiter(m, side, offM);
         return m.concat(outer.slice().reverse()).map(p => proj.inv(p));
     }
-    // Inner-side shielding band (uniform offsetFt, opposite the width side).
-    function advBand(verts, offsetFt, side) {
+    // Shielding band of uniform offsetFt on ONE side of the drawn line. dir = -1 = front
+    // (opposite the width/box side), +1 = back (same side as the FFZ box).
+    function advBandSigned(verts, offsetFt, side, dir) {
         if (!verts || verts.length < 2) return null;
         const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
         const m = verts.map(v => proj.fwd(v));
-        const band = advOffsetMiter(m, side, -offsetFt * GEN_FT_TO_M);
+        const band = advOffsetMiter(m, side, dir * offsetFt * GEN_FT_TO_M);
         return m.concat(band.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Draw a shielding band polygon + a low-pri "<offset> ft" measure label at its centroid.
+    function advDrawBand(map, L, band, color, fillOpacity) {
+        if (!band || !band.length) return;
+        try {
+            const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: color, weight: 1, opacity: 0.6, fillColor: color, fillOpacity: fillOpacity, interactive: false });
+            pb.addTo(map); advDraw.layers.push(pb);
+            const c = ringCentroid(band);
+            const lab = L.marker([c.lat, c.lng], { interactive: false, icon: L.divIcon({ className: 'aim-adv-meas', html: '<span style="background:rgba(17,21,26,0.78);color:' + color + ';border:1px solid ' + color + ';border-radius:3px;padding:0 4px;font:600 10px/14px system-ui;white-space:nowrap;">' + advDraw.offsetFt + ' ft</span>', iconSize: [0, 0] }) });
+            lab.addTo(map); advDraw.layers.push(lab);
+        } catch (e) {}
     }
     // Outer edges (lat/lng) per PLACED segment, for grab-to-widen hit-testing.
     function advOuterEdges() {
@@ -9336,10 +9348,12 @@
             const placed = advSegWidthsFt(advDraw.verts.length - 1);
             const widthsFt = [];
             for (let i = 0; i < path.length - 1; i++) widthsFt.push(i < placed.length ? placed[i] : advDraw.widthFt);
-            const band = advBand(path, advDraw.offsetFt, advDraw.side);
-            if (band) { try { const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: advDraw.bufColor, weight: 1, opacity: 0.5, fillColor: advDraw.bufColor, fillOpacity: advDraw.bufOpacity, interactive: false }); pb.addTo(map); advDraw.layers.push(pb); } catch (e) {} }
+            // FFZ corridor box (green) first, then the shielding bands ON TOP so the back band stays visible over the box.
             const outline = advOutline(path, widthsFt, advDraw.side);
             if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#5fff5f', weight: 2, opacity: 0.95, fillColor: '#5fff5f', fillOpacity: 0.18, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
+            // Shielding on BOTH sides of the drawn line: red on the front (away from the box), yellow on the back (box side).
+            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, 1), advDraw.bufColor2, advDraw.bufOpacity);
+            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, -1), advDraw.bufColor, advDraw.bufOpacity);
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
             // grabbed outer edge highlight (white, neutral against the green FFZ)
             if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
