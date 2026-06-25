@@ -66,6 +66,12 @@ Until now, deleting an issue was creator-only (anyone could also delete throwawa
 
 ---
 
+## 2026-06-23 — Asset Inspector v4.34 (prod) / v4.93 (dev/latest) — asset state colours now actually visible
+
+Follow-up to v4.33: the state colours were too faint to see (no polygon fill in 2D, only ~20% fill in 3D), so assets read as "all white". Fills are now solid (~80% for orange/light-blue, ~50% white regular, 30% white empty) and show in **both** 2D and 3D, with thicker outlines.
+
+---
+
 ## 2026-06-23 — Asset Inspector v4.33 (prod) / v4.90 (dev/latest) — Analyzer KML colours assets by health state
 
 Asset polygons in the exported KML are now colour-coded by state (parsed from the subtype, same as the SUM table): **white** for regular, **orange** for unshielded, **light blue** for unreachable, and **30%-opacity white** for empty. Unshielded takes priority when an asset has more than one modifier. Other states (HY, Inactive, normal) stay white.
