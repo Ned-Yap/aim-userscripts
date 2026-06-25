@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.112
+// @version      4.113
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.112';
+    const SCRIPT_VERSION = '4.113';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10188,6 +10188,28 @@
         return genPreviewLayers.length;
     }
 
+    // ===== Geometry-validity gate — a self-intersecting (bowtie) FFZ ring is a broken geofence
+    // (ambiguous "inside") and must NEVER be POSTed to a live site. Checked at commit/save. =====
+    function segProperCross(p1, p2, p3, p4) {
+        const o = (a, b, c) => (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng);
+        const d1 = o(p3, p4, p1), d2 = o(p3, p4, p2), d3 = o(p1, p2, p3), d4 = o(p1, p2, p4);
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    }
+    // True if any two NON-adjacent edges of the closed ring cross (a bowtie / figure-8).
+    function ringSelfIntersects(ring) {
+        if (!Array.isArray(ring)) return false;
+        const n = ring.length; if (n < 4) return false;
+        for (let i = 0; i < n; i++) {
+            const a1 = ring[i], a2 = ring[(i + 1) % n];
+            for (let j = i + 1; j < n; j++) {
+                if ((i + 1) % n === j || (j + 1) % n === i) continue; // adjacent edges share a vertex — allowed
+                const b1 = ring[j], b2 = ring[(j + 1) % n];
+                if (segProperCross(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+
     // ===== A1.5 — commit the draft FFZs as new entities =====
     // Build the create body for one generated FFZ. Prefer cloning an existing
     // FFZ's write-body as a template (guarantees every field the server wants);
@@ -10213,7 +10235,7 @@
     async function commitGeneratedFfzs(ffzs, opts) {
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
-        const res = { created: 0, updated: 0, failed: 0, skipped: 0, ids: [], errors: [], dryRun };
+        const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], dryRun };
         if (!ffzs || !ffzs.length) return res;
         const csrf = getCsrfToken();
         if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
@@ -10227,6 +10249,7 @@
         const writes = fuseCorridorGroups(ffzs);
         for (const w of writes) {
             const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
+            if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
             if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
             let body;
             if (w.kind === 'upsert') {
@@ -10355,6 +10378,7 @@
             downloadKMLFile(`aim-ffz-edit-rollback-${siteID}.json`, JSON.stringify({ site: siteID, savedAt: 'pre-edit', entities: snap }, null, 2));
         } catch (e) { console.warn(`${GEN_TAG} rollback snapshot failed:`, e); }
         for (const f of pending) {
+            if (ringSelfIntersects(f.points)) { res.failed++; res.errors.push(`${f.name} (#${f._origId}): self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
             let body;
             try { body = buildWriteBody(f._origEntity, siteCfg); }
             catch (e) { res.failed++; res.errors.push(`${f.name}: build body threw ${e && e.message || e}`); continue; }
@@ -10820,11 +10844,12 @@
                 const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
                 const updTxt = r.updated ? ` · <b style="color:#ffe14d">${r.updated}</b> fused into existing` : '';
+                const invTxt = r.invalid ? ` · <b style="color:#ff5a5a">${r.invalid}</b> BLOCKED (self-intersecting)` : '';
                 if (dry) {
-                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created${updTxt} · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created${updTxt}${invTxt} · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
                 } else {
                     if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
-                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt}${invTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
                     if (r.created || r.updated) {
                         // Keep committed FFZs drawn (no reload needed to see them) + lock them.
                         clearResizeHandles();

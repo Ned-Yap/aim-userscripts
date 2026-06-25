@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Commit now BLOCKS self-intersecting (bowtie) FFZs — Asset Inspector v4.113 (dev/latest)
+
+Safety gate: an FFZ whose outline crosses itself (a bowtie / figure-8) is a broken geofence — its "inside" is ambiguous — and must never reach a live site. Commit and Save FFZ edits now check every zone's geometry and **refuse to send** a self-intersecting one, flagging it in red ("N BLOCKED (self-intersecting)") in both the dry run and the live result. The rest still commit normally. This applies to drawn corridors, fused corridors, and edits to existing FFZs.
+
+---
+
 ## 2026-06-25 — Advanced Draw — fix the bowtie when fusing a bridged 3-FFZ chain — Asset Inspector v4.112 (dev/latest)
 
 The bridged-fusion in v4.111 could draw a crossing/triangle at the connector's junction. Cause was the ring "re-roll" I added, which collapsed the clean width-slot at the join into a sliver and flipped the splice direction. Removed it — pieces now splice at their natural base (the clean slot), assembled in connection order. The bridged chain should come out without the bowtie.
