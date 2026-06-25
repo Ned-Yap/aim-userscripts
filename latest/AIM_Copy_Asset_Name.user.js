@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.107
+// @version      4.108
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.107';
+    const SCRIPT_VERSION = '4.108';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9680,6 +9680,79 @@
         return true;
     }
 
+    // ===== Generic per-vertex editor — works on ANY uncommitted preview FFZ (old corridor,
+    // merged shape, simple draw, or an existing FFZ loaded for edit). Edits f.points directly,
+    // so it doesn't need corridor structure. Drag a dot to move · m2 a dot to delete · click a
+    // faint mid-dot to insert · Esc / m2 the body to finish. =====
+    let genVertEdit = { active: false, f: null, markers: [], mids: [], resumeAdv: false, _onKey: null };
+    function clearGenVertMarkers() {
+        const map = getLeafletMap();
+        genVertEdit.markers.forEach(m => { try { if (map) map.removeLayer(m); } catch (e) {} });
+        genVertEdit.mids.forEach(m => { try { if (map) map.removeLayer(m); } catch (e) {} });
+        genVertEdit.markers = []; genVertEdit.mids = [];
+    }
+    function genVertEditPersist() {
+        const f = genVertEdit.f; if (!f || !Array.isArray(f.points)) return;
+        f._centroid = ringCentroid(f.points);
+        if (f._poly) { try { f._poly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {} }
+        if (f._existing) f._dirty = true;                 // Save FFZ edits will upsert it
+        else { try { advSaveFfzs(); } catch (e) {} }       // drawn/merged preview → autosave
+    }
+    function renderGenMidMarkers() {
+        const map = getLeafletMap(), L = getLeafletL();
+        const f = genVertEdit.f; if (!map || !L || !f || !Array.isArray(f.points)) return;
+        const pts = f.points, n = pts.length;
+        for (let i = 0; i < n; i++) {
+            const a = pts[i], b = pts[(i + 1) % n];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const icon = L.divIcon({ className: 'aim-vert-mid', html: '<div style="width:9px;height:9px;border-radius:50%;background:rgba(0,229,255,0.30);border:1px dashed #00e5ff;"></div>', iconSize: [9, 9], iconAnchor: [5, 5] });
+            const mk = L.marker([mid.lat, mid.lng], { icon, interactive: true, keyboard: false, zIndexOffset: 900 });
+            const insertAt = i + 1;
+            mk.addTo(map);
+            mk.on('click', (e) => { try { if (e.originalEvent) e.originalEvent.stopPropagation(); } catch (er) {} f.points.splice(insertAt, 0, { lat: mid.lat, lng: mid.lng }); genVertEditPersist(); renderGenVertMarkers(); });
+            genVertEdit.mids.push(mk);
+        }
+    }
+    function renderGenVertMarkers() {
+        const map = getLeafletMap(), L = getLeafletL();
+        if (!map || !L) return;
+        clearGenVertMarkers();
+        const f = genVertEdit.f; if (!f || !Array.isArray(f.points)) return;
+        f.points.forEach((p, i) => {
+            const icon = L.divIcon({ className: 'aim-vert-dot', html: '<div style="width:12px;height:12px;border-radius:50%;background:#00e5ff;border:2px solid #08121a;box-shadow:0 0 0 1px #00e5ff;"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
+            const mk = L.marker([p.lat, p.lng], { icon, draggable: true, autoPan: false, keyboard: false, zIndexOffset: 1000 });
+            mk.addTo(map);
+            mk.on('drag', (e) => { const ll = e.target.getLatLng(); f.points[i] = { lat: ll.lat, lng: ll.lng }; if (f._poly) { try { f._poly.setLatLngs(f.points.map(q => [q.lat, q.lng])); } catch (er) {} } });
+            mk.on('dragend', () => { genVertEditPersist(); renderGenVertMarkers(); });
+            mk.on('contextmenu', (e) => {
+                try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (er) {}
+                if (f.points.length <= 3) { showToast('A zone needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+                f.points.splice(i, 1); genVertEditPersist(); renderGenVertMarkers();
+            });
+            genVertEdit.markers.push(mk);
+        });
+        renderGenMidMarkers();
+    }
+    function startGenVertEdit(f) {
+        if (!f || f._committed || !Array.isArray(f.points) || f.points.length < 3) return false;
+        if (genVertEdit.active) exitGenVertEdit(false);
+        genVertEdit.resumeAdv = !!advDraw.active;
+        if (advDraw.active) setAdvDraw(false);           // Adv Draw captures clicks — pause it while editing verts
+        genVertEdit.active = true; genVertEdit.f = f;
+        renderGenVertMarkers();
+        genVertEdit._onKey = (ev) => { if ((ev.key || '') === 'Escape') { ev.preventDefault(); ev.stopImmediatePropagation(); exitGenVertEdit(true); } };
+        try { uwin().addEventListener('keydown', genVertEdit._onKey, true); } catch (e) {}
+        showToast('Editing vertices — drag a dot · m2 a dot to delete · click a faint dot to add · Esc / m2 body to finish', 'rgba(0,229,255,0.5)');
+        return true;
+    }
+    function exitGenVertEdit(resume) {
+        clearGenVertMarkers();
+        try { uwin().removeEventListener('keydown', genVertEdit._onKey, true); } catch (e) {}
+        const wasAdv = genVertEdit.resumeAdv;
+        genVertEdit.active = false; genVertEdit.f = null; genVertEdit._onKey = null; genVertEdit.resumeAdv = false;
+        if (resume && wasAdv) { try { setAdvDraw(true); } catch (e) {} }
+    }
+
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
     function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
     function deleteFfzPoly(poly) {
@@ -9920,14 +9993,12 @@
         // Right-click (M2) → show the FFZ info popup (built fresh, current state).
         poly.on('contextmenu', (e) => {
             try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
-            // Right-click an Advanced-Draw corridor (not yet committed) → re-open it for editing.
-            if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
-            // A drawn/merged preview with no corridor re-edit data (older version, or merged) — can't
-            // reopen as a corridor (its centerline wasn't saved). Say so + point at what works.
-            if (poly._ffz && !poly._ffz._committed && (poly._ffz._drawn || poly._ffz._adv || poly._ffz._merged) && !(Array.isArray(poly._ffz._advVerts) && poly._ffz._advVerts.length >= 2)) {
-                showToast('Older/merged FFZ — can\'t reopen as a corridor. Branch off its edge (cyan snap) to extend it.', 'rgba(255,179,71,0.6)');
-                return;
-            }
+            // Already vertex-editing THIS poly → m2 on the body finishes.
+            if (genVertEdit.active && genVertEdit.f === poly._ffz) { exitGenVertEdit(true); return; }
+            // A fresh Advanced-Draw corridor (has its centerline) → reopen as a corridor (richer edit).
+            if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && poly._ffz._advVerts.length >= 2 && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
+            // Any other uncommitted preview FFZ (older corridor, merged, simple draw, existing edit) → per-vertex editor.
+            if (poly._ffz && !poly._ffz._committed) { try { startGenVertEdit(poly._ffz); } catch (err) {} return; }
             try {
                 const L2 = getLeafletL();
                 if (L2 && map) L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
@@ -9935,6 +10006,7 @@
         });
         poly.on('mousedown', (e) => {
             if (genDraw.active) return; // Draw mode owns the mouse
+            if (genVertEdit.active && genVertEdit.f === poly._ffz) return; // vertex editor owns this poly's verts
             if (poly._ffz && poly._ffz._committed) { try { showCommittedPopup(e.latlng); } catch (er) {} return; }
             clearResizeHandles(); // hide handles while moving/snaking (stops flicker)
             genEdit.dragging = true;
@@ -10198,6 +10270,7 @@
         genReadParamsLive = null;
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
+        try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
         try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
