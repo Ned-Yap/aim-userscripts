@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.102
+// @version      4.103
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.102';
+    const SCRIPT_VERSION = '4.103';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9194,6 +9194,7 @@
         dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
         dragEdge: null,  // index of the segment whose outer edge is being dragged (widen)
         ctrlHeld: false, // for the live Ctrl-snap guides
+        ffzSnap: null,   // {lat,lng} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
     // Hit-test the cursor against existing vertices (screen px) → index or -1.
@@ -9355,6 +9356,8 @@
                 try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
             }
         }
+        // Branch-from-edge snap marker (cyan) — cursor is locked onto an existing FFZ edge.
+        if (advDraw.ffzSnap && !editing) { try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: '#00e5ff', weight: 2.5, fillColor: '#00e5ff', fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
         advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
@@ -9376,8 +9379,37 @@
         } catch (e) {}
         return false;
     }
+    // Branch-from-edge: snap the cursor onto the nearest EXISTING FFZ edge (entity type-16
+    // rings + other uncommitted _adv preview corridors), within ~12 px. Returns {lat,lng} or null.
+    // Lets a corridor START on / CONNECT to an existing FFZ's edge — the "M1 on any FFZ edge" ask.
+    function advSnapToFfzEdge(cursor) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
+        const rings = [];
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) { if (a.type !== 16) continue; const r = entityCoords(a); if (r && r.length >= 2) rings.push(r); }
+        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && f._adv && !f._committed && Array.isArray(f.points) && f.points.length >= 2) rings.push(f.points); } } catch (e) {}
+        let best = null, bestD = 12;
+        for (const ring of rings) {
+            const n = ring.length;
+            for (let i = 0; i < n; i++) {
+                const a = ring[i], b = ring[(i + 1) % n];
+                let A, B; try { A = map.latLngToContainerPoint(a); B = map.latLngToContainerPoint(b); } catch (e) { continue; }
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+                const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; }
+            }
+        }
+        if (!best) return null;
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng }; } catch (e) { return null; }
+    }
     function advSnapCursor(ll, ev) {
         let s = ll;
+        // FFZ-edge snap wins over angle/asset snap — it's a hard connect to existing geometry.
+        const fe = advSnapToFfzEdge(s);
+        if (fe) { advDraw.ffzSnap = fe; return fe; }
+        advDraw.ffzSnap = null;
         if (ev && ev.shiftKey) s = advSnapAngle(s);
         if (ev && ev.ctrlKey) s = advSnapToAsset(s);
         return s;
@@ -9464,7 +9496,7 @@
         } else {
             advUnwire(); advClearLayers();
         }
-        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click edge · Shift=angle · Ctrl=snap · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
+        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click · Shift=angle · Ctrl=asset · cyan=FFZ edge · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
     }
     async function finalizeAdvDraw() {

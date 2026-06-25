@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — branch a corridor from an existing FFZ edge — Asset Inspector v4.103 (dev/latest)
+
+You can now **start or connect a corridor on an existing FFZ's edge**. While drawing, when the cursor gets close to any existing FFZ edge (a real one on the map, or another corridor you've drawn but not committed), it snaps onto that edge — a **cyan marker** shows where it'll lock. Click to drop the point exactly on the edge so the new corridor lines up flush with what's already there, instead of eyeballing it. The FFZ-edge snap takes priority over Shift (angle) and Ctrl (asset standoff) snapping.
+
+---
+
 ## 2026-06-24 — Advanced Draw — fix right-click re-edit (inspector was stealing it) — Asset Inspector v4.102 (dev/latest)
 
 Right-clicking a drawn corridor popped the entity inspector instead of re-opening it for editing — the Inspector's global right-click handler fires before the corridor's own. Now that handler checks first whether the right-click landed inside an unsaved drawn corridor and, if so, re-opens it for editing instead.
