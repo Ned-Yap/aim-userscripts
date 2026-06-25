@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.100
+// @version      4.101
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.100';
+    const SCRIPT_VERSION = '4.101';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -8313,14 +8313,14 @@
     function translateFfz(f, dLat, dLng) {
         f.points = f.points.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng }));
         f._centroid = { lat: f._centroid.lat + dLat, lng: f._centroid.lng + dLng };
+        if (Array.isArray(f._advVerts)) f._advVerts = f._advVerts.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng })); // keep corridor re-edit in sync
     }
     function rotateFfz(f, deg) {
         const proj = genProjector(f._centroid.lat, f._centroid.lng);
         const a = deg * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
-        f.points = f.points.map(p => {
-            const m = proj.fwd(p);
-            return proj.inv({ x: m.x * ca - m.y * sa, y: m.x * sa + m.y * ca });
-        });
+        const rot = (p) => { const m = proj.fwd(p); return proj.inv({ x: m.x * ca - m.y * sa, y: m.x * sa + m.y * ca }); };
+        f.points = f.points.map(rot);
+        if (Array.isArray(f._advVerts)) f._advVerts = f._advVerts.map(rot);
         // centroid is the rotation pivot → unchanged
     }
     function buildFaceBox(obb, side, s, d) {
@@ -8678,7 +8678,7 @@
         // from the modal's AGL/Δ numbers when the CSM armed "Recompute alt on edit".
         // Generated drafts (no saved band) always DEM-recompute on drop.
         const recompute = f._existing ? genEditRecomputeAlt : true;
-        if (!recompute) { restyleFfzPoly(f); return; }
+        if (!recompute) { restyleFfzPoly(f); try { advSaveFfzs(); } catch (e) {} return; }
         const p = (genReadParamsLive && genReadParamsLive()) || genState.lastParams || GEN_DEFAULTS;
         const am = await siteAltMode(genState.siteID);
         const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
@@ -8696,6 +8696,7 @@
         }
         // mode 'unknown' → leave the band untouched (never guess).
         restyleFfzPoly(f);
+        try { advSaveFfzs(); } catch (e) {}
     }
 
     // Clicking a committed (locked) FFZ explains why it isn't editable yet and
@@ -9453,7 +9454,9 @@
     async function finalizeAdvDraw() {
         advDraw.drawing = false;
         const verts = advDraw.verts.slice();
-        const outline = advOutline(verts, advSegWidthsFt(Math.max(0, verts.length - 1)), advDraw.side);
+        const segW = advSegWidthsFt(Math.max(0, verts.length - 1)).slice();
+        const finSide = advDraw.side;
+        const outline = advOutline(verts, segW, finSide);
         advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
         advClearLayers(); advClearPersist();
         if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
@@ -9461,7 +9464,7 @@
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
         for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
-        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen };
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide };
         // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL).
         const p = genState.lastParams || GEN_DEFAULTS;
         const mode = genActiveAltMode();
@@ -9473,7 +9476,54 @@
         if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
         genState.lastResult.ffzs.push(f);
         renderGenPreview(genState.lastResult.ffzs);
-        showToast('Drew corridor FFZ — Commit to save', 'rgba(255,225,77,0.55)');
+        advSaveFfzs(); // persist the finished (uncommitted) corridor so a reload doesn't lose it
+        showToast('Drew corridor FFZ — right-click it to re-edit · Commit to save', 'rgba(255,225,77,0.55)');
+    }
+    // Persist FINISHED-but-uncommitted FFZs (drawn corridors) so a reload doesn't lose them.
+    // Restored when the ⊕ Generate modal is reopened. Committed ones drop out (server-side).
+    function advFfzKey() { return 'aim_adv_ffzs:' + (genState.siteID || '?'); }
+    function advSaveFfzs() {
+        try {
+            const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
+            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide }));
+            if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
+            else localStorage.removeItem(advFfzKey());
+        } catch (e) {}
+    }
+    function advLoadFfzs(siteID) {
+        try {
+            const raw = localStorage.getItem('aim_adv_ffzs:' + siteID); if (!raw) return;
+            const slim = JSON.parse(raw); if (!Array.isArray(slim) || !slim.length) return;
+            if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+            const have = new Set(((genState.lastResult.ffzs) || []).map(f => f && f.points && JSON.stringify(f.points)));
+            let added = 0;
+            for (const s of slim) {
+                if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
+                if (have.has(JSON.stringify(s.points))) continue; // don't double-load
+                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide });
+                added++;
+            }
+            if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
+            if (added) showToast(`Restored ${added} unsaved corridor${added === 1 ? '' : 's'}`, 'rgba(95,184,255,0.5)');
+        } catch (e) {}
+    }
+    // Re-open a finished corridor for editing: pull its verts/widths/side back into
+    // Advanced Draw and drop the preview FFZ (re-finish to rebuild it).
+    function advReEdit(f) {
+        if (!f || !Array.isArray(f._advVerts) || f._advVerts.length < 2) { showToast('This FFZ wasn\'t drawn with Advanced Draw', 'rgba(255,179,71,0.6)'); return false; }
+        if (advDraw.verts.length) { showToast('Finish the current draw first (dbl-click)', 'rgba(255,179,71,0.6)'); return false; }
+        const map = getLeafletMap();
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) { const j = genState.lastResult.ffzs.indexOf(f); if (j >= 0) genState.lastResult.ffzs.splice(j, 1); }
+        if (f._poly) { try { if (map) map.removeLayer(f._poly); } catch (e) {} const k = genPreviewLayers.indexOf(f._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+        renderGenPreview((genState.lastResult && genState.lastResult.ffzs) || []);
+        advDraw.verts = f._advVerts.map(v => ({ lat: v.lat, lng: v.lng }));
+        advDraw.segWidth = Array.isArray(f._advSegWidth) ? f._advSegWidth.slice() : [];
+        advDraw.side = f._advSide || 1;
+        advDraw.drawing = true;
+        setAdvDraw(true);
+        advPersist(); advSaveFfzs();
+        showToast('Editing corridor — drag verts/edges · dbl-click to re-finish', 'rgba(95,184,255,0.55)');
+        return true;
     }
 
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
@@ -9492,6 +9542,7 @@
         if (genEdit.activePoly === poly) { genEdit.activePoly = null; genEdit.dragging = false; }
         try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
         try { if (map) { map.dragging.enable(); map.scrollWheelZoom.enable(); } } catch (e) {}
+        try { advSaveFfzs(); } catch (e) {} // keep the autosave in sync after a delete
         showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
     }
     let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
@@ -9715,6 +9766,8 @@
         // Right-click (M2) → show the FFZ info popup (built fresh, current state).
         poly.on('contextmenu', (e) => {
             try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
+            // Right-click an Advanced-Draw corridor (not yet committed) → re-open it for editing.
+            if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
             try {
                 const L2 = getLeafletL();
                 if (L2 && map) L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
@@ -10400,6 +10453,7 @@
                         // Keep committed FFZs drawn (no reload needed to see them) + lock them.
                         clearResizeHandles();
                         (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
+                        try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
                         showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'}`, 'rgba(95,255,95,0.5)');
                     }
@@ -10458,6 +10512,7 @@
                 commitResult.innerHTML = `<span style="color:#ff8a80">Save failed: ${xmlEscape(String(e && e.message || e))}</span>`;
             } finally { saveFfzBtn.disabled = false; saveFfzBtn.textContent = t0; }
         };
+        try { advLoadFfzs(siteID); } catch (e) {} // restore any unsaved (finished, uncommitted) corridors after a reload
         console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${eligibleCount} eligible)`);
     }
 
