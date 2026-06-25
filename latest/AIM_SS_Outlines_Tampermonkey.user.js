@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.77
+// @version      34.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.77';
+    const SCRIPT_VERSION = '34.78';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -949,6 +949,8 @@
         applyMapBackgroundVisibility();
         // 11. Orthomosaic brightness + low-res cap (perf optimization).
         applyOrthoSettings();
+        // 11b. Full ortho hide — remove COG layers to kill their tile storm.
+        applyOrthoVisibility();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -981,6 +983,13 @@
     // Shield drives via PERF_TOGGLE messages on AIM_CONTROL_CHANNEL.
     let perfOrthoLowRes = false;
     let perfOrthoLowResZoom = 15;
+    // Full ortho hide (v34.78). Distinct from low-res: this REMOVES the
+    // orthomosaic COG layers from the map entirely so their tiles stop
+    // being fetched. On sites that stack dozens of COG ortho layers (e.g.
+    // 1153 — ~50 layers), that tile storm is the real cause of the freeze
+    // when a heavy mission opens and zooms in. Driven by Perf Shield's
+    // "Hide orthomosaic imagery" toggle (PERF_TOGGLE key 'hide-ortho').
+    let perfHideOrtho = false;
     const _SAT_URL_PATTERNS = [
         /esri/i, /arcgis/i, /world_?imagery/i,
         /mapbox.*satellite/i, /tiles?\.virtualearth/i,
@@ -1077,8 +1086,14 @@
     // Original `maxNativeZoom` is cached on the layer as `_aimOrigMaxNativeZoom`
     // so we can restore.
     const _ORTHO_URL_PATTERNS = [
-        /user_tile_\d+/i,           // Percepto site-ortho identifier
+        /user_tile_\d+/i,           // Percepto site-ortho identifier (cloudfront COG)
         /cog\/tiles\/.*\.tif/i,     // generic COG tile-server URL with .tif source
+        // DroneDeploy-hosted orthomosaics — on many sites these are the
+        // BULK of the ortho layers (e.g. 1153 stacks ~40 of them) and the
+        // patterns above miss them entirely (no user_tile / no .tif). Path
+        // always carries `/orthomosaic/`, so target that to stay precise
+        // and avoid catching any non-ortho dronedeploy layer.
+        /dronedeploy\.com\/.*\/orthomosaic\//i,
     ];
     const _seenOrthoUrls = new Set();
     function applyOrthoSettings() {
@@ -1150,6 +1165,59 @@
                 }
             });
         } catch (e) {}
+    }
+
+    // Full ortho hide: remove the orthomosaic COG layers from the map so
+    // Leaflet stops fetching their tiles altogether. We can't use
+    // display:none — the browser still fetches <img> tiles inside a hidden
+    // container, so the network storm (the actual freeze on COG-heavy
+    // sites) would continue. removeLayer is the only thing that truly
+    // stops it. We stash the removed layer refs so toggling the option
+    // back off re-adds them (no page reload needed). The heartbeat re-runs
+    // this so any ortho layer Percepto adds later (e.g. on nav) also gets
+    // removed while the toggle is on.
+    const _aimRemovedOrtho = new Set();
+    function applyOrthoVisibility() {
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            if (perfHideOrtho) {
+                // Collect first, then remove — never mutate during eachLayer.
+                const toRemove = [];
+                map.eachLayer(layer => {
+                    if (!layer || !layer._url || typeof layer._url !== 'string') return;
+                    if (_ORTHO_URL_PATTERNS.some(p => p.test(layer._url))) toRemove.push(layer);
+                });
+                toRemove.forEach(layer => {
+                    try { map.removeLayer(layer); _aimRemovedOrtho.add(layer); } catch (e) {}
+                });
+                if (toRemove.length) {
+                    console.log(`${TAG} hide-ortho: removed ${toRemove.length} ortho layer(s) — tile fetches stopped (${_aimRemovedOrtho.size} stashed)`);
+                }
+            } else if (_aimRemovedOrtho.size) {
+                restoreOrthoVisibility();
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyOrthoVisibility failed:`, e);
+        }
+    }
+
+    // Re-add every ortho layer we removed. Called when the user turns the
+    // hide off, and from cleanup() so deactivating the styler never strands
+    // the user with missing imagery they can't get back without a reload.
+    function restoreOrthoVisibility() {
+        const map = getLeafletMap();
+        if (!map) { _aimRemovedOrtho.clear(); return; }
+        let restored = 0;
+        _aimRemovedOrtho.forEach(layer => {
+            try {
+                if (typeof map.hasLayer === 'function' && map.hasLayer(layer)) return; // already back
+                map.addLayer(layer);
+                restored++;
+            } catch (e) {}
+        });
+        _aimRemovedOrtho.clear();
+        if (restored) console.log(`${TAG} hide-ortho OFF: restored ${restored} ortho layer(s)`);
     }
 
     // Flight-path vertex dot styling. Percepto renders FP vertices as
@@ -5370,6 +5438,8 @@
         restoreMapBackground();
         // Restore ortho brightness + native zoom if we changed them.
         restoreOrthoSettings();
+        // Re-add any ortho COG layers we removed for the full hide.
+        restoreOrthoVisibility();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -5843,6 +5913,13 @@
                     if (!isNaN(n) && n !== perfOrthoLowResZoom) {
                         perfOrthoLowResZoom = n;
                         if (isActive && perfOrthoLowRes) runUpdate();
+                    }
+                } else if (msg.key === 'hide-ortho') {
+                    const next = !!msg.value;
+                    if (next !== perfHideOrtho) {
+                        perfHideOrtho = next;
+                        if (isActive) runUpdate();
+                        else if (!next) restoreOrthoVisibility();
                     }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {

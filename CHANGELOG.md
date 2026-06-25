@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — "Hide orthomosaic imagery" perf toggle — Perf Shield v1.18 + Map Styler v34.78 (dev/latest)
+
+New Control Panel → Performance → Map performance → **"Hide orthomosaic imagery."** On sites that stack dozens of orthomosaic COG layers (e.g. site 1153 has ~50), opening a heavy mission zooms in and triggers a tile-fetch storm that can freeze the tab. This toggle tells Map Styler to **remove** those ortho layers from the map so their tiles stop being fetched entirely (low-res only thins the storm; this kills it). Fully reversible — toggle off re-adds the layers, no reload. Also fixed the ortho-layer detection to match **DroneDeploy-hosted** orthos (`public_tiles.dronedeploy.com/.../orthomosaic/`), which the old patterns missed — on many sites those are the bulk of the ortho layers, so low-res/hide now actually cover them. Note: "Hide satellite base tiles" only hides the HERE world basemap *underneath* the orthos — to clear the site imagery itself, use the new ortho toggle.
+
+---
+
 ## 2026-06-25 — Commit now BLOCKS self-intersecting (bowtie) FFZs — Asset Inspector v4.113 (dev/latest)
 
 Safety gate: an FFZ whose outline crosses itself (a bowtie / figure-8) is a broken geofence — its "inside" is ambiguous — and must never reach a live site. Commit and Save FFZ edits now check every zone's geometry and **refuse to send** a self-intersecting one, flagging it in red ("N BLOCKED (self-intersecting)") in both the dry run and the live result. The rest still commit normally. This applies to drawn corridors, fused corridors, and edits to existing FFZs.

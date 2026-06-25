@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Performance Shield
 // @namespace    http://tampermonkey.net/
-// @version      1.17
+// @version      1.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Perf_Shield.user.js
 // @description  AIM Performance section. Bundles surgical network blocks for stuff site builders don't need: session-replay recorder (default ON — major leak source), weather API (default OFF — useful only to pilots), Intercom chat widget (default OFF). Plus an in-map "hide satellite base tiles" toggle (default OFF — for when your ortho already covers the site).
@@ -115,6 +115,15 @@
     let orthoLowResZoom = 15;
     try { orthoLowRes = GM_getValue(STORAGE_KEY_ORTHO_LOWRES, false) === true; } catch (e) {}
     try { orthoLowResZoom = Number(GM_getValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, 15)) || 15; } catch (e) {}
+
+    // Full ortho hide (v1.18). Stronger than low-res: tells Map Styler to
+    // REMOVE the orthomosaic COG layers so their tiles stop being fetched
+    // entirely. The cure for COG-heavy sites (e.g. 1153 stacks ~50 ortho
+    // layers) where opening a mission triggers a tile storm that freezes
+    // the tab. Map Styler owns the removal; we persist + broadcast the pref.
+    const STORAGE_KEY_HIDE_ORTHO = 'aim-perf-shield-hide-ortho';
+    let hideOrtho = false;
+    try { hideOrtho = GM_getValue(STORAGE_KEY_HIDE_ORTHO, false) === true; } catch (e) {}
 
     // Debug-log suppression (v1.8) — Percepto floods console.log with
     // non-actionable state-change noise (RAZTEST, WeatherStore:_calcweather,
@@ -292,7 +301,7 @@
     // declared at the bottom but referenced from the top crashed init).
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-perf-shield';
-    const SCRIPT_VERSION = '1.17';
+    const SCRIPT_VERSION = '1.18';
     // Tracks the last-applied per-group state so we only log on real changes.
     // The Control Panel echoes SET_TOGGLE for every toggle on REGISTER, which
     // without this dedup would log a reload-reminder line per toggle per
@@ -546,6 +555,7 @@
         controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'hide-satellite', value: hideSatellite });
         controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'ortho-lowres', value: orthoLowRes });
         controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'ortho-lowres-zoom', value: orthoLowResZoom });
+        controlChannel.postMessage({ type: 'PERF_TOGGLE', key: 'hide-ortho', value: hideOrtho });
     }
 
     // The panel uses toggleId='master' to signal the script's primary
@@ -590,6 +600,14 @@
                     orthoLowResZoom = n;
                     try { GM_setValue(STORAGE_KEY_ORTHO_LOWRES_ZOOM, n); } catch (e) {}
                     console.log(`${TAG} ortho-lowres cap zoom = ${n}`);
+                    broadcastPerfSettings();
+                    return;
+                }
+                if (msg.toggleId === 'hide-ortho') {
+                    if (newVal === hideOrtho) return; // IDEMPOTENT no-op
+                    hideOrtho = newVal;
+                    try { GM_setValue(STORAGE_KEY_HIDE_ORTHO, newVal); } catch (e) {}
+                    console.log(`${TAG} hide-ortho ${newVal ? 'ON' : 'OFF'}`);
                     broadcastPerfSettings();
                     return;
                 }
@@ -668,6 +686,12 @@
                     default: false,
                 },
                 { type: 'header', label: 'Map performance' },
+                {
+                    id: 'hide-ortho',
+                    label: 'Hide orthomosaic imagery (removes COG layers — biggest perf win on heavy sites)',
+                    type: 'boolean',
+                    default: false,
+                },
                 {
                     id: 'hide-satellite',
                     label: 'Hide satellite base tiles',
