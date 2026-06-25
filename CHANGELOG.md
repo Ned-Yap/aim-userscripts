@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Site Setup Generator — ✦ Advanced Draw (interactive zigzag corridor FFZ) — Asset Inspector v4.96 (dev/latest)
+
+New **✦ Advanced Draw** mode in the ⊕ Generate modal for hand-drawing complex FFZs (zigzags/corridors) the auto-generator can't. You click the **inner (asset-facing) edge** point-to-point; each segment is a box of an adjustable **width** (default 30 ft) extending to one side (**F** flips it), and a live **shielding band** of an adjustable **offset** (default 25 ft, customizable color + opacity) rides the inner side so you keep the actual infrastructure clear by eye. **Live full-box preview** follows the cursor; **Shift** angle-snaps to 15° off the previous segment for clean turns; **Ctrl** magnet-snaps the edge to the offset off the nearest asset (release = free, for on-pad drawing); **double-click / Enter** finishes, **Esc** undoes the last point. The whole zigzag commits as **one FFZ** via the normal Commit (DEM/altitude computed at finish only, MSL/AGL-aware). In-progress draws **autosave to localStorage** so a crash/reload doesn't lose them. (Per-segment edge-width drag, branch-from-existing-edge, and the experimental closed-loop "donut" are the next slices.)
+
+---
+
 ## 2026-06-24 — Asset Inspector v4.36 (prod) / v4.95 (dev/latest) — asset state styling: outline-only, 4px
 
 Assets are now outline-only (no fill): pink regular, orange unshielded, light-blue unreachable (all 100% opacity, 4px) and white empty at 35% opacity. (Dashed outlines for the non-regular states were requested but KML/Google Earth doesn't support dashed lines, so colour distinguishes them.)

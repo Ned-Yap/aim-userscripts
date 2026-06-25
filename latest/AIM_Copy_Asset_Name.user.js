@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.95
+// @version      4.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.95';
+    const SCRIPT_VERSION = '4.96';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9154,6 +9154,210 @@
         showToast('Drew FFZ corridor', 'rgba(255,225,77,0.55)');
     }
 
+    // ============================================================
+    // ✦ ADVANCED DRAW — interactive zigzag corridor FFZ builder.
+    // You draw the INNER (asset-facing) edge click-by-click; each segment is a
+    // box of `widthFt` extending to one side (F flips). A live shielding BAND of
+    // `offsetFt` rides the inner side so you keep critical infrastructure clear
+    // by eye. Shift = angle-snap 15° off the previous segment; Ctrl = magnet-snap
+    // the inner edge to `offsetFt` off the nearest asset. The whole zigzag commits
+    // as ONE FFZ via the normal preview→Commit rails. In-progress draw autosaves
+    // to localStorage (survives crash/reload). DEM/altitude only at finish.
+    // ============================================================
+    const ADV_LS_KEY = 'aim_adv_draw';
+    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff5a5a', bufOpacity: 0.28 };
+    let advDraw = {
+        active: false, drawing: false,
+        verts: [],       // inner-edge polyline [{lat,lng}]
+        side: 1,         // +1 / -1 — which side the box width extends (F flips)
+        tentative: null, // snapped cursor for live preview
+        widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
+        bufColor: ADV_DEFAULTS.bufColor, bufOpacity: ADV_DEFAULTS.bufOpacity,
+        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null,
+    };
+    function advSegNormals(pathM, side) {
+        const segN = [];
+        for (let i = 0; i < pathM.length - 1; i++) {
+            const dx = pathM[i + 1].x - pathM[i].x, dy = pathM[i + 1].y - pathM[i].y, L = Math.hypot(dx, dy) || 1;
+            segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); // left normal, side-flipped
+        }
+        if (!segN.length) segN.push({ nx: 0, ny: 1 });
+        return segN;
+    }
+    // Corridor FFZ outline (lat/lng ring) = inner polyline + outer offset reversed.
+    function advOutline(verts, widthFt, side) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts);
+        const proj = genProjector(cen.lat, cen.lng);
+        const pathM = verts.map(v => proj.fwd(v));
+        const segN = advSegNormals(pathM, side);
+        const outer = offsetPolylineMiter(pathM, segN, widthFt * GEN_FT_TO_M);
+        return pathM.concat(outer.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Inner-side shielding band polygon (offset INWARD by offsetFt, opposite the width).
+    function advBand(verts, offsetFt, side) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts);
+        const proj = genProjector(cen.lat, cen.lng);
+        const pathM = verts.map(v => proj.fwd(v));
+        const segN = advSegNormals(pathM, side);
+        const band = offsetPolylineMiter(pathM, segN, -offsetFt * GEN_FT_TO_M);
+        return pathM.concat(band.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Ctrl-snap: nearest point on the nearest asset's offset ring (offsetFt off it).
+    function advSnapToAsset(cursor) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const offM = advDraw.offsetFt * GEN_FT_TO_M;
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = getAssetOffsetRing(a, offM);
+            if (!ring) continue;
+            const np = nearestPointOnRing(cursor, ring);
+            if (np && (!best || np.d < best.d)) best = np;
+        }
+        return (best && best.d < 45 * GEN_FT_TO_M) ? best.pt : cursor; // 45 ft magnet radius
+    }
+    // Shift-snap: snap (last→cursor) bearing to 15° steps relative to the previous segment.
+    function advSnapAngle(cursor) {
+        const n = advDraw.verts.length;
+        if (n < 1) return cursor;
+        const last = advDraw.verts[n - 1];
+        const proj = genProjector(last.lat, last.lng);
+        const c = proj.fwd(cursor);
+        const dist = Math.hypot(c.x, c.y); if (dist < 0.5) return cursor;
+        let ref = 0;
+        if (n >= 2) { const prev = proj.fwd(advDraw.verts[n - 2]); ref = Math.atan2(0 - prev.y, 0 - prev.x); } // dir prev→last
+        const step = 15 * Math.PI / 180;
+        const snapped = ref + Math.round((Math.atan2(c.y, c.x) - ref) / step) * step;
+        return proj.inv({ x: dist * Math.cos(snapped), y: dist * Math.sin(snapped) });
+    }
+    function advClearLayers() { const map = getLeafletMap(); advDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); advDraw.layers = []; }
+    function advRender() {
+        const map = getLeafletMap(), L = getLeafletL();
+        if (!map || !L) return;
+        advClearLayers();
+        const path = (advDraw.drawing && advDraw.tentative) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
+        if (path.length >= 2) {
+            const band = advBand(path, advDraw.offsetFt, advDraw.side);
+            if (band) { try { const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: advDraw.bufColor, weight: 1, opacity: 0.5, fillColor: advDraw.bufColor, fillOpacity: advDraw.bufOpacity, interactive: false }); pb.addTo(map); advDraw.layers.push(pb); } catch (e) {} }
+            const outline = advOutline(path, advDraw.widthFt, advDraw.side);
+            if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.16, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
+            try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
+        }
+        advDraw.verts.forEach(v => { try { const m = L.circleMarker([v.lat, v.lng], { radius: 4, color: '#fff', weight: 1, fillColor: '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
+    }
+    function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
+    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
+    function advClearPersist() { try { localStorage.removeItem(advStoreKey()); } catch (e) {} }
+    function advRestore() {
+        try {
+            const raw = localStorage.getItem(advStoreKey()); if (!raw) return false;
+            const o = JSON.parse(raw);
+            if (o && Array.isArray(o.verts) && o.verts.length) {
+                advDraw.verts = o.verts.filter(v => v && typeof v.lat === 'number');
+                advDraw.side = o.side || 1;
+                if (o.widthFt) advDraw.widthFt = o.widthFt;
+                if (o.offsetFt) advDraw.offsetFt = o.offsetFt;
+                advDraw.drawing = advDraw.verts.length > 0;
+                return advDraw.verts.length > 0;
+            }
+        } catch (e) {}
+        return false;
+    }
+    function advSnapCursor(ll, ev) {
+        let s = ll;
+        if (ev && ev.shiftKey) s = advSnapAngle(s);
+        if (ev && ev.ctrlKey) s = advSnapToAsset(s);
+        return s;
+    }
+    function advWire() {
+        const map = getLeafletMap(); if (!map) return;
+        advUnwire();
+        advDraw._container = map.getContainer();
+        advDraw._onMove = (ev) => {
+            if (!advDraw.active) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            advDraw.tentative = advSnapCursor(ll, ev);
+            advRender();
+        };
+        advDraw._onDown = (ev) => {
+            if (!advDraw.active || ev.button !== 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            advDraw.drawing = true;
+            advDraw.verts.push(advSnapCursor(ll, ev));
+            advDraw.tentative = null;
+            advPersist(); advRender();
+        };
+        advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
+        advDraw._onKey = (ev) => {
+            if (!advDraw.active) return;
+            const t = ev.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+            const k = (ev.key || '').toLowerCase();
+            if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
+            else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
+            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; advPersist(); advRender(); } else setAdvDraw(false); }
+        };
+        advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
+        advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
+        advDraw._container.addEventListener('dblclick', advDraw._onDbl, true);
+        try { uwin().addEventListener('keydown', advDraw._onKey, true); } catch (e) {}
+        try { map.doubleClickZoom.disable(); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function advUnwire() {
+        const c = advDraw._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', advDraw._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', advDraw._onMove, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', advDraw._onDbl, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', advDraw._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        if (map) { try { map.doubleClickZoom.enable(); } catch (e) {} try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        advDraw._container = null;
+    }
+    function setAdvDraw(on) {
+        advDraw.active = !!on;
+        if (advDraw.active) {
+            try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
+            if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
+            try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; } catch (e) {}
+            advWire(); advRender();
+        } else {
+            advUnwire(); advClearLayers();
+        }
+        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click edge · Shift=angle · Ctrl=snap · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
+        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
+    }
+    async function finalizeAdvDraw() {
+        advDraw.drawing = false;
+        const verts = advDraw.verts.slice();
+        const outline = advOutline(verts, advDraw.widthFt, advDraw.side);
+        advDraw.verts = []; advDraw.tentative = null;
+        advClearLayers(); advClearPersist();
+        if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
+        const cen = ringCentroid(outline);
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let nm = 'corridor', bestD = Infinity;
+        for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen };
+        // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL).
+        const p = genState.lastParams || GEN_DEFAULTS;
+        const mode = genActiveAltMode();
+        f._altMode = mode;
+        try {
+            if (mode === 'agl') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') }; }
+            else if (mode === 'msl') { await bulkFetchElevations([cen]); const g = getElevationFromCache(cen.lat, cen.lng); if (typeof g === 'number') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') }; f._groundM = g; } }
+        } catch (e) { console.warn(`${GEN_TAG} adv-draw DEM failed:`, e); }
+        if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+        genState.lastResult.ffzs.push(f);
+        renderGenPreview(genState.lastResult.ffzs);
+        showToast('Drew corridor FFZ — Commit to save', 'rgba(255,225,77,0.55)');
+    }
+
     // ---- map-level wiring for drag/rotate/snap (A1.6) ----
     function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
     function deleteFfzPoly(poly) {
@@ -9663,6 +9867,9 @@
         genReadParamsLive = null;
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
+        // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
+        // corridor survives close/reload — restored when the mode is re-armed).
+        try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
         genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
         try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
     }
@@ -9732,6 +9939,7 @@
                 <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
                 <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
                 <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
                 <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
                 <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
                 <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
@@ -9739,6 +9947,16 @@
                 <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
                 <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
                 <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            </div>
+            <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
+                <div style="font-size:11px;color:#5fb8ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">✦ Advanced Draw</div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
+                    <label style="display:inline-flex;align-items:center;gap:4px">Width <input type="number" id="aim-adv-width" value="30" min="5" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Offset <input type="number" id="aim-adv-offset" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff5a5a" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
+                </div>
+                <div style="font-size:10px;color:#7a8794;margin-top:6px">Click the inner edge point-to-point · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to offset off asset · <b style="color:#fff">F</b>=flip side · <b style="color:#fff">dbl-click</b>/Enter=finish · <b style="color:#fff">Esc</b>=undo point</div>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
@@ -10023,6 +10241,25 @@
                 }
             } catch (e) {}
         };
+
+        const advDrawBtn = box.querySelector('#aim-gen-advdraw');
+        if (advDrawBtn) advDrawBtn.onclick = () => {
+            if (advDraw.active) {
+                // turning off mid-draw finishes the corridor
+                if (advDraw.drawing && advDraw.verts.length >= 2) finalizeAdvDraw();
+                setAdvDraw(false);
+            } else {
+                // turn off the simple Draw first (mutually exclusive)
+                try { if (genDraw.active) { document.getElementById('aim-gen-draw').click(); } } catch (e) {}
+                setAdvDraw(true);
+            }
+        };
+        // Advanced Draw live controls
+        const advW = box.querySelector('#aim-adv-width'), advO = box.querySelector('#aim-adv-offset'), advC = box.querySelector('#aim-adv-color'), advOp = box.querySelector('#aim-adv-opacity');
+        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advPersist(); advRender(); } }; }
+        if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advRender(); } }; }
+        if (advC) { advC.value = advDraw.bufColor; advC.oninput = () => { advDraw.bufColor = advC.value; advRender(); }; }
+        if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advRender(); } }; }
 
         const dryEl = box.querySelector('#aim-gen-dryrun');
         const commitResult = box.querySelector('#aim-gen-commit-result');
