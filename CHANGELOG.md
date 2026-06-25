@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Asset Inspector v4.36 (prod) / v4.95 (dev/latest) — asset state styling: outline-only, 4px
+
+Assets are now outline-only (no fill): pink regular, orange unshielded, light-blue unreachable (all 100% opacity, 4px) and white empty at 35% opacity. (Dashed outlines for the non-regular states were requested but KML/Google Earth doesn't support dashed lines, so colour distinguishes them.)
+
+---
+
 ## 2026-06-24 — Asset Inspector v4.35 (prod) / v4.94 (dev/latest) — regular assets are now PINK
 
 Per request, regular (normal-state) assets render with a pink ~80% fill instead of white, so they stand out from the satellite. Unshielded stays orange, unreachable light blue, empty 30% white.
