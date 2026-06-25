@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.104
+// @version      4.105
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.104';
+    const SCRIPT_VERSION = '4.105';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9194,7 +9194,8 @@
         dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
         dragEdge: null,  // index of the segment whose outer edge is being dragged (widen)
         ctrlHeld: false, // for the live Ctrl-snap guides
-        ffzSnap: null,   // {lat,lng} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
+        ffzSnap: null,   // {lat,lng,src} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
+        branchSrc: null, // src of the FFZ whose edge the FIRST vertex landed on → merge corridor into it on finish (else null)
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
     // Hit-test the cursor against existing vertices (screen px) → index or -1.
@@ -9399,24 +9400,24 @@
     function advSnapToFfzEdge(cursor) {
         const map = getLeafletMap(); if (!map) return null;
         let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
-        const rings = [];
+        const sources = [];
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
-        for (const a of ents) { if (a.type !== 16) continue; const r = entityCoords(a); if (r && r.length >= 2) rings.push(r); }
-        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && f._adv && !f._committed && Array.isArray(f.points) && f.points.length >= 2) rings.push(f.points); } } catch (e) {}
-        let best = null, bestD = 12;
-        for (const ring of rings) {
-            const n = ring.length;
+        for (const a of ents) { if (a.type !== 16) continue; const r = entityCoords(a); if (r && r.length >= 2) sources.push({ ring: r, kind: 'entity', id: a.id, ref: null }); }
+        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && f._adv && !f._committed && Array.isArray(f.points) && f.points.length >= 2) sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); } } catch (e) {}
+        let best = null, bestD = 12, bestSrc = null;
+        for (const s of sources) {
+            const ring = s.ring, n = ring.length;
             for (let i = 0; i < n; i++) {
                 const a = ring[i], b = ring[(i + 1) % n];
                 let A, B; try { A = map.latLngToContainerPoint(a); B = map.latLngToContainerPoint(b); } catch (e) { continue; }
                 const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
                 let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
                 const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
-                if (d < bestD) { bestD = d; best = { x: px, y: py }; }
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestSrc = { kind: s.kind, id: s.id, ref: s.ref, edge: i }; }
             }
         }
         if (!best) return null;
-        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng }; } catch (e) { return null; }
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc }; } catch (e) { return null; }
     }
     function advSnapCursor(ll, ev) {
         let s = ll;
@@ -9462,7 +9463,10 @@
             const hitE = advHitEdge(ll);
             if (hitE >= 0) { advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
             advDraw.drawing = true;
-            advDraw.verts.push(advSnapCursor(ll, ev));
+            const snapped = advSnapCursor(ll, ev);
+            // First point landing on an existing FFZ edge → remember it so finish MERGES the corridor into that FFZ.
+            if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.branchSrc = advDraw.ffzSnap.src;
+            advDraw.verts.push(snapped);
             advDraw.tentative = null;
             advPersist(); advRender();
         };
@@ -9477,7 +9481,7 @@
             const k = (ev.key || '').toLowerCase();
             if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
             else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
-            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; advPersist(); advRender(); } else setAdvDraw(false); }
+            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) advDraw.branchSrc = null; advPersist(); advRender(); } else setAdvDraw(false); }
         };
         advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
         advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
@@ -9508,10 +9512,70 @@
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; } catch (e) {}
             advWire(); advRender();
         } else {
-            advUnwire(); advClearLayers();
+            advUnwire(); advClearLayers(); advDraw.branchSrc = null;
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click · Shift=angle · Ctrl=asset · cyan=FFZ edge · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
+    }
+    // Open a slot in an FFZ ring at edge `edgeIdx` and route the corridor's open chain
+    // out and back through it → one simple polygon (no boolean union, no holes on an open branch).
+    function spliceCorridor(ring, chain, edgeIdx) {
+        if (!Array.isArray(ring) || ring.length < 3 || !Array.isArray(chain) || chain.length < 2) return null;
+        const i = Math.max(0, Math.min(edgeIdx, ring.length - 1));
+        const rI = ring[i];
+        const head = chain[0], tail = chain[chain.length - 1];
+        // Orient the chain so its endpoint nearer ring[i] connects first (keeps the ring simple).
+        const dHead = approxMeters(head.lat, head.lng, rI.lat, rI.lng);
+        const dTail = approxMeters(tail.lat, tail.lng, rI.lat, rI.lng);
+        const oriented = (dHead <= dTail) ? chain.slice() : chain.slice().reverse();
+        return ring.slice(0, i + 1).concat(oriented.map(p => ({ lat: p.lat, lng: p.lng })), ring.slice(i + 1));
+    }
+    // Merge a finished corridor into the FFZ its first point branched off — preview corridor
+    // (in place) or committed entity (as an _existing dirty layer → upsert keeps the id + altitude).
+    function mergeCorridorIntoSource(branch, outline) {
+        try {
+            if (branch.kind === 'preview') {
+                const f = branch.ref;
+                const list = (genState.lastResult && genState.lastResult.ffzs) || [];
+                if (!f || list.indexOf(f) < 0) return false;
+                const combined = spliceCorridor(f.points, outline, branch.edge);
+                if (!combined) return false;
+                f.points = combined; f._centroid = ringCentroid(combined); f._merged = true;
+                delete f._adv; delete f._advVerts; delete f._advSegWidth; delete f._advSide;  // no longer a re-editable corridor
+                if (f._poly) { try { f._poly.setLatLngs(combined.map(p => [p.lat, p.lng])); } catch (e) {} }
+                else renderGenPreview(genState.lastResult.ffzs, false);
+                advSaveFfzs();
+                showToast('Merged corridor into the drawn FFZ — Commit to save', 'rgba(95,255,95,0.5)');
+                return true;
+            }
+            if (branch.kind === 'entity') {
+                const bucket = mapObjectsBySite[genState.siteID];
+                const ent = bucket && bucket.entities && bucket.entities.find(e => e.id === branch.id && e.type === 16);
+                if (!ent) return false;
+                const ring = entityCoords(ent); if (!ring || ring.length < 3) return false;
+                const combined = spliceCorridor(ring.map(p => ({ lat: p.lat, lng: p.lng })), outline, branch.edge);
+                if (!combined) return false;
+                // Already loaded as an editable layer? splice into it. Else add a fresh _existing layer.
+                const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(f => f && f._existing && f._origId === ent.id);
+                if (existing) {
+                    existing.points = combined; existing._centroid = ringCentroid(combined); existing._dirty = true; existing._merged = true;
+                    if (existing._poly) { try { existing._poly.setLatLngs(combined.map(p => [p.lat, p.lng])); } catch (e) {} }
+                } else {
+                    const r = ent.restrictions || {};
+                    const mf = {
+                        type: 16, name: ent.name || (ent.id != null ? `#${ent.id}` : 'FFZ'),
+                        site_id: ent.site != null ? ent.site : genState.siteID, points: combined,
+                        restrictions: { minAlt: (typeof r.minAlt === 'number' ? r.minAlt : null), maxAlt: (typeof r.maxAlt === 'number' ? r.maxAlt : null) },
+                        _existing: true, _origId: ent.id, _origEntity: ent, _origValidated: !!ent.validated,
+                        _altMode: 'unknown', _centroid: ringCentroid(combined), _dirty: true, _merged: true,
+                    };
+                    renderGenPreview([mf], true);
+                }
+                showToast(`Merged corridor into FFZ #${ent.id} — press "Save FFZ edits" to save`, 'rgba(95,255,95,0.5)');
+                return true;
+            }
+        } catch (e) { console.warn(`${GEN_TAG} corridor merge failed:`, e); }
+        return false;
     }
     async function finalizeAdvDraw() {
         advDraw.drawing = false;
@@ -9519,9 +9583,13 @@
         const segW = advSegWidthsFt(Math.max(0, verts.length - 1)).slice();
         const finSide = advDraw.side;
         const outline = advOutline(verts, segW, finSide);
+        const branch = advDraw.branchSrc; advDraw.branchSrc = null;
         advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
         advClearLayers(); advClearPersist();
         if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
+        // If the first point branched off an existing FFZ edge, MERGE the corridor into that
+        // FFZ (splice its open chain into the ring) so it stays ONE entity, not a second polygon.
+        if (branch && mergeCorridorIntoSource(branch, outline)) return;
         const cen = ringCentroid(outline);
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
@@ -9582,6 +9650,7 @@
         advDraw.segWidth = Array.isArray(f._advSegWidth) ? f._advSegWidth.slice() : [];
         advDraw.side = f._advSide || 1;
         advDraw.drawing = true;
+        advDraw.branchSrc = null;   // re-editing a corridor isn't a fresh branch
         setAdvDraw(true);
         advPersist(); advSaveFfzs();
         showToast('Editing corridor — drag verts/edges · dbl-click to re-finish', 'rgba(95,184,255,0.55)');

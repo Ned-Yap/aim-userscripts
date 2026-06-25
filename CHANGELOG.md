@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — branched corridor MERGES into the FFZ instead of making a separate one — Asset Inspector v4.105 (dev/latest)
+
+When you start a corridor on an existing FFZ's edge, finishing it now **combines it into that same FFZ** — it opens a slot in the FFZ's edge and routes the corridor out and back through it, so the result is **one FFZ**, not two overlapping ones. Works branching off another corridor you've drawn (merges in place → Commit) or off a committed FFZ already on the map (becomes an in-place edit → press **Save FFZ edits**, altitude preserved). No reload, no new dependency. (Open branches only — a branch that loops all the way back into a hole isn't supported yet.)
+
+---
+
 ## 2026-06-25 — Advanced Draw — shielding band on both sides + measure label — Asset Inspector v4.104 (dev/latest)
 
 The shielding band now shows on **both sides** of the line you draw — **red on the front** (away from the FFZ box) and **yellow on the back** (the box side, drawn on top so you can still see it). Each band carries a small **"25 ft" measure label** so the standoff distance is visible at a glance (uses your offset value). Back-band color is customizable.
