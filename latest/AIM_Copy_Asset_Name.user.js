@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.110
+// @version      4.111
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.110';
+    const SCRIPT_VERSION = '4.111';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9196,6 +9196,7 @@
         ctrlHeld: false, // for the live Ctrl-snap guides
         ffzSnap: null,   // {lat,lng,src} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
         branchSrc: null, // src of the FFZ whose edge the FIRST vertex landed on → merge corridor into it on finish (else null)
+        snapSrcs: [],    // every placed vertex's FFZ-edge snap src → a corridor bridging 2 FFZs unifies BOTH groups at finish
         reGroup: null,   // when re-editing a grouped corridor, its {_group,_anchorId,_branchPoint} so re-finish keeps it grouped
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
@@ -9482,8 +9483,10 @@
             if (hitE >= 0) { advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
             advDraw.drawing = true;
             const snapped = advSnapCursor(ll, ev);
-            // First point landing on an existing FFZ edge → remember it so finish MERGES the corridor into that FFZ.
+            // First point landing on an existing FFZ edge → remember it so finish joins that FFZ's group.
             if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.branchSrc = advDraw.ffzSnap.src;
+            // Record EVERY vertex's snap (src + where) so a corridor bridging two FFZs fuses BOTH at finish.
+            if (advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.snapSrcs.push({ src: advDraw.ffzSnap.src, pt: { lat: advDraw.ffzSnap.lat, lng: advDraw.ffzSnap.lng } });
             advDraw.verts.push(snapped);
             advDraw.tentative = null;
             advPersist(); advRender();
@@ -9499,7 +9502,7 @@
             const k = (ev.key || '').toLowerCase();
             if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
             else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
-            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; } advPersist(); advRender(); } else setAdvDraw(false); }
+            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; } advPersist(); advRender(); } else setAdvDraw(false); }
         };
         advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
         advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
@@ -9530,7 +9533,7 @@
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; } catch (e) {}
             advWire(); advRender();
         } else {
-            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null;
+            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = [];
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click · Shift=angle · Ctrl=asset · cyan=FFZ edge · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
@@ -9577,6 +9580,35 @@
             return true;
         } catch (e) { console.warn(`${GEN_TAG} branch group failed:`, e); return false; }
     }
+    // Resolve a snap src → the {group, anchor} of the FFZ it points at (assigning a group id to a
+    // bare drawn parent if needed). For unifying the OTHER end of a bridge corridor.
+    function srcGroup(src) {
+        if (!src) return null;
+        if (src.kind === 'entity') return { group: 'ent:' + src.id, anchor: src.id };
+        if (src.kind === 'preview') {
+            const pf = src.ref; if (!pf) return null;
+            if (pf._existing) return { group: 'ent:' + pf._origId, anchor: pf._origId };
+            if (pf._anchorId != null) { pf._group = pf._group || ('ent:' + pf._anchorId); return { group: pf._group, anchor: pf._anchorId }; }
+            pf._group = pf._group || ('g:' + (++advGroupCounter)); return { group: pf._group, anchor: null };
+        }
+        return null;
+    }
+    // A corridor whose OTHER end snapped onto a different FFZ → fuse the two groups into one
+    // (prefer an anchored group so the result upserts the real FFZ). Reassigns all members.
+    function unifyCorridorWithSrc(f, src) {
+        try {
+            const g = srcGroup(src); if (!g) return false;
+            if (!f._group) { f._group = g.group; f._anchorId = g.anchor; return true; }
+            if (g.group === f._group) return true;
+            const Gs = f._group, As = f._anchorId, Ge = g.group, Ae = g.anchor;
+            const canon = (typeof Gs === 'string' && Gs.indexOf('ent:') === 0) ? Gs : ((typeof Ge === 'string' && Ge.indexOf('ent:') === 0) ? Ge : Gs);
+            const canonAnchor = (canon === Gs) ? As : Ae;
+            const list = (genState.lastResult && genState.lastResult.ffzs) || [];
+            for (const ff of list) { if (ff && (ff._group === Gs || ff._group === Ge)) { ff._group = canon; ff._anchorId = canonAnchor; } }
+            f._group = canon; f._anchorId = canonAnchor;
+            return true;
+        } catch (e) { console.warn(`${GEN_TAG} unify failed:`, e); return false; }
+    }
     // Nearest ring-EDGE index to a point (meters). For proximity splicing at commit.
     function nearestRingEdgeIdx(ring, pt) {
         const proj = genProjector(pt.lat, pt.lng), P = proj.fwd(pt);
@@ -9594,6 +9626,42 @@
     // their own 'create'. Each group → ONE 'create' (new entity, drawn-rooted) or 'upsert'
     // (anchored to a committed FFZ id). Members processed in creation order so each child's
     // branch edge already exists in the accumulating ring; join edge found by proximity.
+    // A member's connection point = where it joins the rest (its own branch, or where another
+    // corridor bridged INTO it). Roots have neither.
+    function memberConnPoint(m) { return m._branchPoint || m._joinHint || null; }
+    // Roll a ring so it STARTS at the vertex nearest pt → the splice seam lands at the join.
+    function reRollRingNear(ring, pt) {
+        if (!pt || ring.length < 3) return ring;
+        let bi = 0, bd = Infinity;
+        for (let i = 0; i < ring.length; i++) { const d = approxMeters(ring[i].lat, ring[i].lng, pt.lat, pt.lng); if (d < bd) { bd = d; bi = i; } }
+        return ring.slice(bi).concat(ring.slice(0, bi));
+    }
+    // Splice one member into the accumulating ring at its connection point (re-rolled so the
+    // join is clean), then return the new ring.
+    function spliceMemberInto(combined, m) {
+        const cp = memberConnPoint(m) || m._centroid || ringCentroid(m.points);
+        let chain = m.points.map(p => ({ lat: p.lat, lng: p.lng }));
+        if (memberConnPoint(m)) chain = reRollRingNear(chain, cp);
+        const idx = nearestRingEdgeIdx(combined, cp);
+        const c = spliceCorridor(combined, chain, idx);
+        return c || combined;
+    }
+    // Greedily splice members: each step picks the not-yet-placed member whose connection point
+    // is nearest the current ring (so a bridge chain assembles in connectivity order, not draw
+    // order). Returns the fused ring.
+    function fuseMembers(baseRing, members) {
+        let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
+        const remaining = members.slice();
+        const nearestVertM = (cp) => { let d = Infinity; for (const v of combined) { const dd = approxMeters(v.lat, v.lng, cp.lat, cp.lng); if (dd < d) d = dd; } return d; };
+        let guard = 0;
+        while (remaining.length && guard++ < 200) {
+            let bi = 0, bd = Infinity;
+            for (let i = 0; i < remaining.length; i++) { const cp = memberConnPoint(remaining[i]) || remaining[i]._centroid || ringCentroid(remaining[i].points); const d = nearestVertM(cp); if (d < bd) { bd = d; bi = i; } }
+            combined = spliceMemberInto(combined, remaining[bi]);
+            remaining.splice(bi, 1);
+        }
+        return combined;
+    }
     function fuseCorridorGroups(ffzs) {
         const groups = new Map(), loose = [];
         for (const f of ffzs) { if (f && f._group) { if (!groups.has(f._group)) groups.set(f._group, []); groups.get(f._group).push(f); } else if (f) loose.push(f); }
@@ -9610,14 +9678,16 @@
                     const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId);
                     const baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
                     if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
-                    let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
-                    for (const m of members) { const idx = nearestRingEdgeIdx(combined, m._branchPoint || m._centroid || ringCentroid(m.points)); const c = spliceCorridor(combined, m.points, idx); if (c) combined = c; }
+                    const combined = fuseMembers(baseRing, members);   // base = the committed FFZ ring
                     const er = (ent.restrictions) || (existing && existing.restrictions) || {};
                     writes.push({ kind: 'upsert', anchorId, ent, existing, points: combined, restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members });
                 } else {
-                    const root = members[0];
-                    let combined = root.points.map(p => ({ lat: p.lat, lng: p.lng }));
-                    for (let i = 1; i < members.length; i++) { const m = members[i]; const idx = nearestRingEdgeIdx(combined, m._branchPoint || m._centroid || ringCentroid(m.points)); const c = spliceCorridor(combined, m.points, idx); if (c) combined = c; }
+                    // Root = a member with no connection (true root); else the first.
+                    let rootIdx = members.findIndex(m => !memberConnPoint(m));
+                    if (rootIdx < 0) rootIdx = 0;
+                    const root = members[rootIdx];
+                    const rest = members.filter((_, i) => i !== rootIdx);
+                    const combined = fuseMembers(root.points, rest);
                     writes.push({ kind: 'create', name: root.name, points: combined, restrictions: root.restrictions, members });
                 }
             } catch (e) { console.warn(`${GEN_TAG} fuse group ${gid} failed:`, e); asCreates(members); }
@@ -9631,6 +9701,7 @@
         const finSide = advDraw.side;
         const outline = advOutline(verts, segW, finSide);
         const branch = advDraw.branchSrc; advDraw.branchSrc = null;
+        const snaps = advDraw.snapSrcs.slice(); advDraw.snapSrcs = [];
         advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
         advDraw.dragVert = null; advDraw.dragEdge = null; advDraw.ffzSnap = null;  // clear transient edit state so the mode stays usable
         advClearLayers(); advClearPersist();
@@ -9652,6 +9723,13 @@
             if (reGroup._altMode) f._altMode = reGroup._altMode;
             if (typeof reGroup._groundM === 'number') f._groundM = reGroup._groundM;
             grouped = true;
+        }
+        // Bridge: any OTHER vertex that snapped onto a different FFZ → fuse those groups into one,
+        // and tell that FFZ where this corridor joins it (_joinHint) so the fused ring splices cleanly.
+        for (const s of snaps) {
+            if (!s || s.src === branch) continue;
+            if (unifyCorridorWithSrc(f, s.src)) grouped = true;
+            if (s.src.kind === 'preview' && s.src.ref && !s.src.ref._branchPoint && !s.src.ref._joinHint) s.src.ref._joinHint = { lat: s.pt.lat, lng: s.pt.lng };
         }
         if (!grouped) {
             // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL). Grouped corridors
@@ -9677,7 +9755,7 @@
     function advSaveFfzs() {
         try {
             const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
-            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint }));
+            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
             if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
             else localStorage.removeItem(advFfzKey());
         } catch (e) {}
@@ -9692,7 +9770,7 @@
             for (const s of slim) {
                 if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
                 if (have.has(JSON.stringify(s.points))) continue; // don't double-load
-                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint });
+                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
                 added++;
             }
             if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);

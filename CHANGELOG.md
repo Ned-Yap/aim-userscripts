@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — a corridor that snaps to TWO FFZs fuses all of them into one — Asset Inspector v4.111 (dev/latest)
+
+Fixes the case where a third corridor snapped onto two separate FFZs but Commit still saw them as two zones (dry run said "2 of 3"). Now **every** vertex's snap is recorded, so a corridor bridging two FFZs pulls **both** into the same group → they fuse into a single FFZ. The fusion also assembles the pieces in connection order (not draw order) and rolls each piece so its seam lands right at the join, so a bridged chain comes out clean.
+
+---
+
 ## 2026-06-25 — Advanced Draw — branched corridors stay independent + editable, fuse only at Commit (Phase 1) — Asset Inspector v4.110 (dev/latest)
 
 Big one: branching a corridor off an existing FFZ **no longer fuses the geometry immediately**. Each branched corridor stays its **own fast-editable corridor** (right-click = the quick corridor edit, drag verts/edges/widths) — they just overlap so they look like one zone. They get fused into **one FFZ only when you Commit**: connected corridors splice together at their join edges into a single polygon. If the chain started on a **committed FFZ already on the map**, Commit fuses them straight into that FFZ (updates it in place, altitude kept) — so you can extend a real FFZ. The Commit summary now shows how many were created vs. fused into existing. Grouping survives a reload. (Phase 2 — keeping committed corridors corridor-editable via a centerline sidecar — is next.)
