@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.96
+// @version      4.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.96';
+    const SCRIPT_VERSION = '4.97';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9173,8 +9173,18 @@
         tentative: null, // snapped cursor for live preview
         widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
         bufColor: ADV_DEFAULTS.bufColor, bufOpacity: ADV_DEFAULTS.bufOpacity,
-        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null,
+        dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
+        ctrlHeld: false, // for the live Ctrl-snap guides
+        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
+    // Hit-test the cursor against existing vertices (screen px) → index or -1.
+    function advHitVert(ll) {
+        const map = getLeafletMap(); if (!map) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = 14;
+        advDraw.verts.forEach((v, i) => { try { const p = map.latLngToContainerPoint(v); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bestD) { bestD = d; best = i; } } catch (e) {} });
+        return best;
+    }
     function advSegNormals(pathM, side) {
         const segN = [];
         for (let i = 0; i < pathM.length - 1; i++) {
@@ -9216,7 +9226,7 @@
             const np = nearestPointOnRing(cursor, ring);
             if (np && (!best || np.d < best.d)) best = np;
         }
-        return (best && best.d < 45 * GEN_FT_TO_M) ? best.pt : cursor; // 45 ft magnet radius
+        return (best && best.d < 120 * GEN_FT_TO_M) ? best.pt : cursor; // generous magnet (Ctrl is explicit + shows the target ring)
     }
     // Shift-snap: snap (last→cursor) bearing to 15° steps relative to the previous segment.
     function advSnapAngle(cursor) {
@@ -9237,7 +9247,8 @@
         const map = getLeafletMap(), L = getLeafletL();
         if (!map || !L) return;
         advClearLayers();
-        const path = (advDraw.drawing && advDraw.tentative) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
+        // Rubber-band the live segment to the cursor only while drawing AND not dragging a vertex.
+        const path = (advDraw.drawing && advDraw.tentative && advDraw.dragVert == null) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
         if (path.length >= 2) {
             const band = advBand(path, advDraw.offsetFt, advDraw.side);
             if (band) { try { const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: advDraw.bufColor, weight: 1, opacity: 0.5, fillColor: advDraw.bufColor, fillOpacity: advDraw.bufOpacity, interactive: false }); pb.addTo(map); advDraw.layers.push(pb); } catch (e) {} }
@@ -9245,7 +9256,19 @@
             if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#ffe14d', weight: 2, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.16, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
         }
-        advDraw.verts.forEach(v => { try { const m = L.circleMarker([v.lat, v.lng], { radius: 4, color: '#fff', weight: 1, fillColor: '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
+        // Ctrl-snap guides — show the nearest asset's offset ring (magenta) + a marker at
+        // the snap point, so Ctrl visibly does something. Only while Ctrl is held.
+        if (advDraw.ctrlHeld) {
+            const at = (advDraw.dragVert != null) ? advDraw.verts[advDraw.dragVert] : advDraw.tentative;
+            if (at) {
+                const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                let bestRing = null, bestD = Infinity;
+                for (const a of ents) { if (a.type !== 3) continue; const ring = getAssetOffsetRing(a, advDraw.offsetFt * GEN_FT_TO_M); if (!ring) continue; const np = nearestPointOnRing(at, ring); if (np && np.d < bestD) { bestD = np.d; bestRing = ring; } }
+                if (bestRing) { try { const pr = L.polyline(bestRing.concat([bestRing[0]]).map(p => [p.lat, p.lng]), { color: '#ff5fff', weight: 1.5, opacity: 0.85, dashArray: '5 4', interactive: false }); pr.addTo(map); advDraw.layers.push(pr); } catch (e) {} }
+                try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
+            }
+        }
+        advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#fff', weight: 1.5, fillColor: drag ? '#ffe14d' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
     function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
@@ -9278,6 +9301,13 @@
         advDraw._onMove = (ev) => {
             if (!advDraw.active) return;
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            advDraw.ctrlHeld = !!ev.ctrlKey;
+            if (advDraw.dragVert != null) {
+                // Move the grabbed vertex live (Ctrl still snaps it to an asset offset; angle-snap N/A for interior).
+                advDraw.verts[advDraw.dragVert] = ev.ctrlKey ? advSnapToAsset(ll) : ll;
+                advRender();
+                return;
+            }
             advDraw.tentative = advSnapCursor(ll, ev);
             advRender();
         };
@@ -9285,12 +9315,18 @@
             if (!advDraw.active || ev.button !== 0) return;
             ev.preventDefault(); ev.stopPropagation();
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            // Click ON an existing vertex → GRAB it to fix it (no Enter needed); else add a point.
+            const hit = advHitVert(ll);
+            if (hit >= 0) { advDraw.dragVert = hit; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
             advDraw.drawing = true;
             advDraw.verts.push(advSnapCursor(ll, ev));
             advDraw.tentative = null;
             advPersist(); advRender();
         };
-        advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
+        advDraw._onUp = (ev) => {
+            if (advDraw.dragVert != null) { advDraw.dragVert = null; try { map.dragging.enable(); } catch (e) {} advPersist(); advRender(); }
+        };
+        advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing || advDraw.dragVert != null) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
         advDraw._onKey = (ev) => {
             if (!advDraw.active) return;
             const t = ev.target;
@@ -9302,6 +9338,7 @@
         };
         advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
         advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
+        advDraw._container.addEventListener('mouseup', advDraw._onUp, true);
         advDraw._container.addEventListener('dblclick', advDraw._onDbl, true);
         try { uwin().addEventListener('keydown', advDraw._onKey, true); } catch (e) {}
         try { map.doubleClickZoom.disable(); } catch (e) {}
@@ -9312,6 +9349,7 @@
         if (c) {
             try { c.removeEventListener('mousedown', advDraw._onDown, true); } catch (e) {}
             try { c.removeEventListener('mousemove', advDraw._onMove, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', advDraw._onUp, true); } catch (e) {}
             try { c.removeEventListener('dblclick', advDraw._onDbl, true); } catch (e) {}
         }
         try { uwin().removeEventListener('keydown', advDraw._onKey, true); } catch (e) {}
