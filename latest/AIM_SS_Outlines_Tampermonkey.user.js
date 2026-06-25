@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.79
+// @version      34.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.79';
+    const SCRIPT_VERSION = '34.80';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1244,6 +1244,28 @@
             }
         } catch (e) {}
     }, 1500);
+
+    // Debug hook (v34.80): read this instance's live perf state + force-apply
+    // from the console. Exposed on unsafeWindow so it's reachable cross-frame:
+    //   document.querySelector('iframe').contentWindow.__aim_styler_debug()
+    //   document.querySelector('iframe').contentWindow.__aim_styler_applyPerf()
+    try {
+        const _g = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+        _g.__aim_styler_debug = function () {
+            const map = getLeafletMap();
+            let orthoOnMap = 0, satOnMap = 0;
+            if (map && typeof map.eachLayer === 'function') map.eachLayer(l => {
+                if (l && l._url) {
+                    if (_ORTHO_URL_PATTERNS.some(p => p.test(l._url))) orthoOnMap++;
+                    if (_SAT_URL_PATTERNS.some(p => p.test(l._url))) satOnMap++;
+                }
+            });
+            return { frame: FRAME_ID, version: SCRIPT_VERSION, isActive,
+                perfHideOrtho, perfHideSatellite, perfOrthoLowRes,
+                mapFound: !!map, orthoOnMap, satOnMap, removedStash: _aimRemovedOrtho.size };
+        };
+        _g.__aim_styler_applyPerf = function () { applyPerfMapSettings(); return _g.__aim_styler_debug(); };
+    } catch (e) {}
 
     // Flight-path vertex dot styling. Percepto renders FP vertices as
     // `<div class="map-marker__flight-path-vertex …">` icons in
