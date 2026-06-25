@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.34
+// @version      4.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -34,7 +34,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.34';
+    const SCRIPT_VERSION = '4.35';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5204,10 +5204,10 @@
         const m3 = mode === '3D';
         const fillFreezone   = m3 ? '<color>3300ff00</color>' : '<fill>0</fill>';
         const fillNFZ        = m3 ? '<color>330000ff</color>' : '<fill>0</fill>';
-        // Regular asset — WHITE, with a solid fill in BOTH modes so it reads
-        // as a white box (not just a hairline outline that vanishes on
-        // satellite). Empty is the requested fainter 30%-alpha white.
-        const fillAsset      = '<color>80ffffff</color>'; // ~50% white
+        // Regular asset — PINK, solid fill in BOTH modes so it reads as a
+        // pink box (not a hairline outline that vanishes on satellite).
+        // Empty stays the requested fainter 30%-alpha white.
+        const fillAsset      = '<color>ccb469ff</color>'; // pink ~80%
         // Asset state fills — colour-coded per health state, present in BOTH
         // 2D and 3D (a thin outline alone was invisible → "all white").
         // KML colour is aabbggrr (alpha, blue, green, red).
@@ -5215,8 +5215,8 @@
         const fillUnreachable = '<color>ccffaf5f</color>'; // light blue ~80%
         const fillEmpty       = '<color>4dffffff</color>'; // 30% white
         return [
-            // Regular asset — WHITE.
-            '<Style id="asset_style"><LineStyle><color>ffffffff</color><width>2</width></LineStyle><PolyStyle>' + fillAsset + '</PolyStyle></Style>',
+            // Regular asset — PINK.
+            '<Style id="asset_style"><LineStyle><color>ffb469ff</color><width>2</width></LineStyle><PolyStyle>' + fillAsset + '</PolyStyle></Style>',
             // Asset by state — ORANGE unshielded / LIGHT-BLUE unreachable /
             // 30%-alpha WHITE empty. Solid fill shows in 2D and 3D.
             '<Style id="asset_unshielded_style"><LineStyle><color>ff00a5ff</color><width>2</width></LineStyle><PolyStyle>' + fillUnshielded + '</PolyStyle></Style>',

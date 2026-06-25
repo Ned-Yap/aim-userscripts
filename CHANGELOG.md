@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Asset Inspector v4.35 (prod) / v4.94 (dev/latest) — regular assets are now PINK
+
+Per request, regular (normal-state) assets render with a pink ~80% fill instead of white, so they stand out from the satellite. Unshielded stays orange, unreachable light blue, empty 30% white.
+
+---
+
 ## 2026-06-24 — AIM Mission Log Table v1.7 — fix: AGL really resolves now (DEM lookup no longer bails on one hiccup)
 
 v1.5's DEM retry overcorrected: it gave up the whole batch if the *first* lookup failed, and didn't retry non-429 hiccups at all — so AGL still showed "n/a". The terrain endpoint is actually healthy and answers on the first try; the lookup now retries transients per-pin and only stops after several consecutive failures, so a single blip can't wipe every AGL. Logs `[AIM MLOG] DEM ground resolved N/11` so it's verifiable.
