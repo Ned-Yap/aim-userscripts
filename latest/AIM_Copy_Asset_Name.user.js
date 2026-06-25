@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.111
+// @version      4.112
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.111';
+    const SCRIPT_VERSION = '4.112';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9629,21 +9629,14 @@
     // A member's connection point = where it joins the rest (its own branch, or where another
     // corridor bridged INTO it). Roots have neither.
     function memberConnPoint(m) { return m._branchPoint || m._joinHint || null; }
-    // Roll a ring so it STARTS at the vertex nearest pt → the splice seam lands at the join.
-    function reRollRingNear(ring, pt) {
-        if (!pt || ring.length < 3) return ring;
-        let bi = 0, bd = Infinity;
-        for (let i = 0; i < ring.length; i++) { const d = approxMeters(ring[i].lat, ring[i].lng, pt.lat, pt.lng); if (d < bd) { bd = d; bi = i; } }
-        return ring.slice(bi).concat(ring.slice(0, bi));
-    }
-    // Splice one member into the accumulating ring at its connection point (re-rolled so the
-    // join is clean), then return the new ring.
+    // Splice one member into the accumulating ring at the edge nearest its connection point.
+    // We splice the member's NATURAL outline (do NOT re-roll) — a corridor's two open ends are
+    // its width-separated base, which gives a clean slot; re-rolling collapses that to a sliver
+    // and flips spliceCorridor's orientation (→ bowtie).
     function spliceMemberInto(combined, m) {
         const cp = memberConnPoint(m) || m._centroid || ringCentroid(m.points);
-        let chain = m.points.map(p => ({ lat: p.lat, lng: p.lng }));
-        if (memberConnPoint(m)) chain = reRollRingNear(chain, cp);
         const idx = nearestRingEdgeIdx(combined, cp);
-        const c = spliceCorridor(combined, chain, idx);
+        const c = spliceCorridor(combined, m.points, idx);
         return c || combined;
     }
     // Greedily splice members: each step picks the not-yet-placed member whose connection point

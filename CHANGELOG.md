@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — fix the bowtie when fusing a bridged 3-FFZ chain — Asset Inspector v4.112 (dev/latest)
+
+The bridged-fusion in v4.111 could draw a crossing/triangle at the connector's junction. Cause was the ring "re-roll" I added, which collapsed the clean width-slot at the join into a sliver and flipped the splice direction. Removed it — pieces now splice at their natural base (the clean slot), assembled in connection order. The bridged chain should come out without the bowtie.
+
+---
+
 ## 2026-06-25 — Advanced Draw — a corridor that snaps to TWO FFZs fuses all of them into one — Asset Inspector v4.111 (dev/latest)
 
 Fixes the case where a third corridor snapped onto two separate FFZs but Commit still saw them as two zones (dry run said "2 of 3"). Now **every** vertex's snap is recorded, so a corridor bridging two FFZs pulls **both** into the same group → they fuse into a single FFZ. The fusion also assembles the pieces in connection order (not draw order) and rolls each piece so its seam lands right at the join, so a bridged chain comes out clean.
