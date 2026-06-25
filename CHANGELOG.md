@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — branched corridors stay independent + editable, fuse only at Commit (Phase 1) — Asset Inspector v4.110 (dev/latest)
+
+Big one: branching a corridor off an existing FFZ **no longer fuses the geometry immediately**. Each branched corridor stays its **own fast-editable corridor** (right-click = the quick corridor edit, drag verts/edges/widths) — they just overlap so they look like one zone. They get fused into **one FFZ only when you Commit**: connected corridors splice together at their join edges into a single polygon. If the chain started on a **committed FFZ already on the map**, Commit fuses them straight into that FFZ (updates it in place, altitude kept) — so you can extend a real FFZ. The Commit summary now shows how many were created vs. fused into existing. Grouping survives a reload. (Phase 2 — keeping committed corridors corridor-editable via a centerline sidecar — is next.)
+
+---
+
 ## 2026-06-25 — Advanced Draw — vertex editor is opt-in again (m2 no longer hijacked) — Asset Inspector v4.109 (dev/latest)
 
 Right-click goes back to what you're used to: a **fresh corridor reopens for fast corridor editing**, and any other FFZ shows its **info popup**. The per-vertex editor (slow, native-feeling) is no longer forced on m2 — instead, an uncommitted preview's popup now has a small **✎ Edit points** button you press only when you actually need to reshape an older or merged shape. So fast editing stays the default; vertex editing is there when you want it, out of the way when you don't.

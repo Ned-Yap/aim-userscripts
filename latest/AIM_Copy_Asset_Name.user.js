@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.109
+// @version      4.110
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.109';
+    const SCRIPT_VERSION = '4.110';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9196,6 +9196,7 @@
         ctrlHeld: false, // for the live Ctrl-snap guides
         ffzSnap: null,   // {lat,lng,src} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
         branchSrc: null, // src of the FFZ whose edge the FIRST vertex landed on → merge corridor into it on finish (else null)
+        reGroup: null,   // when re-editing a grouped corridor, its {_group,_anchorId,_branchPoint} so re-finish keeps it grouped
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
     // Hit-test the cursor against existing vertices (screen px) → index or -1.
@@ -9498,7 +9499,7 @@
             const k = (ev.key || '').toLowerCase();
             if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
             else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
-            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) advDraw.branchSrc = null; advPersist(); advRender(); } else setAdvDraw(false); }
+            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; } advPersist(); advRender(); } else setAdvDraw(false); }
         };
         advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
         advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
@@ -9529,7 +9530,7 @@
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; } catch (e) {}
             advWire(); advRender();
         } else {
-            advUnwire(); advClearLayers(); advDraw.branchSrc = null;
+            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null;
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click · Shift=angle · Ctrl=asset · cyan=FFZ edge · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
@@ -9547,54 +9548,81 @@
         const oriented = (dHead <= dTail) ? chain.slice() : chain.slice().reverse();
         return ring.slice(0, i + 1).concat(oriented.map(p => ({ lat: p.lat, lng: p.lng })), ring.slice(i + 1));
     }
-    // Merge a finished corridor into the FFZ its first point branched off — preview corridor
-    // (in place) or committed entity (as an _existing dirty layer → upsert keeps the id + altitude).
-    function mergeCorridorIntoSource(branch, outline) {
+    // ===== Phase 1 — NON-DESTRUCTIVE merge. A branched corridor stays its OWN editable
+    // corridor (keeps _adv/_advVerts), tagged into a GROUP that fuses into one FFZ only at
+    // Commit. _group = shared id ('ent:<id>' if the lineage roots on a committed FFZ, else
+    // 'g:<n>'); _anchorId = that entity id (upsert target) or null; _branchPoint = where it
+    // snapped onto its parent (used to find the join edge at commit). =====
+    let advGroupCounter = 0;
+    function applyBranchGroup(f, branch, branchPoint) {
         try {
-            if (branch.kind === 'preview') {
-                // ref = a live preview f: a drawn corridor (in genState.lastResult.ffzs) OR an
-                // _existing editable layer (genPreviewLayers, e.g. a previously merged committed FFZ).
-                const f = branch.ref;
-                if (!f || !Array.isArray(f.points) || f.points.length < 3) return false;
-                const combined = spliceCorridor(f.points, outline, branch.edge);
-                if (!combined) return false;
-                f.points = combined; f._centroid = ringCentroid(combined); f._merged = true;
-                if (f._existing) { f._dirty = true; }
-                else { delete f._adv; delete f._advVerts; delete f._advSegWidth; delete f._advSide; }  // no longer a re-editable corridor
-                if (f._poly) { try { f._poly.setLatLngs(combined.map(p => [p.lat, p.lng])); } catch (e) {} }
-                else renderGenPreview((genState.lastResult && genState.lastResult.ffzs) || [], false);
-                advSaveFfzs();
-                showToast(f._existing ? `Merged into FFZ #${f._origId} — press "Save FFZ edits"` : 'Merged corridor into the drawn FFZ — Commit to save', 'rgba(95,255,95,0.5)');
-                return true;
-            }
+            let group = null, anchorId = null, parentRest = null, parentMode = null;
             if (branch.kind === 'entity') {
+                anchorId = branch.id; group = 'ent:' + branch.id;
                 const bucket = mapObjectsBySite[genState.siteID];
                 const ent = bucket && bucket.entities && bucket.entities.find(e => e.id === branch.id && e.type === 16);
-                if (!ent) return false;
-                const ring = entityCoords(ent); if (!ring || ring.length < 3) return false;
-                const combined = spliceCorridor(ring.map(p => ({ lat: p.lat, lng: p.lng })), outline, branch.edge);
-                if (!combined) return false;
-                // Already loaded as an editable layer? splice into it. Else add a fresh _existing layer.
-                const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(f => f && f._existing && f._origId === ent.id);
-                if (existing) {
-                    existing.points = combined; existing._centroid = ringCentroid(combined); existing._dirty = true; existing._merged = true;
-                    if (existing._poly) { try { existing._poly.setLatLngs(combined.map(p => [p.lat, p.lng])); } catch (e) {} }
-                } else {
-                    const r = ent.restrictions || {};
-                    const mf = {
-                        type: 16, name: ent.name || (ent.id != null ? `#${ent.id}` : 'FFZ'),
-                        site_id: ent.site != null ? ent.site : genState.siteID, points: combined,
-                        restrictions: { minAlt: (typeof r.minAlt === 'number' ? r.minAlt : null), maxAlt: (typeof r.maxAlt === 'number' ? r.maxAlt : null) },
-                        _existing: true, _origId: ent.id, _origEntity: ent, _origValidated: !!ent.validated,
-                        _altMode: 'unknown', _centroid: ringCentroid(combined), _dirty: true, _merged: true,
-                    };
-                    renderGenPreview([mf], true);
-                }
-                showToast(`Merged corridor into FFZ #${ent.id} — press "Save FFZ edits" to save`, 'rgba(95,255,95,0.5)');
-                return true;
+                if (ent && ent.restrictions) parentRest = { minAlt: ent.restrictions.minAlt, maxAlt: ent.restrictions.maxAlt };
+            } else if (branch.kind === 'preview') {
+                const pf = branch.ref;
+                if (!pf) return false;
+                if (pf._existing) { anchorId = pf._origId; group = 'ent:' + pf._origId; parentRest = pf.restrictions; parentMode = pf._altMode; }
+                else if (pf._anchorId != null) { anchorId = pf._anchorId; group = pf._group || ('ent:' + pf._anchorId); pf._group = group; pf._anchorId = anchorId; parentRest = pf.restrictions; parentMode = pf._altMode; }
+                else { pf._group = pf._group || ('g:' + (++advGroupCounter)); group = pf._group; parentRest = pf.restrictions; parentMode = pf._altMode; }
             }
-        } catch (e) { console.warn(`${GEN_TAG} corridor merge failed:`, e); }
-        return false;
+            if (!group) return false;
+            f._group = group; f._anchorId = anchorId;
+            f._branchPoint = { lat: branchPoint.lat, lng: branchPoint.lng };
+            if (parentRest && typeof parentRest.minAlt === 'number') f.restrictions = { minAlt: parentRest.minAlt, maxAlt: parentRest.maxAlt };
+            if (parentMode) f._altMode = parentMode;
+            return true;
+        } catch (e) { console.warn(`${GEN_TAG} branch group failed:`, e); return false; }
+    }
+    // Nearest ring-EDGE index to a point (meters). For proximity splicing at commit.
+    function nearestRingEdgeIdx(ring, pt) {
+        const proj = genProjector(pt.lat, pt.lng), P = proj.fwd(pt);
+        let best = 0, bestD = Infinity;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const d = Math.hypot(P.x - (A.x + t * dx), P.y - (A.y + t * dy));
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+    // Fuse grouped corridors into single entities at commit. Ungrouped FFZs pass through as
+    // their own 'create'. Each group → ONE 'create' (new entity, drawn-rooted) or 'upsert'
+    // (anchored to a committed FFZ id). Members processed in creation order so each child's
+    // branch edge already exists in the accumulating ring; join edge found by proximity.
+    function fuseCorridorGroups(ffzs) {
+        const groups = new Map(), loose = [];
+        for (const f of ffzs) { if (f && f._group) { if (!groups.has(f._group)) groups.set(f._group, []); groups.get(f._group).push(f); } else if (f) loose.push(f); }
+        const writes = [];
+        for (const f of loose) writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] });
+        const asCreates = (members) => members.forEach(f => writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] }));
+        for (const [gid, members] of groups) {
+            try {
+                const anchored = typeof gid === 'string' && gid.indexOf('ent:') === 0;
+                if (anchored) {
+                    const anchorId = parseInt(gid.slice(4), 10);
+                    const bucket = mapObjectsBySite[genState.siteID];
+                    const ent = bucket && bucket.entities && bucket.entities.find(e => e.id === anchorId && e.type === 16);
+                    const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId);
+                    const baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
+                    if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
+                    let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
+                    for (const m of members) { const idx = nearestRingEdgeIdx(combined, m._branchPoint || m._centroid || ringCentroid(m.points)); const c = spliceCorridor(combined, m.points, idx); if (c) combined = c; }
+                    const er = (ent.restrictions) || (existing && existing.restrictions) || {};
+                    writes.push({ kind: 'upsert', anchorId, ent, existing, points: combined, restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members });
+                } else {
+                    const root = members[0];
+                    let combined = root.points.map(p => ({ lat: p.lat, lng: p.lng }));
+                    for (let i = 1; i < members.length; i++) { const m = members[i]; const idx = nearestRingEdgeIdx(combined, m._branchPoint || m._centroid || ringCentroid(m.points)); const c = spliceCorridor(combined, m.points, idx); if (c) combined = c; }
+                    writes.push({ kind: 'create', name: root.name, points: combined, restrictions: root.restrictions, members });
+                }
+            } catch (e) { console.warn(`${GEN_TAG} fuse group ${gid} failed:`, e); asCreates(members); }
+        }
+        return writes;
     }
     async function finalizeAdvDraw() {
         advDraw.drawing = false;
@@ -9608,29 +9636,40 @@
         advClearLayers(); advClearPersist();
         try { const mp0 = getLeafletMap(); if (mp0) mp0.dragging.enable(); } catch (e) {}
         if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
-        // If the first point branched off an existing FFZ edge, MERGE the corridor into that
-        // FFZ (splice its open chain into the ring) so it stays ONE entity, not a second polygon.
-        // Re-arm advDraw wiring afterward — renderGenPreview re-wires map editing and can steal events.
-        if (branch && mergeCorridorIntoSource(branch, outline)) { if (advDraw.active) { advWire(); advRender(); } return; }
         const cen = ringCentroid(outline);
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
         for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
         const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide };
-        // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL).
-        const p = genState.lastParams || GEN_DEFAULTS;
-        const mode = genActiveAltMode();
-        f._altMode = mode;
-        try {
-            if (mode === 'agl') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') }; }
-            else if (mode === 'msl') { await bulkFetchElevations([cen]); const g = getElevationFromCache(cen.lat, cen.lng); if (typeof g === 'number') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') }; f._groundM = g; } }
-        } catch (e) { console.warn(`${GEN_TAG} adv-draw DEM failed:`, e); }
+        // NON-DESTRUCTIVE merge: if the first point branched off an FFZ, join that FFZ's group
+        // (stays its own editable corridor; fuses into one entity at Commit) + inherit its band.
+        // reGroup = re-finishing a corridor that was already in a group → keep it in that group.
+        const reGroup = advDraw.reGroup; advDraw.reGroup = null;
+        let grouped = branch ? applyBranchGroup(f, branch, verts[0]) : false;
+        if (!grouped && reGroup && reGroup._group) {
+            f._group = reGroup._group; f._anchorId = reGroup._anchorId; f._branchPoint = reGroup._branchPoint || { lat: verts[0].lat, lng: verts[0].lng };
+            if (reGroup._restrictions && typeof reGroup._restrictions.minAlt === 'number') f.restrictions = { minAlt: reGroup._restrictions.minAlt, maxAlt: reGroup._restrictions.maxAlt };
+            if (reGroup._altMode) f._altMode = reGroup._altMode;
+            if (typeof reGroup._groundM === 'number') f._groundM = reGroup._groundM;
+            grouped = true;
+        }
+        if (!grouped) {
+            // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL). Grouped corridors
+            // inherit the parent's band instead (one fused FFZ = one altitude).
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const mode = genActiveAltMode();
+            f._altMode = mode;
+            try {
+                if (mode === 'agl') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') }; }
+                else if (mode === 'msl') { await bulkFetchElevations([cen]); const g = getElevationFromCache(cen.lat, cen.lng); if (typeof g === 'number') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') }; f._groundM = g; } }
+            } catch (e) { console.warn(`${GEN_TAG} adv-draw DEM failed:`, e); }
+        }
         if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
         genState.lastResult.ffzs.push(f);
         renderGenPreview(genState.lastResult.ffzs);
         if (advDraw.active) { advWire(); advRender(); }  // re-arm — renderGenPreview re-wires map editing
         advSaveFfzs(); // persist the finished (uncommitted) corridor so a reload doesn't lose it
-        showToast('Drew corridor FFZ — right-click it to re-edit · Commit to save', 'rgba(255,225,77,0.55)');
+        showToast(grouped ? 'Linked corridor — fuses into one FFZ on Commit · m2 either piece to edit' : 'Drew corridor FFZ — right-click it to re-edit · Commit to save', grouped ? 'rgba(95,255,95,0.5)' : 'rgba(255,225,77,0.55)');
     }
     // Persist FINISHED-but-uncommitted FFZs (drawn corridors) so a reload doesn't lose them.
     // Restored when the ⊕ Generate modal is reopened. Committed ones drop out (server-side).
@@ -9638,7 +9677,7 @@
     function advSaveFfzs() {
         try {
             const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
-            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide }));
+            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint }));
             if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
             else localStorage.removeItem(advFfzKey());
         } catch (e) {}
@@ -9653,7 +9692,7 @@
             for (const s of slim) {
                 if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
                 if (have.has(JSON.stringify(s.points))) continue; // don't double-load
-                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide });
+                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint });
                 added++;
             }
             if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
@@ -9674,6 +9713,9 @@
         advDraw.side = f._advSide || 1;
         advDraw.drawing = true;
         advDraw.branchSrc = null;   // re-editing a corridor isn't a fresh branch
+        // Preserve its group/anchor so re-finishing keeps it fused with its siblings (else it'd
+        // drop out of the group and commit as a separate FFZ).
+        advDraw.reGroup = f._group ? { _group: f._group, _anchorId: (f._anchorId != null ? f._anchorId : null), _branchPoint: f._branchPoint, _restrictions: f.restrictions, _altMode: f._altMode, _groundM: f._groundM } : null;
         setAdvDraw(true);
         advPersist(); advSaveFfzs();
         showToast('Editing corridor — drag verts/edges · dbl-click to re-finish', 'rgba(95,184,255,0.55)');
@@ -10100,7 +10142,7 @@
     async function commitGeneratedFfzs(ffzs, opts) {
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
-        const res = { created: 0, failed: 0, skipped: 0, ids: [], errors: [], dryRun };
+        const res = { created: 0, updated: 0, failed: 0, skipped: 0, ids: [], errors: [], dryRun };
         if (!ffzs || !ffzs.length) return res;
         const csrf = getCsrfToken();
         if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
@@ -10110,19 +10152,35 @@
         const tmplEnt = bucket && bucket.entities && bucket.entities.find(e => e.type === 16 && entityCoords(e));
         let tmplBody = null;
         if (tmplEnt) { try { tmplBody = buildWriteBody(tmplEnt, siteCfg); } catch (e) {} }
-        for (const f of ffzs) {
-            if (!f.restrictions || typeof f.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${f.name}: no DEM altitude — skipped`); continue; }
-            const body = genCreateBody(f, siteID, siteCfg, tmplBody);
-            if (dryRun) { res.created++; continue; }
+        // Phase 1: fuse grouped corridors into single entities (one create/upsert each).
+        const writes = fuseCorridorGroups(ffzs);
+        for (const w of writes) {
+            const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
+            if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
+            let body;
+            if (w.kind === 'upsert') {
+                if (!w.ent) { res.failed++; res.errors.push(`${label}: anchor entity not found — skipped`); continue; }
+                try { body = buildWriteBody(w.ent, siteCfg); } catch (e) { res.failed++; res.errors.push(`${label}: build body threw ${e && e.message || e}`); continue; }
+                body.points = w.points;
+                if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+                if (typeof w.restrictions.minAlt === 'number') body.restrictions.minAlt = w.restrictions.minAlt;
+                if (typeof w.restrictions.maxAlt === 'number') body.restrictions.maxAlt = w.restrictions.maxAlt;
+                body.validated = false;   // geometry changed → re-enters review
+            } else {
+                body = genCreateBody({ name: w.name, points: w.points, restrictions: w.restrictions }, siteID, siteCfg, tmplBody);
+            }
+            if (dryRun) { if (w.kind === 'upsert') res.updated++; else res.created++; continue; }
             try {
                 const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
                 const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
                 const saved = json && json.map_objects;
                 if (r.status === 200 && saved) {
-                    res.created++;
-                    if (saved.id != null) { res.ids.push({ id: saved.id, name: f.name }); f._committedId = saved.id; }
-                } else { res.failed++; res.errors.push(`${f.name}: server ${r.status} ${(txt || '').slice(0, 140)}`); }
-            } catch (e) { res.failed++; res.errors.push(`${f.name}: POST threw ${e && e.message || e}`); }
+                    if (w.kind === 'upsert') res.updated++; else res.created++;
+                    const sid = (saved.id != null) ? saved.id : w.anchorId;
+                    if (sid != null) { res.ids.push({ id: sid, name: label }); (w.members || []).forEach(m => { m._committedId = sid; }); }
+                    if (w.existing) { w.existing._dirty = false; w.existing._committedId = sid; try { markFfzCommitted(w.existing); } catch (e) {} }
+                } else { res.failed++; res.errors.push(`${label}: server ${r.status} ${(txt || '').slice(0, 140)}`); }
+            } catch (e) { res.failed++; res.errors.push(`${label}: POST threw ${e && e.message || e}`); }
         }
         return res;
     }
@@ -10685,23 +10743,24 @@
             const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
             if (!ffzs.length) { commitResult.innerHTML = '<span style="color:#ffb347">Nothing to commit — run Preview first.</span>'; return; }
             const dry = !!dryEl.checked;
-            if (!dry && !confirm(`Create ${ffzs.length} FFZ${ffzs.length === 1 ? '' : 's'} on this site? They'll be named with a DRAFT prefix (removable via "Remove DRAFT FFZs").`)) return;
+            if (!dry && !confirm(`Commit these drawn FFZs on this site? Connected corridors fuse into ONE zone each; new zones are DRAFT-prefixed (removable via "Remove DRAFT FFZs").`)) return;
             commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
             try {
                 const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
+                const updTxt = r.updated ? ` · <b style="color:#ffe14d">${r.updated}</b> fused into existing` : '';
                 if (dry) {
-                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created${updTxt} · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
                 } else {
                     if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
-                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b> · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${r.created ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
-                    if (r.created) {
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
+                    if (r.created || r.updated) {
                         // Keep committed FFZs drawn (no reload needed to see them) + lock them.
                         clearResizeHandles();
                         (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
                         try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
-                        showToast(`Committed ${r.created} FFZ${r.created === 1 ? '' : 's'}`, 'rgba(95,255,95,0.5)');
+                        showToast(`Committed ${r.created} new${r.updated ? ` · ${r.updated} fused` : ''} FFZ`, 'rgba(95,255,95,0.5)');
                     }
                 }
             } catch (e) {
