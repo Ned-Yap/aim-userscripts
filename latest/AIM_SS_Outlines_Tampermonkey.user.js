@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.78
+// @version      34.79
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.78';
+    const SCRIPT_VERSION = '34.79';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1219,6 +1219,31 @@
         _aimRemovedOrtho.clear();
         if (restored) console.log(`${TAG} hide-ortho OFF: restored ${restored} ortho layer(s)`);
     }
+
+    // Apply the three Map-performance levers (satellite hide, ortho low-res,
+    // ortho hide) WITHOUT requiring the styler master to be active. Each
+    // underlying function is idempotent and reads live perf flags + handles
+    // its own restore branch, so it's safe to call from here AND from
+    // runUpdate. This is what lets the perf toggles work when Outlines is off.
+    function applyPerfMapSettings() {
+        try { applyMapBackgroundVisibility(); } catch (e) {}
+        try { applyOrthoSettings(); } catch (e) {}
+        try { applyOrthoVisibility(); } catch (e) {}
+    }
+
+    // Independent keep-alive: while any Map-performance lever is ON and the
+    // styler is NOT active (so runUpdate's heartbeat isn't running), re-apply
+    // on a slow tick. Catches ortho/satellite layers Percepto adds later (on
+    // pan / mission open / nav) and re-suppresses any it re-adds. When the
+    // styler IS active, runUpdate already does this every heartbeat, so we
+    // skip to avoid doubling the work.
+    setInterval(() => {
+        try {
+            if (!isActive && (perfHideOrtho || perfHideSatellite || perfOrthoLowRes)) {
+                applyPerfMapSettings();
+            }
+        } catch (e) {}
+    }, 1500);
 
     // Flight-path vertex dot styling. Percepto renders FP vertices as
     // `<div class="map-marker__flight-path-vertex …">` icons in
@@ -5893,34 +5918,26 @@
                 }
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
-                // re-run so the change takes effect immediately.
+                // apply IMMEDIATELY — independent of the styler master. These
+                // are performance levers and must work even when the user has
+                // the Outlines master OFF (which is exactly the case that made
+                // them look broken: they used to gate on `if (isActive)
+                // runUpdate()`, so a styler-off page silently ignored them).
+                // applyPerfMapSettings() calls the underlying appliers, which
+                // are idempotent and handle both the ON and OFF (restore)
+                // branches, so we don't need the old `else restore…` calls.
                 if (msg.key === 'hide-satellite') {
                     const next = !!msg.value;
-                    if (next !== perfHideSatellite) {
-                        perfHideSatellite = next;
-                        if (isActive) runUpdate();
-                        else if (!next) restoreMapBackground();
-                    }
+                    if (next !== perfHideSatellite) { perfHideSatellite = next; applyPerfMapSettings(); }
                 } else if (msg.key === 'ortho-lowres') {
                     const next = !!msg.value;
-                    if (next !== perfOrthoLowRes) {
-                        perfOrthoLowRes = next;
-                        if (isActive) runUpdate();
-                        else if (!next) restoreOrthoSettings();
-                    }
+                    if (next !== perfOrthoLowRes) { perfOrthoLowRes = next; applyPerfMapSettings(); }
                 } else if (msg.key === 'ortho-lowres-zoom') {
                     const n = Number(msg.value);
-                    if (!isNaN(n) && n !== perfOrthoLowResZoom) {
-                        perfOrthoLowResZoom = n;
-                        if (isActive && perfOrthoLowRes) runUpdate();
-                    }
+                    if (!isNaN(n) && n !== perfOrthoLowResZoom) { perfOrthoLowResZoom = n; applyPerfMapSettings(); }
                 } else if (msg.key === 'hide-ortho') {
                     const next = !!msg.value;
-                    if (next !== perfHideOrtho) {
-                        perfHideOrtho = next;
-                        if (isActive) runUpdate();
-                        else if (!next) restoreOrthoVisibility();
-                    }
+                    if (next !== perfHideOrtho) { perfHideOrtho = next; applyPerfMapSettings(); }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 // Same cross-tab gate as TRIGGER_ACTION: hotkeys pressed in

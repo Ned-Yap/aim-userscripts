@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Map-performance toggles now work with Outlines OFF — Map Styler v34.79 (dev/latest)
+
+Fix: the three Map-performance levers (hide ortho, hide satellite, low-res) are implemented inside Map Styler and used to do nothing unless the **Outlines master was ON** — they gated on `if (isActive) runUpdate()`. So turning Outlines off (e.g. to cut load) silently disabled the very toggles that cut load. They now apply **independently of the styler master**, via a direct idempotent applier + a slow keep-alive tick that also catches ortho/satellite layers Percepto adds later. Perf toggles work regardless of whether Outlines is on.
+
+---
+
 ## 2026-06-25 — "Hide orthomosaic imagery" perf toggle — Perf Shield v1.18 + Map Styler v34.78 (dev/latest)
 
 New Control Panel → Performance → Map performance → **"Hide orthomosaic imagery."** On sites that stack dozens of orthomosaic COG layers (e.g. site 1153 has ~50), opening a heavy mission zooms in and triggers a tile-fetch storm that can freeze the tab. This toggle tells Map Styler to **remove** those ortho layers from the map so their tiles stop being fetched entirely (low-res only thins the storm; this kills it). Fully reversible — toggle off re-adds the layers, no reload. Also fixed the ortho-layer detection to match **DroneDeploy-hosted** orthos (`public_tiles.dronedeploy.com/.../orthomosaic/`), which the old patterns missed — on many sites those are the bulk of the ortho layers, so low-res/hide now actually cover them. Note: "Hide satellite base tiles" only hides the HERE world basemap *underneath* the orthos — to clear the site imagery itself, use the new ortho toggle.
