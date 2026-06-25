@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — clearer m2 on older/merged corridors — Asset Inspector v4.107 (dev/latest)
+
+Right-clicking a corridor that can't be reopened for editing (one drawn by an older version, or one that was merged into another FFZ — its corridor centerline wasn't saved) now shows a clear note instead of doing nothing, and points you at the way to extend it: branch off its edge with the cyan snap. Newly drawn corridors still reopen on right-click as before.
+
+---
+
 ## 2026-06-25 — Advanced Draw — fix yellow shielding side + keep editing after a merge — Asset Inspector v4.106 (dev/latest)
 
 (1) The **yellow shielding band now sits beyond the far edge of the FFZ** (the opposite side of the 30 ft zone), not on either side of the drawn line — so red flanks the inner edge and yellow flanks the outer edge. (2) After a merge you can **keep working**: you can now branch a new corridor off a freshly-merged FFZ (it's recognized as a snap target before it's even saved), and the draw mode no longer gets stuck — finishing re-arms the tool and clears the leftover drag state.

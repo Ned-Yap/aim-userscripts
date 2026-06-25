@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.106
+// @version      4.107
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.106';
+    const SCRIPT_VERSION = '4.107';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9922,6 +9922,12 @@
             try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
             // Right-click an Advanced-Draw corridor (not yet committed) → re-open it for editing.
             if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
+            // A drawn/merged preview with no corridor re-edit data (older version, or merged) — can't
+            // reopen as a corridor (its centerline wasn't saved). Say so + point at what works.
+            if (poly._ffz && !poly._ffz._committed && (poly._ffz._drawn || poly._ffz._adv || poly._ffz._merged) && !(Array.isArray(poly._ffz._advVerts) && poly._ffz._advVerts.length >= 2)) {
+                showToast('Older/merged FFZ — can\'t reopen as a corridor. Branch off its edge (cyan snap) to extend it.', 'rgba(255,179,71,0.6)');
+                return;
+            }
             try {
                 const L2 = getLeafletL();
                 if (L2 && map) L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
