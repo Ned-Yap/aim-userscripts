@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Advanced Draw — fix right-click re-edit (inspector was stealing it) — Asset Inspector v4.102 (dev/latest)
+
+Right-clicking a drawn corridor popped the entity inspector instead of re-opening it for editing — the Inspector's global right-click handler fires before the corridor's own. Now that handler checks first whether the right-click landed inside an unsaved drawn corridor and, if so, re-opens it for editing instead.
+
+---
+
 ## 2026-06-24 — Advanced Draw — finished corridors autosave + right-click to re-edit — Asset Inspector v4.101 (dev/latest)
 
 (1) **Finished-but-uncommitted corridors now survive a reload** — they autosave to localStorage and restore when you reopen the ⊕ Generate modal (a toast tells you how many came back). Committing or removing them clears them from the autosave. (2) **Right-click a drawn corridor to edit it again** — it reloads the vertices/widths back into Advanced Draw so you can drag points/edges and double-click to re-finish, no need to redraw from scratch. Moving/rotating a corridor via the normal edit layer keeps its re-edit data in sync.

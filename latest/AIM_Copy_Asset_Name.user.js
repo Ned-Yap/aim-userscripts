@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.101
+// @version      4.102
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.101';
+    const SCRIPT_VERSION = '4.102';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2967,6 +2967,22 @@
             try { latlng = map.containerPointToLatLng([px, py]); }
             catch (err) { dbg('bail: containerPointToLatLng threw', err); return; }
             if (!latlng) { dbg('bail: no latlng'); return; }
+            // Advanced Draw: a right-click inside an unsaved drawn corridor re-opens it
+            // for editing. This global handler fires before the preview polygon's own
+            // contextmenu, so it has to be handled here (else the inspector pops instead).
+            try {
+                if (document.getElementById(GEN_MODAL_ID)) {
+                    const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+                    for (const f of ffzs) {
+                        if (f && f._adv && !f._committed && Array.isArray(f._advVerts) && Array.isArray(f.points) && f.points.length >= 3 && pointInPolygon(latlng.lat, latlng.lng, f.points)) {
+                            e.preventDefault(); e.stopPropagation();
+                            dbg('adv-draw corridor right-click → re-edit');
+                            advReEdit(f);
+                            return;
+                        }
+                    }
+                }
+            } catch (err) {}
             // Lazy-fetch if not loaded yet
             if (!mapObjectsBySite[siteID] && !fetchingSites.has(siteID)) {
                 fetchMapObjects(siteID);
