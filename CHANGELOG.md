@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-24 — Advanced Draw — flush corners (auto-overshoot + snap to standoff corner) — Asset Inspector v4.100 (dev/latest)
+
+No more guessing how far past a corner to click. (1) **Ctrl now snaps to the asset's standoff *corner*** (the offset-ring vertex), not just the nearest edge point — so wraps land exactly on that "30 ft-past" point you were predicting. (2) **Corners auto-square** — a sharp/gentle turn now overshoots past the pivot by the width into a clean square corner instead of a pinched/pointed one (right-angle turns were already flush). Together you get clean corners around obstacles on or off pads.
+
+---
+
 ## 2026-06-24 — Advanced Draw — per-segment width (drag an outer edge) — Asset Inspector v4.98 (dev/latest)
 
 Each corridor segment now has its **own width**. Grab a segment's **outer edge and drag it** to widen/narrow just that box (e.g. push past 30 ft on one stretch) — the corridor re-mitres cleanly at the width change, neighbors stay attached. The **Width** field still sets all segments at once (a global reset); edge-drag overrides individuals. Per-segment widths autosave with the rest of the draw. (Priority on click: grab a vertex → grab an outer edge → else add a point.)

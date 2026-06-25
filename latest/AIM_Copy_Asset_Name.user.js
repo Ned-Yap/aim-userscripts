@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.99
+// @version      4.100
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.99';
+    const SCRIPT_VERSION = '4.100';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9197,8 +9197,8 @@
     // Offset a meters polyline by per-segment offsets (array, meters) OR a scalar,
     // mitering at corners (so different-width segments meet cleanly). side = ±1.
     function advOffsetMiter(m, side, off) {
-        const N = m.length, segN = [];
-        for (let i = 0; i < N - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); }
+        const N = m.length, segN = [], ud = [];
+        for (let i = 0; i < N - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); ud.push({ x: dx / L, y: dy / L }); }
         if (!segN.length) return m.slice();
         const w = (i) => Array.isArray(off) ? (off[Math.min(i, off.length - 1)]) : off;
         const out = [];
@@ -9208,11 +9208,15 @@
             const o0 = w(i - 1), o1 = w(i);
             const a0 = { x: m[i].x + segN[i - 1].nx * o0, y: m[i].y + segN[i - 1].ny * o0 };
             const a1 = { x: m[i].x + segN[i].nx * o1, y: m[i].y + segN[i].ny * o1 };
-            const d0 = { x: m[i].x - m[i - 1].x, y: m[i].y - m[i - 1].y };
-            const d1 = { x: m[i + 1].x - m[i].x, y: m[i + 1].y - m[i].y };
-            const X = lineX(a0, d0, a1, d1);
-            if (X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= Math.max(Math.abs(o0), Math.abs(o1)) * 4) out.push(X);
-            else { out.push(a0); out.push(a1); }
+            const X = lineX(a0, ud[i - 1], a1, ud[i]);
+            const maxo = Math.max(Math.abs(o0), Math.abs(o1));
+            const miterLen = X ? Math.hypot(X.x - m[i].x, X.y - m[i].y) : Infinity;
+            // A clean ~right-angle (or concave) miter is already a flush square corner — use it.
+            if (X && miterLen <= maxo * 1.8) { out.push(X); continue; }
+            // Sharp/gentle CONVEX turn would pinch/bevel — auto-OVERSHOOT past the pivot by the
+            // width so the corner wraps square (the "go out another 30 ft" the user asked for).
+            out.push({ x: a0.x + ud[i - 1].x * maxo, y: a0.y + ud[i - 1].y * maxo });
+            out.push({ x: a1.x - ud[i].x * maxo, y: a1.y - ud[i].y * maxo });
         }
         return out;
     }
@@ -9269,19 +9273,23 @@
         const wm = (c.x - a.x) * nx + (c.y - a.y) * ny; // signed perpendicular on the width side
         return Math.max(5, Math.round(wm / GEN_FT_TO_M));
     }
-    // Ctrl-snap: nearest point on the nearest asset's offset ring (offsetFt off it).
+    // Ctrl-snap: PREFER the nearest asset standoff CORNER (offset-ring vertex) so corner
+    // wraps land precisely; else the nearest point on the offset ring (an edge).
     function advSnapToAsset(cursor) {
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         const offM = advDraw.offsetFt * GEN_FT_TO_M;
-        let best = null;
+        let bestCorner = null, bestCornerD = Infinity, bestEdge = null, bestEdgeD = Infinity;
         for (const a of ents) {
             if (a.type !== 3) continue;
             const ring = getAssetOffsetRing(a, offM);
             if (!ring) continue;
+            for (const v of ring) { const d = approxMeters(cursor.lat, cursor.lng, v.lat, v.lng); if (d < bestCornerD) { bestCornerD = d; bestCorner = v; } }
             const np = nearestPointOnRing(cursor, ring);
-            if (np && (!best || np.d < best.d)) best = np;
+            if (np && np.d < bestEdgeD) { bestEdgeD = np.d; bestEdge = np.pt; }
         }
-        return (best && best.d < 120 * GEN_FT_TO_M) ? best.pt : cursor; // generous magnet (Ctrl is explicit + shows the target ring)
+        if (bestCorner && bestCornerD < 40 * GEN_FT_TO_M) return bestCorner; // standoff corner = clean wrap
+        if (bestEdge && bestEdgeD < 120 * GEN_FT_TO_M) return bestEdge;      // standoff edge
+        return cursor;
     }
     // Shift-snap: snap (last→cursor) bearing to 15° steps relative to the previous segment.
     function advSnapAngle(cursor) {
