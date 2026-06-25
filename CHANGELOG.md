@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — vertex editor is opt-in again (m2 no longer hijacked) — Asset Inspector v4.109 (dev/latest)
+
+Right-click goes back to what you're used to: a **fresh corridor reopens for fast corridor editing**, and any other FFZ shows its **info popup**. The per-vertex editor (slow, native-feeling) is no longer forced on m2 — instead, an uncommitted preview's popup now has a small **✎ Edit points** button you press only when you actually need to reshape an older or merged shape. So fast editing stays the default; vertex editing is there when you want it, out of the way when you don't.
+
+---
+
 ## 2026-06-25 — Advanced Draw — per-vertex editor for ANY preview FFZ — Asset Inspector v4.108 (dev/latest)
 
 Right-click any uncommitted preview FFZ — an older corridor, a merged shape, a simple draw, or an existing FFZ you loaded for editing — and its **polygon points become draggable cyan dots**: drag a dot to move it, right-click a dot to delete it, click a faint mid-dot to insert a new point. Finish with **Esc** or right-clicking the body. This edits the shape directly, so it works on every FFZ regardless of how it was made (the older/merged ones that couldn't reopen as corridors are now fully editable). Freshly drawn Advanced-Draw corridors still reopen as corridors (the richer edit); everything else uses the vertex editor. If Advanced Draw was armed, it pauses while you edit vertices and resumes after. Drawn shapes autosave; existing-FFZ edits save via **Save FFZ edits**.

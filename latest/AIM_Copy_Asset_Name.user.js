@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.108
+// @version      4.109
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.108';
+    const SCRIPT_VERSION = '4.109';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9995,13 +9995,26 @@
             try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
             // Already vertex-editing THIS poly → m2 on the body finishes.
             if (genVertEdit.active && genVertEdit.f === poly._ffz) { exitGenVertEdit(true); return; }
-            // A fresh Advanced-Draw corridor (has its centerline) → reopen as a corridor (richer edit).
+            // A fresh Advanced-Draw corridor (has its centerline) → reopen as a corridor (the FAST edit).
             if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && poly._ffz._advVerts.length >= 2 && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
-            // Any other uncommitted preview FFZ (older corridor, merged, simple draw, existing edit) → per-vertex editor.
-            if (poly._ffz && !poly._ffz._committed) { try { startGenVertEdit(poly._ffz); } catch (err) {} return; }
+            // Everything else → info popup (familiar). Uncommitted previews ALSO get an opt-in
+            // "✎ Edit points" button — the per-vertex editor is on demand only, never auto (it's slow).
             try {
                 const L2 = getLeafletL();
-                if (L2 && map) L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
+                if (!L2 || !map) return;
+                const pop = L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
+                if (poly._ffz && !poly._ffz._committed) {
+                    const el = pop.getElement && pop.getElement();
+                    const host = el && el.querySelector('.leaflet-popup-content');
+                    if (host) {
+                        const btn = document.createElement('button');
+                        btn.textContent = '✎ Edit points';
+                        btn.style.cssText = 'margin-top:6px;background:rgba(0,229,255,0.15);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:3px 8px;cursor:pointer;font:inherit;font-size:11px';
+                        btn.onclick = () => { try { map.closePopup(pop); } catch (er) {} try { startGenVertEdit(poly._ffz); } catch (er) {} };
+                        host.appendChild(document.createElement('br'));
+                        host.appendChild(btn);
+                    }
+                }
             } catch (err) {}
         });
         poly.on('mousedown', (e) => {
