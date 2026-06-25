@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.13
+// @version      0.14
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.13';
+    const SCRIPT_VERSION = '0.14';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -327,39 +327,60 @@
         }
         throw new Error(`PUT ${path} HTTP ${resp.status}`);
     }
+    // Robust read of the changes.csv. Returns {text, sha}:
+    //   - {text:null, sha:null}  ONLY on a genuine 404 (file does not exist yet).
+    //   - {text, sha}            on success (full content + the sha for the PUT).
+    //   - THROWS                 when the file EXISTS (sha present) but the body
+    //                            can't be read back intact.
+    // A blank/short read of an existing file is a READ FAILURE, never an empty
+    // file. v0.11–v0.13 treated it as empty and rewrote the file from a bare
+    // header — silently wiping ~3000 rows of audit history on 2026-06-20, then
+    // re-wiping every cycle. So we sanity-check (non-empty + our header) and
+    // refuse to proceed otherwise. Read base64 from the Contents API when it's
+    // present (the proven path that carried 3000+ rows); the API only blanks
+    // base64 above 1 MB, so fall back to the raw media type just for that case.
+    async function readCsv() {
+        const meta = await ghGetMeta(CSV_PATH);
+        if (!meta) return { text: null, sha: null };          // genuine 404
+        let text;
+        if (meta.base64 && meta.base64.length) text = b64ToText(meta.base64);   // <1 MB
+        else text = await ghGetRaw(CSV_PATH);                 // >1 MB — base64 blanked
+        const firstLine = text ? (text.split('\n', 1)[0] || '') : '';
+        if (!text || !text.length || firstLine !== CSV_HEADER) {
+            throw new Error(`CSV read failed for existing file (sha ${meta.sha}, len ${text ? text.length : 'null'}, head "${firstLine.slice(0, 40)}") — refusing to overwrite history`);
+        }
+        return { text, sha: meta.sha };
+    }
+
     // CSV append: re-reads fresh content each attempt so concurrent appends
-    // never drop rows.
+    // never drop rows, and NEVER recreates an existing file from scratch (a bad
+    // read retries, then aborts with history intact rather than wiping it).
     async function appendCsvRows(rowStrings, message) {
         if (!rowStrings.length) return;
         for (let attempt = 0; attempt < 3; attempt++) {
-            const meta = await ghGetMeta(CSV_PATH);     // sha (present even when >1MB)
-            let content;
-            if (!meta) {
-                content = CSV_HEADER + '\n';
-            } else {
-                // Read the REAL content via raw — base64 `content` is blanked >1MB,
-                // which used to make this branch rewrite the file from scratch.
-                const existing = await ghGetRaw(CSV_PATH);
-                if (existing == null || !existing.length) {
-                    content = CSV_HEADER + '\n';        // vanished/empty → (re)create
-                } else {
-                    const firstLine = (existing.split('\n', 1)[0] || '');
-                    // Only a genuine schema change (real old header) starts fresh;
-                    // never an empty read.
-                    if (firstLine === CSV_HEADER) content = existing.endsWith('\n') ? existing : existing + '\n';
-                    else content = CSV_HEADER + '\n';
-                }
+            let base, sha;
+            try {
+                const r = await readCsv();
+                if (r.text == null) { base = CSV_HEADER + '\n'; sha = undefined; }   // create ONLY on real 404
+                else { base = r.text.endsWith('\n') ? r.text : r.text + '\n'; sha = r.sha; }
+            } catch (e) {
+                // Read of an existing file failed — retry; do NOT overwrite.
+                console.warn(`${TAG} CSV read attempt ${attempt + 1}/3 failed, retrying`, e);
+                await sleep(800);
+                continue;
             }
-            content += rowStrings.join('\n') + '\n';
+            const content = base + rowStrings.join('\n') + '\n';
             const url = `${GITHUB_API_BASE}/repos/${DATA_REPO}/contents/${ghPath(CSV_PATH)}`;
             const body = { message, content: textToB64(content), branch: DATA_BRANCH };
-            if (meta && meta.sha) body.sha = meta.sha;
+            if (sha) body.sha = sha;
             const resp = await ghRequest({ method: 'PUT', url, headers: ghHeaders(true), data: JSON.stringify(body), timeout: 30000 });
             if (resp.status === 200 || resp.status === 201) return;
-            if (resp.status === 409 || resp.status === 422) continue;   // conflict → re-GET fresh and re-append
+            if (resp.status === 409 || resp.status === 422) continue;   // sha conflict → re-read and re-append
             throw new Error(`CSV PUT HTTP ${resp.status}`);
         }
-        throw new Error('CSV PUT failed after retries');
+        // All attempts exhausted. Better to drop these rows (still recorded in the
+        // per-site snapshots) than to wipe the whole audit log.
+        throw new Error('CSV append failed after retries — audit log left intact, rows not written');
     }
 
     // =====================================================================
@@ -682,8 +703,8 @@
         return rows;
     }
     async function fetchChangesSince(sinceISO) {
-        const text = await ghGetRaw(CSV_PATH);      // raw: full content even >1MB
-        if (text == null) return [];
+        const { text } = await readCsv();           // throws on a bad read of an existing file
+        if (text == null) return [];                // genuine 404 — no log yet
         const rows = parseCsv(text);
         if (!rows.length) return [];
         const header = rows[0];
