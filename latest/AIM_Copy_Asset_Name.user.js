@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.105
+// @version      4.106
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.105';
+    const SCRIPT_VERSION = '4.106';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9257,6 +9257,18 @@
         const band = advOffsetMiter(m, side, dir * offsetFt * GEN_FT_TO_M);
         return m.concat(band.slice().reverse()).map(p => proj.inv(p));
     }
+    // Shielding band beyond the FAR (outer) edge of the corridor box — sits on the OPPOSITE
+    // side of the FFZ from the front band, not on the drawn line.
+    function advBandOuter(verts, widthsFt, offsetFt, side) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const om = offsetFt * GEN_FT_TO_M;
+        const widthsM = widthsFt.map(w => w * GEN_FT_TO_M);
+        const inner = advOffsetMiter(m, side, widthsM);                  // box outer rail (far edge of the FFZ)
+        const outer = advOffsetMiter(m, side, widthsM.map(w => w + om)); // + shielding offset
+        return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
+    }
     // Draw a shielding band polygon + a low-pri "<offset> ft" measure label at its centroid.
     function advDrawBand(map, L, band, color, fillOpacity) {
         if (!band || !band.length) return;
@@ -9349,12 +9361,12 @@
             const placed = advSegWidthsFt(advDraw.verts.length - 1);
             const widthsFt = [];
             for (let i = 0; i < path.length - 1; i++) widthsFt.push(i < placed.length ? placed[i] : advDraw.widthFt);
-            // FFZ corridor box (green) first, then the shielding bands ON TOP so the back band stays visible over the box.
+            // FFZ corridor box (green) first, then the shielding bands ON TOP.
             const outline = advOutline(path, widthsFt, advDraw.side);
             if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#5fff5f', weight: 2, opacity: 0.95, fillColor: '#5fff5f', fillOpacity: 0.18, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
-            // Shielding on BOTH sides of the drawn line: red on the front (away from the box), yellow on the back (box side).
-            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, 1), advDraw.bufColor2, advDraw.bufOpacity);
-            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, -1), advDraw.bufColor, advDraw.bufOpacity);
+            // Shielding flanks the whole FFZ: red just outside the inner (drawn) edge, yellow beyond the far (outer) edge of the box.
+            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, -1), advDraw.bufColor, advDraw.bufOpacity);        // red — just outside the inner (drawn) edge
+            advDrawBand(map, L, advBandOuter(path, widthsFt, advDraw.offsetFt, advDraw.side), advDraw.bufColor2, advDraw.bufOpacity);  // yellow — beyond the FAR edge of the 30 ft FFZ
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
             // grabbed outer edge highlight (white, neutral against the green FFZ)
             if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
@@ -9400,10 +9412,15 @@
     function advSnapToFfzEdge(cursor) {
         const map = getLeafletMap(); if (!map) return null;
         let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
-        const sources = [];
+        const sources = [], skipIds = new Set();
+        // Editable existing-FFZ layers FIRST — their (possibly merged/edited) geometry wins over
+        // the stale committed entity ring, so you can branch off a just-merged FFZ before saving.
+        genPreviewLayers.forEach(pl => { const f = pl && pl._ffz; if (f && f._existing && Array.isArray(f.points) && f.points.length >= 2 && !f._committed) { sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); if (f._origId != null) skipIds.add(f._origId); } });
+        // Any uncommitted preview FFZ (drawn corridor, merged-in-place, etc.) — not just _adv ones.
+        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && !f._committed && Array.isArray(f.points) && f.points.length >= 2) sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); } } catch (e) {}
+        // Committed entities — skip any we already have a fresher editable copy of.
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
-        for (const a of ents) { if (a.type !== 16) continue; const r = entityCoords(a); if (r && r.length >= 2) sources.push({ ring: r, kind: 'entity', id: a.id, ref: null }); }
-        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && f._adv && !f._committed && Array.isArray(f.points) && f.points.length >= 2) sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); } } catch (e) {}
+        for (const a of ents) { if (a.type !== 16 || skipIds.has(a.id)) continue; const r = entityCoords(a); if (r && r.length >= 2) sources.push({ ring: r, kind: 'entity', id: a.id, ref: null }); }
         let best = null, bestD = 12, bestSrc = null;
         for (const s of sources) {
             const ring = s.ring, n = ring.length;
@@ -9535,17 +9552,19 @@
     function mergeCorridorIntoSource(branch, outline) {
         try {
             if (branch.kind === 'preview') {
+                // ref = a live preview f: a drawn corridor (in genState.lastResult.ffzs) OR an
+                // _existing editable layer (genPreviewLayers, e.g. a previously merged committed FFZ).
                 const f = branch.ref;
-                const list = (genState.lastResult && genState.lastResult.ffzs) || [];
-                if (!f || list.indexOf(f) < 0) return false;
+                if (!f || !Array.isArray(f.points) || f.points.length < 3) return false;
                 const combined = spliceCorridor(f.points, outline, branch.edge);
                 if (!combined) return false;
                 f.points = combined; f._centroid = ringCentroid(combined); f._merged = true;
-                delete f._adv; delete f._advVerts; delete f._advSegWidth; delete f._advSide;  // no longer a re-editable corridor
+                if (f._existing) { f._dirty = true; }
+                else { delete f._adv; delete f._advVerts; delete f._advSegWidth; delete f._advSide; }  // no longer a re-editable corridor
                 if (f._poly) { try { f._poly.setLatLngs(combined.map(p => [p.lat, p.lng])); } catch (e) {} }
-                else renderGenPreview(genState.lastResult.ffzs, false);
+                else renderGenPreview((genState.lastResult && genState.lastResult.ffzs) || [], false);
                 advSaveFfzs();
-                showToast('Merged corridor into the drawn FFZ — Commit to save', 'rgba(95,255,95,0.5)');
+                showToast(f._existing ? `Merged into FFZ #${f._origId} — press "Save FFZ edits"` : 'Merged corridor into the drawn FFZ — Commit to save', 'rgba(95,255,95,0.5)');
                 return true;
             }
             if (branch.kind === 'entity') {
@@ -9585,11 +9604,14 @@
         const outline = advOutline(verts, segW, finSide);
         const branch = advDraw.branchSrc; advDraw.branchSrc = null;
         advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
+        advDraw.dragVert = null; advDraw.dragEdge = null; advDraw.ffzSnap = null;  // clear transient edit state so the mode stays usable
         advClearLayers(); advClearPersist();
+        try { const mp0 = getLeafletMap(); if (mp0) mp0.dragging.enable(); } catch (e) {}
         if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
         // If the first point branched off an existing FFZ edge, MERGE the corridor into that
         // FFZ (splice its open chain into the ring) so it stays ONE entity, not a second polygon.
-        if (branch && mergeCorridorIntoSource(branch, outline)) return;
+        // Re-arm advDraw wiring afterward — renderGenPreview re-wires map editing and can steal events.
+        if (branch && mergeCorridorIntoSource(branch, outline)) { if (advDraw.active) { advWire(); advRender(); } return; }
         const cen = ringCentroid(outline);
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
@@ -9606,6 +9628,7 @@
         if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
         genState.lastResult.ffzs.push(f);
         renderGenPreview(genState.lastResult.ffzs);
+        if (advDraw.active) { advWire(); advRender(); }  // re-arm — renderGenPreview re-wires map editing
         advSaveFfzs(); // persist the finished (uncommitted) corridor so a reload doesn't lose it
         showToast('Drew corridor FFZ — right-click it to re-edit · Commit to save', 'rgba(255,225,77,0.55)');
     }
