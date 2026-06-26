@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.127
+// @version      4.128
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.127';
+    const SCRIPT_VERSION = '4.128';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10006,16 +10006,29 @@
         try {
             const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
             const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
-            if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
-            else localStorage.removeItem(advFfzKey());
+            if (slim.length) {
+                const json = JSON.stringify(slim);
+                localStorage.setItem(advFfzKey(), json);
+                // ALSO mirror to a NEVER-cleared backup on every non-empty save, so a commit/reload can
+                // never lose your work — __aimAdvRestoreBackup() always has the last drawn state.
+                try { localStorage.setItem('aim_adv_ffzs_backup:' + (genState.siteID || '?'), json); } catch (e) {}
+            } else {
+                localStorage.removeItem(advFfzKey()); // live key only — the backup is left intact on purpose
+            }
         } catch (e) {}
     }
     // Recovery: copy the pre-commit backup back into the live autosave, then reopen the ⊕ modal.
     try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const b = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); if (!b) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } localStorage.setItem('aim_adv_ffzs:' + siteID, b); const n = (JSON.parse(b) || []).length; (uwin().console || console).log('[AIM] restored ' + n + ' draft(s) — reopen the ⊕ Generate modal to see them'); return n; }; } catch (e) {}
     function advLoadFfzs(siteID) {
         try {
-            const raw = localStorage.getItem('aim_adv_ffzs:' + siteID); if (!raw) return;
+            // Live key first; if it was wiped, AUTO-FALL-BACK to the never-cleared backup so reopening
+            // the modal always brings your drafts back (no console command needed).
+            let raw = localStorage.getItem('aim_adv_ffzs:' + siteID);
+            let fromBackup = false;
+            if (!raw) { raw = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); fromBackup = !!raw; }
+            if (!raw) return;
             const slim = JSON.parse(raw); if (!Array.isArray(slim) || !slim.length) return;
+            if (fromBackup) { try { localStorage.setItem('aim_adv_ffzs:' + siteID, raw); } catch (e) {} } // re-seat the live key
             if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
             const have = new Set(((genState.lastResult.ffzs) || []).map(f => f && f.points && JSON.stringify(f.points)));
             let added = 0;
@@ -11210,6 +11223,9 @@
                         } catch (e) { console.warn(`${GEN_TAG} draw merged shapes failed:`, e); }
                         (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
                         try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
+                        // Clear the safety backup ONLY on a fully clean commit (nothing failed/blocked) —
+                        // a partial/failed commit keeps the backup so nothing is ever lost.
+                        if (r.failed === 0 && r.invalid === 0) { try { localStorage.removeItem('aim_adv_ffzs_backup:' + genState.siteID); } catch (e) {} }
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
                         showToast(`Committed ${r.created} new${r.updated ? ` · ${r.updated} fused` : ''} FFZ`, 'rgba(95,255,95,0.5)');
                     }
