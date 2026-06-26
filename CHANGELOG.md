@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — "Show shielding on drafts" toggle — Asset Inspector v4.121 (dev/latest)
+
+New **Show shielding on drafts** checkbox in the Commit box. When on, every drawn corridor draft shows its red inner / yellow outer shielding bands — not just the one you're actively drawing — so you can see clearance across the whole site at once. The bands re-draw after you move or rotate a draft. (Reads each corridor's stored width/offset/line settings.)
+
+---
+
 ## 2026-06-25 — Generator — Undo (Ctrl+Z) for moves / rotates / vertex edits — Asset Inspector v4.120 (dev/latest)
 
 Accidentally dragged or rotated a draft zone? **Ctrl+Z** now puts it back. It snapshots a zone's geometry before each move, Q/E rotate, or per-vertex edit, and restores the most recent on Ctrl+Z (up to 40 steps back). Works on drawn drafts and loaded existing-FFZ edits.

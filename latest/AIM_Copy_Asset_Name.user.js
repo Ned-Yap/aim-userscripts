@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.120
+// @version      4.121
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.120';
+    const SCRIPT_VERSION = '4.121';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9841,7 +9841,7 @@
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
         for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
-        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide, _advAnchor: finAnchor, _advAnchorOffsetFt: finStartFt };
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide, _advAnchor: finAnchor, _advAnchorOffsetFt: finStartFt, _advOffsetFt: advDraw.offsetFt };
         // NON-DESTRUCTIVE merge: if the first point branched off an FFZ, join that FFZ's group
         // (stays its own editable corridor; fuses into one entity at Commit) + inherit its band.
         // reGroup = re-finishing a corridor that was already in a group → keep it in that group.
@@ -9885,7 +9885,7 @@
     function advSaveFfzs() {
         try {
             const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
-            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
+            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
             if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
             else localStorage.removeItem(advFfzKey());
         } catch (e) {}
@@ -9900,7 +9900,7 @@
             for (const s of slim) {
                 if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
                 if (have.has(JSON.stringify(s.points))) continue; // don't double-load
-                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
+                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
                 added++;
             }
             if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
@@ -10166,6 +10166,7 @@
             if (poly) { setActivePolyStyle(poly, false); finalizeFfzEdit(poly._ffz); }
             genEdit.activePoly = null;
             try { map.scrollWheelZoom.enable(); } catch (e) {}
+            try { renderAllDraftShielding(); } catch (e) {}   // shielding follows the moved/rotated draft
         };
         // Keyboard: Q/E rotate the FFZ while dragging it (easier than scrolling
         // with the mouse button held); Delete removes the hovered/active FFZ.
@@ -10322,6 +10323,28 @@
         });
     }
 
+    // ===== Show shielding bands on DRAFT corridors (red inner / yellow outer), from their stored
+    // params — toggleable so you can see clearance on all drafts, not just while drawing. =====
+    let genShowShielding = false, genShieldLayers = [];
+    function clearDraftShielding() { const map = getLeafletMap(); genShieldLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genShieldLayers = []; }
+    function drawShieldBand(map, L, band, color) { if (!band || !band.length) return; try { const p = L.polygon(band.map(q => [q.lat, q.lng]), { color, weight: 1, opacity: 0.45, fillColor: color, fillOpacity: 0.16, interactive: false }); p.addTo(map); genShieldLayers.push(p); } catch (e) {} }
+    function renderOneDraftShielding(map, L, f) {
+        const verts = f._advVerts; if (!Array.isArray(verts) || verts.length < 2) return;
+        const nseg = verts.length - 1, segW = Array.isArray(f._advSegWidth) ? f._advSegWidth : [];
+        const w = []; for (let i = 0; i < nseg; i++) w.push(segW[i] || segW[0] || 30);
+        const side = f._advSide || 1, off = f._advOffsetFt || 25;
+        const startFt = (f._advAnchor === 'shielding') ? off : 0;
+        const inner = (f._advAnchor === 'shielding') ? advRibbon(verts, side, 0, off) : advBandSigned(verts, off, side, -1);
+        drawShieldBand(map, L, inner, '#ff2d2d');
+        drawShieldBand(map, L, advBandOuter(verts, w, off, side, startFt), '#ffd400');
+    }
+    function renderAllDraftShielding() {
+        clearDraftShielding();
+        if (!genShowShielding) return;
+        const map = getLeafletMap(), L = getLeafletL(); if (!map || !L) return;
+        const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+        for (const f of ffzs) { if (f && !f._committed && Array.isArray(f._advVerts)) renderOneDraftShielding(map, L, f); }
+    }
     // Draw proposed FFZs as polygons on the Leaflet map (SVG so each is a
     // hit-testable path) — PREVIEW ONLY, nothing is written. The polygons are
     // hand-editable: drag to move, scroll to rotate 10°, hold Alt to snap to a
@@ -10359,6 +10382,7 @@
             } catch (e) { /* one bad polygon shouldn't kill the rest */ }
         });
         console.log(`${GEN_TAG} preview rendered ${genPreviewLayers.length} editable FFZ polygons`);
+        try { renderAllDraftShielding(); } catch (e) {}
         return genPreviewLayers.length;
     }
 
@@ -10612,6 +10636,7 @@
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
+        try { clearDraftShielding(); } catch (e) {}
         genUndoStack = [];
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
@@ -10708,6 +10733,7 @@
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
                     <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
                     <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove DRAFT FFZs</button>
@@ -11012,6 +11038,8 @@
         if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advSaveParams(); advRender(); } }; }
 
         const dryEl = box.querySelector('#aim-gen-dryrun');
+        const shieldEl = box.querySelector('#aim-gen-shield');
+        if (shieldEl) { shieldEl.checked = genShowShielding; shieldEl.onchange = () => { genShowShielding = shieldEl.checked; renderAllDraftShielding(); }; }
         const commitResult = box.querySelector('#aim-gen-commit-result');
         const commitBtn = box.querySelector('#aim-gen-commit');
         commitBtn.onclick = async () => {
