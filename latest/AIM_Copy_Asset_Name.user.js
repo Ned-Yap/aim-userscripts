@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.131
+// @version      4.132
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.131';
+    const SCRIPT_VERSION = '4.132';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9841,6 +9841,27 @@
             return { rings: out, holes };
         } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
     }
+    // DE-NOTCH: drop tiny steps/jogs (a vertex deviating < tolFt from its neighbours) via Douglas-
+    // Peucker on a closed ring (split at the two farthest anchors so the loop isn't degenerate). Removes
+    // the little misalignment notches at junctions WITHOUT adding vertices or cutting real corners.
+    function denotchRing(ringLL, tolFt) {
+        if (!Array.isArray(ringLL) || ringLL.length < 4) return ringLL;
+        try {
+            const proj = genProjector(ringLL[0].lat, ringLL[0].lng), eps = tolFt * GEN_FT_TO_M;
+            const ring = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const perp = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; return Math.abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / L; };
+            const rdp = (pts) => { if (pts.length < 3) return pts.slice(); let dmax = 0, idx = 0; const a = pts[0], b = pts[pts.length - 1]; for (let i = 1; i < pts.length - 1; i++) { const d = perp(pts[i], a, b); if (d > dmax) { dmax = d; idx = i; } } if (dmax > eps) { return rdp(pts.slice(0, idx + 1)).slice(0, -1).concat(rdp(pts.slice(idx))); } return [a, b]; };
+            let cx = 0, cy = 0; for (const p of ring) { cx += p[0]; cy += p[1]; } cx /= ring.length; cy /= ring.length;
+            let a1 = 0, bd = -1; for (let i = 0; i < ring.length; i++) { const d = Math.hypot(ring[i][0] - cx, ring[i][1] - cy); if (d > bd) { bd = d; a1 = i; } }
+            let a2 = 0; bd = -1; for (let i = 0; i < ring.length; i++) { const d = Math.hypot(ring[i][0] - ring[a1][0], ring[i][1] - ring[a1][1]); if (d > bd) { bd = d; a2 = i; } }
+            const n = ring.length, arc1 = [], arc2 = [];
+            for (let i = a1; ; i = (i + 1) % n) { arc1.push(ring[i]); if (i === a2) break; }
+            for (let i = a2; ; i = (i + 1) % n) { arc2.push(ring[i]); if (i === a1) break; }
+            const out = rdp(arc1).slice(0, -1).concat(rdp(arc2).slice(0, -1));
+            if (out.length < 3) return ringLL;
+            return out.map(p => proj.inv({ x: p[0], y: p[1] }));
+        } catch (e) { console.warn(`${GEN_TAG} denotch failed:`, e); return ringLL; }
+    }
     // Morphological CLOSE: fill any gap/notch/sliver narrower than 2*dFt so the fused shape comes out
     // clean (no "little bits"). dilate by d then erode by d (erode via the complement trick so holes
     // are preserved). Falls back to the input ring on any failure — never makes the shape worse.
@@ -9954,7 +9975,7 @@
                 // CREATE-ONLY: union the drawn pieces in this cluster into one (or more) NEW zones.
                 // We NEVER read/upsert/overwrite an existing real FFZ — commit is strictly non-destructive.
                 const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
-                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => simplifyRing(r)); // simplify only — no morph-close (it mangled rotated edges)
+                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => denotchRing(simplifyRing(r), 4)); // dedup/collinear + drop <4ft notches (flush junctions)
                 const root = members[0];
                 // Flag (for a warning only) if this new zone overlaps an existing FFZ — never act on it.
                 let overlapsExisting = null;
