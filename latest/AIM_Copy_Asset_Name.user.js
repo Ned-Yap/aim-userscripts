@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.132
+// @version      4.133
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.132';
+    const SCRIPT_VERSION = '4.133';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9456,16 +9456,18 @@
                 try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
             }
         }
-        // Flush-snap targets (magenta dots): every preview corridor's CENTERLINE vertices PLUS the
-        // CORNERS of real committed FFZs (so you can snap precisely onto an existing real zone too).
+        // Flush-snap targets (magenta dots): preview corridor CENTERLINE vertices + real committed FFZ
+        // CORNERS — but ONLY the ones NEAR the cursor (else the whole site fills with dots / they linger).
         try {
-            const ffzsCL = (genState.lastResult && genState.lastResult.ffzs) || [];
-            for (const f of ffzsCL) {
-                if (!f || f._committed || !Array.isArray(f._advVerts)) continue;
-                for (const v of f._advVerts) { try { const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: 0.85, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} }
+            let curCp = null; try { if (advDraw.tentative) curCp = map.latLngToContainerPoint(advDraw.tentative); } catch (e) {}
+            if (curCp) {
+                const R = 90; // px radius around the cursor
+                const dot = (v, op) => { try { const cp = map.latLngToContainerPoint(v); if (Math.hypot(cp.x - curCp.x, cp.y - curCp.y) > R) return; const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: op, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} };
+                const ffzsCL = (genState.lastResult && genState.lastResult.ffzs) || [];
+                for (const f of ffzsCL) { if (!f || f._committed || !Array.isArray(f._advVerts)) continue; for (const v of f._advVerts) dot(v, 0.85); }
+                const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                for (const a of ents) { if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue; for (const v of ring) dot(v, 0.7); }
             }
-            const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
-            for (const a of ents) { if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue; for (const v of ring) { try { const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: 0.7, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} } }
         } catch (e) {}
         // Live snap marker: magenta = flush centerline snap, cyan = FFZ-edge snap.
         if (advDraw.ffzSnap && !editing) { const sc = advDraw.ffzSnap.centerline ? '#ff5fff' : '#00e5ff'; try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: sc, weight: 2.5, fillColor: sc, fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
@@ -10205,6 +10207,7 @@
         try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
         try { if (map) { map.dragging.enable(); map.scrollWheelZoom.enable(); } } catch (e) {}
         try { advSaveFfzs(); } catch (e) {} // keep the autosave in sync after a delete
+        try { if (advDraw.active) advRender(); } catch (e) {} // refresh the snap dots (don't leave stale ones)
         showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
     }
     let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
