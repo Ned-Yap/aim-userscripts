@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.129
+// @version      4.130
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.129';
+    const SCRIPT_VERSION = '4.130';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9940,35 +9940,19 @@
         const realFfzs = ((bucket && bucket.entities) || []).filter(e => e.type === 16);
         for (const members of clusters.values()) {
             try {
-                let anchorId = null;
-                for (const m of members) { if (m._anchorId != null) { anchorId = m._anchorId; break; } }
-                // No explicit anchor but the cluster OVERLAPS a real FFZ → absorb it (server forbids overlap).
-                if (anchorId == null) {
-                    for (const a of realFfzs) { const r = entityCoords(a); if (!r || r.length < 3) continue; let hit = false; for (const m of members) { const np = nearestBetweenRings(m.points, r); if (np && np.d < 1.5 * GEN_FT_TO_M) { hit = true; break; } if (m.points.some(pt => pointInPolygon(pt.lat, pt.lng, r)) || r.some(pt => pointInPolygon(pt.lat, pt.lng, m.points))) { hit = true; break; } } if (hit) { anchorId = a.id; break; } }
-                }
-                let ent = null, existing = null, baseRing = null;
-                if (anchorId != null) {
-                    ent = realFfzs.find(e => e.id === anchorId) || null;
-                    existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId) || null;
-                    baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
-                    if (!baseRing || baseRing.length < 3 || !ent) { anchorId = null; ent = null; existing = null; baseRing = null; }
-                }
-                const u = unionWithGapClose((baseRing ? [baseRing] : []).concat(members.map(m => m.points)), GAP_MERGE_FT);
-                // Clean up the fused shape: fill notches/slivers narrower than GAP_MERGE_FT (no little bits).
+                // CREATE-ONLY: union the drawn pieces in this cluster into one (or more) NEW zones.
+                // We NEVER read/upsert/overwrite an existing real FFZ — commit is strictly non-destructive.
+                const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
                 if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => simplifyRing(morphCloseRing(r, GAP_MERGE_FT / 2)));
                 const root = members[0];
-                if (anchorId != null && ent) {
-                    const er = ent.restrictions || (existing && existing.restrictions) || {};
-                    const rest = { minAlt: er.minAlt, maxAlt: er.maxAlt };
-                    if (u && u.rings.length) {
-                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: u.rings[0], restrictions: rest, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
-                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${ent.name || ('#' + anchorId)} pt${i + 1}`, points: u.rings[i], restrictions: rest, members: [], _disjoint: true });
-                    } else writes.push({ kind: 'upsert', anchorId, ent, existing, points: fuseMembers(baseRing, members), restrictions: rest, members });
-                } else if (u && u.rings.length) {
-                    u.rings.forEach((rg, i) => writes.push({ kind: 'create', name: i === 0 ? root.name : `${root.name} pt${i + 1}`, points: rg, restrictions: root.restrictions, members: i === 0 ? members : [], _holes: u.holes, _disjoint: u.rings.length > 1 }));
+                // Flag (for a warning only) if this new zone overlaps an existing FFZ — never act on it.
+                let overlapsExisting = null;
+                try { for (const a of realFfzs) { const r = entityCoords(a); if (!r || r.length < 3) continue; const np = nearestBetweenRings(members[0].points, r); if ((np && np.d < 1.5 * GEN_FT_TO_M) || members[0].points.some(pt => pointInPolygon(pt.lat, pt.lng, r))) { overlapsExisting = a.id; break; } } } catch (e) {}
+                if (u && u.rings.length) {
+                    u.rings.forEach((rg, i) => writes.push({ kind: 'create', name: i === 0 ? root.name : `${root.name} pt${i + 1}`, points: rg, restrictions: root.restrictions, members: i === 0 ? members : [], _holes: u.holes, _disjoint: u.rings.length > 1, _overlapsExisting: i === 0 ? overlapsExisting : null }));
                 } else {
                     let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0;
-                    writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members });
+                    writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members, _overlapsExisting: overlapsExisting });
                 }
             } catch (e) { console.warn(`${GEN_TAG} cluster fuse failed:`, e); members.forEach(f => writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] })); }
         }
@@ -10616,6 +10600,7 @@
             if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
             if (w._holes) res.errors.push(`${label}: fused shape enclosed a hole — Percepto can't store holes, so the hole was filled in`);
             if (w._disjoint) res.errors.push(`${label}: a piece didn't overlap the rest → kept as a SEPARATE zone. Snap it onto the others (cyan/magenta) so they actually touch, to fuse into one.`);
+            if (w._overlapsExisting != null) res.errors.push(`${label}: overlaps existing FFZ #${w._overlapsExisting} — the server may reject it. Delete that old FFZ first (this tool never touches existing FFZs).`);
             if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
             let body;
             if (w.kind === 'upsert') {
@@ -10905,6 +10890,7 @@
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button id="aim-gen-merge" title="Merge your drawn pieces into the final fused shapes RIGHT NOW so you can see exactly what will be created, before committing. Non-destructive." style="background:rgba(95,184,255,0.18);color:#5fb8ff;border:1px solid rgba(95,184,255,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔗 Merge (preview)</button>
                     <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
                     <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove DRAFT FFZs</button>
                     <button id="aim-gen-saveffz" title="Save geometry changes made to LOADED existing FFZs (📥 Load site FFZs) back IN PLACE — id preserved (update, not a new DRAFT). Validated zones prompt per-edit; a rollback file downloads first." style="background:rgba(255,225,77,0.14);color:#ffe14d;border:1px solid rgba(255,225,77,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">💾 Save FFZ edits</button>
@@ -11211,6 +11197,34 @@
         const shieldEl = box.querySelector('#aim-gen-shield');
         if (shieldEl) { shieldEl.checked = genShowShielding; shieldEl.onchange = () => { genShowShielding = shieldEl.checked; renderAllDraftShielding(); }; }
         const commitResult = box.querySelector('#aim-gen-commit-result');
+        // 🔗 Merge (preview): replace the drawn pieces with their final fused shapes ON THE MAP so you
+        // SEE exactly what Commit will create — non-destructive, never touches existing FFZs.
+        const mergeBtn = box.querySelector('#aim-gen-merge');
+        if (mergeBtn) mergeBtn.onclick = () => {
+            try {
+                const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+                const pieces = ffzs.filter(f => f && !f._committed && (f._drawn || f._adv) && Array.isArray(f.points) && f.points.length >= 3);
+                if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
+                const writes = fuseCorridorGroups(ffzs).filter(w => w.kind === 'create' && Array.isArray(w.points) && w.points.length >= 3);
+                if (!writes.length) { showToast('Merge produced nothing', 'rgba(255,82,82,0.6)'); return; }
+                const map = getLeafletMap();
+                pieces.forEach(m => {
+                    if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                    const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+                });
+                writes.forEach(w => {
+                    const cen = ringCentroid(w.points);
+                    genState.lastResult.ffzs.push({ type: 16, name: w.name, site_id: genState.siteID, points: w.points, restrictions: w.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _merged: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _altMode: (w.members && w.members[0] && w.members[0]._altMode), _holes: w._holes, _overlapsExisting: w._overlapsExisting });
+                });
+                renderGenPreview(genState.lastResult.ffzs);
+                try { advSaveFfzs(); } catch (e) {}
+                const holes = writes.filter(w => w._holes).length, over = writes.filter(w => w._overlapsExisting != null).length;
+                let msg = `Merged into ${writes.length} shape${writes.length === 1 ? '' : 's'} — review, then Commit`;
+                if (holes) msg += ` · ${holes} filled a hole`;
+                if (over) msg += ` · ⚠ ${over} overlap an existing FFZ (may be rejected — delete the old one)`;
+                showToast(msg, over ? 'rgba(255,179,71,0.6)' : 'rgba(95,255,95,0.5)');
+            } catch (e) { console.warn(`${GEN_TAG} merge preview failed:`, e); showToast('Merge failed: ' + (e && e.message || e), 'rgba(255,82,82,0.6)'); }
+        };
         const commitBtn = box.querySelector('#aim-gen-commit');
         commitBtn.onclick = async () => {
             const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
