@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.122
+// @version      4.123
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.122';
+    const SCRIPT_VERSION = '4.123';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9789,8 +9789,28 @@
     // order). Returns the fused ring.
     // True polygon UNION (boolean OR) of N rings via polygon-clipping (@require). Handles bridges,
     // overlaps, any topology — and never returns a self-intersecting ring. Returns
-    // { ring:[{lat,lng}], holes:bool, multi:bool } (largest piece), or null (lib missing / failed).
+    // { rings:[[{lat,lng}],...] (largest first), holes:bool } or null (lib missing / failed).
     function ringAreaAbs(ring) { let a = 0; for (let i = 0, n = ring.length; i < n; i++) { const p = ring[i], q = ring[(i + 1) % n]; a += (p.lng * q.lat - q.lng * p.lat); } return Math.abs(a) / 2; }
+    // Drop near-coincident + COLLINEAR vertices so straight runs become a single 2-vertex segment
+    // (the union output stacks redundant points where pieces meet — the "extra vertices" issue).
+    function simplifyRing(ring) {
+        if (!Array.isArray(ring) || ring.length < 4) return ring;
+        const proj = genProjector(ring[0].lat, ring[0].lng), pts = ring.map(p => proj.fwd(p)), tol = 0.3; // 0.3 m dedupe
+        const dd = [];
+        for (let i = 0; i < pts.length; i++) { const p = pts[i], q = dd[dd.length - 1]; if (!q || Math.hypot(p.x - q.x, p.y - q.y) > tol) dd.push(p); }
+        if (dd.length > 1) { const a = dd[0], b = dd[dd.length - 1]; if (Math.hypot(a.x - b.x, a.y - b.y) <= tol) dd.pop(); }
+        const n = dd.length; if (n < 4) return dd.map(p => proj.inv(p));
+        const res = [];
+        for (let i = 0; i < n; i++) {
+            const a = dd[(i - 1 + n) % n], b = dd[i], c = dd[(i + 1) % n];
+            const v1x = b.x - a.x, v1y = b.y - a.y, v2x = c.x - b.x, v2y = c.y - b.y;
+            const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+            if (l1 < 1e-6 || l2 < 1e-6) continue;
+            if (Math.abs(v1x * v2y - v1y * v2x) / (l1 * l2) < 0.02) continue; // ~1.1° → collinear, drop b
+            res.push(b);
+        }
+        return (res.length >= 3 ? res : dd).map(p => proj.inv(p));
+    }
     function unionRings(rings) {
         const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
         if (!PC || typeof PC.union !== 'function') return null;
@@ -9799,12 +9819,17 @@
             if (!polys.length) return null;
             const result = PC.union(polys[0], ...polys.slice(1)); // MultiPolygon
             if (!result || !result.length) return null;
-            let best = result[0], bestA = ringAreaAbs(result[0][0].map(c => ({ lng: c[0], lat: c[1] })));
-            for (let i = 1; i < result.length; i++) { const a = ringAreaAbs(result[i][0].map(c => ({ lng: c[0], lat: c[1] }))); if (a > bestA) { bestA = a; best = result[i]; } }
-            const outer = best[0].map(c => ({ lat: c[1], lng: c[0] }));
-            if (outer.length > 1) { const a = outer[0], b = outer[outer.length - 1]; if (a.lat === b.lat && a.lng === b.lng) outer.pop(); } // drop closing dup
-            if (outer.length < 3) return null;
-            return { ring: outer, holes: best.length > 1, multi: result.length > 1 };
+            let holes = false; const out = [];
+            for (const poly of result) {
+                if (poly.length > 1) holes = true;
+                let outer = poly[0].map(c => ({ lat: c[1], lng: c[0] }));
+                if (outer.length > 1) { const a = outer[0], b = outer[outer.length - 1]; if (a.lat === b.lat && a.lng === b.lng) outer.pop(); }
+                outer = simplifyRing(outer);
+                if (outer.length >= 3) out.push(outer);
+            }
+            if (!out.length) return null;
+            out.sort((a, b) => ringAreaAbs(b) - ringAreaAbs(a)); // largest first
+            return { rings: out, holes };
         } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
     }
     function fuseMembers(baseRing, members) {
@@ -9837,17 +9862,26 @@
                     const baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
                     if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
                     // UNION (clean, any topology) → fall back to splice only if the lib is unavailable.
-                    const u = unionRings([baseRing].concat(members.map(m => m.points)));
-                    const combined = (u && u.ring) ? u.ring : fuseMembers(baseRing, members);
                     const er = (ent.restrictions) || (existing && existing.restrictions) || {};
-                    writes.push({ kind: 'upsert', anchorId, ent, existing, points: combined, restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members, _holes: !!(u && u.holes) });
+                    const u = unionRings([baseRing].concat(members.map(m => m.points)));
+                    if (u && u.rings.length) {
+                        // Largest piece = the FFZ being extended (upsert). Any extra disjoint pieces
+                        // (a member that didn't actually overlap) → their own create, NOT dropped.
+                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: u.rings[0], restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
+                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${ent.name || ('#' + anchorId)} pt${i + 1}`, points: u.rings[i], restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members: [], _disjoint: true });
+                    } else {
+                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: fuseMembers(baseRing, members), restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members });
+                    }
                 } else {
                     const root = members[0];
                     const u = unionRings(members.map(m => m.points));
-                    let combined;
-                    if (u && u.ring) combined = u.ring;
-                    else { let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0; combined = fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)); }
-                    writes.push({ kind: 'create', name: root.name, points: combined, restrictions: root.restrictions, members, _holes: !!(u && u.holes) });
+                    if (u && u.rings.length) {
+                        writes.push({ kind: 'create', name: root.name, points: u.rings[0], restrictions: root.restrictions, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
+                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${root.name} pt${i + 1}`, points: u.rings[i], restrictions: root.restrictions, members: [], _disjoint: true });
+                    } else {
+                        let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0;
+                        writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members });
+                    }
                 }
             } catch (e) { console.warn(`${GEN_TAG} fuse group ${gid} failed:`, e); asCreates(members); }
         }
@@ -10479,6 +10513,7 @@
             const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
             if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
             if (w._holes) res.errors.push(`${label}: fused shape enclosed a hole — Percepto can't store holes, so the hole was filled in`);
+            if (w._disjoint) res.errors.push(`${label}: a piece didn't overlap the rest → kept as a SEPARATE zone. Snap it onto the others (cyan/magenta) so they actually touch, to fuse into one.`);
             if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
             let body;
             if (w.kind === 'upsert') {

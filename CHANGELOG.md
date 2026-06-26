@@ -36,6 +36,14 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — union keeps disjoint pieces + cleans extra vertices — Asset Inspector v4.123 (dev/latest)
+
+Two fixes to the multi-piece merge:
+- **A piece that doesn't actually overlap the others is no longer silently dropped.** It's kept as its own zone, and the commit summary tells you it didn't connect (snap it onto the others so they touch, to fuse into one).
+- **Redundant vertices are simplified** — the fused outline drops near-duplicate and collinear points, so a straight run is a clean 2-vertex segment instead of having extra vertices stacked where pieces met.
+
+---
+
 ## 2026-06-25 — Site Setup Generator — ⊕ button right on the map toolbar — Asset Inspector v4.122 (dev/latest)
 
 The Site Setup Generator now has its own **⊕ button on the map toolbar** (next to the gear / flag / ⚡), so you can open it directly instead of going Summary → Generate every time. It loads the site data on its own if needed.
