@@ -36,6 +36,14 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — ALT+click to start (plain click edits existing) + Esc fix — Asset Inspector v4.116 (dev/latest)
+
+Two annoyance fixes:
+- **Starting a new corridor now requires ALT+click.** A plain left-click is free again to edit existing shapes (drag/move) or pan — no more accidentally dropping a new corridor every time you click. Once you've started, plain clicks add points as before. Esc with nothing in progress turns the mode off.
+- **Esc now always undoes the last point** (or exits), even if your cursor focus was on the Line/Width/Offset controls — previously a focused field swallowed Esc so it looked like it "didn't cancel the vertex."
+
+---
+
 ## 2026-06-25 — Advanced Draw — measure labels sit in each lane + a green FFZ-width label — Asset Inspector v4.115 (dev/latest)
 
 The "N ft" labels used to land in the empty middle of a wrap-around shape. Now each one sits **in the middle of its own lane** — red in the standoff band, yellow in the outer shielding band — and there's a new **green label showing the FFZ width** in the middle of the green lane. So at a glance you can read the standoff, the zone width, and the outer shielding right where each one is.

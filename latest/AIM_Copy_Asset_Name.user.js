@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.115
+// @version      4.116
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.115';
+    const SCRIPT_VERSION = '4.116';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9514,14 +9514,19 @@
         };
         advDraw._onDown = (ev) => {
             if (!advDraw.active || ev.button !== 0) return;
-            ev.preventDefault(); ev.stopPropagation();
             let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
-            // Priority: grab a VERTEX (fix the shape) → grab an outer EDGE (widen that
-            // segment) → otherwise ADD a point. No Enter needed to edit.
-            const hitV = advHitVert(ll);
-            if (hitV >= 0) { advDraw.dragVert = hitV; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
-            const hitE = advHitEdge(ll);
-            if (hitE >= 0) { advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+            const drawingNow = advDraw.drawing && advDraw.verts.length > 0;
+            // While a corridor is in progress, m1 grabs a VERTEX (fix the shape) or an outer EDGE (widen).
+            if (drawingNow) {
+                const hitV = advHitVert(ll);
+                if (hitV >= 0) { ev.preventDefault(); ev.stopPropagation(); advDraw.dragVert = hitV; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+                const hitE = advHitEdge(ll);
+                if (hitE >= 0) { ev.preventDefault(); ev.stopPropagation(); advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+            }
+            // STARTING a new corridor requires Alt — so a plain m1 stays free to edit existing shapes
+            // (drag/move) instead of constantly dropping a new corridor. In-progress draws keep plain m1.
+            if (!drawingNow && !ev.altKey) return;        // let the click through (edit existing / pan)
+            ev.preventDefault(); ev.stopPropagation();
             advDraw.drawing = true;
             const snapped = advSnapCursor(ll, ev);
             // First point landing on an existing FFZ edge → remember it so finish joins that FFZ's group.
@@ -9538,12 +9543,25 @@
         advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing || advDraw.dragVert != null) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
         advDraw._onKey = (ev) => {
             if (!advDraw.active) return;
-            const t = ev.target;
-            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
             const k = (ev.key || '').toLowerCase();
+            const t = ev.target;
+            const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+            // Escape ALWAYS undoes the last point / exits — even if a control (Line/Width/Offset) has
+            // focus, since Esc isn't typing. (This was the "Esc doesn't cancel the vert" bug.)
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (t && t.blur) { try { t.blur(); } catch (e) {} }
+                if (advDraw.verts.length) {
+                    advDraw.verts.pop(); if (advDraw.snapSrcs.length) advDraw.snapSrcs.pop();
+                    advDraw.drawing = advDraw.verts.length > 0;
+                    if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; }
+                    advPersist(); advRender();
+                } else setAdvDraw(false);
+                return;
+            }
+            if (inField) return;   // letter hotkeys suppressed only while typing in a field
             if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
             else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
-            else if (k === 'escape') { ev.preventDefault(); ev.stopImmediatePropagation(); if (advDraw.verts.length) { advDraw.verts.pop(); advDraw.drawing = advDraw.verts.length > 0; if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; } advPersist(); advRender(); } else setAdvDraw(false); }
         };
         advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
         advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
@@ -9576,7 +9594,7 @@
         } else {
             advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = [];
         }
-        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw — click · Shift=angle · Ctrl=asset · cyan=FFZ edge · F=flip · dbl-click=finish' : '✦ Advanced Draw'; } } catch (e) {}
+        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw ON — ALT+click to START a corridor (plain click edits existing) · Shift=angle · Ctrl=asset · F=flip · dbl-click=finish · Esc=undo/off' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
     }
     // Open a slot in an FFZ ring at edge `edgeIdx` and route the corridor's open chain
@@ -10571,7 +10589,7 @@
                     <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff2d2d" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
                 </div>
-                <div style="font-size:10px;color:#7a8794;margin-top:6px">Click inner edge · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen that segment · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo</div>
+                <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
