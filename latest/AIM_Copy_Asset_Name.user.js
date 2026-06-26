@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.136
+// @version      4.137
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.136';
+    const SCRIPT_VERSION = '4.137';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9214,6 +9214,7 @@
     // ============================================================
     const ADV_LS_KEY = 'aim_adv_draw';
     const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff2d2d', bufColor2: '#ffd400', bufOpacity: 0.3 };
+    const ADV_SNAP_OVERLAP_FT = 5; // when an end snaps onto existing geometry, extend it this far PAST the snap so it overlaps (no edge-kiss slivers)
     let advDraw = {
         active: false, drawing: false,
         verts: [],       // inner-edge polyline [{lat,lng}]
@@ -9229,6 +9230,7 @@
         ffzSnap: null,   // {lat,lng,src} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
         branchSrc: null, // src of the FFZ whose edge the FIRST vertex landed on → merge corridor into it on finish (else null)
         snapSrcs: [],    // every placed vertex's FFZ-edge snap src → a corridor bridging 2 FFZs unifies BOTH groups at finish
+        vertSnapped: [], // per-vertex: did it snap onto existing geometry? → extend that END past the snap so it OVERLAPS (no edge-kiss slivers)
         reGroup: null,   // when re-editing a grouped corridor, its {_group,_anchorId,_branchPoint} so re-finish keeps it grouped
         layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
     };
@@ -9630,6 +9632,7 @@
             }
             // Record EVERY vertex's snap (src + where) so a corridor bridging two FFZs fuses BOTH at finish.
             if (advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.snapSrcs.push({ src: advDraw.ffzSnap.src, pt: { lat: advDraw.ffzSnap.lat, lng: advDraw.ffzSnap.lng } });
+            advDraw.vertSnapped.push(!!(advDraw.ffzSnap && advDraw.ffzSnap.src)); // for end-overlap extension
             advDraw.verts.push(snapped);
             advDraw.tentative = null;
             advPersist(); advRender();
@@ -9651,7 +9654,8 @@
                 if (advDraw.verts.length) {
                     advDraw.verts.pop(); if (advDraw.snapSrcs.length) advDraw.snapSrcs.pop();
                     advDraw.drawing = advDraw.verts.length > 0;
-                    if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; }
+                    if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = []; }
+                    else advDraw.vertSnapped.pop();
                     advPersist(); advRender();
                 } else setAdvDraw(false);
                 return;
@@ -9689,7 +9693,7 @@
             try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
         } else {
-            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = [];
+            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = [];
         }
         try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw ON — ALT+click to START a corridor (plain click edits existing) · Shift=angle · Ctrl=asset · F=flip · dbl-click=finish · Esc=undo/off' : '✦ Advanced Draw'; } } catch (e) {}
         try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
@@ -9995,6 +9999,20 @@
     async function finalizeAdvDraw() {
         advDraw.drawing = false;
         const verts = advDraw.verts.slice();
+        const vSnap = advDraw.vertSnapped.slice(); advDraw.vertSnapped = [];
+        // Auto-overlap: where an END vertex snapped onto existing geometry, push it PAST the snap point
+        // (extend the end segment outward) by ADV_SNAP_OVERLAP_FT so the union overlaps instead of
+        // kissing the edge → no thin tab/sliver. You never have to think about overlap.
+        if (verts.length >= 2) {
+            const extend = (endIdx, neighborIdx) => {
+                const a = verts[endIdx], b = verts[neighborIdx];
+                const proj = genProjector(a.lat, a.lng), A = proj.fwd(a), B = proj.fwd(b);
+                const dx = A.x - B.x, dy = A.y - B.y, L = Math.hypot(dx, dy) || 1, d = ADV_SNAP_OVERLAP_FT * GEN_FT_TO_M;
+                verts[endIdx] = proj.inv({ x: A.x + dx / L * d, y: A.y + dy / L * d });
+            };
+            if (vSnap[0]) extend(0, 1);
+            if (vSnap[verts.length - 1]) extend(verts.length - 1, verts.length - 2);
+        }
         const segW = advSegWidthsFt(Math.max(0, verts.length - 1)).slice();
         const finSide = advDraw.side;
         const finAnchor = advDraw.anchor, finStartFt = (finAnchor === 'shielding') ? advDraw.offsetFt : 0;
