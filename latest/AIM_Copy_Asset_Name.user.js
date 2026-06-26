@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.116
+// @version      4.117
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.116';
+    const SCRIPT_VERSION = '4.117';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9426,7 +9426,16 @@
             }
         }
         // Branch-from-edge snap marker (cyan) — cursor is locked onto an existing FFZ edge.
-        if (advDraw.ffzSnap && !editing) { try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: '#00e5ff', weight: 2.5, fillColor: '#00e5ff', fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
+        // Flush-snap targets: magenta dots on every existing corridor's CENTERLINE vertices.
+        try {
+            const ffzsCL = (genState.lastResult && genState.lastResult.ffzs) || [];
+            for (const f of ffzsCL) {
+                if (!f || f._committed || !Array.isArray(f._advVerts)) continue;
+                for (const v of f._advVerts) { try { const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: 0.85, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} }
+            }
+        } catch (e) {}
+        // Live snap marker: magenta = flush centerline snap, cyan = FFZ-edge snap.
+        if (advDraw.ffzSnap && !editing) { const sc = advDraw.ffzSnap.centerline ? '#ff5fff' : '#00e5ff'; try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: sc, weight: 2.5, fillColor: sc, fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
         advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
@@ -9479,9 +9488,34 @@
         if (!best) return null;
         try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc }; } catch (e) { return null; }
     }
+    // FLUSH branching: snap onto an existing corridor's CENTERLINE (its _advVerts — vertex or
+    // projected along a segment), within ~12 px. Connecting centerline-to-centerline is what makes
+    // the lanes line up flush (vs the edge-snap, which offsets by ½ width). Returns {lat,lng,ref}.
+    function advSnapToCenterline(cursor) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
+        const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+        let best = null, bestD = 12, bestRef = null;
+        for (const f of ffzs) {
+            if (!f || f._committed || !Array.isArray(f._advVerts) || f._advVerts.length < 1) continue;
+            const cl = f._advVerts;
+            for (const v of cl) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestRef = f; } }
+            for (let i = 0; i < cl.length - 1; i++) {
+                let A, B; try { A = map.latLngToContainerPoint(cl[i]); B = map.latLngToContainerPoint(cl[i + 1]); } catch (e) { continue; }
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+                const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestRef = f; }
+            }
+        }
+        if (!best) return null;
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, ref: bestRef }; } catch (e) { return null; }
+    }
     function advSnapCursor(ll, ev) {
         let s = ll;
-        // FFZ-edge snap wins over angle/asset snap — it's a hard connect to existing geometry.
+        // Centerline snap wins (flush) > FFZ-edge snap > angle/asset snap.
+        const ce = advSnapToCenterline(s);
+        if (ce) { advDraw.ffzSnap = { lat: ce.lat, lng: ce.lng, centerline: true, ref: ce.ref, src: { kind: 'preview', ref: ce.ref } }; return { lat: ce.lat, lng: ce.lng }; }
         const fe = advSnapToFfzEdge(s);
         if (fe) { advDraw.ffzSnap = fe; return fe; }
         advDraw.ffzSnap = null;
@@ -9531,6 +9565,11 @@
             const snapped = advSnapCursor(ll, ev);
             // First point landing on an existing FFZ edge → remember it so finish joins that FFZ's group.
             if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.branchSrc = advDraw.ffzSnap.src;
+            // First point snapped onto a corridor's CENTERLINE → match its width so the lanes are flush.
+            if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.centerline && advDraw.ffzSnap.ref) {
+                const rw = advDraw.ffzSnap.ref._advSegWidth; const w = Array.isArray(rw) && rw.length ? rw[0] : null;
+                if (w && w > 0) { advDraw.widthFt = w; advDraw.segWidth = []; try { const wi = document.getElementById('aim-adv-width'); if (wi) wi.value = w; } catch (e) {} }
+            }
             // Record EVERY vertex's snap (src + where) so a corridor bridging two FFZs fuses BOTH at finish.
             if (advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.snapSrcs.push({ src: advDraw.ffzSnap.src, pt: { lat: advDraw.ffzSnap.lat, lng: advDraw.ffzSnap.lng } });
             advDraw.verts.push(snapped);
@@ -10589,7 +10628,7 @@
                     <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff2d2d" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
                 </div>
-                <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
+                <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
             </div>
             <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
                 <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
