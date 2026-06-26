@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — snap dots on real existing FFZ corners too — Asset Inspector v4.125 (dev/latest)
+
+The flush-snap magenta dots now appear on the **corners of real committed FFZs** as well, not just corridors you drew this session — so you can snap a new corridor precisely onto an existing real zone and extend it. (A corridor started on a real FFZ corner anchors to that FFZ and fuses into it on commit.)
+
+---
+
 ## 2026-06-25 — Advanced Draw — pieces within 15 ft auto-merge into one FFZ — Asset Inspector v4.124 (dev/latest)
 
 Since the SOP doesn't allow two FFZs within 30 ft of each other, connected pieces that end up **within 15 ft but not quite touching** now **auto-weld into one zone** at commit instead of staying separate. So you no longer have to fight for pixel-perfect overlap — get them close (snapped) and they fuse.

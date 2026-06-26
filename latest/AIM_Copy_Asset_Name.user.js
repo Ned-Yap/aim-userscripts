@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.124
+// @version      4.125
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.124';
+    const SCRIPT_VERSION = '4.125';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9456,14 +9456,16 @@
                 try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
             }
         }
-        // Branch-from-edge snap marker (cyan) — cursor is locked onto an existing FFZ edge.
-        // Flush-snap targets: magenta dots on every existing corridor's CENTERLINE vertices.
+        // Flush-snap targets (magenta dots): every preview corridor's CENTERLINE vertices PLUS the
+        // CORNERS of real committed FFZs (so you can snap precisely onto an existing real zone too).
         try {
             const ffzsCL = (genState.lastResult && genState.lastResult.ffzs) || [];
             for (const f of ffzsCL) {
                 if (!f || f._committed || !Array.isArray(f._advVerts)) continue;
                 for (const v of f._advVerts) { try { const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: 0.85, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} }
             }
+            const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+            for (const a of ents) { if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue; for (const v of ring) { try { const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: 0.7, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} } }
         } catch (e) {}
         // Live snap marker: magenta = flush centerline snap, cyan = FFZ-edge snap.
         if (advDraw.ffzSnap && !editing) { const sc = advDraw.ffzSnap.centerline ? '#ff5fff' : '#00e5ff'; try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: sc, weight: 2.5, fillColor: sc, fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
@@ -9535,34 +9537,41 @@
         if (!best) return null;
         try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc }; } catch (e) { return null; }
     }
-    // FLUSH branching: snap onto an existing corridor's CENTERLINE (its _advVerts — vertex or
-    // projected along a segment), within ~12 px. Connecting centerline-to-centerline is what makes
-    // the lanes line up flush (vs the edge-snap, which offsets by ½ width). Returns {lat,lng,ref}.
+    // FLUSH branching: snap onto a preview corridor's CENTERLINE (its _advVerts, vertex OR projected
+    // along a segment) OR a real committed FFZ's CORNER (vertex), within ~12 px. Returns
+    // {lat,lng, src}. src = {kind:'preview',ref} for a corridor (centerline-flush + width-match) or
+    // {kind:'entity',id} for a real FFZ corner (so the new corridor anchors → fuses into it).
     function advSnapToCenterline(cursor) {
         const map = getLeafletMap(); if (!map) return null;
         let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
         const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
-        let best = null, bestD = 12, bestRef = null;
+        let best = null, bestD = 12, bestSrc = null;
         for (const f of ffzs) {
             if (!f || f._committed || !Array.isArray(f._advVerts) || f._advVerts.length < 1) continue;
             const cl = f._advVerts;
-            for (const v of cl) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestRef = f; } }
+            for (const v of cl) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestSrc = { kind: 'preview', ref: f }; } }
             for (let i = 0; i < cl.length - 1; i++) {
                 let A, B; try { A = map.latLngToContainerPoint(cl[i]); B = map.latLngToContainerPoint(cl[i + 1]); } catch (e) { continue; }
                 const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
                 let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
                 const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
-                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestRef = f; }
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestSrc = { kind: 'preview', ref: f }; }
             }
         }
+        // Real committed FFZ corners (vertex-only snap).
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) {
+            if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue;
+            for (const v of ring) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestSrc = { kind: 'entity', id: a.id }; } }
+        }
         if (!best) return null;
-        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, ref: bestRef }; } catch (e) { return null; }
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc, ref: (bestSrc && bestSrc.kind === 'preview') ? bestSrc.ref : null }; } catch (e) { return null; }
     }
     function advSnapCursor(ll, ev) {
         let s = ll;
-        // Centerline snap wins (flush) > FFZ-edge snap > angle/asset snap.
+        // Centerline / real-FFZ-corner snap wins (flush) > FFZ-edge snap > angle/asset snap.
         const ce = advSnapToCenterline(s);
-        if (ce) { advDraw.ffzSnap = { lat: ce.lat, lng: ce.lng, centerline: true, ref: ce.ref, src: { kind: 'preview', ref: ce.ref } }; return { lat: ce.lat, lng: ce.lng }; }
+        if (ce) { advDraw.ffzSnap = { lat: ce.lat, lng: ce.lng, centerline: true, ref: ce.ref, src: ce.src }; return { lat: ce.lat, lng: ce.lng }; }
         const fe = advSnapToFfzEdge(s);
         if (fe) { advDraw.ffzSnap = fe; return fe; }
         advDraw.ffzSnap = null;
