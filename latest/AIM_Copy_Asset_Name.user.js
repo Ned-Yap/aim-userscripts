@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.130
+// @version      4.131
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.130';
+    const SCRIPT_VERSION = '4.131';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9884,6 +9884,17 @@
         if (!best.p) return null;
         return { d: best.d, p: proj.inv(best.p), q: proj.inv(best.q) };
     }
+    // Do two rings actually OVERLAP (cross / contain)? nearestBetweenRings only sees vertex-to-edge
+    // distance, which misses two long shapes that CROSS in the middle (an X). Real intersection test.
+    function ringsOverlap(A, B) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.intersection !== 'function') return false;
+        try {
+            const toPoly = r => { const rr = r.map(p => [p.lng, p.lat]); rr.push([r[0].lng, r[0].lat]); return [rr]; };
+            const inter = PC.intersection(toPoly(A), toPoly(B));
+            return !!(inter && inter.length);
+        } catch (e) { return false; }
+    }
     function makeWeld(p, q) {
         const proj = genProjector(p.lat, p.lng), P = proj.fwd(p), Q = proj.fwd(q);
         const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
@@ -9933,7 +9944,7 @@
         // Union-find: two pieces share a cluster if they overlap or are within GAP_MERGE_FT.
         const parent = drawn.map((_, i) => i);
         const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-        for (let i = 0; i < drawn.length; i++) for (let j = i + 1; j < drawn.length; j++) { const np = nearestBetweenRings(drawn[i].points, drawn[j].points); if (np && np.d < maxGapM) parent[find(i)] = find(j); }
+        for (let i = 0; i < drawn.length; i++) for (let j = i + 1; j < drawn.length; j++) { const np = nearestBetweenRings(drawn[i].points, drawn[j].points); if ((np && np.d < maxGapM) || ringsOverlap(drawn[i].points, drawn[j].points)) parent[find(i)] = find(j); }
         const clusters = new Map();
         drawn.forEach((p, i) => { const r = find(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(p); });
         const bucket = mapObjectsBySite[genState.siteID];
@@ -9943,7 +9954,7 @@
                 // CREATE-ONLY: union the drawn pieces in this cluster into one (or more) NEW zones.
                 // We NEVER read/upsert/overwrite an existing real FFZ — commit is strictly non-destructive.
                 const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
-                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => simplifyRing(morphCloseRing(r, GAP_MERGE_FT / 2)));
+                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => simplifyRing(r)); // simplify only — no morph-close (it mangled rotated edges)
                 const root = members[0];
                 // Flag (for a warning only) if this new zone overlaps an existing FFZ — never act on it.
                 let overlapsExisting = null;
