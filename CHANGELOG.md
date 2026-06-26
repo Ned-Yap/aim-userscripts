@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — real polygon UNION at commit (multi-piece merges just work) — Asset Inspector v4.119 (dev/latest)
+
+Connected corridors now fuse with a proper **polygon union** instead of the old splice. This fixes the cases that were getting BLOCKED as self-intersecting — combining several pieces around adjacent pads into one big FFZ now produces a single clean zone, any topology (bridges, overlaps, multi-pad). If a union ever encloses a hole, Percepto can't store holes, so it's filled in and you're told. (Uses the `polygon-clipping` library; splice remains as a fallback if the library can't load.)
+
+---
+
 ## 2026-06-25 — Advanced Draw — remembers your Width/Offset/Line/band settings — Asset Inspector v4.118 (dev/latest)
 
 The Advanced Draw settings (Width, Offset, Line mode, band color/opacity) now **persist across reloads** (saved per browser). So the commit → reload → re-draw cycle no longer makes you re-type the same parameters every time.

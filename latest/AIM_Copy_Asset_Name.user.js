@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.118
+// @version      4.119
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @require      https://cdn.jsdelivr.net/npm/polygon-clipping@0.15.7/dist/polygon-clipping.umd.js
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
 // @connect      api.opentopodata.org
@@ -46,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.118';
+    const SCRIPT_VERSION = '4.119';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9756,6 +9757,26 @@
     // Greedily splice members: each step picks the not-yet-placed member whose connection point
     // is nearest the current ring (so a bridge chain assembles in connectivity order, not draw
     // order). Returns the fused ring.
+    // True polygon UNION (boolean OR) of N rings via polygon-clipping (@require). Handles bridges,
+    // overlaps, any topology — and never returns a self-intersecting ring. Returns
+    // { ring:[{lat,lng}], holes:bool, multi:bool } (largest piece), or null (lib missing / failed).
+    function ringAreaAbs(ring) { let a = 0; for (let i = 0, n = ring.length; i < n; i++) { const p = ring[i], q = ring[(i + 1) % n]; a += (p.lng * q.lat - q.lng * p.lat); } return Math.abs(a) / 2; }
+    function unionRings(rings) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function') return null;
+        try {
+            const polys = rings.filter(r => Array.isArray(r) && r.length >= 3).map(r => { const ring = r.map(p => [p.lng, p.lat]); ring.push([r[0].lng, r[0].lat]); return [ring]; });
+            if (!polys.length) return null;
+            const result = PC.union(polys[0], ...polys.slice(1)); // MultiPolygon
+            if (!result || !result.length) return null;
+            let best = result[0], bestA = ringAreaAbs(result[0][0].map(c => ({ lng: c[0], lat: c[1] })));
+            for (let i = 1; i < result.length; i++) { const a = ringAreaAbs(result[i][0].map(c => ({ lng: c[0], lat: c[1] }))); if (a > bestA) { bestA = a; best = result[i]; } }
+            const outer = best[0].map(c => ({ lat: c[1], lng: c[0] }));
+            if (outer.length > 1) { const a = outer[0], b = outer[outer.length - 1]; if (a.lat === b.lat && a.lng === b.lng) outer.pop(); } // drop closing dup
+            if (outer.length < 3) return null;
+            return { ring: outer, holes: best.length > 1, multi: result.length > 1 };
+        } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
+    }
     function fuseMembers(baseRing, members) {
         let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
         const remaining = members.slice();
@@ -9785,17 +9806,18 @@
                     const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId);
                     const baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
                     if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
-                    const combined = fuseMembers(baseRing, members);   // base = the committed FFZ ring
+                    // UNION (clean, any topology) → fall back to splice only if the lib is unavailable.
+                    const u = unionRings([baseRing].concat(members.map(m => m.points)));
+                    const combined = (u && u.ring) ? u.ring : fuseMembers(baseRing, members);
                     const er = (ent.restrictions) || (existing && existing.restrictions) || {};
-                    writes.push({ kind: 'upsert', anchorId, ent, existing, points: combined, restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members });
+                    writes.push({ kind: 'upsert', anchorId, ent, existing, points: combined, restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members, _holes: !!(u && u.holes) });
                 } else {
-                    // Root = a member with no connection (true root); else the first.
-                    let rootIdx = members.findIndex(m => !memberConnPoint(m));
-                    if (rootIdx < 0) rootIdx = 0;
-                    const root = members[rootIdx];
-                    const rest = members.filter((_, i) => i !== rootIdx);
-                    const combined = fuseMembers(root.points, rest);
-                    writes.push({ kind: 'create', name: root.name, points: combined, restrictions: root.restrictions, members });
+                    const root = members[0];
+                    const u = unionRings(members.map(m => m.points));
+                    let combined;
+                    if (u && u.ring) combined = u.ring;
+                    else { let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0; combined = fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)); }
+                    writes.push({ kind: 'create', name: root.name, points: combined, restrictions: root.restrictions, members, _holes: !!(u && u.holes) });
                 }
             } catch (e) { console.warn(`${GEN_TAG} fuse group ${gid} failed:`, e); asCreates(members); }
         }
@@ -10367,6 +10389,7 @@
         for (const w of writes) {
             const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
             if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
+            if (w._holes) res.errors.push(`${label}: fused shape enclosed a hole — Percepto can't store holes, so the hole was filled in`);
             if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
             let body;
             if (w.kind === 'upsert') {
