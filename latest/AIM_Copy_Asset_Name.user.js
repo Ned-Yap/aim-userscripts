@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.126
+// @version      4.127
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.126';
+    const SCRIPT_VERSION = '4.127';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9890,45 +9890,56 @@
         }
         return combined;
     }
+    // Build commit writes. The server FORBIDS overlapping FFZs, so we CLUSTER drawn pieces by actual
+    // geometry (overlap or within GAP_MERGE_FT) — NOT by snap-lineage — and union each cluster into one
+    // zone. A cluster that overlaps a real FFZ absorbs it (upsert). Auto-generated per-asset FFZs and
+    // non-drawn shapes commit individually, unchanged.
     function fuseCorridorGroups(ffzs) {
-        const groups = new Map(), loose = [];
-        for (const f of ffzs) { if (f && f._group) { if (!groups.has(f._group)) groups.set(f._group, []); groups.get(f._group).push(f); } else if (f) loose.push(f); }
         const writes = [];
-        for (const f of loose) writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] });
-        const asCreates = (members) => members.forEach(f => writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] }));
-        for (const [gid, members] of groups) {
+        const all = (ffzs || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3);
+        const drawn = all.filter(f => f._drawn || f._adv), other = all.filter(f => !(f._drawn || f._adv));
+        for (const f of other) writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] });
+        if (!drawn.length) return writes;
+        const maxGapM = GAP_MERGE_FT * GEN_FT_TO_M;
+        // Union-find: two pieces share a cluster if they overlap or are within GAP_MERGE_FT.
+        const parent = drawn.map((_, i) => i);
+        const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+        for (let i = 0; i < drawn.length; i++) for (let j = i + 1; j < drawn.length; j++) { const np = nearestBetweenRings(drawn[i].points, drawn[j].points); if (np && np.d < maxGapM) parent[find(i)] = find(j); }
+        const clusters = new Map();
+        drawn.forEach((p, i) => { const r = find(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(p); });
+        const bucket = mapObjectsBySite[genState.siteID];
+        const realFfzs = ((bucket && bucket.entities) || []).filter(e => e.type === 16);
+        for (const members of clusters.values()) {
             try {
-                const anchored = typeof gid === 'string' && gid.indexOf('ent:') === 0;
-                if (anchored) {
-                    const anchorId = parseInt(gid.slice(4), 10);
-                    const bucket = mapObjectsBySite[genState.siteID];
-                    const ent = bucket && bucket.entities && bucket.entities.find(e => e.id === anchorId && e.type === 16);
-                    const existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId);
-                    const baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
-                    if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
-                    // UNION (clean, any topology) → fall back to splice only if the lib is unavailable.
-                    const er = (ent.restrictions) || (existing && existing.restrictions) || {};
-                    const u = unionWithGapClose([baseRing].concat(members.map(m => m.points)), GAP_MERGE_FT);
-                    if (u && u.rings.length) {
-                        // Largest piece = the FFZ being extended (upsert). Any extra disjoint pieces
-                        // (a member that didn't actually overlap) → their own create, NOT dropped.
-                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: u.rings[0], restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
-                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${ent.name || ('#' + anchorId)} pt${i + 1}`, points: u.rings[i], restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members: [], _disjoint: true });
-                    } else {
-                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: fuseMembers(baseRing, members), restrictions: { minAlt: er.minAlt, maxAlt: er.maxAlt }, members });
-                    }
-                } else {
-                    const root = members[0];
-                    const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
-                    if (u && u.rings.length) {
-                        writes.push({ kind: 'create', name: root.name, points: u.rings[0], restrictions: root.restrictions, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
-                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${root.name} pt${i + 1}`, points: u.rings[i], restrictions: root.restrictions, members: [], _disjoint: true });
-                    } else {
-                        let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0;
-                        writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members });
-                    }
+                let anchorId = null;
+                for (const m of members) { if (m._anchorId != null) { anchorId = m._anchorId; break; } }
+                // No explicit anchor but the cluster OVERLAPS a real FFZ → absorb it (server forbids overlap).
+                if (anchorId == null) {
+                    for (const a of realFfzs) { const r = entityCoords(a); if (!r || r.length < 3) continue; let hit = false; for (const m of members) { const np = nearestBetweenRings(m.points, r); if (np && np.d < 1.5 * GEN_FT_TO_M) { hit = true; break; } if (m.points.some(pt => pointInPolygon(pt.lat, pt.lng, r)) || r.some(pt => pointInPolygon(pt.lat, pt.lng, m.points))) { hit = true; break; } } if (hit) { anchorId = a.id; break; } }
                 }
-            } catch (e) { console.warn(`${GEN_TAG} fuse group ${gid} failed:`, e); asCreates(members); }
+                let ent = null, existing = null, baseRing = null;
+                if (anchorId != null) {
+                    ent = realFfzs.find(e => e.id === anchorId) || null;
+                    existing = genPreviewLayers.map(pl => pl && pl._ffz).find(x => x && x._existing && x._origId === anchorId) || null;
+                    baseRing = (existing && Array.isArray(existing.points) && existing.points.length >= 3) ? existing.points : (ent ? entityCoords(ent) : null);
+                    if (!baseRing || baseRing.length < 3 || !ent) { anchorId = null; ent = null; existing = null; baseRing = null; }
+                }
+                const u = unionWithGapClose((baseRing ? [baseRing] : []).concat(members.map(m => m.points)), GAP_MERGE_FT);
+                const root = members[0];
+                if (anchorId != null && ent) {
+                    const er = ent.restrictions || (existing && existing.restrictions) || {};
+                    const rest = { minAlt: er.minAlt, maxAlt: er.maxAlt };
+                    if (u && u.rings.length) {
+                        writes.push({ kind: 'upsert', anchorId, ent, existing, points: u.rings[0], restrictions: rest, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
+                        for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${ent.name || ('#' + anchorId)} pt${i + 1}`, points: u.rings[i], restrictions: rest, members: [], _disjoint: true });
+                    } else writes.push({ kind: 'upsert', anchorId, ent, existing, points: fuseMembers(baseRing, members), restrictions: rest, members });
+                } else if (u && u.rings.length) {
+                    u.rings.forEach((rg, i) => writes.push({ kind: 'create', name: i === 0 ? root.name : `${root.name} pt${i + 1}`, points: rg, restrictions: root.restrictions, members: i === 0 ? members : [], _holes: u.holes, _disjoint: u.rings.length > 1 }));
+                } else {
+                    let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0;
+                    writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members });
+                }
+            } catch (e) { console.warn(`${GEN_TAG} cluster fuse failed:`, e); members.forEach(f => writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] })); }
         }
         return writes;
     }
@@ -9999,6 +10010,8 @@
             else localStorage.removeItem(advFfzKey());
         } catch (e) {}
     }
+    // Recovery: copy the pre-commit backup back into the live autosave, then reopen the ⊕ modal.
+    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const b = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); if (!b) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } localStorage.setItem('aim_adv_ffzs:' + siteID, b); const n = (JSON.parse(b) || []).length; (uwin().console || console).log('[AIM] restored ' + n + ' draft(s) — reopen the ⊕ Generate modal to see them'); return n; }; } catch (e) {}
     function advLoadFfzs(siteID) {
         try {
             const raw = localStorage.getItem('aim_adv_ffzs:' + siteID); if (!raw) return;
@@ -11160,6 +11173,9 @@
             if (!ffzs.length) { commitResult.innerHTML = '<span style="color:#ffb347">Nothing to commit — run Preview first.</span>'; return; }
             const dry = !!dryEl.checked;
             if (!dry && !confirm(`Commit these drawn FFZs on this site? Connected corridors fuse into ONE zone each; new zones are DRAFT-prefixed (removable via "Remove DRAFT FFZs").`)) return;
+            // SAFETY: back up every current draft to a key that is NEVER auto-cleared, BEFORE writing —
+            // so a partial/failed commit can't lose your work. Recover via __aimAdvRestoreBackup().
+            if (!dry) { try { const slim = ffzs.filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3).map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt })); if (slim.length) localStorage.setItem('aim_adv_ffzs_backup:' + genState.siteID, JSON.stringify(slim)); } catch (e) {} }
             commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
             try {
                 const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
