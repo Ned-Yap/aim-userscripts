@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.128
+// @version      4.129
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.128';
+    const SCRIPT_VERSION = '4.129';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9841,6 +9841,35 @@
             return { rings: out, holes };
         } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
     }
+    // Morphological CLOSE: fill any gap/notch/sliver narrower than 2*dFt so the fused shape comes out
+    // clean (no "little bits"). dilate by d then erode by d (erode via the complement trick so holes
+    // are preserved). Falls back to the input ring on any failure — never makes the shape worse.
+    function morphCloseRing(ringLL, dFt) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function' || !Array.isArray(ringLL) || ringLL.length < 4) return ringLL;
+        try {
+            const d = dFt * GEN_FT_TO_M, proj = genProjector(ringLL[0].lat, ringLL[0].lng);
+            const ringXY = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const ringToMP = r => { const c = r.slice(); c.push(r[0]); return [[c]]; };
+            const dilateMP = (mp) => {
+                const parts = [mp];
+                for (const poly of mp) for (const ring of poly) { const n = ring.length; for (let i = 0; i < n - 1; i++) { const a = ring[i], b = ring[i + 1]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = -dy / L * d, ny = dx / L * d; const q = [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]]; q.push(q[0]); parts.push([q]); const s = [[a[0] + d, a[1] + d], [a[0] + d, a[1] - d], [a[0] - d, a[1] - d], [a[0] - d, a[1] + d]]; s.push(s[0]); parts.push([s]); } }
+                return PC.union(parts[0], ...parts.slice(1));
+            };
+            const outers = m => m.map(p => p[0].map(c => [c[0], c[1]]));
+            const areaXY = r => { let a = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+            const D = dilateMP(ringToMP(ringXY));
+            let mnx = 1e18, mny = 1e18, mxx = -1e18, mxy = -1e18;
+            for (const r of outers(D)) for (const p of r) { mnx = Math.min(mnx, p[0]); mny = Math.min(mny, p[1]); mxx = Math.max(mxx, p[0]); mxy = Math.max(mxy, p[1]); }
+            const mg = d * 4, Bc = [[mnx - mg, mny - mg], [mxx + mg, mny - mg], [mxx + mg, mxy + mg], [mnx - mg, mxy + mg]]; Bc.push(Bc[0]);
+            const eroded = PC.difference([Bc], dilateMP(PC.difference([Bc], D)));
+            const er = outers(eroded); if (!er.length) return ringLL;
+            er.sort((a, b) => areaXY(b) - areaXY(a));
+            let out = er[0].map(c => proj.inv({ x: c[0], y: c[1] }));
+            if (out.length > 1) { const a = out[0], b = out[out.length - 1]; if (Math.abs(a.lat - b.lat) < 1e-12 && Math.abs(a.lng - b.lng) < 1e-12) out.pop(); }
+            return out.length >= 3 ? out : ringLL;
+        } catch (e) { console.warn(`${GEN_TAG} morph-close failed:`, e); return ringLL; }
+    }
     // Per SOP, two FFZs can't sit within 30 ft of each other — so pieces this close are meant to be
     // ONE zone. If a union leaves disjoint pieces within GAP_MERGE_FT, weld the nearest pair with a
     // small connector and re-union until they're all one (or genuinely far apart).
@@ -9925,6 +9954,8 @@
                     if (!baseRing || baseRing.length < 3 || !ent) { anchorId = null; ent = null; existing = null; baseRing = null; }
                 }
                 const u = unionWithGapClose((baseRing ? [baseRing] : []).concat(members.map(m => m.points)), GAP_MERGE_FT);
+                // Clean up the fused shape: fill notches/slivers narrower than GAP_MERGE_FT (no little bits).
+                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => simplifyRing(morphCloseRing(r, GAP_MERGE_FT / 2)));
                 const root = members[0];
                 if (anchorId != null && ent) {
                     const er = ent.restrictions || (existing && existing.restrictions) || {};
