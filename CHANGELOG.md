@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — remembers your Width/Offset/Line/band settings — Asset Inspector v4.118 (dev/latest)
+
+The Advanced Draw settings (Width, Offset, Line mode, band color/opacity) now **persist across reloads** (saved per browser). So the commit → reload → re-draw cycle no longer makes you re-type the same parameters every time.
+
+---
+
 ## 2026-06-25 — Advanced Draw — flush branching: snap to a corridor's centerline (v1) — Asset Inspector v4.117 (dev/latest)
 
 First cut at building extensions that line up perfectly with the fewest vertices. Existing corridors now show **magenta dots along their centerline**, and the cursor snaps to that centerline (a vertex *or* anywhere along it). Connecting centerline-to-centerline is what makes the new lane sit **flush** instead of offset by half a width — so an "n" → "H" crossbar is just two clicks (snap each end onto a leg). Starting on a centerline also **auto-matches that corridor's width** so the lanes are the same thickness. The free cyan edge-snap still works everywhere else. Rough first version — we'll dial it in.

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.117
+// @version      4.118
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.117';
+    const SCRIPT_VERSION = '4.118';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9438,6 +9438,22 @@
         if (advDraw.ffzSnap && !editing) { const sc = advDraw.ffzSnap.centerline ? '#ff5fff' : '#00e5ff'; try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: sc, weight: 2.5, fillColor: sc, fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
         advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
+    // Remember the Advanced Draw PARAMS (width/offset/anchor/band) across reloads (GM, cross-site)
+    // so a commit→reload→re-draw cycle doesn't make you re-type them.
+    const ADV_PARAMS_KEY = 'aim_adv_params';
+    function advSaveParams() { try { GM_setValue(ADV_PARAMS_KEY, JSON.stringify({ widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt, anchor: advDraw.anchor, bufColor: advDraw.bufColor, bufColor2: advDraw.bufColor2, bufOpacity: advDraw.bufOpacity })); } catch (e) {} }
+    function advLoadParams() {
+        try {
+            const raw = GM_getValue(ADV_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (o.widthFt > 0) advDraw.widthFt = o.widthFt;
+            if (typeof o.offsetFt === 'number') advDraw.offsetFt = o.offsetFt;
+            if (o.anchor) advDraw.anchor = o.anchor;
+            if (o.bufColor) advDraw.bufColor = o.bufColor;
+            if (o.bufColor2) advDraw.bufColor2 = o.bufColor2;
+            if (typeof o.bufOpacity === 'number') advDraw.bufOpacity = o.bufOpacity;
+        } catch (e) {}
+    }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
     function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt, anchor: advDraw.anchor })); } catch (e) {} }
     function advClearPersist() { try { localStorage.removeItem(advStoreKey()); } catch (e) {} }
@@ -10926,14 +10942,15 @@
                 setAdvDraw(true);
             }
         };
-        // Advanced Draw live controls
+        // Advanced Draw live controls — load remembered params first so the fields show them.
+        advLoadParams();
         const advAnchor = box.querySelector('#aim-adv-anchor');
-        if (advAnchor) { advAnchor.value = advDraw.anchor; advAnchor.onchange = () => { advDraw.anchor = advAnchor.value; advPersist(); advRender(); }; }
+        if (advAnchor) { advAnchor.value = advDraw.anchor; advAnchor.onchange = () => { advDraw.anchor = advAnchor.value; advPersist(); advSaveParams(); advRender(); }; }
         const advW = box.querySelector('#aim-adv-width'), advO = box.querySelector('#aim-adv-offset'), advC = box.querySelector('#aim-adv-color'), advOp = box.querySelector('#aim-adv-opacity');
-        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advDraw.segWidth = advDraw.segWidth.map(() => v); advPersist(); advRender(); } }; }
-        if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advRender(); } }; }
-        if (advC) { advC.value = advDraw.bufColor; advC.oninput = () => { advDraw.bufColor = advC.value; advRender(); }; }
-        if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advRender(); } }; }
+        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advDraw.segWidth = advDraw.segWidth.map(() => v); advPersist(); advSaveParams(); advRender(); } }; }
+        if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advSaveParams(); advRender(); } }; }
+        if (advC) { advC.value = advDraw.bufColor; advC.oninput = () => { advDraw.bufColor = advC.value; advSaveParams(); advRender(); }; }
+        if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advSaveParams(); advRender(); } }; }
 
         const dryEl = box.querySelector('#aim-gen-dryrun');
         const commitResult = box.querySelector('#aim-gen-commit-result');
