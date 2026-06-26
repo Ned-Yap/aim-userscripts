@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.133
+// @version      4.134
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.133';
+    const SCRIPT_VERSION = '4.134';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -11235,8 +11235,9 @@
         // 🔗 Merge (preview): replace the drawn pieces with their final fused shapes ON THE MAP so you
         // SEE exactly what Commit will create — non-destructive, never touches existing FFZs.
         const mergeBtn = box.querySelector('#aim-gen-merge');
-        if (mergeBtn) mergeBtn.onclick = () => {
+        if (mergeBtn) mergeBtn.onclick = async () => {
             try {
+                try { await fetchMapObjects(genState.siteID, true); } catch (e) {} // fresh entity list so the overlap check doesn't flag DELETED FFZs (stale cache)
                 const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
                 const pieces = ffzs.filter(f => f && !f._committed && (f._drawn || f._adv) && Array.isArray(f.points) && f.points.length >= 3);
                 if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
@@ -11271,6 +11272,7 @@
             if (!dry) { try { const slim = ffzs.filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3).map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt })); if (slim.length) localStorage.setItem('aim_adv_ffzs_backup:' + genState.siteID, JSON.stringify(slim)); } catch (e) {} }
             commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
             try {
+                try { await fetchMapObjects(genState.siteID, true); } catch (e) {} // fresh entities → overlap warning won't flag deleted FFZs
                 const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
                 const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
                 const updTxt = r.updated ? ` · <b style="color:#ffe14d">${r.updated}</b> fused into existing` : '';
