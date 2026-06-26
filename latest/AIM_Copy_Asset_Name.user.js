@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.119
+// @version      4.120
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.119';
+    const SCRIPT_VERSION = '4.120';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9961,7 +9961,7 @@
             const mk = L.marker([mid.lat, mid.lng], { icon, interactive: true, keyboard: false, zIndexOffset: 900 });
             const insertAt = i + 1;
             mk.addTo(map);
-            mk.on('click', (e) => { try { if (e.originalEvent) e.originalEvent.stopPropagation(); } catch (er) {} f.points.splice(insertAt, 0, { lat: mid.lat, lng: mid.lng }); genVertEditPersist(); renderGenVertMarkers(); });
+            mk.on('click', (e) => { try { if (e.originalEvent) e.originalEvent.stopPropagation(); } catch (er) {} genPushUndo(f, 'vertex add'); f.points.splice(insertAt, 0, { lat: mid.lat, lng: mid.lng }); genVertEditPersist(); renderGenVertMarkers(); });
             genVertEdit.mids.push(mk);
         }
     }
@@ -9974,12 +9974,13 @@
             const icon = L.divIcon({ className: 'aim-vert-dot', html: '<div style="width:12px;height:12px;border-radius:50%;background:#00e5ff;border:2px solid #08121a;box-shadow:0 0 0 1px #00e5ff;"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
             const mk = L.marker([p.lat, p.lng], { icon, draggable: true, autoPan: false, keyboard: false, zIndexOffset: 1000 });
             mk.addTo(map);
+            mk.on('dragstart', () => { genPushUndo(f, 'vertex move'); });
             mk.on('drag', (e) => { const ll = e.target.getLatLng(); f.points[i] = { lat: ll.lat, lng: ll.lng }; if (f._poly) { try { f._poly.setLatLngs(f.points.map(q => [q.lat, q.lng])); } catch (er) {} } });
             mk.on('dragend', () => { genVertEditPersist(); renderGenVertMarkers(); });
             mk.on('contextmenu', (e) => {
                 try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (er) {}
                 if (f.points.length <= 3) { showToast('A zone needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
-                f.points.splice(i, 1); genVertEditPersist(); renderGenVertMarkers();
+                genPushUndo(f, 'vertex delete'); f.points.splice(i, 1); genVertEditPersist(); renderGenVertMarkers();
             });
             genVertEdit.markers.push(mk);
         });
@@ -10025,6 +10026,30 @@
         showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
     }
     let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
+    // ===== Undo (Ctrl+Z) — snapshot a preview FFZ's geometry before each move/rotate/vertex edit,
+    // restore the most recent on Ctrl+Z (e.g. an accidental drag). =====
+    let genUndoStack = [];
+    function genPushUndo(f, label) {
+        if (!f || !Array.isArray(f.points)) return;
+        try {
+            genUndoStack.push({ f, points: f.points.map(p => ({ lat: p.lat, lng: p.lng })), advVerts: Array.isArray(f._advVerts) ? f._advVerts.map(v => ({ lat: v.lat, lng: v.lng })) : null, dirty: !!f._dirty, label: label || 'edit' });
+            if (genUndoStack.length > 40) genUndoStack.shift();
+        } catch (e) {}
+    }
+    function genUndo() {
+        const u = genUndoStack.pop();
+        if (!u) { showToast('Nothing to undo', 'rgba(255,179,71,0.5)'); return; }
+        const f = u.f;
+        f.points = u.points; f._centroid = ringCentroid(u.points);
+        if (u.advVerts) f._advVerts = u.advVerts;
+        if (f._existing) f._dirty = u.dirty;
+        if (f._poly) { try { f._poly.setLatLngs(u.points.map(p => [p.lat, p.lng])); } catch (e) {} }
+        try { refreshFfzLineFlag(f); } catch (e) {}
+        try { restyleFfzPoly(f); } catch (e) {}
+        try { clearResizeHandles(); } catch (e) {}
+        try { advSaveFfzs(); } catch (e) {}
+        showToast(`Undid ${u.label}`, 'rgba(95,184,255,0.5)');
+    }
     function wireGenEditing(map) {
         if (genEdit.wired) return;
         genEdit.map = map;
@@ -10147,6 +10172,14 @@
         // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
         genEdit.onKey = (ev) => {
             const k0 = (ev.key || '').toLowerCase();
+            // Ctrl/Cmd+Z = undo the last move/rotate/vertex edit (e.g. an accidental drag).
+            if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && k0 === 'z') {
+                const t = ev.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return; // let fields handle their own undo
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                genUndo();
+                return;
+            }
             // Esc cancels the in-progress drawn corridor (drops placed corners).
             if (k0 === 'escape' && genDraw.active && genDraw.drawing) {
                 ev.preventDefault(); ev.stopImmediatePropagation();
@@ -10166,6 +10199,7 @@
             if (!genEdit.dragging || poly !== genEdit.activePoly) return; // Q/E only mid-drag
             if (k === 'q' || k === 'e') {
                 ev.preventDefault(); ev.stopImmediatePropagation();
+                genPushUndo(poly._ffz, 'rotate');
                 rotateFfz(poly._ffz, k === 'q' ? 10 : -10);
                 try { poly.setLatLngs(poly._ffz.points.map(p => [p.lat, p.lng])); } catch (err) {}
                 refreshFfzLineFlag(poly._ffz);
@@ -10273,6 +10307,7 @@
             if (genDraw.active) return; // Draw mode owns the mouse
             if (genVertEdit.active && genVertEdit.f === poly._ffz) return; // vertex editor owns this poly's verts
             if (poly._ffz && poly._ffz._committed) { try { showCommittedPopup(e.latlng); } catch (er) {} return; }
+            genPushUndo(poly._ffz, 'move');   // snapshot before a drag so Ctrl+Z can revert it
             clearResizeHandles(); // hide handles while moving/snaking (stops flicker)
             genEdit.dragging = true;
             genEdit.activePoly = poly;
@@ -10577,6 +10612,7 @@
         genAltModeOverride = null;
         try { setFpSnap(false); } catch (e) {}
         try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
+        genUndoStack = [];
         // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
         // corridor survives close/reload — restored when the mode is re-armed).
         try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}

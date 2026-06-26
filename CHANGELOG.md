@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Generator — Undo (Ctrl+Z) for moves / rotates / vertex edits — Asset Inspector v4.120 (dev/latest)
+
+Accidentally dragged or rotated a draft zone? **Ctrl+Z** now puts it back. It snapshots a zone's geometry before each move, Q/E rotate, or per-vertex edit, and restores the most recent on Ctrl+Z (up to 40 steps back). Works on drawn drafts and loaded existing-FFZ edits.
+
+---
+
 ## 2026-06-25 — Advanced Draw — real polygon UNION at commit (multi-piece merges just work) — Asset Inspector v4.119 (dev/latest)
 
 Connected corridors now fuse with a proper **polygon union** instead of the old splice. This fixes the cases that were getting BLOCKED as self-intersecting — combining several pieces around adjacent pads into one big FFZ now produces a single clean zone, any topology (bridges, overlaps, multi-pad). If a union ever encloses a hole, Percepto can't store holes, so it's filled in and you're told. (Uses the `polygon-clipping` library; splice remains as a fallback if the library can't load.)
