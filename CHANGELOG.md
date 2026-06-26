@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — measure labels sit in each lane + a green FFZ-width label — Asset Inspector v4.115 (dev/latest)
+
+The "N ft" labels used to land in the empty middle of a wrap-around shape. Now each one sits **in the middle of its own lane** — red in the standoff band, yellow in the outer shielding band — and there's a new **green label showing the FFZ width** in the middle of the green lane. So at a glance you can read the standoff, the zone width, and the outer shielding right where each one is.
+
+---
+
 ## 2026-06-25 — Advanced Draw — "Line is…" dropdown: draw on the asset boundary, build outward — Asset Inspector v4.114 (dev/latest)
 
 New **Line** dropdown in the Advanced Draw controls picks what the line you draw represents:

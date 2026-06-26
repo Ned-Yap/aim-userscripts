@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.114
+// @version      4.115
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.114';
+    const SCRIPT_VERSION = '4.115';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9284,14 +9284,28 @@
         const outer = advOffsetMiter(m, side, widthsM.map(w => w + om)); // + shielding offset
         return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
     }
-    // Draw a shielding band polygon + a low-pri "<offset> ft" measure label at its centroid.
+    // Draw a shielding band polygon (no label — labels are placed in the lane center separately).
     function advDrawBand(map, L, band, color, fillOpacity) {
         if (!band || !band.length) return;
         try {
             const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: color, weight: 1, opacity: 0.6, fillColor: color, fillOpacity: fillOpacity, interactive: false });
             pb.addTo(map); advDraw.layers.push(pb);
-            const c = ringCentroid(band);
-            const lab = L.marker([c.lat, c.lng], { interactive: false, icon: L.divIcon({ className: 'aim-adv-meas', html: '<span style="background:rgba(17,21,26,0.78);color:' + color + ';border:1px solid ' + color + ';border-radius:3px;padding:0 4px;font:600 10px/14px system-ui;white-space:nowrap;">' + advDraw.offsetFt + ' ft</span>', iconSize: [0, 0] }) });
+        } catch (e) {}
+    }
+    // Point at the MIDDLE of a lane: midpoint of the first drawn segment, offset perpendicular
+    // (box side) by depthFt. Used to drop measure labels in the middle of each band/lane.
+    function advLanePt(verts, side, depthFt) {
+        if (!verts || verts.length < 2) return null;
+        const a = verts[0], b = verts[1], proj = genProjector(a.lat, a.lng);
+        const A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, Llen = Math.hypot(dx, dy) || 1;
+        const nx = side * (-dy / Llen), ny = side * (dx / Llen), d = depthFt * GEN_FT_TO_M;
+        return proj.inv({ x: (A.x + B.x) / 2 + nx * d, y: (A.y + B.y) / 2 + ny * d });
+    }
+    function advMeasLabel(map, L, pt, text, color) {
+        if (!pt) return;
+        try {
+            const lab = L.marker([pt.lat, pt.lng], { interactive: false, icon: L.divIcon({ className: 'aim-adv-meas', html: '<span style="background:rgba(17,21,26,0.82);color:' + color + ';border:1px solid ' + color + ';border-radius:3px;padding:0 4px;font:600 10px/14px system-ui;white-space:nowrap;">' + text + '</span>', iconSize: [0, 0] }) });
             lab.addTo(map); advDraw.layers.push(lab);
         } catch (e) {}
     }
@@ -9389,6 +9403,12 @@
                 : advBandSigned(path, advDraw.offsetFt, advDraw.side, -1);   // just outside the inner (drawn) edge
             advDrawBand(map, L, innerBand, advDraw.bufColor, advDraw.bufOpacity);                                                  // red — inner shielding
             advDrawBand(map, L, advBandOuter(path, widthsFt, advDraw.offsetFt, advDraw.side, startFt), advDraw.bufColor2, advDraw.bufOpacity); // yellow — beyond the FAR edge of the FFZ
+            // Measure labels in the MIDDLE of each lane (red=standoff, green=FFZ width, yellow=outer shielding).
+            const off = advDraw.offsetFt, w0 = widthsFt[0] || advDraw.widthFt;
+            const redDepth = (advDraw.anchor === 'shielding') ? off / 2 : -off / 2;
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, redDepth), `${off} ft`, advDraw.bufColor);
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, startFt + w0 / 2), `${w0} ft`, '#5fff5f');
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, startFt + w0 + off / 2), `${off} ft`, advDraw.bufColor2);
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
             // grabbed outer edge highlight (white, neutral against the green FFZ)
             if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
