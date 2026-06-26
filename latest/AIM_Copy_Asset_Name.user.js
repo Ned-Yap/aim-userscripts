@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.137
+// @version      4.138
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.137';
+    const SCRIPT_VERSION = '4.138';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10652,6 +10652,10 @@
         if (tmplEnt) { try { tmplBody = buildWriteBody(tmplEnt, siteCfg); } catch (e) {} }
         // Phase 1: fuse grouped corridors into single entities (one create/upsert each).
         const writes = fuseCorridorGroups(ffzs);
+        // Names must be UNIQUE on the site (Percepto 400s on a duplicate). Seed with existing FFZ
+        // names, then suffix _2/_3/… so two zones off the same asset don't collide.
+        const usedNames = new Set(((bucket && bucket.entities) || []).filter(e => e.type === 16 && e.name).map(e => e.name));
+        const uniqueName = (base) => { if (!base) base = 'FFZ'; if (!usedNames.has(base)) { usedNames.add(base); return base; } let i = 2, n; do { n = base + '_' + (i++); } while (usedNames.has(n)); usedNames.add(n); return n; };
         for (const w of writes) {
             const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
             if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
@@ -10670,6 +10674,7 @@
                 body.validated = false;   // geometry changed → re-enters review
             } else {
                 body = genCreateBody({ name: w.name, points: w.points, restrictions: w.restrictions }, siteID, siteCfg, tmplBody);
+                body.name = uniqueName(body.name); // de-dup so same-pad zones don't collide on the server
             }
             if (dryRun) { if (w.kind === 'upsert') res.updated++; else res.created++; continue; }
             try {
