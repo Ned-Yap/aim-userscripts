@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.121
+// @version      4.122
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.121';
+    const SCRIPT_VERSION = '4.122';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5991,9 +5991,39 @@
         };
         container.appendChild(btn);
     }
+    // Inject a ⊕ Generate button straight into the map toolbar (next to the gear / flag /
+    // lightning), so the Site Setup Generator is one click away instead of via SUM → Generate.
+    const GEN_MAP_BTN_ID = 'aim-gen-maptools-btn';
+    function injectGenMapButton(doc) {
+        try {
+            const tools = doc.querySelector('.map-tools');
+            if (!tools) return;
+            if (doc.getElementById(GEN_MAP_BTN_ID)) { doc.getElementById(GEN_MAP_BTN_ID).style.display = ''; return; }
+            const ref = tools.querySelector('.map-tools__button, button');
+            const btn = doc.createElement('button');
+            btn.id = GEN_MAP_BTN_ID;
+            btn.type = 'button';
+            btn.className = ref ? ref.className : 'map-tools__button';
+            btn.title = 'Site Setup Generator (AIM) — build FFZs / Advanced Draw';
+            btn.style.setProperty('color', '#39ff14', 'important');
+            btn.innerHTML = '<span style="font-size:16px;font-weight:800;line-height:1">⊕</span>';
+            btn.onclick = async (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const sid = getCurrentSiteID();
+                if (!sid) { showToast('Open a site first', 'rgba(255,179,71,0.6)'); return; }
+                if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+                    showToast('Loading site data…', 'rgba(122,223,230,0.5)');
+                    try { await fetchMapObjects(sid, true); } catch (err) { console.warn(`${TAG} gen-map-button fetch failed:`, err); }
+                }
+                openSiteGenerator(sid);
+            };
+            tools.appendChild(btn);
+        } catch (e) {}
+    }
     function recursiveSumInject(win) {
         try {
             injectSumButton(win.document);
+            injectGenMapButton(win.document);
             const frames = win.document.querySelectorAll('iframe');
             frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
         } catch (e) {}

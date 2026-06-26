@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Site Setup Generator — ⊕ button right on the map toolbar — Asset Inspector v4.122 (dev/latest)
+
+The Site Setup Generator now has its own **⊕ button on the map toolbar** (next to the gear / flag / ⚡), so you can open it directly instead of going Summary → Generate every time. It loads the site data on its own if needed.
+
+---
+
 ## 2026-06-25 — Advanced Draw — "Show shielding on drafts" toggle — Asset Inspector v4.121 (dev/latest)
 
 New **Show shielding on drafts** checkbox in the Commit box. When on, every drawn corridor draft shows its red inner / yellow outer shielding bands — not just the one you're actively drawing — so you can see clearance across the whole site at once. The bands re-draw after you move or rotate a draft. (Reads each corridor's stored width/offset/line settings.)
