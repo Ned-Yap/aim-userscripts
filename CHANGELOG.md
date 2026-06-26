@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — commit draws the MERGED shape immediately (no reload) — Asset Inspector v4.126 (dev/latest)
+
+After you commit, the actual **fused shape** is now drawn on the map right away (solid green), and the individual pieces it was built from are removed — so you can see the merge worked before moving on, instead of staring at the separate drafts. (A reload still pulls it into Percepto's native editor, but you don't need one to confirm the result.)
+
+---
+
 ## 2026-06-25 — Advanced Draw — snap dots on real existing FFZ corners too — Asset Inspector v4.125 (dev/latest)
 
 The flush-snap magenta dots now appear on the **corners of real committed FFZs** as well, not just corridors you drew this session — so you can snap a new corridor precisely onto an existing real zone and extend it. (A corridor started on a real FFZ corner anchors to that FFZ and fuses into it on commit.)

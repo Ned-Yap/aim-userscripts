@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.125
+// @version      4.126
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.125';
+    const SCRIPT_VERSION = '4.126';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10542,7 +10542,7 @@
     async function commitGeneratedFfzs(ffzs, opts) {
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
-        const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], dryRun };
+        const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], merged: [], dryRun };
         if (!ffzs || !ffzs.length) return res;
         const csrf = getCsrfToken();
         if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
@@ -10582,6 +10582,9 @@
                     const sid = (saved.id != null) ? saved.id : w.anchorId;
                     if (sid != null) { res.ids.push({ id: sid, name: label }); (w.members || []).forEach(m => { m._committedId = sid; }); }
                     if (w.existing) { w.existing._dirty = false; w.existing._committedId = sid; try { markFfzCommitted(w.existing); } catch (e) {} }
+                    // Keep the actual MERGED shape + its source pieces so the UI can draw the fused
+                    // result on the map immediately (no reload) for visual confirmation.
+                    res.merged.push({ id: sid, name: label, points: w.points, restrictions: w.restrictions, members: (w.members || []).slice() });
                 } else { res.failed++; res.errors.push(`${label}: server ${r.status} ${(txt || '').slice(0, 140)}`); }
             } catch (e) { res.failed++; res.errors.push(`${label}: POST threw ${e && e.message || e}`); }
         }
@@ -11167,10 +11170,28 @@
                     commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created${updTxt}${invTxt} · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
                 } else {
                     if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
-                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt}${invTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · shown on the map (solid green). Reload only to edit them natively in Percepto.</span>' : ''}`;
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt}${invTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · <b style="color:#5fff5f">merged shape drawn on the map (solid green)</b>. Reload to edit it natively in Percepto.</span>' : ''}`;
                     if (r.created || r.updated) {
-                        // Keep committed FFZs drawn (no reload needed to see them) + lock them.
+                        // Draw the actual MERGED shape on the map (locked green) + drop the individual
+                        // pieces, so you SEE the fused result immediately without reloading.
                         clearResizeHandles();
+                        try {
+                            const mapL = getLeafletMap(), L2 = getLeafletL();
+                            (r.merged || []).forEach(mg => {
+                                // remove the source piece polys (they're now one merged shape)
+                                (mg.members || []).forEach(m => {
+                                    if (m && m._poly) { try { if (mapL) mapL.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                                    if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) { const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1); }
+                                });
+                                // draw the fused ring as a committed (locked green) FFZ
+                                if (mapL && L2 && Array.isArray(mg.points) && mg.points.length >= 3) {
+                                    const mf = { type: 16, name: mg.name, site_id: genState.siteID, points: mg.points, restrictions: mg.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _committed: true, _committedId: mg.id, _centroid: ringCentroid(mg.points) };
+                                    genState.lastResult.ffzs.push(mf);
+                                    renderGenPreview([mf], true);
+                                    try { markFfzCommitted(mf); } catch (e) {}
+                                }
+                            });
+                        } catch (e) { console.warn(`${GEN_TAG} draw merged shapes failed:`, e); }
                         (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
                         try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
