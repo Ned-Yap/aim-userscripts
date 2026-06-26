@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.48
+// @version      0.49
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -75,7 +75,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.48';
+    const SCRIPT_VERSION = '0.49';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -1199,6 +1199,233 @@
         }
     }
 
+    // =====================================================================
+    // TRIM / SURGERY — delete corrupted segments WITHOUT clicking them.
+    // The whole reason this exists: when segments pile up ("stuck together")
+    // you can't right-click them on the map, so we drive everything from a
+    // panel keyed on segment NUMBERS. Four ops, all via the SAME working-copy
+    // splice + pre/post validation gate + undo as split/open-path:
+    //   • Truncate   — keep 1..N-1, delete N..end (keeps a prefix, no stitch)
+    //   • Range del  — delete A..B and stitch the gap with one connector arc
+    //   • Prune      — delete the branch/spur a segment sits on
+    //   • Auto-clean — remove every zero-length / duplicate / self arc at once
+    // verifyEdit() is the backstop: any op that introduces a NEW integrity
+    // problem (disconnect, inverted band, …) auto-reverts and the path is
+    // left exactly as it was.
+    // =====================================================================
+    const TRIM_PANEL_ID = 'aim-fpe-trim-panel';
+    const TRIM_INP_CSS = 'background:#0d0f13;color:#e6e6e6;border:1px solid #3a414b;border-radius:4px;padding:3px 5px;font:12px sans-serif';
+    const TRIM_BTN_CSS = 'background:#1f2228;color:#7fdfff;border:1px solid #7fdfff66;border-radius:5px;padding:4px 9px;font:12px sans-serif;font-weight:600;cursor:pointer';
+    let trimFpId = null;
+    let trimConnSeq = 0;
+    const ftA = (m) => num(m) ? Math.round(m * 3.28084) : '—';
+
+    function trimWcs() { return findFpWorkingCopies(); }
+    function currentTrimWc() {
+        const wcs = trimWcs();
+        if (!wcs.length) return null;
+        return wcs.find(w => String(w.id) === String(trimFpId)) || wcs[0];
+    }
+
+    // Per-arc diagnostic: length, endpoint degree, and the "stuck together" flags.
+    function trimRows(arcs) {
+        const deg = new Map();
+        arcs.forEach(a => { [a.point_a, a.point_b].forEach(p => { const k = finitePt(p) ? nodeKey(p) : '?'; deg.set(k, (deg.get(k) || 0) + 1); }); });
+        return arcs.map((a, i) => {
+            const lenFt = (finitePt(a.point_a) && finitePt(a.point_b)) ? hav(a.point_a, a.point_b) * 3.28084 : NaN;
+            const ka = finitePt(a.point_a) ? nodeKey(a.point_a) : '?', kb = finitePt(a.point_b) ? nodeKey(a.point_b) : '?';
+            const dupPrev = i > 0 && finitePt(arcs[i - 1].point_a) && nodeKey(arcs[i - 1].point_a) === ka && nodeKey(arcs[i - 1].point_b) === kb;
+            const flags = [];
+            if (Number.isFinite(lenFt) && lenFt < 1) flags.push('ZERO');
+            if (ka === kb && ka !== '?') flags.push('SELF');
+            if (dupPrev) flags.push('DUP');
+            return { seg: i + 1, lenFt, degA: deg.get(ka), degB: deg.get(kb), minFt: ftA(a.min_alt), maxFt: ftA(a.max_alt), flags };
+        });
+    }
+
+    // Rebuild coords to exactly the kept arcs' endpoint set (drop orphans left by the
+    // deletion, add any new connector vertex). Server rebuilds coords from arcs anyway,
+    // but a clean coords array keeps checkFlightPath happy (no orphan/missing nodes).
+    function coordsForArcs(origCoords, arcs) {
+        const need = new Set();
+        arcs.forEach(a => { if (finitePt(a.point_a)) need.add(nodeKey(a.point_a)); if (finitePt(a.point_b)) need.add(nodeKey(a.point_b)); });
+        const out = [], seen = new Set();
+        (origCoords || []).forEach(c => { if (!finitePt(c)) return; const k = nodeKey(c); if (need.has(k) && !seen.has(k)) { out.push(clone(c)); seen.add(k); } });
+        arcs.forEach(a => { [a.point_a, a.point_b].forEach(p => { if (!finitePt(p)) return; const k = nodeKey(p); if (!seen.has(k)) { out.push(clone(p)); seen.add(k); } }); });
+        return out;
+    }
+
+    // The maximal simple chain (branch/spur) a segment sits on: walk outward through
+    // degree-2 vertices only, stopping at leaves (deg 1) and junctions (deg ≥ 3). If one
+    // end is a junction and the other a leaf it's a prunable spur; if both ends are
+    // junctions the prune would split the path and verifyEdit will block it.
+    function branchArcs(arcs, sIdx) {
+        const byV = new Map();
+        arcs.forEach((a, i) => { [a.point_a, a.point_b].forEach(p => { if (!finitePt(p)) return; const k = nodeKey(p); if (!byV.has(k)) byV.set(k, []); byV.get(k).push(i); }); });
+        const deg = k => (byV.get(k) || []).length;
+        const out = new Set(); const stack = [sIdx];
+        while (stack.length) {
+            const i = stack.pop(); if (out.has(i)) continue; out.add(i);
+            const a = arcs[i];
+            [a.point_a, a.point_b].forEach(p => {
+                if (!finitePt(p)) return; const k = nodeKey(p);
+                if (deg(k) === 2) (byV.get(k) || []).forEach(j => { if (j !== i && !out.has(j)) stack.push(j); });
+            });
+        }
+        return out;
+    }
+
+    // Shared apply path for every op: snapshot → splice → rebuild coords → bridge bands →
+    // preflight (block on a fresh non-disconnect issue) → undo-push → dispatch → verifyEdit.
+    function applyDeletion(wc, removeIdx, connector, label) {
+        const st = wc.state;
+        const arcs = st.arcs || [];
+        const origArcs = clone(arcs), origCoords = clone(st.coords || []);
+        const preIssues = checkFlightPath(st);
+        const newArcs = arcs.filter((a, i) => !removeIdx.has(i)).map(clone);
+        if (connector) newArcs.push(connector);
+        if (!newArcs.length) { toast('That would delete the whole path — nothing left. Aborted.', '#ff8a80'); return false; }
+        const newCoords = coordsForArcs(origCoords, newArcs);
+        bridgeArcContinuity(newArcs, settings.overlapM);
+        // local preflight — block before touching anything if the cut creates a NEW problem.
+        const post = checkFlightPath({ ...st, arcs: newArcs, coords: newCoords });
+        const fresh = post.filter(p => !preIssues.includes(p));
+        if (fresh.length) {
+            const why = /disconnected/.test(fresh[0]) ? `${fresh[0]} — for a middle cut use “Delete + stitch” instead` : fresh[0];
+            toast(`⛔ ${label} blocked: ${why}. Path untouched.`, '#ff8a80'); warn(`${label} preflight blocked:`, fresh); return false;
+        }
+        undoStack.push({ id: wc.id, name: st.name, kind: 'trim', arcs: origArcs, coords: origCoords });
+        wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
+        state.inserts++;
+        renderPanel();
+        verifyEdit(wc.id, preIssues, newArcs.length, label);
+        toast(`✂ ${label}: ${arcs.length}→${newArcs.length} segments on ${st.name}. Save (no refresh) to persist.`, '#5fff5f');
+        return true;
+    }
+
+    function scheduleTrimRerender() { setTimeout(() => { const el = document.getElementById(TRIM_PANEL_ID); if (el) renderTrimContent(el); }, 130); }
+
+    function onTrimClick(e) {
+        const t = e.target && e.target.closest && e.target.closest('[data-act]');
+        if (!t) return;
+        e.preventDefault(); e.stopPropagation();
+        const act = t.getAttribute('data-act');
+        if (act === 'close') { closeTrimPanel(); return; }
+        if (act === 'pickfp') { trimFpId = t.getAttribute('data-fp'); const el = document.getElementById(TRIM_PANEL_ID); if (el) renderTrimContent(el); return; }
+        if (act === 'refresh') { const el = document.getElementById(TRIM_PANEL_ID); if (el) renderTrimContent(el); return; }
+        if (act === 'undo') { doUndo(); scheduleTrimRerender(); return; }
+        const wc = currentTrimWc();
+        if (!wc) { toast('Editor closed — reopen the flight path.', '#ff8a80'); return; }
+        const arcs = wc.state.arcs || [];
+        const n = arcs.length;
+        const gv = (id) => parseInt(((document.getElementById(id) || {}).value), 10);
+        try {
+            if (act === 'truncate') {
+                const from = gv('aim-trim-from');
+                if (!(from >= 2 && from <= n)) { toast(`Enter a segment 2..${n}.`, '#ffb14e'); return; }
+                if (!confirm(`Delete segments ${from}..${n} (keep 1..${from - 1})?`)) return;
+                const rm = new Set(); for (let i = from - 1; i < n; i++) rm.add(i);
+                if (applyDeletion(wc, rm, null, `Truncate from seg ${from}`)) scheduleTrimRerender();
+            } else if (act === 'range') {
+                let a = gv('aim-trim-a'), b = gv('aim-trim-b');
+                if (!(a >= 1 && b >= 1 && a <= n && b <= n)) { toast(`Enter segments 1..${n}.`, '#ffb14e'); return; }
+                if (a > b) { const tmp = a; a = b; b = tmp; }
+                if (!confirm(`Delete segments ${a}..${b} and stitch the gap?`)) return;
+                const rm = new Set(); for (let i = a - 1; i <= b - 1; i++) rm.add(i);
+                const P = clone(arcs[a - 1].point_a), Q = clone(arcs[b - 1].point_b);
+                let connector = null;
+                if (finitePt(P) && finitePt(Q) && !ptEq(P, Q)) {
+                    const tmpl = arcs[a - 2] || arcs[b] || arcs[a - 1];
+                    connector = { ...clone(tmpl), point_a: P, point_b: Q, points: [clone(P), clone(Q)], distance: hav(P, Q), id: 'aim-conn-' + (++trimConnSeq) };
+                }
+                if (applyDeletion(wc, rm, connector, `Delete segs ${a}–${b}${connector ? ' + stitch' : ''}`)) scheduleTrimRerender();
+            } else if (act === 'prune') {
+                const s = gv('aim-trim-prune');
+                if (!(s >= 1 && s <= n)) { toast(`Enter a segment 1..${n}.`, '#ffb14e'); return; }
+                const rm = branchArcs(arcs, s - 1);
+                if (!confirm(`Prune the branch containing seg ${s} (${rm.size} segment${rm.size === 1 ? '' : 's'})?`)) return;
+                if (applyDeletion(wc, rm, null, `Prune branch at seg ${s}`)) scheduleTrimRerender();
+            } else if (act === 'clean') {
+                const rm = new Set(trimRows(arcs).filter(r => r.flags.length).map(r => r.seg - 1));
+                if (!rm.size) { toast('No degenerate arcs to clean.', '#9fe89f'); return; }
+                if (!confirm(`Remove ${rm.size} degenerate (zero-length / duplicate) arc${rm.size === 1 ? '' : 's'}?`)) return;
+                if (applyDeletion(wc, rm, null, `Auto-clean ${rm.size} arc(s)`)) scheduleTrimRerender();
+            }
+        } catch (err) { warn('trim op threw', err); toast('⛔ Trim op errored — see console. Path left as-is.', '#ff8a80'); }
+    }
+
+    function renderTrimContent(el) {
+        const wcs = trimWcs();
+        if (!wcs.length) { el.innerHTML = '<div style="padding:16px">No flight path editor open. Open the path’s editor (so its segment numbers show), then reopen this.</div>'; return; }
+        const wc = currentTrimWc();
+        trimFpId = wc.id;
+        const arcs = wc.state.arcs || [];
+        const rows = trimRows(arcs);
+        const degen = rows.filter(r => r.flags.length);
+        const fpPick = wcs.length > 1
+            ? `<div style="padding:6px 10px;border-bottom:1px solid #2a2f37">FP: ${wcs.map(w => `<span data-act="pickfp" data-fp="${w.id}" style="cursor:pointer;padding:2px 7px;margin-right:4px;border-radius:4px;${String(w.id) === String(wc.id) ? 'background:#7fdfff22;color:#7fdfff;border:1px solid #7fdfff66' : 'border:1px solid #3a414b'}">${(w.state.name || w.id)}</span>`).join('')}</div>`
+            : '';
+        const tbl = rows.map(r => {
+            const junc = (r.degA >= 3 || r.degB >= 3);
+            const bg = r.flags.length ? 'background:#3a210f' : (junc ? 'background:#0f2a33' : '');
+            return `<tr style="${bg}"><td style="padding:2px 6px;text-align:right">${r.seg}</td><td style="padding:2px 6px;text-align:right">${Number.isFinite(r.lenFt) ? Math.round(r.lenFt) : '∞'}</td><td style="padding:2px 6px;text-align:right">${r.minFt}–${r.maxFt}</td><td style="padding:2px 6px;text-align:center;color:${junc ? '#7fdfff' : '#8b939e'}">${r.degA}/${r.degB}</td><td style="padding:2px 6px;color:#ff9e4e">${r.flags.join(' ')}</td></tr>`;
+        }).join('');
+        el.innerHTML = `
+          <div style="position:sticky;top:0;background:#11141a;border-bottom:1px solid #2a2f37;padding:9px 12px;display:flex;align-items:center;justify-content:space-between">
+            <strong style="color:#7fdfff">✂ Trim / delete segments</strong>
+            <span data-act="close" style="cursor:pointer;color:#9aa3ae;font-size:16px;padding:0 4px">×</span>
+          </div>
+          <div style="padding:6px 12px;color:#9aa3ae">${wc.state.name || 'flight path'} · ${arcs.length} segments${degen.length ? ` · <span style="color:#ff9e4e">${degen.length} degenerate</span>` : ''}</div>
+          ${fpPick}
+          <table style="width:100%;border-collapse:collapse;font:11px ui-monospace,monospace">
+            <thead><tr style="color:#8b939e"><th style="padding:3px 6px;text-align:right">#</th><th style="padding:3px 6px;text-align:right">ft</th><th style="padding:3px 6px;text-align:right">band ft</th><th style="padding:3px 6px">deg</th><th style="padding:3px 6px;text-align:left">flag</th></tr></thead>
+            <tbody>${tbl}</tbody>
+          </table>
+          <div style="padding:10px 12px;border-top:1px solid #2a2f37;display:grid;gap:8px">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">Delete from seg <input id="aim-trim-from" type="number" min="2" max="${arcs.length}" style="width:62px;${TRIM_INP_CSS}"> to end <button data-act="truncate" style="${TRIM_BTN_CSS}">Truncate</button></div>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">Delete segs <input id="aim-trim-a" type="number" min="1" max="${arcs.length}" style="width:52px;${TRIM_INP_CSS}">–<input id="aim-trim-b" type="number" min="1" max="${arcs.length}" style="width:52px;${TRIM_INP_CSS}"> <button data-act="range" style="${TRIM_BTN_CSS}">Delete + stitch</button></div>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">Prune branch at seg <input id="aim-trim-prune" type="number" min="1" max="${arcs.length}" style="width:62px;${TRIM_INP_CSS}"> <button data-act="prune" style="${TRIM_BTN_CSS}">Prune</button></div>
+            <div><button data-act="clean" style="${TRIM_BTN_CSS};${degen.length ? '' : 'opacity:0.5'}">Auto-clean ${degen.length} degenerate arc${degen.length === 1 ? '' : 's'}</button></div>
+          </div>
+          <div style="padding:8px 12px;border-top:1px solid #2a2f37;display:flex;justify-content:space-between;color:#9aa3ae">
+            <span><span data-act="undo" style="cursor:pointer;color:#ffd479">↩ Undo</span> · <span data-act="refresh" style="cursor:pointer;color:#7fdfff">⟳ Refresh</span></span>
+            <span style="color:#7d8590">Save (no refresh) to persist</span>
+          </div>`;
+    }
+
+    function openTrimPanel() {
+        if (!editingFP()) { toast('Open the flight path’s editor first (so I can read its segments).', '#ffb14e'); return; }
+        let el = document.getElementById(TRIM_PANEL_ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = TRIM_PANEL_ID;
+            el.style.cssText = 'position:fixed;top:80px;left:18px;width:384px;max-height:74vh;overflow:auto;background:#15181d;color:rgb(232,230,227);border:1px solid #7fdfff66;border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,0.75);font:12px -apple-system,sans-serif;z-index:100004';
+            ['mousedown', 'click'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
+            el.addEventListener('click', onTrimClick);
+            document.body.appendChild(el);
+        }
+        renderTrimContent(el);
+    }
+    function closeTrimPanel() { const el = document.getElementById(TRIM_PANEL_ID); if (el) el.remove(); }
+    unsafeWindow.__aim_fpe_trim = openTrimPanel;
+
+    // Floating ✂ button while editing — independent of the smart-altitude master toggle
+    // (you may want to trim with smart-fill off). Toggles the panel.
+    function ensureTrimUI() {
+        let b = document.getElementById('aim-fpe-trim-btn');
+        if (!editingFP()) { if (b) b.remove(); closeTrimPanel(); return; }
+        if (!b) {
+            b = document.createElement('div');
+            b.id = 'aim-fpe-trim-btn';
+            b.textContent = '✂ Trim';
+            b.title = 'Delete corrupted / stuck-together flight-path segments by number (truncate, range-delete + stitch, prune branch, auto-clean) — no need to click them on the map';
+            b.style.cssText = 'position:fixed;bottom:140px;right:18px;background:#1f2228;border:1px solid rgba(127,223,255,0.6);border-radius:6px;padding:8px 12px;color:#7fdfff;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);cursor:pointer;user-select:none';
+            ['mousedown', 'click'].forEach(t => b.addEventListener(t, e => e.stopPropagation()));
+            b.addEventListener('click', e => { e.preventDefault(); if (document.getElementById(TRIM_PANEL_ID)) closeTrimPanel(); else openTrimPanel(); });
+            document.body.appendChild(b);
+        }
+    }
+
     // ---- Control Panel integration (config lives here; matches the AIM house pattern) ----
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-flight-path-editor';
@@ -1217,6 +1444,7 @@
                     { id: 'maxVarFt', label: 'Max step variation (ft)', type: 'number', default: settings.maxVarFt },
                     { id: 'fillPath', label: '⛰ Smart-fill open path (preview)', type: 'button' },
                     { id: 'prewarm', label: '⤓ Pre-warm path terrain (cache)', type: 'button' },
+                    { id: 'trimPanel', label: '✂ Trim / delete segments…', type: 'button' },
                 ],
                 hotkeys: [],
             });
@@ -1243,6 +1471,8 @@
                 previewFill().catch(e => warn('previewFill threw', e));
             } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'prewarm') {
                 preWarmCorridor().catch(e => warn('preWarmCorridor threw', e));
+            } else if (m.type === 'TRIGGER_ACTION' && m.actionId === 'trimPanel') {
+                openTrimPanel();
             }
         };
     }
@@ -1915,6 +2145,7 @@
     setupControlPanel();
     registerWithControlPanel();
     setInterval(ensureSmartUI, 1500);
+    setInterval(ensureTrimUI, 1500);
     // Background sweep: catch any segment whose band got missed (elevation wasn't ready on
     // its one drop-triggered pass and you never dropped near it again). Idle when you're
     // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.

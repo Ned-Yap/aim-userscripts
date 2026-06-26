@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.113
+// @version      4.114
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -46,7 +46,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.113';
+    const SCRIPT_VERSION = '4.114';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9189,6 +9189,7 @@
         side: 1,         // +1 / -1 — which side the box width extends (F flips)
         tentative: null, // snapped cursor for live preview
         widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
+        anchor: 'ffz-inner', // what the drawn LINE represents: 'ffz-inner' (FFZ inner edge) | 'shielding' (inner-shielding edge, around assets → standoff+FFZ+outer build outward)
         bufColor: ADV_DEFAULTS.bufColor, bufColor2: ADV_DEFAULTS.bufColor2, bufOpacity: ADV_DEFAULTS.bufOpacity,
         segWidth: [],    // per-segment width (ft); edge-drag overrides, Width field resets all
         dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
@@ -9241,14 +9242,26 @@
         }
         return out;
     }
-    // Corridor FFZ outline = inner polyline + outer (per-segment widths) reversed.
-    function advOutline(verts, widthsFt, side) {
+    // Corridor FFZ outline = inner rail + outer (per-segment widths) reversed. startFt insets the
+    // WHOLE box outward from the drawn line by startFt (so the line can be the inner-shielding edge,
+    // with the standoff between the line and the FFZ).
+    function advOutline(verts, widthsFt, side, startFt) {
         if (!verts || verts.length < 2) return null;
         const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
         const m = verts.map(v => proj.fwd(v));
-        const offM = widthsFt.map(w => w * GEN_FT_TO_M);
-        const outer = advOffsetMiter(m, side, offM);
-        return m.concat(outer.slice().reverse()).map(p => proj.inv(p));
+        const s = (startFt || 0) * GEN_FT_TO_M;
+        const inner = s ? advOffsetMiter(m, side, s) : m;
+        const outer = advOffsetMiter(m, side, widthsFt.map(w => s + w * GEN_FT_TO_M));
+        return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
+    }
+    // A parallel ribbon between two scalar offsets (ft) off the drawn line (box side = +).
+    function advRibbon(verts, side, d1Ft, d2Ft) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const a = advOffsetMiter(m, side, d1Ft * GEN_FT_TO_M);
+        const b = advOffsetMiter(m, side, d2Ft * GEN_FT_TO_M);
+        return a.concat(b.slice().reverse()).map(p => proj.inv(p));
     }
     // Shielding band of uniform offsetFt on ONE side of the drawn line. dir = -1 = front
     // (opposite the width/box side), +1 = back (same side as the FFZ box).
@@ -9260,14 +9273,14 @@
         return m.concat(band.slice().reverse()).map(p => proj.inv(p));
     }
     // Shielding band beyond the FAR (outer) edge of the corridor box — sits on the OPPOSITE
-    // side of the FFZ from the front band, not on the drawn line.
-    function advBandOuter(verts, widthsFt, offsetFt, side) {
+    // side of the FFZ from the front band. startFt = the box's inset off the line (see advOutline).
+    function advBandOuter(verts, widthsFt, offsetFt, side, startFt) {
         if (!verts || verts.length < 2) return null;
         const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
         const m = verts.map(v => proj.fwd(v));
-        const om = offsetFt * GEN_FT_TO_M;
-        const widthsM = widthsFt.map(w => w * GEN_FT_TO_M);
-        const inner = advOffsetMiter(m, side, widthsM);                  // box outer rail (far edge of the FFZ)
+        const om = offsetFt * GEN_FT_TO_M, s = (startFt || 0) * GEN_FT_TO_M;
+        const widthsM = widthsFt.map(w => s + w * GEN_FT_TO_M);          // box outer rail (far edge of the FFZ)
+        const inner = advOffsetMiter(m, side, widthsM);
         const outer = advOffsetMiter(m, side, widthsM.map(w => w + om)); // + shielding offset
         return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
     }
@@ -9363,12 +9376,19 @@
             const placed = advSegWidthsFt(advDraw.verts.length - 1);
             const widthsFt = [];
             for (let i = 0; i < path.length - 1; i++) widthsFt.push(i < placed.length ? placed[i] : advDraw.widthFt);
+            // anchor: 'ffz-inner' → line is the FFZ inner edge (box starts at the line; red shielding
+            // sits on the asset side of the line). 'shielding' → line is the inner-shielding edge (around
+            // the assets): standoff (red) → FFZ (green, inset by offset) → outer shielding (yellow) all
+            // build OUTWARD, so you trace the asset boundary and everything stacks behind it.
+            const startFt = (advDraw.anchor === 'shielding') ? advDraw.offsetFt : 0;
             // FFZ corridor box (green) first, then the shielding bands ON TOP.
-            const outline = advOutline(path, widthsFt, advDraw.side);
+            const outline = advOutline(path, widthsFt, advDraw.side, startFt);
             if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#5fff5f', weight: 2, opacity: 0.95, fillColor: '#5fff5f', fillOpacity: 0.18, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
-            // Shielding flanks the whole FFZ: red just outside the inner (drawn) edge, yellow beyond the far (outer) edge of the box.
-            advDrawBand(map, L, advBandSigned(path, advDraw.offsetFt, advDraw.side, -1), advDraw.bufColor, advDraw.bufOpacity);        // red — just outside the inner (drawn) edge
-            advDrawBand(map, L, advBandOuter(path, widthsFt, advDraw.offsetFt, advDraw.side), advDraw.bufColor2, advDraw.bufOpacity);  // yellow — beyond the FAR edge of the 30 ft FFZ
+            const innerBand = (advDraw.anchor === 'shielding')
+                ? advRibbon(path, advDraw.side, 0, advDraw.offsetFt)         // standoff: between the line and the FFZ
+                : advBandSigned(path, advDraw.offsetFt, advDraw.side, -1);   // just outside the inner (drawn) edge
+            advDrawBand(map, L, innerBand, advDraw.bufColor, advDraw.bufOpacity);                                                  // red — inner shielding
+            advDrawBand(map, L, advBandOuter(path, widthsFt, advDraw.offsetFt, advDraw.side, startFt), advDraw.bufColor2, advDraw.bufOpacity); // yellow — beyond the FAR edge of the FFZ
             try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
             // grabbed outer edge highlight (white, neutral against the green FFZ)
             if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
@@ -9390,7 +9410,7 @@
         advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
     }
     function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
-    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt })); } catch (e) {} }
+    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt, anchor: advDraw.anchor })); } catch (e) {} }
     function advClearPersist() { try { localStorage.removeItem(advStoreKey()); } catch (e) {} }
     function advRestore() {
         try {
@@ -9402,6 +9422,7 @@
                 advDraw.side = o.side || 1;
                 if (o.widthFt) advDraw.widthFt = o.widthFt;
                 if (o.offsetFt) advDraw.offsetFt = o.offsetFt;
+                if (o.anchor) advDraw.anchor = o.anchor;
                 advDraw.drawing = advDraw.verts.length > 0;
                 return advDraw.verts.length > 0;
             }
@@ -9530,7 +9551,7 @@
         if (advDraw.active) {
             try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
             if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
-            try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; } catch (e) {}
+            try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
             advWire(); advRender();
         } else {
             advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = [];
@@ -9692,7 +9713,8 @@
         const verts = advDraw.verts.slice();
         const segW = advSegWidthsFt(Math.max(0, verts.length - 1)).slice();
         const finSide = advDraw.side;
-        const outline = advOutline(verts, segW, finSide);
+        const finAnchor = advDraw.anchor, finStartFt = (finAnchor === 'shielding') ? advDraw.offsetFt : 0;
+        const outline = advOutline(verts, segW, finSide, finStartFt);
         const branch = advDraw.branchSrc; advDraw.branchSrc = null;
         const snaps = advDraw.snapSrcs.slice(); advDraw.snapSrcs = [];
         advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
@@ -9704,7 +9726,7 @@
         const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
         let nm = 'corridor', bestD = Infinity;
         for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
-        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide };
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide, _advAnchor: finAnchor, _advAnchorOffsetFt: finStartFt };
         // NON-DESTRUCTIVE merge: if the first point branched off an FFZ, join that FFZ's group
         // (stays its own editable corridor; fuses into one entity at Commit) + inherit its band.
         // reGroup = re-finishing a corridor that was already in a group → keep it in that group.
@@ -9748,7 +9770,7 @@
     function advSaveFfzs() {
         try {
             const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
-            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
+            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
             if (slim.length) localStorage.setItem(advFfzKey(), JSON.stringify(slim));
             else localStorage.removeItem(advFfzKey());
         } catch (e) {}
@@ -9763,7 +9785,7 @@
             for (const s of slim) {
                 if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
                 if (have.has(JSON.stringify(s.points))) continue; // don't double-load
-                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
+                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
                 added++;
             }
             if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
@@ -9782,6 +9804,8 @@
         advDraw.verts = f._advVerts.map(v => ({ lat: v.lat, lng: v.lng }));
         advDraw.segWidth = Array.isArray(f._advSegWidth) ? f._advSegWidth.slice() : [];
         advDraw.side = f._advSide || 1;
+        if (f._advAnchor) advDraw.anchor = f._advAnchor;
+        if (typeof f._advAnchorOffsetFt === 'number' && f._advAnchorOffsetFt > 0) advDraw.offsetFt = f._advAnchorOffsetFt;
         advDraw.drawing = true;
         advDraw.branchSrc = null;   // re-editing a corridor isn't a fresh branch
         // Preserve its group/anchor so re-finishing keeps it fused with its siblings (else it'd
@@ -10521,6 +10545,7 @@
             <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
                 <div style="font-size:11px;color:#5fb8ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">✦ Advanced Draw</div>
                 <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="What the line you draw represents. FFZ inner edge = box starts at the line. Inner shielding edge = you trace around the assets and the standoff, FFZ, and outer shielding build outward.">Line <select id="aim-adv-anchor" style="background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="ffz-inner">= FFZ inner edge</option><option value="shielding">= shielding edge (on assets)</option></select></label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Width <input type="number" id="aim-adv-width" value="30" min="5" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Offset <input type="number" id="aim-adv-offset" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
                     <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff2d2d" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
@@ -10825,6 +10850,8 @@
             }
         };
         // Advanced Draw live controls
+        const advAnchor = box.querySelector('#aim-adv-anchor');
+        if (advAnchor) { advAnchor.value = advDraw.anchor; advAnchor.onchange = () => { advDraw.anchor = advAnchor.value; advPersist(); advRender(); }; }
         const advW = box.querySelector('#aim-adv-width'), advO = box.querySelector('#aim-adv-offset'), advC = box.querySelector('#aim-adv-color'), advOp = box.querySelector('#aim-adv-opacity');
         if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advDraw.segWidth = advDraw.segWidth.map(() => v); advPersist(); advRender(); } }; }
         if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advRender(); } }; }

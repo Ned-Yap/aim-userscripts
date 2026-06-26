@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Map Editor: ✂ Trim / delete corrupted segments by number — Map Editor v0.49 (dev/latest, personal)
+
+New **✂ Trim** panel for repairing a corrupted flight path when segments pile up ("stuck together") and you can't right-click them on the map. Drives everything off **segment numbers** instead of clicks. Four ops, all via the same working-copy splice + pre/post integrity gate + undo as split/open-path (so a bad cut auto-reverts and the path is left untouched): **Truncate** (keep 1..N-1, delete N..end), **Delete + stitch** (remove a middle range A..B and bridge the gap with one connector arc), **Prune** (delete the branch/spur a segment sits on), and **Auto-clean** (remove every zero-length / duplicate / self arc at once). The panel shows the per-segment arc table (length, altitude band, endpoint degree, ZERO/SELF/DUP flags) so the bad run stands out. Floating ✂ button appears while editing a flight path (independent of the smart-altitude toggle); also in the Control Panel under Site Setup → Map Editor, or `__aim_fpe_trim()` in the iframe console. Replaces the one-off `AIM_FP_Surgery_*.js` console snippets with an in-editor tool (no page refresh — a native Save persists).
+
+---
+
 ## 2026-06-25 — Site Watch: stop the daily digest going silent (history-wipe fix) — Site Watch v0.14 (dev/latest, personal)
 
 Fix: the daily Slack digest had been silent for ~a week even though sites were changing. Root cause: on 2026-06-20, `appendCsvRows` (rewritten in v0.11 to read `changes.csv` via the raw media type) hit a blank read of the *existing* file and treated it as "file is empty" — recreating it from a bare header, **wiping ~3000 rows of audit history**, then re-wiping every cycle (every CSV commit since wrote only the 2 newest rows). With the log perpetually near-empty, the digest read found nothing new and stayed silent. Site Watch's polling/snapshotting never stopped — only the CSV the digest reads was being destroyed. Fix: a new `readCsv()` that **never** rewrites an existing file (sha present) on a blank/short/wrong-header read — it retries, then aborts with history intact rather than overwriting it; reads base64 from the Contents API for the normal <1 MB case (the proven path) and falls back to raw only when base64 is blanked >1 MB. The digest read goes through the same path, so a transient read failure now defers the digest (and its cutoff) instead of being mistaken for "no changes." The wiped history (through 2026-06-21) is recoverable from git and will be restored once the update lands.
@@ -27,6 +33,16 @@ Fix: the three Map-performance levers (hide ortho, hide satellite, low-res) are 
 ## 2026-06-25 — "Hide orthomosaic imagery" perf toggle — Perf Shield v1.18 + Map Styler v34.78 (dev/latest)
 
 New Control Panel → Performance → Map performance → **"Hide orthomosaic imagery."** On sites that stack dozens of orthomosaic COG layers (e.g. site 1153 has ~50), opening a heavy mission zooms in and triggers a tile-fetch storm that can freeze the tab. This toggle tells Map Styler to **remove** those ortho layers from the map so their tiles stop being fetched entirely (low-res only thins the storm; this kills it). Fully reversible — toggle off re-adds the layers, no reload. Also fixed the ortho-layer detection to match **DroneDeploy-hosted** orthos (`public_tiles.dronedeploy.com/.../orthomosaic/`), which the old patterns missed — on many sites those are the bulk of the ortho layers, so low-res/hide now actually cover them. Note: "Hide satellite base tiles" only hides the HERE world basemap *underneath* the orthos — to clear the site imagery itself, use the new ortho toggle.
+
+---
+
+## 2026-06-25 — Advanced Draw — "Line is…" dropdown: draw on the asset boundary, build outward — Asset Inspector v4.114 (dev/latest)
+
+New **Line** dropdown in the Advanced Draw controls picks what the line you draw represents:
+- **= FFZ inner edge** (default, the old behavior) — the box starts at your line.
+- **= shielding edge (on assets)** — trace the keep-out boundary right around the assets, and the **standoff (red) → FFZ (green) → outer shielding (yellow)** all build *outward* from your line. No more guessing where the offset starts/ends; you draw on what you can see and everything stacks behind it.
+
+The choice is saved per corridor (survives reload + right-click re-edit).
 
 ---
 
