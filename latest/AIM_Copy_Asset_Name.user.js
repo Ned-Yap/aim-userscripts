@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.123
+// @version      4.124
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.123';
+    const SCRIPT_VERSION = '4.124';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -9832,6 +9832,42 @@
             return { rings: out, holes };
         } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
     }
+    // Per SOP, two FFZs can't sit within 30 ft of each other — so pieces this close are meant to be
+    // ONE zone. If a union leaves disjoint pieces within GAP_MERGE_FT, weld the nearest pair with a
+    // small connector and re-union until they're all one (or genuinely far apart).
+    const GAP_MERGE_FT = 15;
+    function ptSegMxy(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t)); const x = a.x + t * dx, y = a.y + t * dy; return { d: Math.hypot(p.x - x, p.y - y), x, y }; }
+    function nearestBetweenRings(A, B) {
+        const proj = genProjector(A[0].lat, A[0].lng);
+        const Am = A.map(p => proj.fwd(p)), Bm = B.map(p => proj.fwd(p));
+        let best = { d: Infinity };
+        for (const va of Am) for (let j = 0; j < Bm.length; j++) { const r = ptSegMxy(va, Bm[j], Bm[(j + 1) % Bm.length]); if (r.d < best.d) best = { d: r.d, p: va, q: { x: r.x, y: r.y } }; }
+        for (const vb of Bm) for (let j = 0; j < Am.length; j++) { const r = ptSegMxy(vb, Am[j], Am[(j + 1) % Am.length]); if (r.d < best.d) best = { d: r.d, p: { x: r.x, y: r.y }, q: vb }; }
+        if (!best.p) return null;
+        return { d: best.d, p: proj.inv(best.p), q: proj.inv(best.q) };
+    }
+    function makeWeld(p, q) {
+        const proj = genProjector(p.lat, p.lng), P = proj.fwd(p), Q = proj.fwd(q);
+        const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
+        const half = 6 * GEN_FT_TO_M, ext = 2 * GEN_FT_TO_M;     // 12 ft neck, pushed 2 ft into each piece to overlap
+        const A = { x: P.x - ux * ext, y: P.y - uy * ext }, B = { x: Q.x + ux * ext, y: Q.y + uy * ext };
+        return [{ x: A.x + nx * half, y: A.y + ny * half }, { x: B.x + nx * half, y: B.y + ny * half }, { x: B.x - nx * half, y: B.y - ny * half }, { x: A.x - nx * half, y: A.y - ny * half }].map(pt => proj.inv(pt));
+    }
+    function unionWithGapClose(rings, maxGapFt) {
+        let u = unionRings(rings);
+        if (!u || u.rings.length <= 1) return u;
+        const maxGapM = (maxGapFt || GAP_MERGE_FT) * GEN_FT_TO_M;
+        let guard = 0;
+        while (u.rings.length > 1 && guard++ < 30) {
+            let bd = maxGapM, bseg = null;
+            for (let i = 0; i < u.rings.length; i++) for (let j = i + 1; j < u.rings.length; j++) { const np = nearestBetweenRings(u.rings[i], u.rings[j]); if (np && np.d < bd) { bd = np.d; bseg = np; } }
+            if (!bseg) break;                                   // remaining pieces genuinely far apart
+            const re = unionRings(u.rings.concat([makeWeld(bseg.p, bseg.q)]));
+            if (!re || re.rings.length >= u.rings.length) break; // weld didn't merge anything → stop
+            re.holes = re.holes || u.holes; u = re;
+        }
+        return u;
+    }
     function fuseMembers(baseRing, members) {
         let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
         const remaining = members.slice();
@@ -9863,7 +9899,7 @@
                     if (!baseRing || baseRing.length < 3 || !ent) { asCreates(members); continue; }
                     // UNION (clean, any topology) → fall back to splice only if the lib is unavailable.
                     const er = (ent.restrictions) || (existing && existing.restrictions) || {};
-                    const u = unionRings([baseRing].concat(members.map(m => m.points)));
+                    const u = unionWithGapClose([baseRing].concat(members.map(m => m.points)), GAP_MERGE_FT);
                     if (u && u.rings.length) {
                         // Largest piece = the FFZ being extended (upsert). Any extra disjoint pieces
                         // (a member that didn't actually overlap) → their own create, NOT dropped.
@@ -9874,7 +9910,7 @@
                     }
                 } else {
                     const root = members[0];
-                    const u = unionRings(members.map(m => m.points));
+                    const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
                     if (u && u.rings.length) {
                         writes.push({ kind: 'create', name: root.name, points: u.rings[0], restrictions: root.restrictions, members, _holes: u.holes, _disjoint: u.rings.length > 1 });
                         for (let i = 1; i < u.rings.length; i++) writes.push({ kind: 'create', name: `${root.name} pt${i + 1}`, points: u.rings[i], restrictions: root.restrictions, members: [], _disjoint: true });

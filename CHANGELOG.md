@@ -36,6 +36,12 @@ New Control Panel → Performance → Map performance → **"Hide orthomosaic im
 
 ---
 
+## 2026-06-25 — Advanced Draw — pieces within 15 ft auto-merge into one FFZ — Asset Inspector v4.124 (dev/latest)
+
+Since the SOP doesn't allow two FFZs within 30 ft of each other, connected pieces that end up **within 15 ft but not quite touching** now **auto-weld into one zone** at commit instead of staying separate. So you no longer have to fight for pixel-perfect overlap — get them close (snapped) and they fuse.
+
+---
+
 ## 2026-06-25 — Advanced Draw — union keeps disjoint pieces + cleans extra vertices — Asset Inspector v4.123 (dev/latest)
 
 Two fixes to the multi-piece merge:
