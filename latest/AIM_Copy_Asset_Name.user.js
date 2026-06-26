@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.134
+// @version      4.135
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.134';
+    const SCRIPT_VERSION = '4.135';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10050,6 +10050,10 @@
     }
     // Persist FINISHED-but-uncommitted FFZs (drawn corridors) so a reload doesn't lose them.
     // Restored when the ⊕ Generate modal is reopened. Committed ones drop out (server-side).
+    // Slim a draft FFZ for storage / restore one back (shared by autosave + the Merge/Unmerge stash).
+    function advFfzSlim(f) { return { name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }; }
+    function advFfzFromSlim(s, siteID) { return { type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint }; }
+    let genMergeStash = null; // pre-merge pieces (slim) so the Merge button can UNMERGE back to editable pieces
     function advFfzKey() { return 'aim_adv_ffzs:' + (genState.siteID || '?'); }
     function advSaveFfzs() {
         try {
@@ -11235,15 +11239,36 @@
         // 🔗 Merge (preview): replace the drawn pieces with their final fused shapes ON THE MAP so you
         // SEE exactly what Commit will create — non-destructive, never touches existing FFZs.
         const mergeBtn = box.querySelector('#aim-gen-merge');
+        // Restore Unmerge state if a prior merge's stash is still around (e.g. after reload).
+        try { const pm = localStorage.getItem('aim_adv_premerge:' + genState.siteID); if (pm) { const arr = JSON.parse(pm); if (Array.isArray(arr) && arr.length && ((genState.lastResult && genState.lastResult.ffzs) || []).some(f => f && f._merged && !f._committed)) { genMergeStash = arr; if (mergeBtn) mergeBtn.textContent = '↩ Unmerge'; } } } catch (e) {}
         if (mergeBtn) mergeBtn.onclick = async () => {
             try {
+                const map = getLeafletMap();
+                // UNMERGE: a stash exists → drop the merged shapes and bring the original pieces back.
+                if (genMergeStash && genMergeStash.length) {
+                    (genState.lastResult.ffzs || []).filter(f => f && f._merged && !f._committed).forEach(m => {
+                        if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                        const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+                    });
+                    genMergeStash.forEach(s => genState.lastResult.ffzs.push(advFfzFromSlim(s, genState.siteID)));
+                    genMergeStash = null;
+                    try { localStorage.removeItem('aim_adv_premerge:' + genState.siteID); } catch (e) {}
+                    renderGenPreview(genState.lastResult.ffzs);
+                    try { advSaveFfzs(); } catch (e) {}
+                    mergeBtn.textContent = '🔗 Merge (preview)';
+                    showToast('Unmerged — original pieces restored for editing', 'rgba(95,184,255,0.5)');
+                    return;
+                }
+                // MERGE
                 try { await fetchMapObjects(genState.siteID, true); } catch (e) {} // fresh entity list so the overlap check doesn't flag DELETED FFZs (stale cache)
                 const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
                 const pieces = ffzs.filter(f => f && !f._committed && (f._drawn || f._adv) && Array.isArray(f.points) && f.points.length >= 3);
                 if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
                 const writes = fuseCorridorGroups(ffzs).filter(w => w.kind === 'create' && Array.isArray(w.points) && w.points.length >= 3);
                 if (!writes.length) { showToast('Merge produced nothing', 'rgba(255,82,82,0.6)'); return; }
-                const map = getLeafletMap();
+                // STASH the original pieces FIRST so Unmerge can restore them.
+                genMergeStash = pieces.map(advFfzSlim);
+                try { localStorage.setItem('aim_adv_premerge:' + genState.siteID, JSON.stringify(genMergeStash)); } catch (e) {}
                 pieces.forEach(m => {
                     if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
                     const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
@@ -11254,12 +11279,13 @@
                 });
                 renderGenPreview(genState.lastResult.ffzs);
                 try { advSaveFfzs(); } catch (e) {}
+                mergeBtn.textContent = '↩ Unmerge';
                 const holes = writes.filter(w => w._holes).length, over = writes.filter(w => w._overlapsExisting != null).length;
-                let msg = `Merged into ${writes.length} shape${writes.length === 1 ? '' : 's'} — review, then Commit`;
+                let msg = `Merged into ${writes.length} shape${writes.length === 1 ? '' : 's'} — review, then Commit (↩ Unmerge to edit pieces)`;
                 if (holes) msg += ` · ${holes} filled a hole`;
-                if (over) msg += ` · ⚠ ${over} overlap an existing FFZ (may be rejected — delete the old one)`;
+                if (over) msg += ` · ⚠ ${over} overlap an existing FFZ`;
                 showToast(msg, over ? 'rgba(255,179,71,0.6)' : 'rgba(95,255,95,0.5)');
-            } catch (e) { console.warn(`${GEN_TAG} merge preview failed:`, e); showToast('Merge failed: ' + (e && e.message || e), 'rgba(255,82,82,0.6)'); }
+            } catch (e) { console.warn(`${GEN_TAG} merge/unmerge failed:`, e); showToast('Failed: ' + (e && e.message || e), 'rgba(255,82,82,0.6)'); }
         };
         const commitBtn = box.querySelector('#aim-gen-commit');
         commitBtn.onclick = async () => {
@@ -11307,7 +11333,7 @@
                         try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
                         // Clear the safety backup ONLY on a fully clean commit (nothing failed/blocked) —
                         // a partial/failed commit keeps the backup so nothing is ever lost.
-                        if (r.failed === 0 && r.invalid === 0) { try { localStorage.removeItem('aim_adv_ffzs_backup:' + genState.siteID); } catch (e) {} }
+                        if (r.failed === 0 && r.invalid === 0) { try { localStorage.removeItem('aim_adv_ffzs_backup:' + genState.siteID); } catch (e) {} try { localStorage.removeItem('aim_adv_premerge:' + genState.siteID); } catch (e) {} genMergeStash = null; try { const mb = box.querySelector('#aim-gen-merge'); if (mb) mb.textContent = '🔗 Merge (preview)'; } catch (e) {} }
                         try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
                         showToast(`Committed ${r.created} new${r.updated ? ` · ${r.updated} fused` : ''} FFZ`, 'rgba(95,255,95,0.5)');
                     }
