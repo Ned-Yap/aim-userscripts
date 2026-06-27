@@ -6,6 +6,18 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-25 — Advanced Draw — corridor → Merge → Commit pipeline (clean, safe, reversible) — Asset Inspector v4.127–v4.138 (dev/latest)
+
+The corridor builder's merge/commit got rebuilt to be predictable and non-destructive:
+- **🔗 Merge / ↩ Unmerge** — Merge fuses your drawn pieces into the final shapes *on the map* so you see exactly what will be created before committing; Merge always merges (build more, merge again), and Unmerge brings the editable pieces back.
+- **Commit is create-only** — it can never overwrite or delete an existing FFZ. If a new zone overlaps an existing one it just warns ("delete the old one first").
+- **Real polygon union** (`polygon-clipping`) — pieces that overlap or are **within 15 ft** fuse into one zone; pieces that genuinely cross now register and merge; the result never self-intersects.
+- **Clean shapes** — collinear/duplicate points dropped, junction notches de-notched, and snapping now auto-overlaps ~5 ft so you don't get edge-kiss slivers.
+- **Unique names** — two zones off the same asset get `_2`/`_3` suffixes so they don't collide on the server.
+- **Bulletproof drafts** — every draft mirrors to a never-cleared backup; reopening the modal auto-restores if anything gets wiped (`__aimAdvRestoreBackup()` to force it). Self-intersecting shapes are blocked at commit. Snap dots only show near the cursor.
+
+---
+
 ## 2026-06-25 — Map Editor: ✂ Trim / delete corrupted segments by number — Map Editor v0.49 (dev/latest, personal)
 
 New **✂ Trim** panel for repairing a corrupted flight path when segments pile up ("stuck together") and you can't right-click them on the map. Drives everything off **segment numbers** instead of clicks. Four ops, all via the same working-copy splice + pre/post integrity gate + undo as split/open-path (so a bad cut auto-reverts and the path is left untouched): **Truncate** (keep 1..N-1, delete N..end), **Delete + stitch** (remove a middle range A..B and bridge the gap with one connector arc), **Prune** (delete the branch/spur a segment sits on), and **Auto-clean** (remove every zero-length / duplicate / self arc at once). The panel shows the per-segment arc table (length, altitude band, endpoint degree, ZERO/SELF/DUP flags) so the bad run stands out. Floating ✂ button appears while editing a flight path (independent of the smart-altitude toggle); also in the Control Panel under Site Setup → Map Editor, or `__aim_fpe_trim()` in the iframe console. Replaces the one-off `AIM_FP_Surgery_*.js` console snippets with an in-editor tool (no page refresh — a native Save persists).
