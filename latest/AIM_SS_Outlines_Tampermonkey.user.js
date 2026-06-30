@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.82
+// @version      34.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.82';
+    const SCRIPT_VERSION = '34.83';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5346,34 +5346,32 @@
         // the circle ballooned when zoomed out and shrank when zoomed in
         // (~60ft zoomed in, ~400ft zoomed out instead of a fixed 200ft).
         //
-        // Correct approach: convert the ground radius to SCREEN PIXELS using
-        // the map's meters-per-pixel at the current zoom (Web-Mercator ground
-        // resolution = 156543.034 · cos(lat) / 2^zoom), then to SVG user units
-        // via the inverse screen CTM scale. Falls back to the old empirical
-        // calc only if the Leaflet map isn't reachable.
+        // EXACT approach (self-calibrating, no hardcoded Mercator constant):
+        // for each marker we ask Leaflet directly how many METERS one screen
+        // pixel covers AT THAT MARKER — measure the ground distance between two
+        // adjacent container points via map.distance() (great-circle, the same
+        // engine the Ruler uses). Then radiusPx = groundRadius / metersPerPx,
+        // converted to SVG user units via the inverse screen CTM scale. This
+        // removes every approximation: real latitude, real projection, real
+        // pixel scale. Falls back to the empirical user-unit calc only if the
+        // Leaflet map isn't reachable.
         const altMult = Number(toggleState['altitude.distance']) || 1.0;
-        let radius;
+        const radiusM = 200 * 0.3048 * altMult;            // exact ground radius, meters
+        const ctmScale = Math.abs(inv.a) || 1;             // screen px → SVG user units
         const _map = getLeafletMap();
-        if (_map && typeof _map.getZoom === 'function' && typeof _map.getCenter === 'function') {
-            const lat = (_map.getCenter().lat) || 0;
-            const zoom = _map.getZoom();
-            const metersPerPx = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
-            const radiusM = 200 * 0.3048 * altMult;          // 200 ft → meters, × multiplier
-            const radiusPx = radiusM / metersPerPx;           // screen/CSS pixels at this zoom
-            const scale = Math.abs(inv.a) || 1;               // screen px → SVG user units
-            radius = radiusPx * scale;
-        } else {
-            // Fallback (map unreachable): old empirical user-unit scaling.
-            const FT_PER_BASEWIDTH = 31.5;
-            const baseWidth = globalBaseWidth || (lineThickness * standardRatio);
-            radius = baseWidth * (200 / FT_PER_BASEWIDTH) * altMult;
-        }
+        const _L = (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) ? unsafeWindow.L : (window.L || null);
+        const _mapContainer = (_map && typeof _map.getContainer === 'function') ? _map.getContainer() : null;
+        const _cRect = _mapContainer ? _mapContainer.getBoundingClientRect() : null;
+        const canProject = !!(_map && _L && _cRect && typeof _map.containerPointToLatLng === 'function' && typeof _map.distance === 'function');
+        // Fallback radius (map unreachable) — old empirical user-unit scaling.
+        const fallbackRadius = (globalBaseWidth || (lineThickness * standardRatio)) * (200 / 31.5) * altMult;
         const fillColor = toggleState['altitude.color'] || '#8a2be2';
         const fillOpacity = Number(toggleState['altitude.opacity']);
         const opacity = isNaN(fillOpacity) ? 0.15 : fillOpacity;
         // Stroke is a touch more opaque so the edge stays visible even at low
         // fill values; capped at 1.
         const strokeOpacity = Math.min(opacity * 2.5, 1);
+        let loggedExact = false; // one console readout per render so it's verifiable
 
         markers.forEach(marker => {
             const rect = marker.getBoundingClientRect();
@@ -5384,6 +5382,26 @@
             pt.x = rect.left + rect.width / 2;
             pt.y = rect.bottom;
             const p = pt.matrixTransform(inv);
+
+            // Per-marker EXACT radius via Leaflet's own projection + distance.
+            let radius = fallbackRadius;
+            if (canProject) {
+                try {
+                    const cx = pt.x - _cRect.left;   // marker tip in container (CSS) px
+                    const cy = pt.y - _cRect.top;
+                    const ll0 = _map.containerPointToLatLng(_L.point(cx, cy));
+                    const ll1 = _map.containerPointToLatLng(_L.point(cx + 1, cy));
+                    const mPerPx = _map.distance(ll0, ll1); // ground meters per 1 CSS px, here
+                    if (mPerPx > 0) {
+                        radius = (radiusM / mPerPx) * ctmScale;
+                        if (!loggedExact) {
+                            loggedExact = true;
+                            const groundFt = (radiusM / 0.3048);
+                            console.log(`${TAG} altitude shield: target r=${groundFt.toFixed(1)} ft (${radiusM.toFixed(2)} m) · ${mPerPx.toFixed(4)} m/px · drawn r=${radius.toFixed(1)} user units (zoom ${_map.getZoom ? _map.getZoom() : '?'})`);
+                        }
+                    }
+                } catch (e) { /* fall back to empirical radius */ }
+            }
 
             const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
