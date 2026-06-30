@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Absolute Altitude
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Altitude_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Altitude_Tampermonkey.user.js
 // @description  Adds Shift+A hotkey for the Absolute Altitude tool, with segment cleanup. Registers with the AIM Control Panel for master toggle + hotkey rebinding.
@@ -19,17 +19,61 @@
     
     window.aimPendingPin = false;
 
+    // ---- Placement shield --------------------------------------------------
+    // The Absolute Altitude pin is dropped by Percepto's own map-click handler.
+    // But clicking directly on a flight-path segment (or any interactive
+    // Leaflet vector / marker) lets THAT layer swallow the click, so the tool
+    // never receives it — the pin won't place until you move off the line, and
+    // overlapping overlays make placement flaky in general. While the tool is
+    // armed we disable pointer-events on Leaflet's interactive layers
+    // (`.leaflet-interactive` = FP/FFZ/NFZ vectors + markers) so the click
+    // always reaches the MAP. Lifted the instant the pin drops, with a 20s
+    // safety auto-clear if no click ever comes. Scoped by element id so it
+    // works regardless of which frame/listener context runs.
+    let shieldSafetyTimer = null;
+    function armPlacementShield(doc) {
+        doc = doc || document;
+        try {
+            if (!doc.getElementById('aim-alt-placement-shield')) {
+                var st = doc.createElement('style');
+                st.id = 'aim-alt-placement-shield';
+                st.textContent = '.leaflet-interactive{pointer-events:none !important;}';
+                (doc.head || doc.documentElement).appendChild(st);
+            }
+        } catch (err) { console.warn('[AIM ALT] armPlacementShield failed:', err); }
+        if (shieldSafetyTimer) clearTimeout(shieldSafetyTimer);
+        shieldSafetyTimer = setTimeout(function() {
+            disarmPlacementShield(document);
+            try { sync.postMessage('END_TRAP'); } catch (e2) {}
+            window.aimPendingPin = false;
+            console.log('[AIM ALT] placement shield auto-cleared (no pin placed in 20s)');
+        }, 20000);
+    }
+    function disarmPlacementShield(doc) {
+        doc = doc || document;
+        if (shieldSafetyTimer) { clearTimeout(shieldSafetyTimer); shieldSafetyTimer = null; }
+        try {
+            var st = doc.getElementById('aim-alt-placement-shield');
+            if (st && st.parentNode) st.parentNode.removeChild(st);
+        } catch (err) { console.warn('[AIM ALT] disarmPlacementShield failed:', err); }
+    }
+
     sync.onmessage = (e) => {
         if (e.data === "START_TRAP") {
             window.aimPendingPin = true;
+            armPlacementShield(document);
             console.log("[AIM ALT] 📡 Received Trap Start signal.");
+        } else if (e.data === "END_TRAP") {
+            window.aimPendingPin = false;
+            disarmPlacementShield(document);
         }
     };
 
     var performAction = function() {
         window.console.log("Altitude: Triggering...");
         window.aimPendingPin = true;
-        sync.postMessage("START_TRAP"); // Tell all other frames to set the trap
+        armPlacementShield(document);   // local frame (map may be top or iframe)
+        sync.postMessage("START_TRAP"); // Tell all other frames to set the trap + shield
         
         function findAndClick(doc) {
             var map = doc.querySelector('.leaflet-container') || doc.querySelector('[class*="map-container"]');
@@ -85,7 +129,7 @@
     const IS_TOP = window === window.top;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const SCRIPT_ID = 'aim-altitude';
-    const SCRIPT_VERSION = '1.10';
+    const SCRIPT_VERSION = '1.11';
     let controlChannel = null;
     let controlPanelDetected = false;
     let masterEnabled = true;
@@ -138,8 +182,16 @@
                 // hits the first popup in DOM order (typically the OLDEST), which
                 // is what produced the "closing older popups one at a time" bug.
                 var popupsBefore = new Set(doc.querySelectorAll('.leaflet-popup'));
-                
+
                 setTimeout(() => {
+                    // The placement click (mousedown→mouseup→click) has now been
+                    // delivered to the map with the shield still up, so it landed
+                    // even over a flight-path segment. Lift the shield BEFORE the
+                    // cleanup below (so elementFromPoint sees the real DOM) and
+                    // tell other frames to lift theirs too.
+                    disarmPlacementShield(doc);
+                    try { sync.postMessage('END_TRAP'); } catch (e2) {}
+
                     // 1. Find the Top Element (The Pin we just dropped)
                     var topEl = doc.elementFromPoint(x, y);
                     
@@ -245,6 +297,7 @@
             if (!t || t.tagName !== 'IMG') return;
             if (t.getAttribute('title') !== 'Absolute altitude') return;
             window.aimPendingPin = true;
+            armPlacementShield(t.ownerDocument || document);
             try { sync.postMessage('START_TRAP'); } catch (e2) {}
             console.log('[AIM ALT] 🎯 Manual AIM button click — pin trap set');
         };
