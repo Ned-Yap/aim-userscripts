@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.143
+// @version      4.144
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.143';
+    const SCRIPT_VERSION = '4.144';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -1195,6 +1195,20 @@
         const x = dlam * Math.cos(phi1);
         const y = dphi;
         return Math.sqrt(x*x + y*y) * R;
+    }
+    // Rough planar area (m²) of a lat/lng ring via local equirectangular
+    // projection + shoelace. Accurate enough for small zones (FFZ/NFZ).
+    function polygonAreaM2(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return null;
+        const mPerLat = 111320;
+        const mPerLng = (111320 * Math.cos(coords[0].lat * Math.PI / 180)) || 1e-9;
+        let a = 0;
+        for (let i = 0, n = coords.length; i < n; i++) {
+            const p = coords[i], q = coords[(i + 1) % n];
+            if (!p || !q || typeof p.lat !== 'number' || typeof q.lat !== 'number') return null;
+            a += (p.lng * mPerLng) * (q.lat * mPerLat) - (q.lng * mPerLng) * (p.lat * mPerLat);
+        }
+        return Math.abs(a) / 2;
     }
     function pointToSegMeters(lat, lng, a, b) {
         const ax = a.lng, ay = a.lat;
@@ -3212,7 +3226,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -3605,6 +3619,7 @@
             elevation: { label: `Elevation (${u})`, val: r => num(r.elevationM) },
             agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
             segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
+            area: { label: `Area (${u}²)`, val: r => r.areaM2 == null ? '' : String(Math.round(unitsFt ? r.areaM2 * 10.7639 : r.areaM2)) },
             route: { label: `Route (${u})`, val: r => num(r.routeM) },
             battery: { label: 'Battery', val: r => { const b = batteryFor(r.routeM, loadBatteryThresholds()); return b ? b.label.replace(/^⚠\s*/, '') : ''; } },
             ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
@@ -6388,6 +6403,7 @@
                 emergAltM: null,
                 segLenM: null,
                 waitApproved: null, // FP-segment-only flag → N/A here
+                areaM2: null,       // polygon area (FFZ/NFZ); null elsewhere
                 // v3.96: generic entity ID + Base/Safe-Zone fields.
                 entId: e.id,
                 ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
@@ -6446,6 +6462,11 @@
                     if (c && typeof c.lat === 'number' && typeof c.lng === 'number') { sLat += c.lat; sLng += c.lng; n++; }
                 }
                 if (n > 0) { row._lat = sLat / n; row._lng = sLng / n; }
+            }
+            // Polygon area (info only) — FFZ (16) + NFZ (4).
+            if ((e.type === 16 || e.type === 4) && Array.isArray(e.coords) && e.coords.length >= 3) {
+                const am2 = polygonAreaM2(e.coords);
+                if (am2 != null) row.areaM2 = am2;
             }
             // For non-asset rows, elevation = MAX DEM across sample
             // points (asset row already populated above from its
@@ -12624,6 +12645,7 @@
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
+                area:      'Area (FFZ / NFZ)',
                 route:     'Route from base (asset)',
                 battery:   'Battery (from route)',
                 ptAlt:     'Altitude (Base / Safe Zone)',
@@ -14419,6 +14441,7 @@
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'area',      label: `Area (${unitLbl}²)`,         w: 100, num: true, dataKey: 'areaM2' },
                 { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'battery',   label: 'Battery',        w: 95,  num: false, dataKey: 'routeM' },
                 { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
@@ -15200,6 +15223,24 @@
                         td.title = (r.type === 16 || r.type === 3)
                             ? (r.unshielded ? 'Unshielded (drone-safety concern)' : 'Shielded')
                             : 'Unshielded flag applies to FFZ + Assets';
+                    } else if (col.key === 'area') {
+                        // Polygon area (FFZ/NFZ), info-only. Follows the ft/m
+                        // unit toggle → ft² / m². Tooltip adds acres + the other
+                        // unit. Right-click copies the displayed integer.
+                        const m2 = r.areaM2;
+                        const useFt = sumPanelState.unitsFt;
+                        td.style.cssText = `padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;color:${m2 == null ? '#555' : '#cdd6e0'};cursor:pointer`;
+                        if (m2 == null) {
+                            td.textContent = '—';
+                            td.title = 'Area is computed for FFZ / NFZ polygons';
+                        } else {
+                            const ft2 = m2 * 10.7639;
+                            const shown = Math.round(useFt ? ft2 : m2);
+                            td.textContent = shown.toLocaleString();
+                            const acres = ft2 / 43560;
+                            td.title = `≈ ${Math.round(ft2).toLocaleString()} ft² · ${acres.toFixed(acres < 1 ? 3 : 2)} acres · ${Math.round(m2).toLocaleString()} m². Rough planar area. Right-click: copy ${useFt ? 'ft²' : 'm²'}.`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(shown), `Copied ${shown.toLocaleString()} ${useFt ? 'ft²' : 'm²'}`); };
+                        }
                     } else if (col.key === 'waitApproved') {
                         // RED ✓ when this FP segment requires approval before
                         // flying (arc.wait_until_approved === true); blank
@@ -15304,6 +15345,10 @@
                     if (col.key === 'waitApproved') {
                         // FP segments → TRUE / FALSE; blank for non-FP rows.
                         return r._isSegment ? (r.waitApproved === true ? 'TRUE' : 'FALSE') : '';
+                    }
+                    if (col.key === 'area') {
+                        if (r.areaM2 == null) return '';
+                        return String(Math.round(sumPanelState.unitsFt ? r.areaM2 * 10.7639 : r.areaM2));
                     }
                     if (col.key === 'notes') return r.notesText || '';
                     if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
