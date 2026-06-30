@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.142
+// @version      4.143
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.142';
+    const SCRIPT_VERSION = '4.143';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6339,6 +6339,13 @@
                             : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
                         // Per-arc "wait until approved" flag — FP segments only.
                         waitApproved: arc.wait_until_approved === true,
+                        // Rough center of the segment = midpoint of its arc.
+                        _lat: (arc.point_a && arc.point_b && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number')
+                            ? (arc.point_a.lat + arc.point_b.lat) / 2
+                            : (arc.point_a && typeof arc.point_a.lat === 'number' ? arc.point_a.lat : null),
+                        _lng: (arc.point_a && arc.point_b && typeof arc.point_a.lng === 'number' && typeof arc.point_b.lng === 'number')
+                            ? (arc.point_a.lng + arc.point_b.lng) / 2
+                            : (arc.point_a && typeof arc.point_a.lng === 'number' ? arc.point_a.lng : null),
                         notesText: e.description ? String(e.description).trim() : '',
                         entId: e.id, // parent FP id
                     });
@@ -6427,12 +6434,18 @@
                 row.ptAltM = e.custom.altitude;
             }
             // Point coordinate — single-point entities (GMs 19, Assets 3, Base
-            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons/lines leave
-            // these null so the Lat/Long/GPS cells render blank.
+            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons (FFZ 16,
+            // NFZ 4) get a ROUGH center = mean of their ring vertices.
             if ((e.type === 19 || e.type === 3 || e.type === 8 || e.type === 98)
                 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') {
                 row._lat = e.coords[0].lat;
                 row._lng = e.coords[0].lng;
+            } else if (Array.isArray(e.coords) && e.coords.length >= 3) {
+                let sLat = 0, sLng = 0, n = 0;
+                for (const c of e.coords) {
+                    if (c && typeof c.lat === 'number' && typeof c.lng === 'number') { sLat += c.lat; sLng += c.lng; n++; }
+                }
+                if (n > 0) { row._lat = sLat / n; row._lng = sLng / n; }
             }
             // For non-asset rows, elevation = MAX DEM across sample
             // points (asset row already populated above from its
@@ -15034,19 +15047,21 @@
                         td.textContent = txt;
                         if (title) td.title = title;
                     } else if (col.key === 'lat' || col.key === 'long') {
-                        // Point coordinate (GMs + Assets only). Click or
-                        // right-click copies the raw number. M1-edit to move
-                        // the marker is a planned fast-follow.
+                        // Coordinate: exact for point entities (GMs/Assets/Base/
+                        // Safe Zone); ROUGH CENTER for FFZ/NFZ polygons (mean of
+                        // vertices) + FP segments (arc midpoint). Click/right-
+                        // click copies the raw number.
                         const v = col.key === 'lat' ? r._lat : r._lng;
+                        const isPoint = (r.type === 19 || r.type === 3 || r.type === 8 || r.type === 98) && !r._isSegment;
                         td.style.cssText = 'padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
                         if (v == null) {
                             td.textContent = '—';
                             td.style.color = '#555';
-                            td.title = 'Only point entities (General Markers, Assets) have a single coordinate';
+                            td.title = 'No coordinate available for this entity';
                         } else {
-                            td.style.color = '#cdd6e0';
+                            td.style.color = isPoint ? '#cdd6e0' : '#9fb0bd'; // dim slightly for "rough center"
                             td.textContent = v.toFixed(6);
-                            td.title = 'Click or right-click to copy. (Editing — moving the marker — coming soon.)';
+                            td.title = isPoint ? 'Click or right-click to copy.' : 'Rough center point. Click or right-click to copy.';
                             const copy = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(v), `Copied ${v.toFixed(6)}`); };
                             td.onclick = copy;
                             td.oncontextmenu = copy;
@@ -15058,7 +15073,7 @@
                         if (r._lat == null) {
                             td.textContent = '—';
                             td.style.color = '#555';
-                            td.title = 'Only point entities (General Markers, Assets) have a coordinate';
+                            td.title = 'No coordinate available for this entity';
                         } else {
                             const url = `https://www.google.com/maps?q=${r._lat},${r._lng}`;
                             const a = document.createElement('span');
