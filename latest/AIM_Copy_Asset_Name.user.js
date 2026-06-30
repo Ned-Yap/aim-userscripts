@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.138
+// @version      4.139
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.138';
+    const SCRIPT_VERSION = '4.139';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3060,7 +3060,12 @@
                 const newToken = msg.token || '';
                 if (newToken !== elevSharedToken) {
                     elevSharedToken = newToken;
-                    if (newToken) console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
+                    if (newToken) {
+                        console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
+                        // Pre-warm the shared default presets so the Presets
+                        // menu reflects the repo file as soon as it's opened.
+                        fetchSharedPresets(true).catch(e => console.warn(`${TAG} shared presets prefetch failed:`, e));
+                    }
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
@@ -3347,6 +3352,111 @@
         elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
     }
 
+    // ============================================================
+    // v4.139 — SHARED DEFAULT PRESETS (admin-editable, repo-backed)
+    // ------------------------------------------------------------
+    // The "★ Built-in views" list can be overridden by a JSON file in
+    // the private data repo (sum-presets.json). When present it REPLACES
+    // the hard-coded BUILTIN_PRESETS for everyone; when absent / fetch
+    // fails / no token, BUILTIN_PRESETS is the permanent fallback so the
+    // menu never breaks. Admins (approvers.json) edit it via the Presets
+    // menu; it commits with the same PAT + Contents API the elevation
+    // cache already uses (GET → sha, PUT → upsert). The data repo is
+    // PRIVATE, so we must read via the authenticated Contents API — the
+    // no-auth raw CDN would 404.
+    // ============================================================
+    const SUM_PRESETS_PATH = 'sum-presets.json'; // in ELEV_REPO (private data repo)
+    let sharedPresets = null;         // array from sum-presets.json, or null if not loaded/absent
+    let sharedPresetsSha = null;      // GitHub file sha for conflict-aware PUT
+    let sharedPresetsFetched = false; // have we attempted a fetch this session
+    let sharedPresetsFetching = null; // in-flight promise (dedupe concurrent callers)
+
+    // Decode a GitHub Contents-API base64 blob (newline-wrapped) to UTF-8.
+    function decodeGithubBase64(content) {
+        const bin = atob(String(content || '').replace(/\s/g, ''));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
+    }
+
+    // Coerce one repo-loaded preset to the BUILTIN_PRESETS shape; drop
+    // anything malformed so a bad hand-edit can't break the menu.
+    function sanitizeSharedPreset(p) {
+        if (!p || typeof p !== 'object') return null;
+        if (typeof p.name !== 'string' || !p.name.trim()) return null;
+        if (!Array.isArray(p.columnOrder) || p.columnOrder.length === 0) return null;
+        const out = {
+            name: p.name.trim(),
+            desc: typeof p.desc === 'string' ? p.desc : '',
+            columnOrder: p.columnOrder.filter(k => typeof k === 'string'),
+            typeFilter: Array.isArray(p.typeFilter) ? p.typeFilter.map(String) : ['3', '4', '8', '15', '16', '19', '98'],
+            sortKey: typeof p.sortKey === 'string' ? p.sortKey : 'typePrio',
+            sortDir: (p.sortDir === 1 || p.sortDir === -1) ? p.sortDir : 1,
+            unitsFt: typeof p.unitsFt === 'boolean' ? p.unitsFt : true,
+        };
+        if (out.columnOrder.length === 0) return null;
+        if (p.numericFilters && typeof p.numericFilters === 'object') out.numericFilters = p.numericFilters;
+        ['validatedOnly', 'unvalidatedOnly', 'unshieldedOnly', 'notesOnly'].forEach(f => { if (p[f]) out[f] = true; });
+        return out;
+    }
+
+    // Fetch sum-presets.json via the Contents API (needs the PAT — the
+    // data repo is private). Caches the array + sha. Returns the array,
+    // or null when the file is absent / unreadable (caller falls back to
+    // BUILTIN_PRESETS). Deduped to one real request per session unless
+    // `force` is passed (used after an admin commit).
+    async function fetchSharedPresets(force) {
+        if (sharedPresetsFetching) return sharedPresetsFetching;
+        if (sharedPresetsFetched && !force) return sharedPresets;
+        const token = elevSharedToken;
+        if (!token) {
+            // No PAT — can't read the private file. Fall back to code.
+            sharedPresetsFetched = true;
+            return null;
+        }
+        sharedPresetsFetching = (async () => {
+            const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(SUM_PRESETS_PATH)}?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}`;
+            const r = await elevGmRequest({
+                method: 'GET', url,
+                headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+                timeout: 8000,
+            });
+            sharedPresetsFetched = true;
+            if (r.status === 404) {
+                console.log(`${TAG} no shared sum-presets.json yet — using built-in defaults`);
+                sharedPresets = null; sharedPresetsSha = null;
+                return null;
+            }
+            if (!r.ok) {
+                console.warn(`${TAG} GET sum-presets.json HTTP ${r.status} — keeping current defaults`);
+                return sharedPresets;
+            }
+            try {
+                const j = JSON.parse(r.responseText);
+                sharedPresetsSha = j.sha || null;
+                const parsed = JSON.parse(decodeGithubBase64(j.content));
+                const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.presets) ? parsed.presets : null);
+                if (!list) { console.warn(`${TAG} sum-presets.json malformed (no presets array) — using built-in defaults`); sharedPresets = null; return null; }
+                const clean = list.map(sanitizeSharedPreset).filter(Boolean);
+                sharedPresets = clean.length ? clean : null;
+                console.log(`${TAG} loaded ${clean.length} shared default preset(s) from repo`);
+                return sharedPresets;
+            } catch (e) {
+                console.warn(`${TAG} sum-presets.json parse failed — using built-in defaults:`, e);
+                return sharedPresets;
+            }
+        })();
+        try { return await sharedPresetsFetching; }
+        finally { sharedPresetsFetching = null; }
+    }
+
+    // The effective built-in views: repo-backed list if one is loaded,
+    // else the hard-coded BUILTIN_PRESETS fallback. Every consumer of the
+    // built-in list goes through here.
+    function getBuiltinPresets() {
+        return (Array.isArray(sharedPresets) && sharedPresets.length) ? sharedPresets : BUILTIN_PRESETS;
+    }
+
     // ---- v3.87 (Phase 2): cross-preset export ----
     // Copy ANY preset's table (its columns + filters) to the clipboard,
     // Sheets-ready, WITHOUT switching the live view — so the user can pull
@@ -3450,7 +3560,7 @@
         }
     }
     function allExportPresets() {
-        return BUILTIN_PRESETS.concat(loadViewPresets());
+        return getBuiltinPresets().concat(loadViewPresets());
     }
 
     // Snapshot the live SUM state into a plain preset object (sans name).
@@ -12568,7 +12678,7 @@
                 biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
                 biHead.textContent = '★ Built-in views';
                 presetsMenuEl.appendChild(biHead);
-                BUILTIN_PRESETS.forEach(p => {
+                getBuiltinPresets().forEach(p => {
                     const row = document.createElement('div');
                     row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
                     row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
@@ -12681,6 +12791,11 @@
                 presetsMenuEl.appendChild(saveRow);
             };
             rebuildPresetsMenu();
+            // Refresh the built-in views from the repo in the background.
+            // The menu renders instantly from the fallback/cache, then
+            // re-renders if the repo list differs once the fetch lands.
+            fetchSharedPresets().then(() => { if (presetsMenuEl) rebuildPresetsMenu(); })
+                .catch(e => console.warn(`${TAG} shared presets refresh failed:`, e));
             const r = presetsBtn.getBoundingClientRect();
             presetsMenuEl.style.left = r.left + 'px';
             presetsMenuEl.style.top = (r.bottom + 4) + 'px';
@@ -13655,7 +13770,7 @@
             biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:4px 12px 2px;font-weight:700';
             biHead.textContent = '★ Built-in';
             exportMenuEl.appendChild(biHead);
-            BUILTIN_PRESETS.forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
+            getBuiltinPresets().forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
             const userPresets = loadViewPresets();
             if (userPresets.length) {
                 const uHead = document.createElement('div');
