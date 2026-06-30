@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.81
+// @version      34.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.81';
+    const SCRIPT_VERSION = '34.82';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5339,15 +5339,35 @@
         if (!ctm) return;
         const inv = ctm.inverse();
 
-        // Convert "ft" to SVG user units using the same scale that drives the
-        // line buffers. Empirical: at standardRatio=1.8, baseWidth (=18 units)
-        // renders as ~31.5ft total band width at typical working zoom. So 1ft
-        // ≈ baseWidth/31.5 user units. The user-facing 'Shielding distance'
-        // multiplier compensates for zoom-driven drift if measurements drift.
-        const FT_PER_BASEWIDTH = 31.5;
-        const baseWidth = globalBaseWidth || (lineThickness * standardRatio);
+        // Shield radius is a REAL-WORLD distance (200 ft × the 'Shielding
+        // distance' multiplier) and must stay that ground size at every zoom.
+        // The old approach scaled the radius off baseWidth in SVG user units —
+        // but 1 user unit = a different ground distance at every zoom level, so
+        // the circle ballooned when zoomed out and shrank when zoomed in
+        // (~60ft zoomed in, ~400ft zoomed out instead of a fixed 200ft).
+        //
+        // Correct approach: convert the ground radius to SCREEN PIXELS using
+        // the map's meters-per-pixel at the current zoom (Web-Mercator ground
+        // resolution = 156543.034 · cos(lat) / 2^zoom), then to SVG user units
+        // via the inverse screen CTM scale. Falls back to the old empirical
+        // calc only if the Leaflet map isn't reachable.
         const altMult = Number(toggleState['altitude.distance']) || 1.0;
-        const radius = baseWidth * (200 / FT_PER_BASEWIDTH) * altMult;
+        let radius;
+        const _map = getLeafletMap();
+        if (_map && typeof _map.getZoom === 'function' && typeof _map.getCenter === 'function') {
+            const lat = (_map.getCenter().lat) || 0;
+            const zoom = _map.getZoom();
+            const metersPerPx = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+            const radiusM = 200 * 0.3048 * altMult;          // 200 ft → meters, × multiplier
+            const radiusPx = radiusM / metersPerPx;           // screen/CSS pixels at this zoom
+            const scale = Math.abs(inv.a) || 1;               // screen px → SVG user units
+            radius = radiusPx * scale;
+        } else {
+            // Fallback (map unreachable): old empirical user-unit scaling.
+            const FT_PER_BASEWIDTH = 31.5;
+            const baseWidth = globalBaseWidth || (lineThickness * standardRatio);
+            radius = baseWidth * (200 / FT_PER_BASEWIDTH) * altMult;
+        }
         const fillColor = toggleState['altitude.color'] || '#8a2be2';
         const fillOpacity = Number(toggleState['altitude.opacity']);
         const opacity = isNaN(fillOpacity) ? 0.15 : fillOpacity;
