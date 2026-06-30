@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.145
+// @version      4.146
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.145';
+    const SCRIPT_VERSION = '4.146';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -11959,6 +11959,11 @@
         const needRoutes = sumPanelState.columnOrder.includes('route')
                         || sumPanelState.columnOrder.includes('battery');
         const routeSummary = needRoutes ? annotateRoutes(siteID, allRows) : null;
+        // Tracks whether annotateRoutes has run for this panel instance, so
+        // redrawTable() can lazily compute routes when the user enables the
+        // Route/Battery column mid-session (Columns menu → redrawTable, no
+        // full re-render) instead of leaving the cells blank until refresh.
+        let routesAnnotated = !!routeSummary;
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
@@ -14442,6 +14447,16 @@
             redrawTable();
         };
         function redrawTable() {
+            // Lazily compute routes if the Route/Battery column is now visible
+            // but routes haven't been annotated yet. Enabling the column from
+            // the Columns menu (or a non-rerender path) calls redrawTable()
+            // without re-running annotateRoutes, which previously left the
+            // Route/Battery cells blank ("—") until a full re-render.
+            if (!routesAnnotated &&
+                (sumPanelState.columnOrder.includes('route') || sumPanelState.columnOrder.includes('battery'))) {
+                try { annotateRoutes(siteID, allRows); } catch (e) { console.warn(`${TAG} lazy annotateRoutes failed:`, e); }
+                routesAnnotated = true;
+            }
             // v3.52: preserve scroll position across redraws. Without
             // this, every inline-edit commit wiped tableWrap.scrollTop
             // and dumped the user at the top of the table — exactly
