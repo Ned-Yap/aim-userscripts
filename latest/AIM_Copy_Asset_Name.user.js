@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.141
+// @version      4.142
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.141';
+    const SCRIPT_VERSION = '4.142';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3212,7 +3212,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -3609,6 +3609,7 @@
             battery: { label: 'Battery', val: r => { const b = batteryFor(r.routeM, loadBatteryThresholds()); return b ? b.label.replace(/^⚠\s*/, '') : ''; } },
             ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
             validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
+            waitApproved: { label: 'Wait Approved', val: r => r._isSegment ? (r.waitApproved === true ? 'TRUE' : 'FALSE') : '' },
             unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
             notes: { label: 'Notes', val: r => r.notesText || '' },
             droneName: { label: 'Drone', val: r => r.droneName || '' },
@@ -6336,6 +6337,8 @@
                         emergAltM: typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null,
                         segLenM: typeof arc.distance === 'number' ? arc.distance
                             : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
+                        // Per-arc "wait until approved" flag — FP segments only.
+                        waitApproved: arc.wait_until_approved === true,
                         notesText: e.description ? String(e.description).trim() : '',
                         entId: e.id, // parent FP id
                     });
@@ -6377,6 +6380,7 @@
                 gmGroup: '',
                 emergAltM: null,
                 segLenM: null,
+                waitApproved: null, // FP-segment-only flag → N/A here
                 // v3.96: generic entity ID + Base/Safe-Zone fields.
                 entId: e.id,
                 ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
@@ -12611,6 +12615,7 @@
                 battery:   'Battery (from route)',
                 ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
+                waitApproved: 'Wait Until Approved (FP seg)',
                 unshielded:'Unshielded',
                 notes:     'Notes',
                 droneName: 'Drone (base)',
@@ -14405,6 +14410,7 @@
                 { key: 'battery',   label: 'Battery',        w: 95,  num: false, dataKey: 'routeM' },
                 { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                { key: 'waitApproved', label: 'Wait Approved', w: 95, num: false, dataKey: 'waitApproved' },
                 { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
                 { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
                 { key: 'droneName', label: 'Drone',          w: 95,  num: false, dataKey: 'droneName' },
@@ -15179,6 +15185,16 @@
                         td.title = (r.type === 16 || r.type === 3)
                             ? (r.unshielded ? 'Unshielded (drone-safety concern)' : 'Shielded')
                             : 'Unshielded flag applies to FFZ + Assets';
+                    } else if (col.key === 'waitApproved') {
+                        // RED ✓ when this FP segment requires approval before
+                        // flying (arc.wait_until_approved === true); blank
+                        // otherwise. N/A for non-FP-segment rows.
+                        td.style.cssText = 'padding:5px 8px;text-align:center;color:#ff3b30;cursor:pointer;font-weight:700';
+                        td.textContent = r.waitApproved === true ? '✓' : '';
+                        td.title = !r._isSegment ? 'Wait-until-approved applies to flight-path segments'
+                            : (r.waitApproved === true
+                                ? 'Wait until approved = TRUE (approval required before flying this segment)'
+                                : 'Wait until approved = FALSE');
                     } else if (col.key === 'notes') {
                         // Description text, single-line with full text on hover.
                         const v = r.notesText || '';
@@ -15269,6 +15285,10 @@
                         if (r.unshielded) return 'yes';
                         if (r.type === 16 || r.type === 3) return 'no';
                         return ''; // N/A
+                    }
+                    if (col.key === 'waitApproved') {
+                        // FP segments → TRUE / FALSE; blank for non-FP rows.
+                        return r._isSegment ? (r.waitApproved === true ? 'TRUE' : 'FALSE') : '';
                     }
                     if (col.key === 'notes') return r.notesText || '';
                     if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';
