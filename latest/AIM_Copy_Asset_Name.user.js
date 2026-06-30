@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.144
+// @version      4.145
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.144';
+    const SCRIPT_VERSION = '4.145';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3226,7 +3226,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -3611,6 +3611,13 @@
             subtype: { label: 'Subtype', val: r => r.subtype || '' },
             equipment: { label: 'Equipment', val: r => r.equipment || '' },
             state: { label: 'State', val: r => r.state || '' },
+            assetAlt: { label: `Altitude (${u})`, val: r => num(r.assetAltM) },
+            assetHeightAgl: { label: `Height AGL (${u})`, val: r => num(r.assetHeightAglM) },
+            assetElevAsl: { label: `Elev ASL (${u})`, val: r => num(r.assetElevAslM) },
+            poiId: { label: 'POI ID', val: r => r.poiId != null ? String(r.poiId) : '' },
+            poleFeeder: { label: 'Pole Feeder', val: r => r.poleFeeder || '' },
+            poleUsage: { label: 'Pole Usage', val: r => r.poleUsage || '' },
+            poleIsSimple: { label: 'Pole Simple', val: r => r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE') },
             gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
             altMin: { label: `Min Alt (${u})`, val: r => num(r.altMinM) },
             altMax: { label: `Max Alt (${u})`, val: r => num(r.altMaxM) },
@@ -6409,12 +6416,28 @@
                 ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
                 droneName: '',      // Base allocated drone name
                 droneId: '',        // Base allocated drone id
+                // v4.145: asset-specific custom.* fields (null/blank elsewhere).
+                assetAltM: null,        // custom.altitude (m)
+                assetHeightAglM: null,  // custom.height_agl (m)
+                assetElevAslM: null,    // custom.elevation_asl (m)
+                poiId: null,            // custom.poi_id
+                poleFeeder: '',         // custom.pole_feeder
+                poleUsage: '',          // custom.pole_usage
+                poleIsSimple: null,     // custom.pole_is_simple (bool)
             };
             if (e.type === 3 && e.custom) {
-                row.subtype = e.custom.poi_type_str || '';
-                if (typeof e.custom.elevation_asl === 'number') {
-                    row.elevationM = e.custom.elevation_asl;
+                const c = e.custom;
+                row.subtype = c.poi_type_str || '';
+                if (typeof c.elevation_asl === 'number') {
+                    row.elevationM = c.elevation_asl;
+                    row.assetElevAslM = c.elevation_asl;
                 }
+                if (typeof c.altitude === 'number') row.assetAltM = c.altitude;
+                if (typeof c.height_agl === 'number') row.assetHeightAglM = c.height_agl;
+                if (c.poi_id != null) row.poiId = c.poi_id;
+                row.poleFeeder = (c.pole_feeder != null && c.pole_feeder !== '') ? String(c.pole_feeder) : '';
+                row.poleUsage = (c.pole_usage != null && c.pole_usage !== '') ? String(c.pole_usage) : '';
+                if (typeof c.pole_is_simple === 'boolean') row.poleIsSimple = c.pole_is_simple;
             }
             // NFZ (4) and FFZ (16) both store altitude range in restrictions.
             if ((e.type === 4 || e.type === 16) && e.restrictions && typeof e.restrictions === 'object') {
@@ -6463,8 +6486,8 @@
                 }
                 if (n > 0) { row._lat = sLat / n; row._lng = sLng / n; }
             }
-            // Polygon area (info only) — FFZ (16) + NFZ (4).
-            if ((e.type === 16 || e.type === 4) && Array.isArray(e.coords) && e.coords.length >= 3) {
+            // Polygon area (info only) — FFZ (16), NFZ (4), Asset (3).
+            if ((e.type === 16 || e.type === 4 || e.type === 3) && Array.isArray(e.coords) && e.coords.length >= 3) {
                 const am2 = polygonAreaM2(e.coords);
                 if (am2 != null) row.areaM2 = am2;
             }
@@ -12635,8 +12658,15 @@
                 segId:     'Segment ID',
                 entId:     'Entity ID',
                 subtype:   'Subtype',
-                equipment: 'Equipment (asset)',
-                state:     'State / Health (asset)',
+                equipment: '(Assets) Equipment',
+                state:     '(Assets) State / Health',
+                assetAlt:  '(Assets) Altitude',
+                assetHeightAgl: '(Assets) Height AGL',
+                assetElevAsl: '(Assets) Elevation ASL',
+                poiId:     '(Assets) POI ID',
+                poleFeeder:'(Assets) Pole Feeder',
+                poleUsage: '(Assets) Pole Usage',
+                poleIsSimple: '(Assets) Pole Is Simple',
                 gmGroup:   'GM Group',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
@@ -12645,9 +12675,9 @@
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
-                area:      'Area (FFZ / NFZ)',
-                route:     'Route from base (asset)',
-                battery:   'Battery (from route)',
+                area:      'Area (FFZ / NFZ / Asset)',
+                route:     '(Assets) Route from base',
+                battery:   '(Assets) Battery (from route)',
                 ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
                 waitApproved: 'Wait Until Approved (FP seg)',
@@ -12655,7 +12685,28 @@
                 notes:     'Notes',
                 droneName: 'Drone (base)',
                 droneId:   'Drone ID (base)',
+                lat:       'Lat (center)',
+                long:      'Long (center)',
+                gps:       'GPS / Maps link',
             };
+            // v4.145: section grouping for the "available columns" list, so
+            // assets/FP/FFZ columns are easy to find. Keys not listed fall to
+            // 'General'. Order here = section order in the menu.
+            const COL_SECTION = {
+                typeShort: 'General', name: 'General', entId: 'General', subtype: 'General',
+                notes: 'General', elevation: 'General', area: 'General', validated: 'General',
+                lat: 'General', long: 'General', gps: 'General', visibility: 'General',
+                equipment: 'Assets', state: 'Assets', assetAlt: 'Assets', assetHeightAgl: 'Assets',
+                assetElevAsl: 'Assets', poiId: 'Assets', poleFeeder: 'Assets', poleUsage: 'Assets',
+                poleIsSimple: 'Assets', route: 'Assets', battery: 'Assets',
+                segId: 'Flight Paths', altMin: 'Flight Paths', altMax: 'Flight Paths',
+                emergAlt: 'Flight Paths', altDelta: 'Flight Paths', agl: 'Flight Paths',
+                segLen: 'Flight Paths', waitApproved: 'Flight Paths',
+                unshielded: 'FFZ / NFZ',
+                ptAlt: 'Base / Safe Zone', droneName: 'Base / Safe Zone', droneId: 'Base / Safe Zone',
+                gmGroup: 'General Markers',
+            };
+            const SECTION_ORDER = ['General', 'Assets', 'Flight Paths', 'FFZ / NFZ', 'Base / Safe Zone', 'General Markers', 'Other'];
             // MBT-style menu: visible columns first with ↑/↓ reorder
             // arrows + remove checkbox, then a divider, then hidden
             // columns with an add checkbox. State persists per
@@ -12736,11 +12787,11 @@
                     colsMenuEl.appendChild(hr);
                     const head2 = document.createElement('div');
                     head2.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:2px 12px 4px;font-weight:700';
-                    head2.textContent = 'Hidden';
+                    head2.textContent = 'Add columns';
                     colsMenuEl.appendChild(head2);
-                    hidden.forEach(key => {
+                    const addHiddenRow = (key) => {
                         const row = document.createElement('label');
-                        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px 3px 18px;cursor:pointer';
                         const cb = document.createElement('input');
                         cb.type = 'checkbox';
                         cb.checked = false;
@@ -12756,6 +12807,21 @@
                         row.appendChild(cb);
                         row.appendChild(document.createTextNode(COL_LABELS[key] || key));
                         colsMenuEl.appendChild(row);
+                    };
+                    // Group the available columns by section for findability.
+                    const sectioned = {};
+                    hidden.forEach(k => {
+                        const sec = COL_SECTION[k] || 'Other';
+                        (sectioned[sec] = sectioned[sec] || []).push(k);
+                    });
+                    SECTION_ORDER.forEach(sec => {
+                        const keys = sectioned[sec];
+                        if (!keys || keys.length === 0) return;
+                        const subHead = document.createElement('div');
+                        subHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.04em;padding:5px 12px 2px;font-weight:700';
+                        subHead.textContent = sec;
+                        colsMenuEl.appendChild(subHead);
+                        keys.forEach(addHiddenRow);
                     });
                 }
                 const hr2 = document.createElement('div');
@@ -14433,6 +14499,13 @@
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
                 { key: 'equipment', label: 'Equipment',      w: 110, num: false, dataKey: 'equipment' },
                 { key: 'state',     label: 'State',          w: 100, num: false, dataKey: 'state' },
+                { key: 'assetAlt',      label: `Altitude (${unitLbl})`,   w: 85,  num: true,  dataKey: 'assetAltM',       fmt: fmtAlt, raw: fmtRaw },
+                { key: 'assetHeightAgl', label: `Height AGL (${unitLbl})`, w: 95, num: true,  dataKey: 'assetHeightAglM', fmt: fmtAlt, raw: fmtRaw },
+                { key: 'assetElevAsl',  label: `Elev ASL (${unitLbl})`,   w: 90,  num: true,  dataKey: 'assetElevAslM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'poiId',     label: 'POI ID',         w: 80,  num: true,  dataKey: 'poiId' },
+                { key: 'poleFeeder', label: 'Pole Feeder',   w: 110, num: false, dataKey: 'poleFeeder' },
+                { key: 'poleUsage', label: 'Pole Usage',     w: 110, num: false, dataKey: 'poleUsage' },
+                { key: 'poleIsSimple', label: 'Pole Simple', w: 85,  num: false, dataKey: 'poleIsSimple' },
                 { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
@@ -15114,9 +15187,11 @@
                             };
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
                         }
-                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName') {
-                        // Plain text (asset equipment / GM group / base drone).
-                        // Blank for rows it doesn't apply to. Right-click copies.
+                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName'
+                        || col.key === 'poleFeeder' || col.key === 'poleUsage') {
+                        // Plain text (asset equipment / GM group / base drone /
+                        // asset pole feeder + usage). Blank for rows it doesn't
+                        // apply to. Right-click copies.
                         const v = r[col.dataKey] || '';
                         const color = col.key === 'gmGroup' ? '#c4a8f0' : (col.key === 'droneName' ? '#ffd54f' : '#cdd6e0');
                         td.style.cssText = `padding:5px 8px;color:${v ? color : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
@@ -15127,19 +15202,29 @@
                         } else {
                             td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only'
                                 : col.key === 'droneName' ? 'Drone applies to Base Stations only'
+                                : col.key === 'poleFeeder' ? 'Pole feeder (custom.pole_feeder) — assets only'
+                                : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
                                 : 'Equipment is parsed from asset subtype (before " - ")';
                         }
-                    } else if (col.key === 'entId' || col.key === 'droneId') {
-                        // Entity ID / allocated drone ID — right-aligned, copyable.
+                    } else if (col.key === 'poleIsSimple') {
+                        // Asset boolean custom.pole_is_simple → Yes / No / — (N/A).
+                        const v = r.poleIsSimple;
+                        const txt = v === true ? 'Yes' : (v === false ? 'No' : '—');
+                        td.style.cssText = `padding:5px 8px;text-align:center;font-size:11px;cursor:pointer;color:${v == null ? '#555' : '#cdd6e0'}`;
+                        td.textContent = txt;
+                        td.title = v == null ? 'Pole-is-simple (custom.pole_is_simple) — assets only'
+                            : `Pole is simple = ${v ? 'TRUE' : 'FALSE'}`;
+                    } else if (col.key === 'entId' || col.key === 'droneId' || col.key === 'poiId') {
+                        // Entity ID / allocated drone ID / POI ID — right-aligned, copyable.
                         const v = r[col.dataKey];
                         const show = (v != null && v !== '') ? String(v) : '—';
                         td.style.cssText = `padding:5px 8px;color:${show === '—' ? '#555' : '#9aa7b0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         td.textContent = show;
                         if (show !== '—') {
-                            td.title = (col.key === 'entId' ? 'Entity ID' : 'Allocated drone ID') + ' — Right-click: copy';
+                            td.title = (col.key === 'entId' ? 'Entity ID' : col.key === 'poiId' ? 'POI ID (custom.poi_id)' : 'Allocated drone ID') + ' — Right-click: copy';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(show, `Copied ${show}`); };
                         } else {
-                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : '';
+                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : col.key === 'poiId' ? 'POI ID — assets only' : '';
                         }
                     } else if (col.key === 'state') {
                         // Asset state, colored by severity (Normal muted, any
@@ -15153,21 +15238,27 @@
                         } else {
                             td.title = 'State applies to assets only';
                         }
-                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt') {
+                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt'
+                        || col.key === 'assetAlt' || col.key === 'assetHeightAgl' || col.key === 'assetElevAsl') {
                         // Numerics converted m→ft per the unit toggle. emergAlt/
-                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only.
+                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only;
+                        // assetAlt/assetHeightAgl/assetElevAsl are asset-only.
                         const m = r[col.dataKey];
                         td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         td.textContent = col.fmt(m);
                         const naLbl = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only'
                             : col.key === 'segLen' ? 'Segment length — FP segments only'
-                            : 'Altitude — Base Stations / Safe Zones only';
+                            : col.key === 'ptAlt' ? 'Altitude — Base Stations / Safe Zones only'
+                            : 'Asset field — assets only';
                         if (m == null) {
                             td.title = naLbl;
                         } else {
                             const desc = col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). '
                                 : col.key === 'segLen' ? 'Segment length (arc.distance). '
-                                : 'Base relative_alt / Safe Zone altitude. ';
+                                : col.key === 'ptAlt' ? 'Base relative_alt / Safe Zone altitude. '
+                                : col.key === 'assetAlt' ? 'Asset altitude (custom.altitude). '
+                                : col.key === 'assetHeightAgl' ? 'Asset height AGL (custom.height_agl). '
+                                : 'Asset ground elevation ASL (custom.elevation_asl). ';
                             td.title = desc + 'Right-click: copy raw';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
@@ -15322,10 +15413,15 @@
                     if (col.key === 'gmGroup') return r.gmGroup || '';
                     if (col.key === 'droneName') return r.droneName || '';
                     if (col.key === 'droneId') return (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '';
+                    if (col.key === 'poiId') return r.poiId != null ? String(r.poiId) : '';
+                    if (col.key === 'poleFeeder') return r.poleFeeder || '';
+                    if (col.key === 'poleUsage') return r.poleUsage || '';
+                    if (col.key === 'poleIsSimple') return r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE');
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
                         || col.key === 'elevation' || col.key === 'agl'
                         || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route'
-                        || col.key === 'ptAlt') {
+                        || col.key === 'ptAlt'
+                        || col.key === 'assetAlt' || col.key === 'assetHeightAgl' || col.key === 'assetElevAsl') {
                         return num(r[col.dataKey]);
                     }
                     if (col.key === 'battery') {
