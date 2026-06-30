@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.146
+// @version      4.147
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.146';
+    const SCRIPT_VERSION = '4.147';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6429,8 +6429,12 @@
                 const c = e.custom;
                 row.subtype = c.poi_type_str || '';
                 if (typeof c.elevation_asl === 'number') {
-                    row.elevationM = c.elevation_asl;
-                    row.assetElevAslM = c.elevation_asl;
+                    // Claimed ground elevation. Percepto leaves this 0 (or null)
+                    // for CSV-imported assets until the asset is edited/saved,
+                    // so only treat a NONZERO value as authoritative; otherwise
+                    // fall through to the DEM lookup below like other entities.
+                    row.assetElevAslM = c.elevation_asl;        // shown as-is (may be 0 → not yet computed)
+                    if (c.elevation_asl !== 0) row.elevationM = c.elevation_asl;
                 }
                 if (typeof c.altitude === 'number') row.assetAltM = c.altitude;
                 if (typeof c.height_agl === 'number') row.assetHeightAglM = c.height_agl;
@@ -6491,10 +6495,13 @@
                 const am2 = polygonAreaM2(e.coords);
                 if (am2 != null) row.areaM2 = am2;
             }
-            // For non-asset rows, elevation = MAX DEM across sample
-            // points (asset row already populated above from its
-            // claimed elevation_asl — that takes priority).
-            if (e.type !== 3) {
+            // Non-asset rows: elevation = MAX DEM across sample points. Asset
+            // rows normally keep their claimed elevation_asl (set above), but
+            // an untouched CSV-imported asset has no computed value yet (0 /
+            // null) → row.elevationM is still null here, so fall back to DEM
+            // like everything else. (If the cache is cold at build time,
+            // __aim_ai_onDemReady re-fills it once the async fetch lands.)
+            if (e.type !== 3 || row.elevationM == null) {
                 const maxDem = maxCachedElevation(samples);
                 if (maxDem != null) row.elevationM = maxDem;
             }
@@ -11972,9 +11979,13 @@
         window.__aim_ai_onDemReady = () => {
             allRows.forEach(r => {
                 if (!Array.isArray(r._samplePoints) || r._samplePoints.length === 0) return;
-                // Asset rows: keep their CLAIMED elevation_asl, ignore DEM.
+                // Asset rows: keep their CLAIMED elevation_asl, ignore DEM —
+                // but only when it's actually computed (nonzero). Untouched
+                // CSV imports have elevation_asl 0/null, so let those fall
+                // through to the DEM fill below.
                 if (r.type === 3 && r.entity && r.entity.custom
-                    && typeof r.entity.custom.elevation_asl === 'number') return;
+                    && typeof r.entity.custom.elevation_asl === 'number'
+                    && r.entity.custom.elevation_asl !== 0) return;
                 const maxE = maxCachedElevation(r._samplePoints);
                 if (maxE != null) {
                     r.elevationM = maxE;
