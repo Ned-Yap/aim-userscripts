@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.140
+// @version      4.141
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.140';
+    const SCRIPT_VERSION = '4.141';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -12779,43 +12779,112 @@
             if (presetsMenuEl) { closePresetsMenu(); return; }
             presetsMenuEl = document.createElement('div');
             presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
+            // Index of the shared default currently being inline-renamed (-1 = none).
+            let editingBuiltinIdx = -1;
             const rebuildPresetsMenu = () => {
                 presetsMenuEl.innerHTML = '';
                 // --- Built-in views (read-only, apply-only) ---
                 const biHead = document.createElement('div');
                 biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
                 const adminMode = isPresetAdmin();
+                presetsMenuEl.style.minWidth = adminMode ? '340px' : '260px';
                 biHead.textContent = adminMode ? '★ Built-in views · shared (you can edit)' : '★ Built-in views';
                 presetsMenuEl.appendChild(biHead);
                 const biList = getBuiltinPresets();
+                // Helper: commit a mutated copy of the shared-default list and
+                // refresh the menu. Returns nothing; toasts on the result.
+                const commitBuiltins = async (arr, msg, okMsg) => {
+                    const ok = await commitSharedPresets(arr, msg);
+                    if (ok) showToast(okMsg, 'rgba(95,255,95,0.5)');
+                    if (presetsMenuEl) rebuildPresetsMenu();
+                };
+                const mkMiniBtn = (txt, title, color, onClick) => {
+                    const b = document.createElement('button');
+                    b.textContent = txt;
+                    b.title = title;
+                    b.style.cssText = `background:transparent;border:1px solid ${color};color:${color};border-radius:3px;width:20px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1;flex:0 0 auto`;
+                    b.onclick = (e2) => { e2.stopPropagation(); onClick(e2, b); };
+                    return b;
+                };
                 biList.forEach((p, i) => {
                     const row = document.createElement('div');
-                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                    row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:3px 12px;cursor:pointer';
                     row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
                     row.onmouseleave = () => { row.style.background = 'transparent'; };
                     row.title = p.desc || 'Apply this view';
+
+                    // Inline-rename state for this row.
+                    if (adminMode && editingBuiltinIdx === i) {
+                        const inp = document.createElement('input');
+                        inp.type = 'text';
+                        inp.value = p.name;
+                        inp.style.cssText = 'flex:1;min-width:0;background:#1a1d23;border:1px solid #ffce6b;color:#e6e6e6;border-radius:3px;padding:2px 6px;font:inherit;font-size:11px;outline:none';
+                        const commitRename = async () => {
+                            const nm = (inp.value || '').trim();
+                            if (!nm || nm === p.name) { editingBuiltinIdx = -1; rebuildPresetsMenu(); return; }
+                            if (biList.some((x, j) => j !== i && (x.name || '').toLowerCase() === nm.toLowerCase())) {
+                                showToast(`A default named "${nm}" already exists`, 'rgba(255,96,96,0.55)');
+                                return;
+                            }
+                            const arr = getBuiltinPresets().slice();
+                            arr[i] = Object.assign({}, arr[i], { name: nm });
+                            editingBuiltinIdx = -1;
+                            await commitBuiltins(arr, `[AIM] rename shared default "${p.name}" → "${nm}"`, `Renamed: ${nm}`);
+                        };
+                        inp.onkeydown = (e2) => {
+                            if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); commitRename(); }
+                            else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); editingBuiltinIdx = -1; rebuildPresetsMenu(); }
+                        };
+                        row.appendChild(inp);
+                        row.appendChild(mkMiniBtn('✓', 'Save name', '#5fff5f', () => commitRename()));
+                        row.appendChild(mkMiniBtn('✕', 'Cancel', '#999', () => { editingBuiltinIdx = -1; rebuildPresetsMenu(); }));
+                        presetsMenuEl.appendChild(row);
+                        setTimeout(() => { inp.focus(); inp.select(); }, 0);
+                        return;
+                    }
+
                     const lbl = document.createElement('span');
                     lbl.textContent = p.name;
-                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    lbl.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
                     lbl.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
                     row.appendChild(lbl);
-                    // Admin: overwrite this shared default with the current view.
+
                     if (adminMode) {
-                        const ovr = document.createElement('button');
-                        ovr.textContent = '⟳';
-                        ovr.title = 'Overwrite this shared default with the current view (applies to ALL coworkers)';
-                        ovr.style.cssText = 'background:transparent;border:1px solid rgba(255,200,80,0.45);color:#ffce6b;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1';
-                        ovr.onclick = async (e2) => {
-                            e2.stopPropagation();
+                        // Reorder ▲▼ (disabled at the ends).
+                        const up = mkMiniBtn('▲', 'Move up', 'rgba(255,255,255,0.45)', async () => {
+                            if (i <= 0) return;
+                            const arr = getBuiltinPresets().slice();
+                            [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]];
+                            await commitBuiltins(arr, `[AIM] reorder shared default "${p.name}" up`, `Moved up: ${p.name}`);
+                        });
+                        const dn = mkMiniBtn('▼', 'Move down', 'rgba(255,255,255,0.45)', async () => {
+                            if (i >= biList.length - 1) return;
+                            const arr = getBuiltinPresets().slice();
+                            [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]];
+                            await commitBuiltins(arr, `[AIM] reorder shared default "${p.name}" down`, `Moved down: ${p.name}`);
+                        });
+                        if (i <= 0) { up.disabled = true; up.style.opacity = '0.3'; up.style.cursor = 'default'; }
+                        if (i >= biList.length - 1) { dn.disabled = true; dn.style.opacity = '0.3'; dn.style.cursor = 'default'; }
+                        row.appendChild(up);
+                        row.appendChild(dn);
+                        // Rename ✎
+                        row.appendChild(mkMiniBtn('✎', 'Rename this shared default', '#9ad0ff', () => { editingBuiltinIdx = i; rebuildPresetsMenu(); }));
+                        // Overwrite ⟳
+                        row.appendChild(mkMiniBtn('⟳', 'Overwrite this shared default with the current view (applies to ALL coworkers)', '#ffce6b', async (e2, b) => {
                             if (!confirm(`Overwrite the shared default "${p.name}" with the CURRENT view (columns, order, filters, sort)?\n\nThis changes the default for ALL coworkers.`)) return;
-                            ovr.disabled = true; ovr.textContent = '…';
+                            b.disabled = true; b.textContent = '…';
                             const arr = getBuiltinPresets().slice();
                             arr[i] = Object.assign({ name: p.name, desc: p.desc || '' }, captureCurrentView());
-                            const ok = await commitSharedPresets(arr, `[AIM] update shared default view "${p.name}"`);
-                            if (ok) showToast(`Shared default updated: ${p.name}`, 'rgba(95,255,95,0.5)');
-                            if (presetsMenuEl) rebuildPresetsMenu();
-                        };
-                        row.appendChild(ovr);
+                            await commitBuiltins(arr, `[AIM] update shared default view "${p.name}"`, `Shared default updated: ${p.name}`);
+                        }));
+                        // Delete ×
+                        row.appendChild(mkMiniBtn('×', 'Delete this shared default (for ALL coworkers)', '#ff8a80', async (e2, b) => {
+                            if (!confirm(`Delete the shared default "${p.name}" for ALL coworkers?`)) return;
+                            b.disabled = true; b.textContent = '…';
+                            const arr = getBuiltinPresets().slice();
+                            arr.splice(i, 1);
+                            await commitBuiltins(arr, `[AIM] delete shared default view "${p.name}"`, `Deleted: ${p.name}`);
+                        }));
                     } else {
                         row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
                     }
