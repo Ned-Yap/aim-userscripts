@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.147
+// @version      4.148
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.147';
+    const SCRIPT_VERSION = '4.148';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -10355,14 +10355,16 @@
     // Persist FINISHED-but-uncommitted FFZs (drawn corridors) so a reload doesn't lose them.
     // Restored when the ⊕ Generate modal is reopened. Committed ones drop out (server-side).
     // Slim a draft FFZ for storage / restore one back (shared by autosave + the Merge/Unmerge stash).
-    function advFfzSlim(f) { return { name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }; }
-    function advFfzFromSlim(s, siteID) { return { type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint }; }
+    function advFfzSlim(f) { return { name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _merged: !!f._merged, _altMode: f._altMode, _centroid: f._centroid, _side: f._side, _offsetFt: f._offsetFt, _assetId: f._assetId, _assetName: f._assetName, _plDistFt: f._plDistFt, _standoffFt: f._standoffFt, _overPowerLine: f._overPowerLine, _holes: f._holes, _overlapsExisting: f._overlapsExisting, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }; }
+    function advFfzFromSlim(s, siteID) { return { type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _merged: !!s._merged, _side: (s._side != null ? s._side : 'drawn'), _offsetFt: (s._offsetFt != null ? s._offsetFt : 0), _assetId: s._assetId, _assetName: s._assetName, _plDistFt: s._plDistFt, _standoffFt: s._standoffFt, _overPowerLine: s._overPowerLine, _holes: s._holes, _overlapsExisting: s._overlapsExisting, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint }; }
     let genMergeStash = null; // pre-merge pieces (slim) so the Merge button can UNMERGE back to editable pieces
     function advFfzKey() { return 'aim_adv_ffzs:' + (genState.siteID || '?'); }
     function advSaveFfzs() {
         try {
-            const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._drawn || f._adv));
-            const slim = list.map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }));
+            // Persist EVERY uncommitted preview FFZ — hand-drawn corridors AND per-asset generated
+            // drafts (both carry _gen). Without _gen, generated previews vanished on reload/crash.
+            const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._gen || f._drawn || f._adv));
+            const slim = list.map(advFfzSlim);
             if (slim.length) {
                 const json = JSON.stringify(slim);
                 localStorage.setItem(advFfzKey(), json);
@@ -10392,11 +10394,11 @@
             for (const s of slim) {
                 if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
                 if (have.has(JSON.stringify(s.points))) continue; // don't double-load
-                genState.lastResult.ffzs.push({ type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _side: 'drawn', _offsetFt: 0, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint });
+                genState.lastResult.ffzs.push(advFfzFromSlim(s, siteID));
                 added++;
             }
             if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
-            if (added) showToast(`Restored ${added} unsaved corridor${added === 1 ? '' : 's'}`, 'rgba(95,184,255,0.5)');
+            if (added) showToast(`Restored ${added} unsaved draft FFZ${added === 1 ? '' : 's'}`, 'rgba(95,184,255,0.5)');
         } catch (e) {}
     }
     // Re-open a finished corridor for editing: pull its verts/widths/side back into
@@ -11469,8 +11471,13 @@
                     statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`;
                     return;
                 }
+                // Preserve any uncommitted hand-drawn / merged corridors so a fresh Preview run
+                // doesn't wipe them out (generated drafts are regenerated each run, so we drop those).
+                const keep = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && (f._drawn || f._adv || f._merged) && Array.isArray(f.points) && f.points.length >= 3);
                 genState.lastResult = res;
+                if (keep.length) res.ffzs = keep.concat(res.ffzs);
                 const drawn = renderGenPreview(res.ffzs);
+                try { advSaveFfzs(); } catch (e) {}   // persist generated drafts immediately — survives reload/crash
                 const demNote = res.demMiss ? ` · <span style="color:#ffb347">${res.demMiss} missing DEM</span>` : '';
                 const skipExNote = res.skippedExisting ? ` + ${res.skippedExisting} already-FFZ` : '';
                 const flagParts = [];

@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-30 — FFZ Generator: per-asset previews now autosave — Asset Inspector v4.148 (dev/latest)
+
+The **⊕ Generate → Preview on Map** drafts now persist exactly like hand-drawn corridors did:
+- Generated preview FFZs autosave to local storage the moment a Preview run finishes (and on every edit/move/delete), so a **reload or crash no longer loses them** — reopen the ⊕ Generate modal and they're restored.
+- Re-running Preview no longer wipes hand-drawn / merged corridors you'd already built — they're kept and the fresh generated drafts are added alongside.
+- Restored generated drafts keep their side/offset/asset link, so they stay editable and commit cleanly.
+
+---
+
 ## 2026-06-25 — Advanced Draw — corridor → Merge → Commit pipeline (clean, safe, reversible) — Asset Inspector v4.127–v4.138 (dev/latest)
 
 The corridor builder's merge/commit got rebuilt to be predictable and non-destructive:
