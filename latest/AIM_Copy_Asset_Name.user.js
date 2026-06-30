@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.139
+// @version      4.140
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -47,7 +47,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.139';
+    const SCRIPT_VERSION = '4.140';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3062,9 +3062,11 @@
                     elevSharedToken = newToken;
                     if (newToken) {
                         console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
-                        // Pre-warm the shared default presets so the Presets
-                        // menu reflects the repo file as soon as it's opened.
+                        // Pre-warm the shared default presets + admin status so
+                        // the Presets menu reflects the repo file (and reveals
+                        // admin controls) as soon as it's opened.
                         fetchSharedPresets(true).catch(e => console.warn(`${TAG} shared presets prefetch failed:`, e));
+                        resolvePresetAdmin(true).catch(e => console.warn(`${TAG} preset-admin resolve failed:`, e));
                     }
                 }
             }
@@ -3455,6 +3457,112 @@
     // built-in list goes through here.
     function getBuiltinPresets() {
         return (Array.isArray(sharedPresets) && sharedPresets.length) ? sharedPresets : BUILTIN_PRESETS;
+    }
+
+    // ---- Admin gating for editing the shared defaults ----
+    // Only GitHub logins on approvers.json (in the data repo) may edit the
+    // shared default presets. Everyone else sees the built-ins apply-only.
+    // Resolution: GET /user for the login + GET approvers.json, both via the
+    // shared PAT. Resolved once per session (cached), re-resolved on token
+    // change. Editing shared defaults is a lead-level action, so we reuse
+    // the (narrow) approver list rather than the broader CSM whitelist.
+    const PRESETS_APPROVERS_PATH = 'approvers.json'; // in ELEV_REPO (data repo)
+    let presetAdminLogin = null;       // resolved GitHub login (lowercased) or null
+    let presetAdminApprovers = null;   // lowercased approver list, or null if unfetched
+    let presetAdminResolved = false;   // attempted resolution this session
+    let presetAdminResolving = null;   // in-flight promise (dedupe)
+
+    function isPresetAdmin() {
+        return !!(presetAdminLogin && Array.isArray(presetAdminApprovers) && presetAdminApprovers.includes(presetAdminLogin));
+    }
+    async function fetchGithubLogin(token) {
+        const r = await elevGmRequest({
+            method: 'GET', url: `${ELEV_GITHUB_API}/user`,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 8000,
+        });
+        if (!r.ok) return null;
+        try { const j = JSON.parse(r.responseText); return (j.login || '').toLowerCase() || null; }
+        catch (e) { return null; }
+    }
+    async function fetchApproversList(token) {
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(PRESETS_APPROVERS_PATH)}?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}`;
+        const r = await elevGmRequest({
+            method: 'GET', url,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 8000,
+        });
+        if (!r.ok) return null;
+        try {
+            const j = JSON.parse(r.responseText);
+            const parsed = JSON.parse(decodeGithubBase64(j.content));
+            const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.approvers) ? parsed.approvers : []);
+            return list.map(s => String(s).toLowerCase());
+        } catch (e) { console.warn(`${TAG} approvers.json parse failed:`, e); return null; }
+    }
+    async function resolvePresetAdmin(force) {
+        if (presetAdminResolving) return presetAdminResolving;
+        if (presetAdminResolved && !force) return isPresetAdmin();
+        const token = elevSharedToken;
+        if (!token) { presetAdminResolved = true; return false; }
+        presetAdminResolving = (async () => {
+            const [login, approvers] = await Promise.all([fetchGithubLogin(token), fetchApproversList(token)]);
+            presetAdminLogin = login;
+            presetAdminApprovers = approvers;
+            presetAdminResolved = true;
+            const ok = isPresetAdmin();
+            console.log(`${TAG} shared-preset admin = ${ok} (login ${login || '?'})`);
+            return ok;
+        })();
+        try { return await presetAdminResolving; }
+        finally { presetAdminResolving = null; }
+    }
+
+    // Serialize + PUT the shared default presets to the repo. Returns true
+    // on success. Refreshes the sha right before writing to minimize 409s,
+    // and updates sharedPresets + sharedPresetsSha in place so the menu
+    // reflects the commit without another fetch. Guarded by token + admin.
+    async function commitSharedPresets(arr, commitMsg) {
+        const token = elevSharedToken;
+        if (!token) { showToast('No GitHub token — set one in the Control Panel', 'rgba(255,96,96,0.55)'); return false; }
+        if (!isPresetAdmin()) { showToast('Not authorized to edit shared defaults', 'rgba(255,96,96,0.55)'); return false; }
+        const clean = (arr || []).map(sanitizeSharedPreset).filter(Boolean);
+        const payload = {
+            version: 1,
+            description: 'Shared default views for the Site Setup SUM panel (Asset Inspector). Edited in-app by approvers via Presets ▾; read by everyone. Each entry mirrors a BUILTIN_PRESETS object: name, desc, columnOrder, typeFilter, optional numericFilters (meters), sortKey, sortDir, unitsFt.',
+            updatedAt: new Date().toISOString(),
+            updatedBy: presetAdminLogin || '',
+            presets: clean,
+        };
+        const json = JSON.stringify(payload, null, 2);
+        const utf8 = new TextEncoder().encode(json);
+        let bin = '';
+        for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+        const contentB64 = btoa(bin);
+        // Refresh the sha right before the write so a concurrent edit by
+        // another admin is far less likely to 409 us.
+        await fetchSharedPresets(true).catch(() => {});
+        const body = { message: commitMsg || '[AIM] update shared SUM default presets', content: contentB64, branch: ELEV_REPO_BRANCH };
+        if (sharedPresetsSha) body.sha = sharedPresetsSha;
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(SUM_PRESETS_PATH)}`;
+        const r = await elevGmRequest({
+            method: 'PUT', url,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            data: JSON.stringify(body),
+            timeout: 20000,
+        });
+        if (r.ok) {
+            try { const j = JSON.parse(r.responseText); sharedPresetsSha = (j.content && j.content.sha) || sharedPresetsSha; } catch (e) {}
+            sharedPresets = clean.length ? clean : null;
+            sharedPresetsFetched = true;
+            console.log(`${TAG} ✓ committed ${clean.length} shared default preset(s)`);
+            return true;
+        }
+        if (r.status === 401 || r.status === 403) showToast('Commit denied — your PAT needs write access to the data repo', 'rgba(255,96,96,0.55)');
+        else if (r.status === 409) showToast('Conflict — someone else just edited; reopen the menu and retry', 'rgba(255,96,96,0.55)');
+        else showToast(`Commit failed (HTTP ${r.status})`, 'rgba(255,96,96,0.55)');
+        console.warn(`${TAG} commit sum-presets.json failed HTTP ${r.status}:`, (r.responseText || '').substring(0, 200));
+        return false;
     }
 
     // ---- v3.87 (Phase 2): cross-preset export ----
@@ -12676,9 +12784,11 @@
                 // --- Built-in views (read-only, apply-only) ---
                 const biHead = document.createElement('div');
                 biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
-                biHead.textContent = '★ Built-in views';
+                const adminMode = isPresetAdmin();
+                biHead.textContent = adminMode ? '★ Built-in views · shared (you can edit)' : '★ Built-in views';
                 presetsMenuEl.appendChild(biHead);
-                getBuiltinPresets().forEach(p => {
+                const biList = getBuiltinPresets();
+                biList.forEach((p, i) => {
                     const row = document.createElement('div');
                     row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
                     row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
@@ -12687,10 +12797,75 @@
                     const lbl = document.createElement('span');
                     lbl.textContent = p.name;
                     lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    lbl.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
                     row.appendChild(lbl);
-                    row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    // Admin: overwrite this shared default with the current view.
+                    if (adminMode) {
+                        const ovr = document.createElement('button');
+                        ovr.textContent = '⟳';
+                        ovr.title = 'Overwrite this shared default with the current view (applies to ALL coworkers)';
+                        ovr.style.cssText = 'background:transparent;border:1px solid rgba(255,200,80,0.45);color:#ffce6b;border-radius:3px;width:22px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1';
+                        ovr.onclick = async (e2) => {
+                            e2.stopPropagation();
+                            if (!confirm(`Overwrite the shared default "${p.name}" with the CURRENT view (columns, order, filters, sort)?\n\nThis changes the default for ALL coworkers.`)) return;
+                            ovr.disabled = true; ovr.textContent = '…';
+                            const arr = getBuiltinPresets().slice();
+                            arr[i] = Object.assign({ name: p.name, desc: p.desc || '' }, captureCurrentView());
+                            const ok = await commitSharedPresets(arr, `[AIM] update shared default view "${p.name}"`);
+                            if (ok) showToast(`Shared default updated: ${p.name}`, 'rgba(95,255,95,0.5)');
+                            if (presetsMenuEl) rebuildPresetsMenu();
+                        };
+                        row.appendChild(ovr);
+                    } else {
+                        row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    }
                     presetsMenuEl.appendChild(row);
                 });
+                // Admin: save the current view as a NEW shared default.
+                if (adminMode) {
+                    const newRow = document.createElement('div');
+                    newRow.style.cssText = 'display:flex;gap:6px;padding:4px 12px 2px';
+                    const newName = document.createElement('input');
+                    newName.type = 'text';
+                    newName.placeholder = 'New shared default…';
+                    newName.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,200,80,0.35);color:#e6e6e6;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;outline:none';
+                    newName.onfocus = () => { newName.style.borderColor = '#ffce6b'; };
+                    newName.onblur = () => { newName.style.borderColor = 'rgba(255,200,80,0.35)'; };
+                    const newBtn = document.createElement('button');
+                    newBtn.type = 'button';
+                    newBtn.textContent = '⭐ Add';
+                    newBtn.title = 'Save the current columns + filters + sort as a NEW shared default for all coworkers';
+                    newBtn.style.cssText = 'background:rgba(255,200,80,0.15);color:#ffce6b;border:1px solid rgba(255,200,80,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap';
+                    const doAddDefault = async () => {
+                        const name = (newName.value || '').trim();
+                        if (!name) { newName.focus(); return; }
+                        const arr = getBuiltinPresets().slice();
+                        const existing = arr.findIndex(x => (x.name || '').toLowerCase() === name.toLowerCase());
+                        const entry = Object.assign({ name, desc: '' }, captureCurrentView());
+                        if (existing >= 0) {
+                            if (!confirm(`A shared default named "${arr[existing].name}" already exists — overwrite it with the current view?`)) return;
+                            arr[existing] = Object.assign({ name: arr[existing].name, desc: arr[existing].desc || '' }, captureCurrentView());
+                        } else {
+                            arr.push(entry);
+                        }
+                        newBtn.disabled = true; newBtn.textContent = '…';
+                        const ok = await commitSharedPresets(arr, `[AIM] ${existing >= 0 ? 'update' : 'add'} shared default view "${name}"`);
+                        if (ok) showToast(`Shared default ${existing >= 0 ? 'updated' : 'added'}: ${name}`, 'rgba(95,255,95,0.5)');
+                        if (presetsMenuEl) rebuildPresetsMenu();
+                    };
+                    newBtn.onclick = (e2) => { e2.stopPropagation(); doAddDefault(); };
+                    newName.onkeydown = (e2) => {
+                        if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); doAddDefault(); }
+                        else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); closePresetsMenu(); }
+                    };
+                    newRow.appendChild(newName);
+                    newRow.appendChild(newBtn);
+                    presetsMenuEl.appendChild(newRow);
+                    const note = document.createElement('div');
+                    note.style.cssText = 'padding:1px 12px 3px;color:#7a7f88;font-size:9px';
+                    note.textContent = sharedPresets ? 'Editing the shared repo file — changes reach all coworkers.' : 'First edit will create the shared file from these built-ins.';
+                    presetsMenuEl.appendChild(note);
+                }
                 const biHr = document.createElement('div');
                 biHr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
                 presetsMenuEl.appendChild(biHr);
@@ -12791,10 +12966,12 @@
                 presetsMenuEl.appendChild(saveRow);
             };
             rebuildPresetsMenu();
-            // Refresh the built-in views from the repo in the background.
-            // The menu renders instantly from the fallback/cache, then
-            // re-renders if the repo list differs once the fetch lands.
-            fetchSharedPresets().then(() => { if (presetsMenuEl) rebuildPresetsMenu(); })
+            // Refresh the built-in views + admin status from the repo in the
+            // background. The menu renders instantly from the fallback/cache,
+            // then re-renders (revealing admin controls / repo list) once the
+            // fetches land.
+            Promise.all([fetchSharedPresets(), resolvePresetAdmin()])
+                .then(() => { if (presetsMenuEl) rebuildPresetsMenu(); })
                 .catch(e => console.warn(`${TAG} shared presets refresh failed:`, e));
             const r = presetsBtn.getBoundingClientRect();
             presetsMenuEl.style.left = r.left + 'px';
