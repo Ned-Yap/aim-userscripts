@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.83
+// @version      34.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.83';
+    const SCRIPT_VERSION = '34.84';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -4628,7 +4628,7 @@
     // and the regular wipe & rebuild cycle (renderValidatorPins is
     // called on every runUpdate tick and re-projects).
     // ============================================================
-    function runCoverageValidator() {
+    async function runCoverageValidator() {
         const map = getLeafletMap();
         if (!map) {
             // Diagnose: did the prototype patch run? Are there .leaflet-container
@@ -4661,45 +4661,48 @@
         const thresholdPx = ftToPx(map, thresholdFt);
         const t2 = thresholdPx * thresholdPx;
 
-        const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
-        if (!targetEls.length) {
-            console.warn(`${TAG} validator: no flight paths or FFZs to check`);
-            validatorState.lastRun = { error: 'No flight paths or FFZs on this map', at: Date.now() };
-            runUpdate();
-            return;
-        }
-
+        // v34.84: build the FFZ/FP outlines from /map_objects DATA (type 16 =
+        // FFZ, type 15 = flight path) instead of reading the rendered Leaflet
+        // SVG path. Leaflet clips its SVG paths to the viewport + a small
+        // padding margin, so the old DOM approach only traced what was on
+        // screen — it silently required "zoom out until the whole site fits"
+        // and cut the red trace at the viewport edge. Data-driven sampling is
+        // zoom-independent and pixel-exact. It also keys on OBJECT TYPE, not
+        // stroke color / dash / opacity, so recolored FPs and dashed
+        // (not-yet-validated) FPs are still checked. DOM path stays as a
+        // fallback if the fetch fails.
         const startTime = Date.now();
-        const gaps = [];
-        targetEls.forEach(el => {
-            const total = el.getTotalLength();
-            if (!total) return;
-            const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
-            let currentGap = null;
+        let outlines = null;
+        try {
+            outlines = await fetchValidatorOutlines(siteID);
+        } catch (err) {
+            console.warn(`${TAG} validator: outline fetch failed for site ${siteID}, falling back to on-screen SVG:`, err);
+        }
+        // User may have navigated to another site while the fetch was in flight.
+        if (getCurrentSiteID() !== siteID) return;
 
-            for (let i = 0; i <= sampleCount; i++) {
-                const t = total * i / sampleCount;
-                let sp;
-                try { sp = el.getPointAtLength(t); } catch (e) { continue; }
-                // sp is already in layer-point coords — same space as our
-                // segments. Compute point-to-segment distance directly.
-                let isFailing = true;
-                for (let j = 0; j < segments.length; j++) {
-                    const seg = segments[j];
-                    if (pointToSegmentDist2(sp.x, sp.y, seg.ax, seg.ay, seg.bx, seg.by) <= t2) {
-                        isFailing = false; break;
-                    }
-                }
-                if (isFailing) {
-                    if (!currentGap) currentGap = { samples: [] };
-                    currentGap.samples.push({ x: sp.x, y: sp.y });
-                } else if (currentGap) {
-                    gaps.push(currentGap);
-                    currentGap = null;
-                }
+        let gaps;
+        let source;
+        if (outlines && outlines.length) {
+            gaps = collectGapsFromOutlines(outlines, map, segments, t2);
+            source = `data (${outlines.length} outline${outlines.length === 1 ? '' : 's'})`;
+        } else {
+            // Fallback: sample the rendered SVG paths (viewport-clipped).
+            const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
+            if (!outlines) {
+                console.warn(`${TAG} validator: using on-screen SVG fallback (zoom out so the whole site is visible)`);
+            } else if (!outlines.length) {
+                console.warn(`${TAG} validator: no FFZ/FP found in site data — using on-screen SVG fallback`);
             }
-            if (currentGap) gaps.push(currentGap);
-        });
+            if (!targetEls.length) {
+                console.warn(`${TAG} validator: no flight paths or FFZs to check`);
+                validatorState.lastRun = { error: 'No flight paths or FFZs on this map', at: Date.now() };
+                runUpdate();
+                return;
+            }
+            gaps = collectGapsFromDomPaths(targetEls, segments, t2);
+            source = 'on-screen SVG (fallback)';
+        }
 
         // For each gap: store ALL failing samples as lat/lng (used for the
         // red highlight that traces the failing portion of the outline) plus
@@ -4730,11 +4733,184 @@
         };
         saveValidatorResults();
         if (results.length === 0) {
-            console.log(`${TAG} validator: ✓ no coverage gaps found (${validatorState.lastRun.durationMs}ms)`);
+            console.log(`${TAG} validator: ✓ no coverage gaps found via ${source} (${validatorState.lastRun.durationMs}ms)`);
         } else {
-            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) in ${validatorState.lastRun.durationMs}ms — click a pin to dismiss after visual confirmation`);
+            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) via ${source} in ${validatorState.lastRun.durationMs}ms — click a pin to dismiss after visual confirmation`);
         }
         runUpdate();
+    }
+
+    // Sample the FFZ/FP outlines (lat/lng, from /map_objects data) against the
+    // shielding segments and return contiguous failing runs as gaps. Each
+    // outline is projected to layer-point space at the map's CURRENT state and
+    // sampled every ~3px along its edges — same resolution and same
+    // point-to-segment math as the old rendered-path approach, minus the
+    // viewport clipping. Closed FFZ rings include their closing edge.
+    function collectGapsFromOutlines(outlines, map, segments, t2) {
+        const STEP_PX = 3;
+        const gaps = [];
+        outlines.forEach(o => {
+            const lps = [];
+            for (let i = 0; i < o.pts.length; i++) {
+                const p = o.pts[i];
+                try { lps.push(map.latLngToLayerPoint([p.lat, p.lng])); } catch (e) {}
+            }
+            if (o.closed && lps.length) lps.push(lps[0]); // close the ring
+            if (lps.length < 2) return;
+
+            // Walk edges, sampling along each; skip the shared vertex between
+            // consecutive edges so joints aren't sampled twice.
+            let currentGap = null;
+            const flush = () => { if (currentGap) { gaps.push(currentGap); currentGap = null; } };
+            const test = (x, y) => {
+                for (let j = 0; j < segments.length; j++) {
+                    const s = segments[j];
+                    if (pointToSegmentDist2(x, y, s.ax, s.ay, s.bx, s.by) <= t2) return false; // covered
+                }
+                return true; // failing
+            };
+            for (let i = 0; i < lps.length - 1; i++) {
+                const a = lps[i], b = lps[i + 1];
+                const len = Math.hypot(b.x - a.x, b.y - a.y);
+                const n = Math.max(1, Math.round(len / STEP_PX));
+                const startK = (i === 0) ? 0 : 1; // first edge samples its start vertex
+                for (let k = startK; k <= n; k++) {
+                    const t = k / n;
+                    const x = a.x + (b.x - a.x) * t;
+                    const y = a.y + (b.y - a.y) * t;
+                    if (test(x, y)) {
+                        if (!currentGap) currentGap = { samples: [] };
+                        currentGap.samples.push({ x, y });
+                    } else {
+                        flush();
+                    }
+                }
+            }
+            flush();
+        });
+        return gaps;
+    }
+
+    // Fallback sampler: read the rendered Leaflet SVG paths directly. Only sees
+    // what's currently drawn (viewport-clipped), so it needs the whole site on
+    // screen — kept purely as a safety net if the /map_objects fetch fails.
+    function collectGapsFromDomPaths(targetEls, segments, t2) {
+        const gaps = [];
+        targetEls.forEach(el => {
+            const total = el.getTotalLength();
+            if (!total) return;
+            const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
+            let currentGap = null;
+            for (let i = 0; i <= sampleCount; i++) {
+                const t = total * i / sampleCount;
+                let sp;
+                try { sp = el.getPointAtLength(t); } catch (e) { continue; }
+                let isFailing = true;
+                for (let j = 0; j < segments.length; j++) {
+                    const seg = segments[j];
+                    if (pointToSegmentDist2(sp.x, sp.y, seg.ax, seg.ay, seg.bx, seg.by) <= t2) {
+                        isFailing = false; break;
+                    }
+                }
+                if (isFailing) {
+                    if (!currentGap) currentGap = { samples: [] };
+                    currentGap.samples.push({ x: sp.x, y: sp.y });
+                } else if (currentGap) {
+                    gaps.push(currentGap);
+                    currentGap = null;
+                }
+            }
+            if (currentGap) gaps.push(currentGap);
+        });
+        return gaps;
+    }
+
+    // Fetch FFZ (type 16) + flight-path (type 15) outlines from /map_objects as
+    // lat/lng point sequences. Keyed on OBJECT TYPE, not rendered color/dash —
+    // so recolored and not-yet-validated (dashed) flight paths are still found.
+    // FFZ → closed polygon ring. FP → arcs chained into polylines by shared
+    // endpoint (branch-safe; each straight arc becomes an edge). Cookie auth.
+    function fetchValidatorOutlines(siteID) {
+        return fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const outlines = [];
+                list.forEach(e => {
+                    if (!e) return;
+                    if (e.type === 16) {
+                        // FFZ / freezone — polygon ring.
+                        const raw = Array.isArray(e.coords) ? e.coords
+                                  : (Array.isArray(e.points) ? e.points : []);
+                        const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                        if (pts.length >= 3) outlines.push({ kind: 'ffz', name: e.name, pts, closed: true });
+                    } else if (e.type === 15) {
+                        // Flight path — arcs are straight point_a→point_b edges.
+                        const arcs = Array.isArray(e.arcs) ? e.arcs : [];
+                        if (arcs.length) {
+                            chainArcsToPolylines(arcs).forEach(pts => {
+                                if (pts.length >= 2) outlines.push({ kind: 'fp', name: e.name, pts, closed: false });
+                            });
+                        } else {
+                            const raw = Array.isArray(e.coords) ? e.coords : [];
+                            const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                            if (pts.length >= 2) outlines.push({ kind: 'fp', name: e.name, pts, closed: false });
+                        }
+                    }
+                });
+                return outlines;
+            });
+    }
+
+    // Chain flight-path arcs into polylines by shared endpoint. A linear path
+    // becomes one polyline; a branching path splits into several (each branch
+    // walked once). Every arc is covered exactly once regardless of order.
+    function chainArcsToPolylines(arcs) {
+        const key = p => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const edges = arcs
+            .filter(a => a && a.point_a && a.point_b
+                && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
+            .map(a => ({ a: a.point_a, b: a.point_b, used: false }));
+        const byKey = new Map();
+        edges.forEach((e, i) => {
+            for (const p of [e.a, e.b]) {
+                const k = key(p);
+                if (!byKey.has(k)) byKey.set(k, []);
+                byKey.get(k).push(i);
+            }
+        });
+        const polylines = [];
+        for (let i = 0; i < edges.length; i++) {
+            if (edges[i].used) continue;
+            edges[i].used = true;
+            const pts = [edges[i].a, edges[i].b];
+            // Extend from the tail.
+            let grew = true;
+            while (grew) {
+                grew = false;
+                const tail = pts[pts.length - 1];
+                const cand = (byKey.get(key(tail)) || []).find(j => !edges[j].used);
+                if (cand != null) {
+                    const ne = edges[cand]; ne.used = true;
+                    pts.push(key(ne.a) === key(tail) ? ne.b : ne.a);
+                    grew = true;
+                }
+            }
+            // Extend from the head.
+            grew = true;
+            while (grew) {
+                grew = false;
+                const head = pts[0];
+                const cand = (byKey.get(key(head)) || []).find(j => !edges[j].used);
+                if (cand != null) {
+                    const ne = edges[cand]; ne.used = true;
+                    pts.unshift(key(ne.a) === key(head) ? ne.b : ne.a);
+                    grew = true;
+                }
+            }
+            polylines.push(pts);
+        }
+        return polylines;
     }
 
     function clearCoverageValidator() {
