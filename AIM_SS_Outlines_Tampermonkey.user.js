@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.77
+// @version      34.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.77';
+    const SCRIPT_VERSION = '34.85';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -302,6 +302,13 @@
             meta: '(on-demand · 200ft FAA rule)',
             master: { id: 'validator.show', default: true },
             children: [
+                { id: 'validator.check-scope', label: 'Check', type: 'select',
+                  options: [
+                      { value: 'both', label: 'FFZs + Flight paths' },
+                      { value: 'ffz', label: 'FFZs only' },
+                      { value: 'fp', label: 'Flight paths only' },
+                  ],
+                  default: 'both' },
                 { id: 'validator.distance', label: 'Required coverage', type: 'number',
                   min: 50, max: 500, step: 10, default: 200, unit: 'ft' },
                 { id: 'validator.sample-spacing', label: 'Sample every', type: 'number',
@@ -949,6 +956,8 @@
         applyMapBackgroundVisibility();
         // 11. Orthomosaic brightness + low-res cap (perf optimization).
         applyOrthoSettings();
+        // 11b. Full ortho hide — remove COG layers to kill their tile storm.
+        applyOrthoVisibility();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -981,6 +990,13 @@
     // Shield drives via PERF_TOGGLE messages on AIM_CONTROL_CHANNEL.
     let perfOrthoLowRes = false;
     let perfOrthoLowResZoom = 15;
+    // Full ortho hide (v34.78). Distinct from low-res: this REMOVES the
+    // orthomosaic COG layers from the map entirely so their tiles stop
+    // being fetched. On sites that stack dozens of COG ortho layers (e.g.
+    // 1153 — ~50 layers), that tile storm is the real cause of the freeze
+    // when a heavy mission opens and zooms in. Driven by Perf Shield's
+    // "Hide orthomosaic imagery" toggle (PERF_TOGGLE key 'hide-ortho').
+    let perfHideOrtho = false;
     const _SAT_URL_PATTERNS = [
         /esri/i, /arcgis/i, /world_?imagery/i,
         /mapbox.*satellite/i, /tiles?\.virtualearth/i,
@@ -1077,8 +1093,14 @@
     // Original `maxNativeZoom` is cached on the layer as `_aimOrigMaxNativeZoom`
     // so we can restore.
     const _ORTHO_URL_PATTERNS = [
-        /user_tile_\d+/i,           // Percepto site-ortho identifier
+        /user_tile_\d+/i,           // Percepto site-ortho identifier (cloudfront COG)
         /cog\/tiles\/.*\.tif/i,     // generic COG tile-server URL with .tif source
+        // DroneDeploy-hosted orthomosaics — on many sites these are the
+        // BULK of the ortho layers (e.g. 1153 stacks ~40 of them) and the
+        // patterns above miss them entirely (no user_tile / no .tif). Path
+        // always carries `/orthomosaic/`, so target that to stay precise
+        // and avoid catching any non-ortho dronedeploy layer.
+        /dronedeploy\.com\/.*\/orthomosaic\//i,
     ];
     const _seenOrthoUrls = new Set();
     function applyOrthoSettings() {
@@ -1151,6 +1173,107 @@
             });
         } catch (e) {}
     }
+
+    // Full ortho hide: remove the orthomosaic COG layers from the map so
+    // Leaflet stops fetching their tiles altogether. We can't use
+    // display:none — the browser still fetches <img> tiles inside a hidden
+    // container, so the network storm (the actual freeze on COG-heavy
+    // sites) would continue. removeLayer is the only thing that truly
+    // stops it. We stash the removed layer refs so toggling the option
+    // back off re-adds them (no page reload needed). The heartbeat re-runs
+    // this so any ortho layer Percepto adds later (e.g. on nav) also gets
+    // removed while the toggle is on.
+    const _aimRemovedOrtho = new Set();
+    function applyOrthoVisibility() {
+        const map = getLeafletMap();
+        if (!map || typeof map.eachLayer !== 'function') return;
+        try {
+            if (perfHideOrtho) {
+                // Collect first, then remove — never mutate during eachLayer.
+                const toRemove = [];
+                map.eachLayer(layer => {
+                    if (!layer || !layer._url || typeof layer._url !== 'string') return;
+                    if (_ORTHO_URL_PATTERNS.some(p => p.test(layer._url))) toRemove.push(layer);
+                });
+                toRemove.forEach(layer => {
+                    try { map.removeLayer(layer); _aimRemovedOrtho.add(layer); } catch (e) {}
+                });
+                if (toRemove.length) {
+                    console.log(`${TAG} hide-ortho: removed ${toRemove.length} ortho layer(s) — tile fetches stopped (${_aimRemovedOrtho.size} stashed)`);
+                }
+            } else if (_aimRemovedOrtho.size) {
+                restoreOrthoVisibility();
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyOrthoVisibility failed:`, e);
+        }
+    }
+
+    // Re-add every ortho layer we removed. Called when the user turns the
+    // hide off, and from cleanup() so deactivating the styler never strands
+    // the user with missing imagery they can't get back without a reload.
+    function restoreOrthoVisibility() {
+        const map = getLeafletMap();
+        if (!map) { _aimRemovedOrtho.clear(); return; }
+        let restored = 0;
+        _aimRemovedOrtho.forEach(layer => {
+            try {
+                if (typeof map.hasLayer === 'function' && map.hasLayer(layer)) return; // already back
+                map.addLayer(layer);
+                restored++;
+            } catch (e) {}
+        });
+        _aimRemovedOrtho.clear();
+        if (restored) console.log(`${TAG} hide-ortho OFF: restored ${restored} ortho layer(s)`);
+    }
+
+    // Apply the three Map-performance levers (satellite hide, ortho low-res,
+    // ortho hide) WITHOUT requiring the styler master to be active. Each
+    // underlying function is idempotent and reads live perf flags + handles
+    // its own restore branch, so it's safe to call from here AND from
+    // runUpdate. This is what lets the perf toggles work when Outlines is off.
+    function applyPerfMapSettings() {
+        try { applyMapBackgroundVisibility(); } catch (e) {}
+        try { applyOrthoSettings(); } catch (e) {}
+        try { applyOrthoVisibility(); } catch (e) {}
+    }
+
+    // Independent keep-alive: while any Map-performance lever is ON, re-apply
+    // on a slow tick. Catches ortho/satellite layers Percepto adds later (on
+    // pan / mission open / nav) and re-suppresses any it re-adds. Runs
+    // regardless of isActive: when Outlines is ON, runUpdate's heartbeat is
+    // hash-gated and may not re-fire after Percepto re-adds an ortho layer,
+    // letting suppressed imagery flicker back. The appliers are idempotent and
+    // cheap (a few eachLayer sweeps), so re-applying unconditionally is safe.
+    setInterval(() => {
+        try {
+            if (perfHideOrtho || perfHideSatellite || perfOrthoLowRes) {
+                applyPerfMapSettings();
+            }
+        } catch (e) {}
+    }, 1500);
+
+    // Debug hook (v34.80): read this instance's live perf state + force-apply
+    // from the console. Exposed on unsafeWindow so it's reachable cross-frame:
+    //   document.querySelector('iframe').contentWindow.__aim_styler_debug()
+    //   document.querySelector('iframe').contentWindow.__aim_styler_applyPerf()
+    try {
+        const _g = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+        _g.__aim_styler_debug = function () {
+            const map = getLeafletMap();
+            let orthoOnMap = 0, satOnMap = 0;
+            if (map && typeof map.eachLayer === 'function') map.eachLayer(l => {
+                if (l && l._url) {
+                    if (_ORTHO_URL_PATTERNS.some(p => p.test(l._url))) orthoOnMap++;
+                    if (_SAT_URL_PATTERNS.some(p => p.test(l._url))) satOnMap++;
+                }
+            });
+            return { frame: FRAME_ID, version: SCRIPT_VERSION, isActive,
+                perfHideOrtho, perfHideSatellite, perfOrthoLowRes,
+                mapFound: !!map, orthoOnMap, satOnMap, removedStash: _aimRemovedOrtho.size };
+        };
+        _g.__aim_styler_applyPerf = function () { applyPerfMapSettings(); return _g.__aim_styler_debug(); };
+    } catch (e) {}
 
     // Flight-path vertex dot styling. Percepto renders FP vertices as
     // `<div class="map-marker__flight-path-vertex …">` icons in
@@ -4512,7 +4635,7 @@
     // and the regular wipe & rebuild cycle (renderValidatorPins is
     // called on every runUpdate tick and re-projects).
     // ============================================================
-    function runCoverageValidator() {
+    async function runCoverageValidator() {
         const map = getLeafletMap();
         if (!map) {
             // Diagnose: did the prototype patch run? Are there .leaflet-container
@@ -4545,45 +4668,60 @@
         const thresholdPx = ftToPx(map, thresholdFt);
         const t2 = thresholdPx * thresholdPx;
 
-        const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
-        if (!targetEls.length) {
-            console.warn(`${TAG} validator: no flight paths or FFZs to check`);
-            validatorState.lastRun = { error: 'No flight paths or FFZs on this map', at: Date.now() };
-            runUpdate();
-            return;
-        }
+        // v34.84: build the FFZ/FP outlines from /map_objects DATA (type 16 =
+        // FFZ, type 15 = flight path) instead of reading the rendered Leaflet
+        // SVG path. Leaflet clips its SVG paths to the viewport + a small
+        // padding margin, so the old DOM approach only traced what was on
+        // screen — it silently required "zoom out until the whole site fits"
+        // and cut the red trace at the viewport edge. Data-driven sampling is
+        // zoom-independent and pixel-exact. It also keys on OBJECT TYPE, not
+        // stroke color / dash / opacity, so recolored FPs and dashed
+        // (not-yet-validated) FPs are still checked. DOM path stays as a
+        // fallback if the fetch fails.
+        // FFZ-only / FP-only / both — lets the user validate FFZ shielding
+        // without the parallel flight-path traces cluttering the map (and vice
+        // versa). The two run near-parallel, so same-colored red traces on both
+        // read as one mis-drawn outline; scoping the check keeps it legible.
+        const scope = toggleState['validator.check-scope'] || 'both';
 
         const startTime = Date.now();
-        const gaps = [];
-        targetEls.forEach(el => {
-            const total = el.getTotalLength();
-            if (!total) return;
-            const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
-            let currentGap = null;
+        let outlines = null;
+        try {
+            outlines = await fetchValidatorOutlines(siteID, scope);
+        } catch (err) {
+            console.warn(`${TAG} validator: outline fetch failed for site ${siteID}, falling back to on-screen SVG:`, err);
+        }
+        // User may have navigated to another site while the fetch was in flight.
+        if (getCurrentSiteID() !== siteID) return;
 
-            for (let i = 0; i <= sampleCount; i++) {
-                const t = total * i / sampleCount;
-                let sp;
-                try { sp = el.getPointAtLength(t); } catch (e) { continue; }
-                // sp is already in layer-point coords — same space as our
-                // segments. Compute point-to-segment distance directly.
-                let isFailing = true;
-                for (let j = 0; j < segments.length; j++) {
-                    const seg = segments[j];
-                    if (pointToSegmentDist2(sp.x, sp.y, seg.ax, seg.ay, seg.bx, seg.by) <= t2) {
-                        isFailing = false; break;
-                    }
-                }
-                if (isFailing) {
-                    if (!currentGap) currentGap = { samples: [] };
-                    currentGap.samples.push({ x: sp.x, y: sp.y });
-                } else if (currentGap) {
-                    gaps.push(currentGap);
-                    currentGap = null;
-                }
+        const scopeLabel = scope === 'ffz' ? 'FFZs' : (scope === 'fp' ? 'flight paths' : 'FFZs + flight paths');
+        let gaps;
+        let source;
+        if (outlines) {
+            // Fetch succeeded (even if scope yielded zero outlines — e.g. FP-only
+            // on a site with no FPs — that's a legitimate "nothing to flag", not
+            // a reason to fall back to the viewport-clipped DOM path).
+            gaps = collectGapsFromOutlines(outlines, map, segments, t2);
+            source = `data (${outlines.length} ${scopeLabel} outline${outlines.length === 1 ? '' : 's'})`;
+        } else {
+            // Fallback ONLY when the fetch itself failed: sample the rendered SVG
+            // paths (viewport-clipped, needs the whole site on screen). Respect
+            // the scope by picking the matching selector.
+            let sel;
+            if (scope === 'ffz') sel = SOLID_GREEN_SELECTOR;
+            else if (scope === 'fp') sel = BLUE_FLIGHT_PATH_SELECTOR;
+            else sel = `${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`;
+            const targetEls = document.querySelectorAll(sel);
+            console.warn(`${TAG} validator: using on-screen SVG fallback for ${scopeLabel} (zoom out so the whole site is visible)`);
+            if (!targetEls.length) {
+                console.warn(`${TAG} validator: no ${scopeLabel} to check`);
+                validatorState.lastRun = { error: `No ${scopeLabel} on this map`, at: Date.now() };
+                runUpdate();
+                return;
             }
-            if (currentGap) gaps.push(currentGap);
-        });
+            gaps = collectGapsFromDomPaths(targetEls, segments, t2);
+            source = `on-screen SVG (fallback, ${scopeLabel})`;
+        }
 
         // For each gap: store ALL failing samples as lat/lng (used for the
         // red highlight that traces the failing portion of the outline) plus
@@ -4614,11 +4752,186 @@
         };
         saveValidatorResults();
         if (results.length === 0) {
-            console.log(`${TAG} validator: ✓ no coverage gaps found (${validatorState.lastRun.durationMs}ms)`);
+            console.log(`${TAG} validator: ✓ no coverage gaps found via ${source} (${validatorState.lastRun.durationMs}ms)`);
         } else {
-            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) in ${validatorState.lastRun.durationMs}ms — click a pin to dismiss after visual confirmation`);
+            console.warn(`${TAG} validator: found ${results.length} coverage gap(s) via ${source} in ${validatorState.lastRun.durationMs}ms — click a pin to dismiss after visual confirmation`);
         }
         runUpdate();
+    }
+
+    // Sample the FFZ/FP outlines (lat/lng, from /map_objects data) against the
+    // shielding segments and return contiguous failing runs as gaps. Each
+    // outline is projected to layer-point space at the map's CURRENT state and
+    // sampled every ~3px along its edges — same resolution and same
+    // point-to-segment math as the old rendered-path approach, minus the
+    // viewport clipping. Closed FFZ rings include their closing edge.
+    function collectGapsFromOutlines(outlines, map, segments, t2) {
+        const STEP_PX = 3;
+        const gaps = [];
+        outlines.forEach(o => {
+            const lps = [];
+            for (let i = 0; i < o.pts.length; i++) {
+                const p = o.pts[i];
+                try { lps.push(map.latLngToLayerPoint([p.lat, p.lng])); } catch (e) {}
+            }
+            if (o.closed && lps.length) lps.push(lps[0]); // close the ring
+            if (lps.length < 2) return;
+
+            // Walk edges, sampling along each; skip the shared vertex between
+            // consecutive edges so joints aren't sampled twice.
+            let currentGap = null;
+            const flush = () => { if (currentGap) { gaps.push(currentGap); currentGap = null; } };
+            const test = (x, y) => {
+                for (let j = 0; j < segments.length; j++) {
+                    const s = segments[j];
+                    if (pointToSegmentDist2(x, y, s.ax, s.ay, s.bx, s.by) <= t2) return false; // covered
+                }
+                return true; // failing
+            };
+            for (let i = 0; i < lps.length - 1; i++) {
+                const a = lps[i], b = lps[i + 1];
+                const len = Math.hypot(b.x - a.x, b.y - a.y);
+                const n = Math.max(1, Math.round(len / STEP_PX));
+                const startK = (i === 0) ? 0 : 1; // first edge samples its start vertex
+                for (let k = startK; k <= n; k++) {
+                    const t = k / n;
+                    const x = a.x + (b.x - a.x) * t;
+                    const y = a.y + (b.y - a.y) * t;
+                    if (test(x, y)) {
+                        if (!currentGap) currentGap = { samples: [] };
+                        currentGap.samples.push({ x, y });
+                    } else {
+                        flush();
+                    }
+                }
+            }
+            flush();
+        });
+        return gaps;
+    }
+
+    // Fallback sampler: read the rendered Leaflet SVG paths directly. Only sees
+    // what's currently drawn (viewport-clipped), so it needs the whole site on
+    // screen — kept purely as a safety net if the /map_objects fetch fails.
+    function collectGapsFromDomPaths(targetEls, segments, t2) {
+        const gaps = [];
+        targetEls.forEach(el => {
+            const total = el.getTotalLength();
+            if (!total) return;
+            const sampleCount = Math.min(2000, Math.max(50, Math.round(total / 3)));
+            let currentGap = null;
+            for (let i = 0; i <= sampleCount; i++) {
+                const t = total * i / sampleCount;
+                let sp;
+                try { sp = el.getPointAtLength(t); } catch (e) { continue; }
+                let isFailing = true;
+                for (let j = 0; j < segments.length; j++) {
+                    const seg = segments[j];
+                    if (pointToSegmentDist2(sp.x, sp.y, seg.ax, seg.ay, seg.bx, seg.by) <= t2) {
+                        isFailing = false; break;
+                    }
+                }
+                if (isFailing) {
+                    if (!currentGap) currentGap = { samples: [] };
+                    currentGap.samples.push({ x: sp.x, y: sp.y });
+                } else if (currentGap) {
+                    gaps.push(currentGap);
+                    currentGap = null;
+                }
+            }
+            if (currentGap) gaps.push(currentGap);
+        });
+        return gaps;
+    }
+
+    // Fetch FFZ (type 16) + flight-path (type 15) outlines from /map_objects as
+    // lat/lng point sequences. Keyed on OBJECT TYPE, not rendered color/dash —
+    // so recolored and not-yet-validated (dashed) flight paths are still found.
+    // FFZ → closed polygon ring. FP → arcs chained into polylines by shared
+    // endpoint (branch-safe; each straight arc becomes an edge). Cookie auth.
+    function fetchValidatorOutlines(siteID, scope) {
+        const wantFFZ = scope !== 'fp';
+        const wantFP = scope !== 'ffz';
+        return fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                const outlines = [];
+                list.forEach(e => {
+                    if (!e) return;
+                    if (e.type === 16 && wantFFZ) {
+                        // FFZ / freezone — polygon ring.
+                        const raw = Array.isArray(e.coords) ? e.coords
+                                  : (Array.isArray(e.points) ? e.points : []);
+                        const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                        if (pts.length >= 3) outlines.push({ kind: 'ffz', name: e.name, pts, closed: true });
+                    } else if (e.type === 15 && wantFP) {
+                        // Flight path — arcs are straight point_a→point_b edges.
+                        const arcs = Array.isArray(e.arcs) ? e.arcs : [];
+                        if (arcs.length) {
+                            chainArcsToPolylines(arcs).forEach(pts => {
+                                if (pts.length >= 2) outlines.push({ kind: 'fp', name: e.name, pts, closed: false });
+                            });
+                        } else {
+                            const raw = Array.isArray(e.coords) ? e.coords : [];
+                            const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
+                            if (pts.length >= 2) outlines.push({ kind: 'fp', name: e.name, pts, closed: false });
+                        }
+                    }
+                });
+                return outlines;
+            });
+    }
+
+    // Chain flight-path arcs into polylines by shared endpoint. A linear path
+    // becomes one polyline; a branching path splits into several (each branch
+    // walked once). Every arc is covered exactly once regardless of order.
+    function chainArcsToPolylines(arcs) {
+        const key = p => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const edges = arcs
+            .filter(a => a && a.point_a && a.point_b
+                && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
+            .map(a => ({ a: a.point_a, b: a.point_b, used: false }));
+        const byKey = new Map();
+        edges.forEach((e, i) => {
+            for (const p of [e.a, e.b]) {
+                const k = key(p);
+                if (!byKey.has(k)) byKey.set(k, []);
+                byKey.get(k).push(i);
+            }
+        });
+        const polylines = [];
+        for (let i = 0; i < edges.length; i++) {
+            if (edges[i].used) continue;
+            edges[i].used = true;
+            const pts = [edges[i].a, edges[i].b];
+            // Extend from the tail.
+            let grew = true;
+            while (grew) {
+                grew = false;
+                const tail = pts[pts.length - 1];
+                const cand = (byKey.get(key(tail)) || []).find(j => !edges[j].used);
+                if (cand != null) {
+                    const ne = edges[cand]; ne.used = true;
+                    pts.push(key(ne.a) === key(tail) ? ne.b : ne.a);
+                    grew = true;
+                }
+            }
+            // Extend from the head.
+            grew = true;
+            while (grew) {
+                grew = false;
+                const head = pts[0];
+                const cand = (byKey.get(key(head)) || []).find(j => !edges[j].used);
+                if (cand != null) {
+                    const ne = edges[cand]; ne.used = true;
+                    pts.unshift(key(ne.a) === key(head) ? ne.b : ne.a);
+                    grew = true;
+                }
+            }
+            polylines.push(pts);
+        }
+        return polylines;
     }
 
     function clearCoverageValidator() {
@@ -5223,21 +5536,39 @@
         if (!ctm) return;
         const inv = ctm.inverse();
 
-        // Convert "ft" to SVG user units using the same scale that drives the
-        // line buffers. Empirical: at standardRatio=1.8, baseWidth (=18 units)
-        // renders as ~31.5ft total band width at typical working zoom. So 1ft
-        // ≈ baseWidth/31.5 user units. The user-facing 'Shielding distance'
-        // multiplier compensates for zoom-driven drift if measurements drift.
-        const FT_PER_BASEWIDTH = 31.5;
-        const baseWidth = globalBaseWidth || (lineThickness * standardRatio);
+        // Shield radius is a REAL-WORLD distance (200 ft × the 'Shielding
+        // distance' multiplier) and must stay that ground size at every zoom.
+        // The old approach scaled the radius off baseWidth in SVG user units —
+        // but 1 user unit = a different ground distance at every zoom level, so
+        // the circle ballooned when zoomed out and shrank when zoomed in
+        // (~60ft zoomed in, ~400ft zoomed out instead of a fixed 200ft).
+        //
+        // EXACT approach (self-calibrating, no hardcoded Mercator constant):
+        // for each marker we ask Leaflet directly how many METERS one screen
+        // pixel covers AT THAT MARKER — measure the ground distance between two
+        // adjacent container points via map.distance() (great-circle, the same
+        // engine the Ruler uses). Then radiusPx = groundRadius / metersPerPx,
+        // converted to SVG user units via the inverse screen CTM scale. This
+        // removes every approximation: real latitude, real projection, real
+        // pixel scale. Falls back to the empirical user-unit calc only if the
+        // Leaflet map isn't reachable.
         const altMult = Number(toggleState['altitude.distance']) || 1.0;
-        const radius = baseWidth * (200 / FT_PER_BASEWIDTH) * altMult;
+        const radiusM = 200 * 0.3048 * altMult;            // exact ground radius, meters
+        const ctmScale = Math.abs(inv.a) || 1;             // screen px → SVG user units
+        const _map = getLeafletMap();
+        const _L = (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) ? unsafeWindow.L : (window.L || null);
+        const _mapContainer = (_map && typeof _map.getContainer === 'function') ? _map.getContainer() : null;
+        const _cRect = _mapContainer ? _mapContainer.getBoundingClientRect() : null;
+        const canProject = !!(_map && _L && _cRect && typeof _map.containerPointToLatLng === 'function' && typeof _map.distance === 'function');
+        // Fallback radius (map unreachable) — old empirical user-unit scaling.
+        const fallbackRadius = (globalBaseWidth || (lineThickness * standardRatio)) * (200 / 31.5) * altMult;
         const fillColor = toggleState['altitude.color'] || '#8a2be2';
         const fillOpacity = Number(toggleState['altitude.opacity']);
         const opacity = isNaN(fillOpacity) ? 0.15 : fillOpacity;
         // Stroke is a touch more opaque so the edge stays visible even at low
         // fill values; capped at 1.
         const strokeOpacity = Math.min(opacity * 2.5, 1);
+        let loggedExact = false; // one console readout per render so it's verifiable
 
         markers.forEach(marker => {
             const rect = marker.getBoundingClientRect();
@@ -5248,6 +5579,26 @@
             pt.x = rect.left + rect.width / 2;
             pt.y = rect.bottom;
             const p = pt.matrixTransform(inv);
+
+            // Per-marker EXACT radius via Leaflet's own projection + distance.
+            let radius = fallbackRadius;
+            if (canProject) {
+                try {
+                    const cx = pt.x - _cRect.left;   // marker tip in container (CSS) px
+                    const cy = pt.y - _cRect.top;
+                    const ll0 = _map.containerPointToLatLng(_L.point(cx, cy));
+                    const ll1 = _map.containerPointToLatLng(_L.point(cx + 1, cy));
+                    const mPerPx = _map.distance(ll0, ll1); // ground meters per 1 CSS px, here
+                    if (mPerPx > 0) {
+                        radius = (radiusM / mPerPx) * ctmScale;
+                        if (!loggedExact) {
+                            loggedExact = true;
+                            const groundFt = (radiusM / 0.3048);
+                            console.log(`${TAG} altitude shield: target r=${groundFt.toFixed(1)} ft (${radiusM.toFixed(2)} m) · ${mPerPx.toFixed(4)} m/px · drawn r=${radius.toFixed(1)} user units (zoom ${_map.getZoom ? _map.getZoom() : '?'})`);
+                        }
+                    }
+                } catch (e) { /* fall back to empirical radius */ }
+            }
 
             const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             circle.setAttribute(CUSTOM_BUFFER_ATTR, 'true');
@@ -5370,6 +5721,8 @@
         restoreMapBackground();
         // Restore ortho brightness + native zoom if we changed them.
         restoreOrthoSettings();
+        // Re-add any ortho COG layers we removed for the full hide.
+        restoreOrthoVisibility();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -5823,27 +6176,26 @@
                 }
             } else if (msg.type === 'PERF_TOGGLE') {
                 // Driven by AIM Performance Shield. Mirror its state, then
-                // re-run so the change takes effect immediately.
+                // apply IMMEDIATELY — independent of the styler master. These
+                // are performance levers and must work even when the user has
+                // the Outlines master OFF (which is exactly the case that made
+                // them look broken: they used to gate on `if (isActive)
+                // runUpdate()`, so a styler-off page silently ignored them).
+                // applyPerfMapSettings() calls the underlying appliers, which
+                // are idempotent and handle both the ON and OFF (restore)
+                // branches, so we don't need the old `else restore…` calls.
                 if (msg.key === 'hide-satellite') {
                     const next = !!msg.value;
-                    if (next !== perfHideSatellite) {
-                        perfHideSatellite = next;
-                        if (isActive) runUpdate();
-                        else if (!next) restoreMapBackground();
-                    }
+                    if (next !== perfHideSatellite) { perfHideSatellite = next; applyPerfMapSettings(); }
                 } else if (msg.key === 'ortho-lowres') {
                     const next = !!msg.value;
-                    if (next !== perfOrthoLowRes) {
-                        perfOrthoLowRes = next;
-                        if (isActive) runUpdate();
-                        else if (!next) restoreOrthoSettings();
-                    }
+                    if (next !== perfOrthoLowRes) { perfOrthoLowRes = next; applyPerfMapSettings(); }
                 } else if (msg.key === 'ortho-lowres-zoom') {
                     const n = Number(msg.value);
-                    if (!isNaN(n) && n !== perfOrthoLowResZoom) {
-                        perfOrthoLowResZoom = n;
-                        if (isActive && perfOrthoLowRes) runUpdate();
-                    }
+                    if (!isNaN(n) && n !== perfOrthoLowResZoom) { perfOrthoLowResZoom = n; applyPerfMapSettings(); }
+                } else if (msg.key === 'hide-ortho') {
+                    const next = !!msg.value;
+                    if (next !== perfHideOrtho) { perfHideOrtho = next; applyPerfMapSettings(); }
                 }
             } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
                 // Same cross-tab gate as TRIGGER_ACTION: hotkeys pressed in

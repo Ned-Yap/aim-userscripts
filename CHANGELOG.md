@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-06-30 — Map Styler **PROMOTED TO PROD v34.85** — Coverage Validator rewrite + map-performance & altitude-shield improvements
+
+Map Styler goes prod **v34.77 → v34.85** for everyone (next Tampermonkey check). What now reaches coworkers:
+- **Coverage Validator rewrite (v34.84–85)** — traces FFZ/flight-path outlines from the site's own data instead of the on-screen map: accurate at any zoom (no more "zoom out until the whole site fits"), traces the whole outline exactly, finds recolored + dashed not-yet-validated flight paths, and adds a **Check** dropdown (FFZs only / flight paths only / both).
+- **"Hide orthomosaic imagery" support (v34.78)** — Map Styler can now remove orthomosaic COG layers to stop their tile storm on COG-heavy sites. *The toggle that drives it lives in Perf Shield — still dev-only, so this stays dormant for coworkers until Perf Shield v1.18 is promoted.* Also fixed ortho detection to catch DroneDeploy-hosted orthos.
+- **Map-performance toggles work with Outlines OFF (v34.79, v34.81)** — hide-satellite / ortho low-res now apply independent of the Outlines master, with a keep-alive that re-suppresses layers Percepto re-adds on pan/nav.
+- **Altitude shield circle is now a true 200 ft (v34.82–83)** — the Shift+A shield radius is self-calibrated to real ground distance via Leaflet's own projection, so it stays a fixed 200 ft at every zoom instead of ballooning when zoomed out.
+- Plus a `__aim_styler_debug()` console probe (v34.80).
+
+---
+
 ## 2026-06-30 — Coverage Validator: zoom-independent, finds recolored/unvalidated FPs, FFZ/FP scope — Map Styler v34.84–v34.85 (dev/latest)
 
 The Shielding **Coverage Validator** (Power Lines → Run coverage check) now traces FFZ/FP outlines from the site's own data instead of the drawn map:
