@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.84
+// @version      34.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.84';
+    const SCRIPT_VERSION = '34.85';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -302,6 +302,13 @@
             meta: '(on-demand · 200ft FAA rule)',
             master: { id: 'validator.show', default: true },
             children: [
+                { id: 'validator.check-scope', label: 'Check', type: 'select',
+                  options: [
+                      { value: 'both', label: 'FFZs + Flight paths' },
+                      { value: 'ffz', label: 'FFZs only' },
+                      { value: 'fp', label: 'Flight paths only' },
+                  ],
+                  default: 'both' },
                 { id: 'validator.distance', label: 'Required coverage', type: 'number',
                   min: 50, max: 500, step: 10, default: 200, unit: 'ft' },
                 { id: 'validator.sample-spacing', label: 'Sample every', type: 'number',
@@ -4671,37 +4678,49 @@
         // stroke color / dash / opacity, so recolored FPs and dashed
         // (not-yet-validated) FPs are still checked. DOM path stays as a
         // fallback if the fetch fails.
+        // FFZ-only / FP-only / both — lets the user validate FFZ shielding
+        // without the parallel flight-path traces cluttering the map (and vice
+        // versa). The two run near-parallel, so same-colored red traces on both
+        // read as one mis-drawn outline; scoping the check keeps it legible.
+        const scope = toggleState['validator.check-scope'] || 'both';
+
         const startTime = Date.now();
         let outlines = null;
         try {
-            outlines = await fetchValidatorOutlines(siteID);
+            outlines = await fetchValidatorOutlines(siteID, scope);
         } catch (err) {
             console.warn(`${TAG} validator: outline fetch failed for site ${siteID}, falling back to on-screen SVG:`, err);
         }
         // User may have navigated to another site while the fetch was in flight.
         if (getCurrentSiteID() !== siteID) return;
 
+        const scopeLabel = scope === 'ffz' ? 'FFZs' : (scope === 'fp' ? 'flight paths' : 'FFZs + flight paths');
         let gaps;
         let source;
-        if (outlines && outlines.length) {
+        if (outlines) {
+            // Fetch succeeded (even if scope yielded zero outlines — e.g. FP-only
+            // on a site with no FPs — that's a legitimate "nothing to flag", not
+            // a reason to fall back to the viewport-clipped DOM path).
             gaps = collectGapsFromOutlines(outlines, map, segments, t2);
-            source = `data (${outlines.length} outline${outlines.length === 1 ? '' : 's'})`;
+            source = `data (${outlines.length} ${scopeLabel} outline${outlines.length === 1 ? '' : 's'})`;
         } else {
-            // Fallback: sample the rendered SVG paths (viewport-clipped).
-            const targetEls = document.querySelectorAll(`${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`);
-            if (!outlines) {
-                console.warn(`${TAG} validator: using on-screen SVG fallback (zoom out so the whole site is visible)`);
-            } else if (!outlines.length) {
-                console.warn(`${TAG} validator: no FFZ/FP found in site data — using on-screen SVG fallback`);
-            }
+            // Fallback ONLY when the fetch itself failed: sample the rendered SVG
+            // paths (viewport-clipped, needs the whole site on screen). Respect
+            // the scope by picking the matching selector.
+            let sel;
+            if (scope === 'ffz') sel = SOLID_GREEN_SELECTOR;
+            else if (scope === 'fp') sel = BLUE_FLIGHT_PATH_SELECTOR;
+            else sel = `${SOLID_GREEN_SELECTOR}, ${BLUE_FLIGHT_PATH_SELECTOR}`;
+            const targetEls = document.querySelectorAll(sel);
+            console.warn(`${TAG} validator: using on-screen SVG fallback for ${scopeLabel} (zoom out so the whole site is visible)`);
             if (!targetEls.length) {
-                console.warn(`${TAG} validator: no flight paths or FFZs to check`);
-                validatorState.lastRun = { error: 'No flight paths or FFZs on this map', at: Date.now() };
+                console.warn(`${TAG} validator: no ${scopeLabel} to check`);
+                validatorState.lastRun = { error: `No ${scopeLabel} on this map`, at: Date.now() };
                 runUpdate();
                 return;
             }
             gaps = collectGapsFromDomPaths(targetEls, segments, t2);
-            source = 'on-screen SVG (fallback)';
+            source = `on-screen SVG (fallback, ${scopeLabel})`;
         }
 
         // For each gap: store ALL failing samples as lat/lng (used for the
@@ -4830,7 +4849,9 @@
     // so recolored and not-yet-validated (dashed) flight paths are still found.
     // FFZ → closed polygon ring. FP → arcs chained into polylines by shared
     // endpoint (branch-safe; each straight arc becomes an edge). Cookie auth.
-    function fetchValidatorOutlines(siteID) {
+    function fetchValidatorOutlines(siteID, scope) {
+        const wantFFZ = scope !== 'fp';
+        const wantFP = scope !== 'ffz';
         return fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID), { credentials: 'include' })
             .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
             .then(data => {
@@ -4838,13 +4859,13 @@
                 const outlines = [];
                 list.forEach(e => {
                     if (!e) return;
-                    if (e.type === 16) {
+                    if (e.type === 16 && wantFFZ) {
                         // FFZ / freezone — polygon ring.
                         const raw = Array.isArray(e.coords) ? e.coords
                                   : (Array.isArray(e.points) ? e.points : []);
                         const pts = raw.filter(c => c && typeof c.lat === 'number' && typeof c.lng === 'number');
                         if (pts.length >= 3) outlines.push({ kind: 'ffz', name: e.name, pts, closed: true });
-                    } else if (e.type === 15) {
+                    } else if (e.type === 15 && wantFP) {
                         // Flight path — arcs are straight point_a→point_b edges.
                         const arcs = Array.isArray(e.arcs) ? e.arcs : [];
                         if (arcs.length) {

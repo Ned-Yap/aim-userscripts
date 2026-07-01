@@ -6,11 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
-## 2026-06-30 — Coverage Validator: zoom-independent + finds recolored/unvalidated FPs — Map Styler v34.84 (dev/latest)
+## 2026-06-30 — Coverage Validator: zoom-independent, finds recolored/unvalidated FPs, FFZ/FP scope — Map Styler v34.84–v34.85 (dev/latest)
 
 The Shielding **Coverage Validator** (Power Lines → Run coverage check) now traces FFZ/FP outlines from the site's own data instead of the drawn map:
 - **No more "zoom out until the whole site fits."** It used to read the on-screen SVG, which Leaflet clips to the viewport — so zoomed in, off-screen edges were skipped and the red trace cut off at the screen edge. It now reads the true FFZ/flight-path geometry, so it's accurate at any zoom and traces the whole outline exactly.
 - **Finds every flight path** — it keys on object type (FFZ / flight path), not line color or dashes. Recolored FPs and dashed *not-yet-validated* FPs are now checked (they were being missed).
+- **New "Check" dropdown** — validate **FFZs only**, **flight paths only**, or **both**. FFZs and flight paths run near-parallel, so checking both drew red traces right next to each other (looked like a mis-drawn FFZ). Scope it to FFZs to validate freezone shielding cleanly.
 - Falls back to the old on-screen method automatically if the site data can't be fetched.
 
 ---
