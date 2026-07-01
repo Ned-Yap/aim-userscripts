@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.63
+// @version      1.64
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.63';
+    const SCRIPT_VERSION = '1.64';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -6545,10 +6545,10 @@ ${snapPlacemarks}
         const body = JSON.parse(bodyStr);
         if (!body || !Array.isArray(body.instructions)) return null;
         const aglM = defaultSnapAglFt / 3.28084;
-        let set = 0, missDem = 0;
+        let set = 0, missDem = 0, noLoc = 0;
         body.instructions.forEach(bi => {
             if (!bi || bi.type !== 6) return; // 6 = snapshot
-            if (!bi.location || bi.location.lat == null) return;
+            if (!bi.location || bi.location.lat == null) { noLoc++; return; } // "In Place" (yaw/tilt) — no GPS to measure AGL from
             const groundM = getElevationFromCache(Number(bi.location.lat), Number(bi.location.lng));
             if (groundM == null) { missDem++; try { fetchElevation(bi.location.lat, bi.location.lng); } catch (e) {} return; }
             const newV = Math.round((groundM + aglM) * 100) / 100;
@@ -6556,6 +6556,12 @@ ${snapPlacemarks}
             bi.value1 = newV;
             set++;
         });
+        if (noLoc) {
+            // These are "In Place" snapshots (a J2A capture pointing by yaw/tilt) —
+            // they have no GPS/altitude, so there's nothing for auto-AGL to set.
+            console.warn(`${TAG} [auto-agl] ${noLoc} snapshot(s) are "In Place" (no GPS) — auto-AGL can't set their AGL. Switch them to "To GPS" if you want a fixed AGL.`);
+            showToast(`⚠ Auto-AGL: ${noLoc} snapshot(s) are "In Place" (no GPS) — can't set their AGL. Only "To GPS" snapshots get ground + ${defaultSnapAglFt} ft.`, '#ff7a00', 6500);
+        }
         if (missDem) {
             console.warn(`${TAG} [auto-agl] ${missDem} snapshot(s) had no DEM cached — skipped; fetching now. Re-save in a moment.`);
             showToast(`⚠ Auto-AGL: ${missDem} snapshot(s) had no ground elevation yet — re-save in a moment to fix them.`, '#ff7a00', 5000);

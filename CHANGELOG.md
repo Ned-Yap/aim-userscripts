@@ -351,6 +351,12 @@ The Site Setup SUM → Analyzer "Download .kml" button named the file by site ID
 
 ---
 
+## 2026-06-22 — Mission Bank Tools v1.64 (dev/latest) — Auto-AGL now tells you when it skips In-Place snapshots
+
+Auto-AGL was silently doing nothing on missions whose snapshots are **"In Place"** (a J2A capture that points by yaw/tilt with no GPS) — because it needs a GPS location to look up the ground. It now says so on save: **"N snapshot(s) are In Place (no GPS) — can't set their AGL. Only 'To GPS' snapshots get ground + N ft."** No behavior change for GPS snapshots. Dev-only (latest/).
+
+---
+
 ## 2026-06-22 — Mission Bank Tools v1.63 (dev/latest) — Stage steps works on J2A / In-Place missions
 
 Fixes "Need an existing Navigate + Snapshot to copy from" on missions built from a **J2A** (Jump-to-Alert) flight, whose snapshots are **"In Place"** (yaw/tilt, no GPS). Stage now: matches steps by `type_name` **or** type number, sources instructions from the live editor if the cached app is empty, and accepts an In-Place snapshot as a settings template (no GPS required). The staged snapshot itself is forced to a proper **GPS** snapshot (since you place + drag it into position), so it shows on the map and exports/validates correctly. Logs a diagnostic if it still can't find a template. Dev-only (latest/).
