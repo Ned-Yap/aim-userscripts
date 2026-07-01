@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.49
+// @version      0.50
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -75,7 +75,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.49';
+    const SCRIPT_VERSION = '0.50';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -291,6 +291,11 @@
     const DRAG_PX = 5;          // movement past this between mousedown and the click = a drag, not a click
     let lastDown = { x: 0, y: 0, onVertex: false };
     let mouseDown = false;       // true between mousedown and mouseup — used to defer the smart pass until a drop
+    // Held from a commitPlan dispatch through its verifyEdit (60 ms) — SERIALIZES the manual
+    // ⛰ Smart-fill Apply and the background auto-sweep so neither mutates the working copy inside
+    // the other's commit→verify window (that race made verifyEdit see an unexpected arc count and
+    // auto-revert every click on heavily-edited paths). Declared here so both writers can see it.
+    let smartBusy = false;
     function editingFP() { return !!document.querySelector(ARC_BADGE_SEL) || findFpWorkingCopies().length > 0; }
     function onDownTrack(e) {
         mouseDown = true;
@@ -455,6 +460,7 @@
                 if (fresh.length) { revert(`integrity check failed: ${fresh[0]}`); return; }
                 log(`${label}: verified clean${post.length ? ' (' + post.length + ' pre-existing issue(s), unchanged)' : ''}`);
             } catch (e) { warn(`${label} post-edit verify threw`, e); }
+            finally { smartBusy = false; } // release the serialization lock (see declaration)
         }, 60);
     }
 
@@ -990,30 +996,39 @@
         // move (snaps the vertex back) or disrupts an in-progress draw. Defer — the segment
         // stays an unprocessed candidate and the next release (onUpTrack) / sweep retries it.
         if (auto && mouseDown) return false;
+        // Serialize with the other smart writer: if a commit's verify (60 ms) is mid-flight, the
+        // auto-sweep defers; a manual Apply that lands in the window is asked to re-click rather
+        // than race. This is what stops the "expected N arcs, got N±1 — auto-reverted" churn.
+        if (smartBusy) { if (!auto) toast('Smart altitude just finished another edit — click Apply again.', '#ffb14e'); return false; }
         const wc = findFpWorkingCopies().find(w => w.id === plan.fpId);
         if (!wc || !wc.dispatch) { toast('Open the flight path editor to apply.', '#ff8a80'); return false; }
-        // staleness guard: the path must not have changed since we planned it
+        // staleness guard: the path must not have changed since we planned it. Compare the arc
+        // COUNT as well as the signature set — a duplicate/reversed segment can leave the sig set
+        // unchanged while the count shifts (that mismatch is exactly what verifyEdit would revert on).
         const curSigs = new Set((wc.state.arcs || []).map(arcSig));
         const origSigs = new Set(plan.origArcs.map(arcSig));
-        if (curSigs.size !== origSigs.size || [...origSigs].some(s => !curSigs.has(s))) {
+        if (curSigs.size !== origSigs.size || (wc.state.arcs || []).length !== plan.origArcs.length || [...origSigs].some(s => !curSigs.has(s))) {
             toast('Path changed while analyzing — re-run smart-fill.', '#ffb14e'); return false;
         }
-        undoStack.push({ id: plan.fpId, name: plan.name, kind: 'smart', arcs: plan.origArcs, coords: plan.origCoords });
-        wc.dispatch({ ...wc.state, arcs: plan.newArcs, coords: plan.newCoords });
-        state.inserts++;
-        // Mark everything processed EXCEPT segments we couldn't band yet (no elevation):
-        // leaving them out keeps them candidates so the next drop auto-retries them once
-        // the cache/quota catches up — no need to nudge the vertex by hand.
-        const resolvedSigs = new Set(plan.newArcs.map(arcSig));
-        (plan.unresolved || []).forEach(s => resolvedSigs.delete(s));
-        procState.set(plan.fpId, { count: plan.newArcs.length, sigs: resolvedSigs });
-        log(`smart altitude on "${plan.name}": ${plan.targets} segment(s) → +${plan.addedVerts} step(s), ${plan.newArcs.length} arcs, ${plan.bridges} seam bridge(s) (validated · live working copy)`);
-        renderPanel();
-        const bandNote = plan.mode === 'agl'
-            ? `AGL band +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft (height above ground)`
-            : `bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft)`;
-        toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, ${bandNote}. ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
-        verifyEdit(plan.fpId, plan.preIssues, plan.newArcs.length, 'Smart altitude');
+        smartBusy = true; // held until verifyEdit's finally — no other smart write may interleave
+        try {
+            undoStack.push({ id: plan.fpId, name: plan.name, kind: 'smart', arcs: plan.origArcs, coords: plan.origCoords });
+            wc.dispatch({ ...wc.state, arcs: plan.newArcs, coords: plan.newCoords });
+            state.inserts++;
+            // Mark everything processed EXCEPT segments we couldn't band yet (no elevation):
+            // leaving them out keeps them candidates so the next drop auto-retries them once
+            // the cache/quota catches up — no need to nudge the vertex by hand.
+            const resolvedSigs = new Set(plan.newArcs.map(arcSig));
+            (plan.unresolved || []).forEach(s => resolvedSigs.delete(s));
+            procState.set(plan.fpId, { count: plan.newArcs.length, sigs: resolvedSigs });
+            log(`smart altitude on "${plan.name}": ${plan.targets} segment(s) → +${plan.addedVerts} step(s), ${plan.newArcs.length} arcs, ${plan.bridges} seam bridge(s) (validated · live working copy)`);
+            renderPanel();
+            const bandNote = plan.mode === 'agl'
+                ? `AGL band +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft (height above ground)`
+                : `bands set (ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft)`;
+            toast(`⛰ Smart altitude: +${plan.addedVerts} step(s) on ${plan.name}, ${bandNote}. ${auto ? '' : 'Drag/Save as usual — no refresh.'}`, '#5fff5f');
+        } catch (e) { smartBusy = false; warn('commitPlan threw after dispatch', e); return false; } // never leave the lock stuck
+        verifyEdit(plan.fpId, plan.preIssues, plan.newArcs.length, 'Smart altitude'); // its finally releases smartBusy
         return true;
     }
 
@@ -1023,7 +1038,7 @@
     let smartTimer = null, autoBusy = false, smartRetryTimer = null;
     function scheduleSmartPass() { if (smartTimer) clearTimeout(smartTimer); smartTimer = setTimeout(() => { smartTimer = null; smartAutoPass().catch(e => warn('smartAutoPass threw', e)); }, SMART_SETTLE_MS); }
     async function smartAutoPass() {
-        if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || pendingPreview) return;
+        if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || smartBusy || pendingPreview) return;
         elevRateLimited = false;
         const wcs = findFpWorkingCopies();
         for (const wc of wcs) {
@@ -2149,7 +2164,7 @@
     // Background sweep: catch any segment whose band got missed (elevation wasn't ready on
     // its one drop-triggered pass and you never dropped near it again). Idle when you're
     // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.
-    setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
+    setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && !smartBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
     // AGL HUD: keep it in sync while editing (cheap — skips rebuild when nothing changed).
     setInterval(() => { try { renderAglHud(); const el = document.getElementById(AGL_HUD_ID); if (el) positionAglHud(el); } catch (e) {} }, 900);
     setTimeout(watchAltTooltips, 2500); // give the map time to mount, then watch native ALT tooltips
