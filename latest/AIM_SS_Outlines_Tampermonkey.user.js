@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.89
+// @version      34.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -35,7 +35,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.89';
+    const SCRIPT_VERSION = '34.90';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1437,13 +1437,17 @@
         // Roughly the sectional's own conventions: B solid blue, C solid
         // magenta, D dashed blue, E dashed magenta (fainter for the
         // 700/1200 ft transition floors that cover most of the country).
+        // Weights are deliberately chunky — the stroke IS the hover target
+        // for the tooltip, and thin lines were fiddly to hit (user feedback
+        // 2026-07-02). Fill stays off: an interactive fill would tooltip
+        // the entire map inside big Class E areas.
         const styleFor = (cls, floor) => {
-            if (cls === 'B') return { color: '#3f8cff', weight: 2.5 };
-            if (cls === 'C') return { color: '#d05fd0', weight: 2.5 };
-            if (cls === 'D') return { color: '#3f8cff', weight: 2, dashArray: '7,5' };
+            if (cls === 'B') return { color: '#3f8cff', weight: 5 };
+            if (cls === 'C') return { color: '#d05fd0', weight: 5 };
+            if (cls === 'D') return { color: '#3f8cff', weight: 4, dashArray: '9,6' };
             return floor > 0
-                ? { color: '#b08ab0', weight: 1.2, dashArray: '3,7', opacity: 0.6 }
-                : { color: '#d05fd0', weight: 1.8, dashArray: '4,6' };
+                ? { color: '#b08ab0', weight: 3, dashArray: '4,8', opacity: 0.55 }
+                : { color: '#d05fd0', weight: 4, dashArray: '5,7' };
         };
         let drawn = 0;
         feats.forEach(f => {

@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Noise filters + windmill standoff — Asset Inspector v4.157, Map Styler v34.90 (dev/latest)
+
+**Asset Inspector v4.157** — the report now hides what doesn't matter, all thresholds editable in the Control Panel: **HIFLD transmission lines** hidden beyond 1,000 ft of the site; **T-L tower dots** hidden beyond the same 1,000 ft; **other FAA obstacles** hidden beyond 1.5 NM; **TFRs** ignored beyond 3 NM (panel shows "none within 3 NM (N elsewhere in the state)"). New **windmill/turbine standoff (500 ft default)** — turbines flag at their own tighter threshold, and the drawn issue **box wraps both the turbine and the violating FFZ/FP/Asset** so the pair reads at a glance. On the test site this cut the obstacle list from 136 rows to 6. Auto-created **windmill GMs are now HAZARD markers** (towers stay tower-typed).
+
+**Map Styler v34.90** — vector airspace boundary strokes are much thicker (they're the hover target for the floor/ceiling tooltip and were fiddly to hit).
+
+---
+
 ## 2026-07-02 — 🔴 Live TFRs + transline distance fix — Asset Inspector v4.155–v4.156 (dev/latest)
 
 **v4.156 — Live TFRs.** The Airspace Checker now pulls the live FAA TFR list (tfr.faa.gov), fetches + parses the geometry of every TFR in the site's state (polygons and circles, with altitude floors and effective windows), and: flags a violation when an active or upcoming surface TFR is over the site or inside the 3 NM standoff; lists everything in a "Live TFRs" panel section (distant ones summarized); draws relevant TFR rings red-dotted on the map. **Auto-recheck runs on site load and every 20 minutes** — TFR issues appear and clear themselves as TFRs are issued and expire, with a toast when one starts affecting your site. High-altitude-only TFRs are informational (we never fly above 400 ft).

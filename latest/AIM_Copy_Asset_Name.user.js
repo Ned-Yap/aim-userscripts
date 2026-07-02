@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.156
+// @version      4.157
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.156';
+    const SCRIPT_VERSION = '4.157';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -145,6 +145,11 @@
         maxOpAglFt: 210,      // our max operating AGL — LAANC ceilings below this flag
         inventoryMi: 15,      // inventory radius for airports/airspace listing
         stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
+        // Display/noise filters + special standoffs (2026-07-02 user spec):
+        windmillFt: 500,      // windmill/turbine violation standoff (tighter than obstacleFt)
+        obstacleShowNm: 1.5,  // hide non-T-L obstacles beyond this (panel + dots)
+        translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
+        tfrShowNm: 3,         // TFRs beyond this are ignored entirely
     };
     const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
@@ -2252,6 +2257,16 @@
         const cx = ax + t * dx, cy = ay + t * dy;
         return { d: Math.sqrt(cx * cx + cy * cy), lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t };
     }
+    // Rectangle wrapping two points (padded) — used for windmill issues
+    // so the drawn box spans BOTH the turbine and the violating entity.
+    function airWrapBox(aLat, aLng, bLat, bLng, padM) {
+        const midLat = (aLat + bLat) / 2;
+        const dLat = padM / 110540;
+        const dLng = padM / (111320 * Math.cos(midLat * Math.PI / 180));
+        const minLat = Math.min(aLat, bLat) - dLat, maxLat = Math.max(aLat, bLat) + dLat;
+        const minLng = Math.min(aLng, bLng) - dLng, maxLng = Math.max(aLng, bLng) + dLng;
+        return [[minLat, minLng], [minLat, maxLng], [maxLat, maxLng], [maxLat, minLng]];
+    }
     function airMinToSite(lat, lng, sitePts) {
         let best = Infinity, bestPt = null;
         for (const p of sitePts) {
@@ -2397,7 +2412,7 @@
                 const ringLL = g2.ring.map(([la, lo]) => ({ lat: la, lng: lo }));
                 const distM = inside ? 0 : pointToPolygonMeters(clat, clng, ringLL);
                 const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
-                const relevant = inside || +distNm.toFixed(2) < st.stripNm;
+                const relevant = inside || +distNm.toFixed(2) < st.tfrShowNm;
                 const upcoming = isFinite(effMs) && effMs > now;
                 const window2 = `${g2.dateEff || '?'} → ${g2.dateExp || '?'} UTC`;
                 const entry = {
@@ -2563,27 +2578,41 @@
         // ---- 3. FAA obstacles near site entities (towers, turbines…). ----
         if (obRes && Array.isArray(obRes.features)) {
             if (obRes.exceededTransferLimit || obRes.features.length >= 2000) inventory.obstacleTruncated = true;
-            const threshM = th.obstacleFt / M_TO_FT;
+            // Display filter is wider than any violation threshold, so the
+            // exact-scan prefilter keys off the largest relevant distance.
+            const dispTlM = th.translineShowFt / M_TO_FT;
+            const dispObsM = th.obstacleShowNm * NM_TO_M;
+            const scanM = Math.max(th.obstacleFt / M_TO_FT, th.windmillFt / M_TO_FT, dispObsM, dispTlM);
             obRes.features.forEach(f => {
                 const a = f.attributes || {};
                 // Lat_DD/Long_DD are STRINGS in the DOF service ('31.829789').
                 const oLat = Number(a.Lat_DD), oLng = Number(a.Long_DD);
                 if (!isFinite(oLat) || !isFinite(oLng) || (oLat === 0 && oLng === 0)) return;
                 const dc = approxMeters(clat, clng, oLat, oLng);
-                // bbox-style prefilter: only pay the exact nearest-vertex scan
-                // when the obstacle could plausibly be within the threshold.
-                const couldHit = dc - siteRadM <= threshM * 1.5;
+                const couldHit = dc - siteRadM <= scanM * 1.2;
                 const near = couldHit ? airMinToSite(oLat, oLng, sitePts) : { d: dc, pt: null };
                 const distFt = Math.round(near.d * M_TO_FT);
                 const agl = typeof a.AGL === 'number' ? a.AGL : null;
                 const type = (a.Type_Code || '?').trim();
                 const lit = (a.Lighting || '').trim();
-                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (near.pt && near.pt.src) || null, hit: false };
-                if (couldHit && distFt < th.obstacleFt && agl != null && agl >= th.obstacleMinAglFt) {
+                const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
+                const isWindmill = /WINDMILL|WIND TURBINE|WTG/i.test(type);
+                // Windmills get their own (tighter) standoff per SOP.
+                const vioFt = isWindmill ? th.windmillFt : th.obstacleFt;
+                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (near.pt && near.pt.src) || null, hit: false, show: false };
+                if (couldHit && distFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
-                    boxIssue(oLat, oLng,
-                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${distFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${th.obstacleFt} ft)`, 'high');
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${distFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${vioFt} ft)`;
+                    if (isWindmill && near.pt) {
+                        // Box spans the turbine AND the violated entity point.
+                        violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, near.pt.lat, near.pt.lng, 15), note, severity: 'high' });
+                    } else {
+                        boxIssue(oLat, oLng, note, 'high');
+                    }
                 }
+                // Noise filter: T-L towers/poles only inside the transmission
+                // display radius; everything else inside obstacleShowNm.
+                entry.show = entry.hit || (isTL ? distFt <= th.translineShowFt : near.d <= dispObsM);
                 inventory.obstacles.push(entry);
             });
             inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
@@ -2740,10 +2769,12 @@
                     }
                 });
                 const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
+                const tDistFt = Math.round(best * M_TO_FT);
                 inventory.translines.push({
                     volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
-                    distFt: Math.round(best * M_TO_FT), distMi: best / MI_TO_M,
+                    distFt: tDistFt, distMi: best / MI_TO_M,
                     src: bestSrc, nearPt: bestPt, paths,
+                    show: tDistFt <= th.translineShowFt,   // noise filter
                 });
             });
             inventory.translines.sort((x, y) => x.distFt - y.distFt);
@@ -2807,12 +2838,12 @@
                     `<strong>TFR ${airEsc(t2.id)}</strong> (${airEsc(t2.type)})<br>${airEsc(t2.window || '')}`));
             });
             // HIFLD transmission lines — orange dashed, distinct from KML styling.
-            (res.inventory.translines || []).forEach(t => {
+            (res.inventory.translines || []).filter(t => t.show).forEach(t => {
                 const html = `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''}<br>HIFLD federal transmission line`;
                 t.paths.forEach(pth => add(tip(L.polyline(pth, { color: '#ff9a3d', weight: 3, dashArray: '7,7', opacity: 0.85, interactive: canTip }), html)));
             });
             // Obstacles — dots (violations bigger + red). Hover for details.
-            (res.inventory.obstacles || []).forEach(o => {
+            (res.inventory.obstacles || []).filter(o => o.show).forEach(o => {
                 if (!isFinite(o.lat)) return;
                 add(tip(L.circleMarker([o.lat, o.lng], {
                     radius: o.hit ? 9 : 5, color: o.hit ? '#ff5555' : '#7adfe6', weight: 2,
@@ -2898,19 +2929,14 @@
         }
         if (airEnabled.tfr) {
             section('Live TFRs (auto-rechecked every 20 min)');
-            if (inv.tfrSkipped) line('info', `Skipped: ${airEsc(inv.tfrSkipped)}`);
-            else if (!(inv.tfrs || []).length) line('ok', 'No TFRs in this state');
-            // Relevant ones in full; far ones summarized (TX alone can have
-            // a dozen 250+ NM away).
             const tfrNear = (inv.tfrs || []).filter(t2 => t2.status !== 'far');
-            const tfrFar = (inv.tfrs || []).filter(t2 => t2.status === 'far').sort((x, y) => x.distNm - y.distNm);
+            const tfrFarCount = (inv.tfrs || []).length - tfrNear.length;
+            if (inv.tfrSkipped) line('info', `Skipped: ${airEsc(inv.tfrSkipped)}`);
+            else if (!tfrNear.length) line('ok', `No TFRs within ${th.tfrShowNm} NM${tfrFarCount ? ` (${tfrFarCount} elsewhere in the state)` : ''}`);
             tfrNear.forEach(t2 => line(
                 t2.status === 'active' && t2.inside ? 'high' : t2.status === 'active' || t2.status === 'upcoming' ? 'warn' : 'info',
                 airEsc(t2.text),
                 (t2.ring && t2.ring.length) ? { lat: t2.ring[0][0], lng: t2.ring[0][1], zoom: 12 } : null));
-            tfrFar.slice(0, 3).forEach(t2 => line('ok', airEsc(t2.text),
-                (t2.ring && t2.ring.length) ? { lat: t2.ring[0][0], lng: t2.ring[0][1], zoom: 12 } : null));
-            if (tfrFar.length > 3) line('ok', `…and ${tfrFar.length - 3} more distant TFRs in the state (none near the site)`);
         }
         if (airEnabled.sua) {
             section('Special use / prohibited airspace (informational)');
@@ -2935,9 +2961,11 @@
                 { lat: s.lat, lng: s.lng, zoom: 13 }));
         }
         if (airEnabled.translines) {
-            section(`Transmission lines — HIFLD federal data (within ~5 mi · orange dashed on map)`);
-            if (!inv.translines.length) line('ok', 'None within range');
-            inv.translines.slice(0, 8).forEach(t => {
+            const tlShown = inv.translines.filter(t => t.show);
+            const tlHidden = inv.translines.length - tlShown.length;
+            section(`Transmission lines — HIFLD federal data (within ${th.translineShowFt.toLocaleString()} ft · orange dashed on map)`);
+            if (!tlShown.length) line('ok', `None within ${th.translineShowFt.toLocaleString()} ft${tlHidden ? ` (${tlHidden} further out hidden)` : ''}`);
+            tlShown.slice(0, 8).forEach(t => {
                 // Jump to the line's nearest-to-site vertex — not mid-path,
                 // which can be miles out in open country.
                 const rep = t.nearPt || t.paths[0][Math.floor(t.paths[0].length / 2)];
@@ -2945,18 +2973,21 @@
                     `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
                     { lat: rep[0], lng: rep[1], zoom: 15 });
             });
-            if (inv.translines.length > 8) line('info', `…and ${inv.translines.length - 8} more (all drawn on map)`);
+            if (tlShown.length > 8) line('info', `…and ${tlShown.length - 8} more within range (drawn on map)`);
+            if (tlShown.length && tlHidden) line('ok', `${tlHidden} more beyond ${th.translineShowFt.toLocaleString()} ft hidden`);
         }
         if (airEnabled.obstacles) {
+            const obsShown = inv.obstacles.filter(o => o.show);
+            const obsHiddenN = inv.obstacles.length - obsShown.length;
             const byType = {};
-            inv.obstacles.forEach(o => { byType[o.type] = (byType[o.type] || 0) + 1; });
-            const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none';
-            section(`FAA obstacles (${inv.obstacles.length}${inv.obstacleTruncated ? '+ (list truncated at 2000)' : ''} within ~5 mi)`);
-            line('info', summary);
-            inv.obstacles.filter(o => o.hit).forEach(o => line('high',
+            obsShown.forEach(o => { byType[o.type] = (byType[o.type] || 0) + 1; });
+            const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none in range';
+            section(`FAA obstacles (${obsShown.length} shown · T-L within ${th.translineShowFt.toLocaleString()} ft, others within ${th.obstacleShowNm} NM)`);
+            line('info', `${summary}${obsHiddenN ? ` · ${obsHiddenN} further out hidden` : ''}${inv.obstacleTruncated ? ' · list truncated at 2000' : ''}`);
+            obsShown.filter(o => o.hit).forEach(o => line('high',
                 `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
-            inv.obstacles.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
+            obsShown.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
                 `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
         }
@@ -3026,15 +3057,17 @@
         (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
         if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
         if (airEnabled.tfr) {
+            const tNear = (inv.tfrs || []).filter(t2 => t2.status !== 'far');
             out.push('Live TFRs:');
             if (inv.tfrSkipped) out.push(`  - skipped: ${inv.tfrSkipped}`);
-            else if (!(inv.tfrs || []).length) out.push('  - none in this state');
-            (inv.tfrs || []).forEach(t2 => out.push(`  - ${t2.text}`));
+            else if (!tNear.length) out.push(`  - none within ${airThresholds.tfrShowNm} NM`);
+            tNear.forEach(t2 => out.push(`  - ${t2.text}`));
         }
         if (airEnabled.sua) { out.push('Special use / prohibited (informational):'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
-        if (airEnabled.translines && inv.translines.length) {
-            out.push('Transmission lines (HIFLD):');
-            inv.translines.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
+        if (airEnabled.translines) {
+            const tlS = inv.translines.filter(t => t.show);
+            out.push(`Transmission lines (HIFLD, within ${airThresholds.translineShowFt} ft): ${tlS.length ? '' : 'none'}`);
+            tlS.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
         }
         if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
         if (airEnabled.stadiums && inv.stadiums.length) {
@@ -3045,7 +3078,10 @@
             out.push(`Airports & helipads (nearest first):`);
             inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
         }
-        if (airEnabled.obstacles) out.push(`FAA obstacles within ~5 mi: ${inv.obstacles.length}${inv.obstacleTruncated ? '+' : ''} (nearest ${inv.obstacles.length ? `${inv.obstacles[0].type} at ${inv.obstacles[0].distFt.toLocaleString()} ft` : '—'})`);
+        if (airEnabled.obstacles) {
+            const oS = inv.obstacles.filter(o => o.show);
+            out.push(`FAA obstacles in range: ${oS.length} (nearest ${oS.length ? `${oS[0].type} at ${oS[0].distFt.toLocaleString()} ft` : '—'})`);
+        }
         return out.join('\n');
     }
 
@@ -3141,7 +3177,10 @@
     // letters/numbers/space/_/- so "(2)" isn't possible).
     const AIR_GM_DEDUP_FT = 150;
     const AIR_GM_MODAL_ID = 'aim-airspace-gm-modal';
-    const AIR_TOWER_TYPES = /TOWER|T-L|POLE|WINDMILL|STACK|ANTENNA/i;
+    // Windmills are deliberately NOT tower-typed: user wants them as
+    // HAZARD markers (and the SOP Tower-standoff check shouldn't treat a
+    // turbine like a comms tower).
+    const AIR_TOWER_TYPES = /TOWER|T-L|POLE|STACK|ANTENNA/i;
     function airGmTitleType(type) {
         const t = (type || '').trim();
         if (/^T-L/i.test(t)) return 'T-L Tower';
@@ -4425,9 +4464,13 @@
                 { id: 'obstacles', label: 'Check · FAA obstacles (towers / turbines)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.obstacles },
                 { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
+                { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
+                { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },
+                { id: 'translineShowFt', label: 'Show transmission lines / T-L towers within', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.translineShowFt, unit: 'ft' },
                 { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
                 { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
                 { id: 'tfr', label: 'Check · Live TFRs (tfr.faa.gov)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfr },
+                { id: 'tfrShowNm', label: 'Show / flag TFRs within', type: 'number', min: 0.5, max: 50, step: 0.5, default: AIR_THRESH_DEFAULTS.tfrShowNm, unit: 'NM' },
                 { id: 'tfrAuto', label: 'Auto-recheck TFRs (site load + every 20 min)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfrAuto },
                 { id: 'sua', label: 'Info · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
                 { id: 'translines', label: 'Info · HIFLD transmission lines overlay', type: 'boolean', default: AIR_ENABLE_DEFAULTS.translines },
