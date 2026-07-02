@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.154
+// @version      4.155
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -49,7 +49,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.154';
+    const SCRIPT_VERSION = '4.155';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2234,6 +2234,21 @@
         });
         return pts;
     }
+    // Project a point onto segment a–b (each [lat,lng]) in equirectangular
+    // meters. HIFLD lines have SPARSE vertices (a 20-mile line may only
+    // have points at bends) so vertex-to-site distances can be miles off —
+    // this is the point-to-SEGMENT lesson from the Coverage Validator.
+    function airClosestOnSeg(plat, plng, a, b) {
+        const cosLat = Math.cos(plat * Math.PI / 180);
+        const ax = (a[1] - plng) * 111320 * cosLat, ay = (a[0] - plat) * 110540;
+        const bx = (b[1] - plng) * 111320 * cosLat, by = (b[0] - plat) * 110540;
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return { d: Math.sqrt(cx * cx + cy * cy), lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t };
+    }
     function airMinToSite(lat, lng, sitePts) {
         let best = Infinity, bestPt = null;
         for (const p of sitePts) {
@@ -2544,15 +2559,23 @@
                     .map(pth => pth.map(xy => [xy[1], xy[0]]))
                     .filter(pth => pth.length >= 2);
                 if (!paths.length) return;
-                // Min distance: line vertices → nearest site point, with a
-                // cheap centroid prefilter per vertex.
+                // Min distance: site points → line SEGMENTS (projection, not
+                // vertices — sparse HIFLD vertices made both the distance and
+                // the jump point miles off). Coarse centroid→segment test
+                // prunes segments that can't beat the current best before
+                // paying the full site-point scan.
                 let best = Infinity, bestSrc = null, bestPt = null;
-                paths.forEach(pth => pth.forEach(([plat, plng]) => {
-                    const dc = approxMeters(clat, clng, plat, plng);
-                    if (dc - siteRadM > best) return;
-                    const near = airMinToSite(plat, plng, sitePts);
-                    if (near.d < best) { best = near.d; bestSrc = near.pt && near.pt.src; bestPt = [plat, plng]; }
-                }));
+                paths.forEach(pth => {
+                    for (let i = 0; i < pth.length - 1; i++) {
+                        const a = pth[i], b2 = pth[i + 1];
+                        const coarse = airClosestOnSeg(clat, clng, a, b2);
+                        if (coarse.d - siteRadM > best) continue;
+                        for (const sp of sitePts) {
+                            const c = airClosestOnSeg(sp.lat, sp.lng, a, b2);
+                            if (c.d < best) { best = c.d; bestSrc = sp.src; bestPt = [c.lat, c.lng]; }
+                        }
+                    }
+                });
                 const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
                 inventory.translines.push({
                     volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
