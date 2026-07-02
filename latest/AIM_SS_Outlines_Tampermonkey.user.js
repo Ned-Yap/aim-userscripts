@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.85
+// @version      34.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.85';
+    const SCRIPT_VERSION = '34.86';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -293,6 +293,30 @@
             children: [
                 { id: 'ortho.brightness', label: 'Brightness', type: 'number',
                   min: 0.2, max: 1.0, step: 0.05, default: 1.0, unit: '×' },
+            ],
+        },
+        {
+            // FAA aeronautical chart overlay — renders the FAA AIS's own
+            // ArcGIS-hosted chart tiles (auto-updated on the official 56-day
+            // chart cycle, no maintenance on our side) as a translucent tile
+            // layer above the basemap/orthos but below every vector pane.
+            // Sectional tiles exist z8–12, Terminal (TAC) z10–12 and only
+            // around Class B cities; min/maxNativeZoom scales them outside
+            // that band (blurry at pad zoom — inherent to a 1:500k chart).
+            type: 'category',
+            id: 'faachart-cat',
+            label: 'FAA Airspace Charts',
+            meta: '(VFR sectional overlay)',
+            master: { id: 'faachart.show', default: false },
+            children: [
+                { id: 'faachart.source', label: 'Chart', type: 'select',
+                  options: [
+                      { value: 'sectional', label: 'VFR Sectional' },
+                      { value: 'terminal', label: 'Terminal Area (Class B areas only)' },
+                  ],
+                  default: 'sectional' },
+                { id: 'faachart.opacity', label: 'Opacity', type: 'number',
+                  min: 0.1, max: 1, step: 0.05, default: 0.55, unit: 'fill' },
             ],
         },
         {
@@ -958,6 +982,8 @@
         applyOrthoSettings();
         // 11b. Full ortho hide — remove COG layers to kill their tile storm.
         applyOrthoVisibility();
+        // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
+        applyFaaChartLayer();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -1225,6 +1251,99 @@
         });
         _aimRemovedOrtho.clear();
         if (restored) console.log(`${TAG} hide-ortho OFF: restored ${restored} ortho layer(s)`);
+    }
+
+    // FAA airspace chart overlay (v34.86). The FAA's Aeronautical
+    // Information Services hosts its rasterized VFR charts as public
+    // ArcGIS tile services updated on the 56-day chart cycle — we add one
+    // as a translucent L.tileLayer. It lives in Leaflet's tilePane (under
+    // every vector pane, so FPs/FFZs/markers/our overlays stay on top);
+    // zIndex 9990 puts it above the basemap + ortho COG layers. Added /
+    // removed via map.addLayer/removeLayer — like hide-ortho, a hidden
+    // tile layer still fetches tiles, so OFF must mean removed. NOTE the
+    // ArcGIS tile path is /tile/{z}/{y}/{x} — y BEFORE x.
+    const _FAA_CHART_SOURCES = {
+        sectional: {
+            url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
+            minNativeZoom: 8, maxNativeZoom: 12,   // verified: 404 outside 8–12
+        },
+        terminal: {
+            url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Terminal/MapServer/tile/{z}/{y}/{x}',
+            minNativeZoom: 10, maxNativeZoom: 12,  // verified: 404 outside 10–12; coverage = Class B areas only
+        },
+    };
+    let _aimChartLayer = null;      // live TileLayer we added
+    let _aimChartLayerKey = '';     // source key it was built for
+    let _aimChartLayerMap = null;   // map instance it was added to
+
+    // Build a TileLayer without assuming a global L: prefer the page's
+    // Leaflet (unsafeWindow.L — same source the Map-init prototype patch
+    // uses), else clone the constructor off an existing tile layer already
+    // on the map (the HERE basemap is always there).
+    function makeAimTileLayer(url, opts) {
+        const _L = (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) ? unsafeWindow.L : (window.L || null);
+        if (_L && typeof _L.tileLayer === 'function') return _L.tileLayer(url, opts);
+        const map = getLeafletMap();
+        let donor = null;
+        if (map && typeof map.eachLayer === 'function') {
+            map.eachLayer(l => { if (!donor && l && l._url && typeof l.getTileUrl === 'function') donor = l; });
+        }
+        if (donor) return new donor.constructor(url, opts);
+        return null;
+    }
+
+    function applyFaaChartLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            if (toggleState['faachart.show'] !== true) { removeFaaChartLayer(); return; }
+            const source = String(toggleState['faachart.source'] || 'sectional');
+            const spec = _FAA_CHART_SOURCES[source] || _FAA_CHART_SOURCES.sectional;
+            const rawOpacity = Number(toggleState['faachart.opacity']);
+            const opacity = isNaN(rawOpacity) ? 0.55 : rawOpacity;
+            if (!_aimChartLayer || _aimChartLayerKey !== source || _aimChartLayerMap !== map) {
+                removeFaaChartLayer();
+                const layer = makeAimTileLayer(spec.url, {
+                    opacity,
+                    minNativeZoom: spec.minNativeZoom,
+                    maxNativeZoom: spec.maxNativeZoom,
+                    maxZoom: 23,
+                    zIndex: 9990,
+                    attribution: 'FAA AIS',
+                });
+                if (!layer) {
+                    console.warn(`${TAG} FAA chart: no Leaflet TileLayer constructor reachable — overlay unavailable`);
+                    return;
+                }
+                map.addLayer(layer);
+                _aimChartLayer = layer;
+                _aimChartLayerKey = source;
+                _aimChartLayerMap = map;
+                console.log(`${TAG} FAA chart overlay ON (${source}, opacity ${opacity})`);
+            } else {
+                if (typeof _aimChartLayer.setOpacity === 'function' && _aimChartLayer.options.opacity !== opacity) {
+                    _aimChartLayer.setOpacity(opacity);
+                }
+                // Re-add if Percepto's layer churn dropped it (e.g. site nav).
+                if (typeof map.hasLayer === 'function' && !map.hasLayer(_aimChartLayer)) {
+                    map.addLayer(_aimChartLayer);
+                }
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyFaaChartLayer failed:`, e);
+        }
+    }
+
+    function removeFaaChartLayer() {
+        if (!_aimChartLayer) return;
+        try {
+            const map = _aimChartLayerMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimChartLayer);
+            console.log(`${TAG} FAA chart overlay removed`);
+        } catch (e) {}
+        _aimChartLayer = null;
+        _aimChartLayerKey = '';
+        _aimChartLayerMap = null;
     }
 
     // Apply the three Map-performance levers (satellite hide, ortho low-res,
@@ -5723,6 +5842,9 @@
         restoreOrthoSettings();
         // Re-add any ortho COG layers we removed for the full hide.
         restoreOrthoVisibility();
+        // Remove the FAA chart overlay so deactivating the styler never
+        // strands a chart layer we can no longer manage.
+        removeFaaChartLayer();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
