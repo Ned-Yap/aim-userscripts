@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.15
+// @version      0.16
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.15';
+    const SCRIPT_VERSION = '0.16';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -693,6 +693,202 @@
     }
 
     // =====================================================================
+    // Site-Setup fingerprint + value-level diff (same idea as missions)
+    // ---------------------------------------------------------------------
+    // Each entity → a fingerprint of ONLY the watched signals (name, type,
+    // validated, vertex count, area, alt band, per-segment FP geometry keyed by
+    // the now-stable arc id, point-entity scalars). The fingerprint is BOTH the
+    // change hash and the diff input, so the "non-structural"/"geometry"/
+    // "polygon" noise rows disappear. Altitudes report as AGL feet, converted at
+    // report time via the DEM endpoint (only when an alt actually changed —
+    // cheap + reliable), ASL-feet fallback if a DEM lookup misses.
+    // =====================================================================
+    const T_ASSET = 3, T_NFZ = 4, T_BASE = 8, T_FP = 15, T_FFZ = 16, T_GM = 19, T_SZ = 98;
+    const M2FT = 3.280839895;
+    function coordsOf(o) { return Array.isArray(o.coords) ? o.coords.filter(p => p && p.lat != null && p.lng != null) : []; }
+    function roundPt(p) { return [+(+p.lat).toFixed(7), +(+p.lng).toFixed(7)]; }
+    function dropClose(cs) {
+        if (cs.length > 1) { const a = cs[0], b = cs[cs.length - 1]; if (Math.abs(a.lat - b.lat) < 1e-9 && Math.abs(a.lng - b.lng) < 1e-9) return cs.slice(0, -1); }
+        return cs;
+    }
+    function centroidOf(cs) {
+        if (!cs.length) return null;
+        let la = 0, ln = 0; for (const p of cs) { la += p.lat; ln += p.lng; }
+        return { lat: la / cs.length, lng: ln / cs.length };
+    }
+    function haversineFt(a, b) {
+        const R = 6371000, toR = Math.PI / 180;
+        const dLat = (b.lat - a.lat) * toR, dLng = (b.lng - a.lng) * toR;
+        const la1 = a.lat * toR, la2 = b.lat * toR;
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)) * M2FT;
+    }
+    // Equirectangular shoelace → ft² (fine for the small polygons here).
+    function areaFt2(cs) {
+        if (cs.length < 3) return null;
+        const mLat = 111320, mLng = 111320 * Math.cos(cs[0].lat * Math.PI / 180);
+        let a = 0;
+        for (let i = 0; i < cs.length; i++) {
+            const j = (i + 1) % cs.length;
+            a += (cs[i].lng * mLng) * (cs[j].lat * mLat) - (cs[j].lng * mLng) * (cs[i].lat * mLat);
+        }
+        return Math.round(Math.abs(a / 2) * M2FT * M2FT);
+    }
+    function altBandOf(o) {
+        const r = o.restrictions;
+        if (r && !Array.isArray(r) && typeof r === 'object') {
+            const mn = r.minAlt != null ? r.minAlt : (r.min_alt != null ? r.min_alt : null);
+            const mx = r.maxAlt != null ? r.maxAlt : (r.max_alt != null ? r.max_alt : null);
+            return { min: mn, max: mx };
+        }
+        return { min: null, max: null };
+    }
+    function fpSegsOf(o) {
+        const arcs = Array.isArray(o.arcs) ? o.arcs : [];
+        const segs = {};
+        for (const arc of arcs) {
+            const id = String(arc.id != null ? arc.id : '');
+            if (!id || !arc.point_a || !arc.point_b) continue;
+            segs[id] = {
+                a: roundPt(arc.point_a), b: roundPt(arc.point_b),
+                len: Math.round(haversineFt(arc.point_a, arc.point_b)),
+                min: arc.min_alt != null ? arc.min_alt : null,
+                max: arc.max_alt != null ? arc.max_alt : null,
+            };
+        }
+        return segs;
+    }
+    function entFP(o) {
+        const type = o.type;
+        const fp = { id: getObjId(o), type, t: typeShort(type), name: o.name || '', validated: !!o.validated };
+        const raw = coordsOf(o);
+        if (type === T_FFZ || type === T_NFZ || type === T_ASSET) {
+            const ring = dropClose(raw);
+            fp.vcount = ring.length;
+            fp.area = areaFt2(raw);
+            fp.verts = ring.map(roundPt);
+            const c = centroidOf(ring); if (c) { fp.clat = c.lat; fp.clng = c.lng; }
+            const ab = altBandOf(o); if (ab.min != null) fp.minAlt = ab.min; if (ab.max != null) fp.maxAlt = ab.max;
+        } else if (type === T_FP) {
+            fp.segs = fpSegsOf(o);
+            fp.segCount = Object.keys(fp.segs).length;
+        } else {
+            const p = raw[0];
+            if (p) { fp.loc = roundPt(p); fp.clat = p.lat; fp.clng = p.lng; }
+            const ab = altBandOf(o); if (ab.min != null) fp.minAlt = ab.min; if (ab.max != null) fp.maxAlt = ab.max;
+            const sc = {};
+            if (o.general_marker_type) sc.marker_type = o.general_marker_type;
+            if (o.marker_height) sc.marker_height = o.marker_height;
+            const cu = (o.custom && typeof o.custom === 'object') ? o.custom : {};
+            for (const k of ['heading', 'docking_heading', 'relative_alt', 'doors_status', 'ground_station_id']) if (cu[k] != null) sc[k] = cu[k];
+            if (Object.keys(sc).length) fp.scalars = sc;
+        }
+        if (o.description) fp.description = String(o.description).slice(0, 160);
+        return fp;
+    }
+    // Whole payload → { counts:{type→n}, ents:{id→entFP} }.
+    function siteFP(payload) {
+        const list = extractList(payload);
+        const ents = {}, counts = {};
+        for (const o of list) {
+            if (!o || typeof o !== 'object') continue;
+            const id = getObjId(o); if (id == null) continue;
+            ents[id] = entFP(o);
+            counts[ents[id].t] = (counts[ents[id].t] || 0) + 1;
+        }
+        return { counts, ents };
+    }
+    function gpsStr(pt) { return pt ? `(${(+pt[0]).toFixed(5)},${(+pt[1]).toFixed(5)})` : '?'; }
+    function countMoved(oldV, newV) {
+        let n = 0; const L = Math.min(oldV.length, newV.length);
+        for (let i = 0; i < L; i++) if (oldV[i][0] !== newV[i][0] || oldV[i][1] !== newV[i][1]) n++;
+        return n;
+    }
+    function descFP(f) {
+        if (f.segCount != null) return `${f.segCount} segments`;
+        if (f.vcount != null) return `${f.vcount} verts${f.area != null ? ', ' + f.area + ' ft²' : ''}`;
+        return f.name || '(point)';
+    }
+    // Value-level diff of two site fingerprints → rows (diffObjects' shape).
+    // Alt rows carry raw meters + {alt:{lat,lng}} for the later AGL pass.
+    function diffSetup(oldSFP, newSFP) {
+        const rows = [];
+        const push = (change, f, field, was, is, alt) => { const r = { change, etype: f.t, ename: f.name || f.id, objectId: f.id, field, was, is }; if (alt) r.alt = alt; rows.push(r); };
+        const oc = oldSFP.counts || {}, nc = newSFP.counts || {};
+        for (const t of new Set([...Object.keys(oc), ...Object.keys(nc)])) {
+            if ((oc[t] || 0) !== (nc[t] || 0)) rows.push({ change: 'modified', etype: 'site', ename: 'Entity counts', objectId: '__counts__', field: t, was: oc[t] || 0, is: nc[t] || 0 });
+        }
+        const oe = oldSFP.ents || {}, ne = newSFP.ents || {};
+        for (const id of Object.keys(oe)) if (!ne[id]) push('removed', oe[id], '(entity)', descFP(oe[id]), '');
+        for (const id of Object.keys(ne)) if (!oe[id]) push('added', ne[id], '(entity)', '', descFP(ne[id]));
+        for (const id of Object.keys(ne)) {
+            const of = oe[id], nf = ne[id];
+            if (!of) continue;
+            const altPt = (nf.clat != null) ? { lat: nf.clat, lng: nf.clng } : null;
+            if (of.name !== nf.name) push('modified', nf, 'name', of.name, nf.name);
+            if (of.validated !== nf.validated) push('modified', nf, 'validated', String(of.validated), String(nf.validated));
+            if (of.minAlt !== nf.minAlt) push('modified', nf, 'minAlt', of.minAlt, nf.minAlt, altPt);
+            if (of.maxAlt !== nf.maxAlt) push('modified', nf, 'maxAlt', of.maxAlt, nf.maxAlt, altPt);
+            if (of.vcount !== nf.vcount) push('modified', nf, 'vertices', of.vcount, nf.vcount);
+            else if (of.verts && nf.verts) { const mv = countMoved(of.verts, nf.verts); if (mv) push('modified', nf, 'vertices_moved', '', `${mv} moved`); }
+            if (of.area != null && nf.area != null && of.area !== nf.area) push('modified', nf, 'area', `${of.area} ft²`, `${nf.area} ft²`);
+            if (of.loc && nf.loc && (of.loc[0] !== nf.loc[0] || of.loc[1] !== nf.loc[1])) push('modified', nf, 'location', gpsStr(of.loc), gpsStr(nf.loc));
+            const os = of.scalars || {}, ns = nf.scalars || {};
+            for (const k of new Set([...Object.keys(os), ...Object.keys(ns)])) if (stableStringify(os[k]) !== stableStringify(ns[k])) push('modified', nf, k, os[k], ns[k]);
+            if (of.description !== nf.description) push('modified', nf, 'description', of.description || '', nf.description || '');
+            if (of.segs || nf.segs) {
+                const osg = of.segs || {}, nsg = nf.segs || {};
+                if ((of.segCount || 0) !== (nf.segCount || 0)) push('modified', nf, 'segments', of.segCount || 0, nf.segCount || 0);
+                for (const sid of Object.keys(nsg)) {
+                    const a = osg[sid], b = nsg[sid];
+                    const mid = { lat: (b.a[0] + b.b[0]) / 2, lng: (b.a[1] + b.b[1]) / 2 };
+                    if (!a) { push('added', nf, `seg#${sid}`, '', `${gpsStr(b.a)}→${gpsStr(b.b)}`); continue; }
+                    if (a.len !== b.len) push('modified', nf, `seg#${sid} length`, `${a.len} ft`, `${b.len} ft`);
+                    if (a.min !== b.min) push('modified', nf, `seg#${sid} minAlt`, a.min, b.min, mid);
+                    if (a.max !== b.max) push('modified', nf, `seg#${sid} maxAlt`, a.max, b.max, mid);
+                    if (a.a[0] !== b.a[0] || a.a[1] !== b.a[1] || a.b[0] !== b.b[0] || a.b[1] !== b.b[1]) push('modified', nf, `seg#${sid} moved`, '', `${gpsStr(b.a)}→${gpsStr(b.b)}`);
+                }
+                for (const sid of Object.keys(osg)) if (!nsg[sid]) push('removed', nf, `seg#${sid}`, `${gpsStr(osg[sid].a)}→${gpsStr(osg[sid].b)}`, '');
+            }
+        }
+        return rows;
+    }
+    // DEM ground elevation (m ASL) at a point — Percepto's own /location_altitude/.
+    async function demGround(lat, lng, cache) {
+        const key = lat.toFixed(5) + ',' + lng.toFixed(5);
+        if (cache.has(key)) return cache.get(key);
+        let g = null;
+        try {
+            const url = `/location_altitude/?location=${encodeURIComponent(JSON.stringify({ lat, lng }))}`;
+            const resp = await fetchWithTimeout(url, { credentials: 'include', headers: { 'Accept': 'application/json' } }, 15000);
+            if (resp.ok) { const d = await resp.json(); if (d && typeof d.altitude === 'number') g = d.altitude; }
+        } catch (e) { console.warn(TAG, 'DEM lookup failed', e); }
+        cache.set(key, g);
+        return g;
+    }
+    function fmtAglFt(m, ground) {
+        if (m == null || m === '') return '';
+        if (ground != null) return `${Math.round((m - ground) * M2FT)} ft AGL`;
+        return `${Math.round(m * M2FT)} ft ASL`;   // DEM miss → ASL feet fallback (tagged by the unit)
+    }
+    // Convert alt rows to AGL feet (DEM fetched only for the rows that changed an
+    // altitude) and stringify any remaining numeric cells for the CSV.
+    async function finalizeSetupRows(rows) {
+        const cache = new Map();
+        for (const r of rows) {
+            if (r.alt) {
+                const g = await demGround(r.alt.lat, r.alt.lng, cache);
+                r.was = fmtAglFt(r.was, g); r.is = fmtAglFt(r.is, g);
+                delete r.alt;
+            } else {
+                if (typeof r.was === 'number') r.was = String(r.was);
+                if (typeof r.is === 'number') r.is = String(r.is);
+            }
+        }
+        return rows;
+    }
+
+    // =====================================================================
     // Scheduler
     // =====================================================================
     function nameFor(id) {
@@ -897,16 +1093,20 @@
             const site = sites.get(c.siteId);
             if (c.siteName && !site.name) site.name = c.siteName;
             const mission = c.etype === 'mission';
-            // Missions are keyed by object id so a mission's rows group together;
-            // setup notes without an objectId fall back to the field.
+            // Group a mission's / entity's rows together by object id.
             const key = (mission ? 'm:' : '') + (c.objectId || ('note:' + c.field));
-            if (!site.ents.has(key)) site.ents.set(key, { change: c.change, etype: c.etype, ename: c.ename || c.objectId, fields: new Set(), tuples: [], mission });
+            if (!site.ents.has(key)) site.ents.set(key, { change: c.change, etype: c.etype, ename: c.ename || c.objectId, fields: new Set(), tuples: [], mission, summary: '' });
             const e = site.ents.get(key);
-            const f = collapseField(c.field);
-            if (f) e.fields.add(f);
-            // Keep the actual old→new values for missions so the digest can show
-            // them (setup rows stay summarized as field names only). Cap per entity.
-            if (mission && e.tuples.length < 12 && c.field && c.field !== '(mission)') e.tuples.push({ field: c.field, was: c.was, is: c.is });
+            const placeholder = (c.field === '(mission)' || c.field === '(entity)');
+            if (placeholder) {
+                e.summary = c.is || c.was || '';   // added/deleted detail (verts/segments)
+            } else {
+                const f = collapseField(c.field);
+                if (f) e.fields.add(f);
+                // Keep the actual old→new values so the digest shows them (both
+                // sources now). Cap per entity to bound a huge single-entity edit.
+                if (e.tuples.length < 14) e.tuples.push({ field: c.field, was: c.was, is: c.is });
+            }
         }
         return sites;
     }
@@ -951,12 +1151,16 @@
             const lines = [];
             ents.slice(0, ROWCAP).forEach(e => {
                 let detail;
-                if (e.change === 'added') detail = e.mission ? '(new mission)' : '(new entity)';
-                else if (e.change === 'removed') detail = e.mission ? '(deleted)' : '(removed)';
-                else if (e.mission && e.tuples.length) {
-                    // Missions show the actual old → new values, not just field names.
-                    detail = e.tuples.slice(0, 6).map(t => `${missionFieldLabel(t.field)} ${t.was || '∅'}→${t.is || '∅'}`).join(' · ')
-                        + (e.tuples.length > 6 ? ` +${e.tuples.length - 6}` : '');
+                if (e.change === 'added') detail = `(new ${e.mission ? 'mission' : dispType(e.etype)})${e.summary ? ' ' + e.summary : ''}`;
+                else if (e.change === 'removed') detail = `(deleted${e.summary ? ' ' + e.summary : ''})`;
+                else if (e.tuples.length) {
+                    // Show the actual old → new values (both setup + missions).
+                    // One-sided event fields (vertex moved, seg added) drop the arrow.
+                    detail = e.tuples.slice(0, 6).map(t => {
+                        const label = e.mission ? missionFieldLabel(t.field) : t.field;
+                        const val = (t.was && t.is) ? `${t.was}→${t.is}` : (t.is || t.was || '');
+                        return `${label} ${val}`;
+                    }).join(' · ') + (e.tuples.length > 6 ? ` +${e.tuples.length - 6}` : '');
                 } else {
                     const fl = [...e.fields];
                     detail = fl.length ? (fl.length + ' field' + (fl.length === 1 ? '' : 's') + ': ' + fl.slice(0, 6).join(', ') + (fl.length > 6 ? ` +${fl.length - 6}` : '')) : '(modified)';
@@ -1110,16 +1314,19 @@
             if (st) scheduleNext(st, 'cold');     // back off; don't hammer a flaky endpoint
             return 'error';
         }
-        const cleaned = stripVolatile(r.data);      // drop live drone telemetry before hashing/diffing
-        const norm = stableStringify(cleaned);
-        const hash = await sha256Hex(norm);
+        const cleaned = stripVolatile(r.data);      // drop live drone telemetry
+        // HASH the fingerprint (only the watched signals) so noise never fires a
+        // change; STORE the raw payload so the snapshot ring stays full forensics.
+        const rawNorm = stableStringify(cleaned);
+        const curFP = siteFP(cleaned);
+        const hash = await sha256Hex(stableStringify(curFP));
         let st = state.sites[id];
 
         if (!st) {
             // First sight — record baseline only, no diff, no alert.
             st = state.sites[id] = { hash, state: 'cold', lastChangeAt: 0, lastCheckAt: Date.now(), nextCheckAt: 0 };
             try {
-                const gz = bytesToB64(await gzipToBytes(norm));
+                const gz = bytesToB64(await gzipToBytes(rawNorm));
                 await ghPut(latestPath(id), gz, `[site-watch] baseline site ${id}`, await safeGetSha(latestPath(id)));
             } catch (e) { console.error(TAG, `baseline commit site ${id} failed`, e); }
             scheduleNext(st, 'cold');
@@ -1137,7 +1344,7 @@
             return 'checked';
         }
 
-        // CHANGED — diff against the previous snapshot from GitHub.
+        // CHANGED — value-level diff of the previous raw snapshot vs current.
         console.log(`${TAG} site ${id} CHANGED`);
         let prevData = null;
         try {
@@ -1148,21 +1355,21 @@
         const ts = new Date().toISOString();
         const nm = nameFor(id) || s.name || '';
         if (prevData) {
-            const rows = diffObjects(extractList(stripVolatile(prevData)), extractList(cleaned));
+            let rows = diffSetup(siteFP(stripVolatile(prevData)), curFP);
+            rows = await finalizeSetupRows(rows);       // AGL feet on the alt rows
             if (rows.length) {
                 for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.etype, row.ename, row.objectId, row.field, row.was, row.is]));
             } else {
-                // Hash moved but no meaningful field diff — a derived/noise field (id, distance, coords mirror) or a key reorder.
                 pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '', '', '(non-structural change)', '', '']));
             }
-            console.log(`${TAG} site ${id}: ${rows.length} field change(s)`);
+            console.log(`${TAG} site ${id}: ${rows.length} change(s)`);
         } else {
             pendingCsv.push(csvRow([ts, id, nm, 'modified', '', '', '', '(changed; no prior snapshot)', '', '']));
         }
 
-        // Store new snapshot: overwrite latest + push into the 10-deep ring.
+        // Store new snapshot (raw payload): overwrite latest + push into the ring.
         try {
-            const gz = bytesToB64(await gzipToBytes(norm));
+            const gz = bytesToB64(await gzipToBytes(rawNorm));
             await ghPut(latestPath(id), gz, `[site-watch] update latest site ${id}`, await safeGetSha(latestPath(id)));
             const slot = ((st.slot || 0) % 10) + 1;     // 1..10 rotating
             st.slot = slot;
@@ -1348,6 +1555,7 @@
         { id: 'digestHourPT', label: 'Daily Slack digest hour (PT, 24h)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
         { id: 'watchMissions', label: 'Also watch missions (steps · distance · values)', type: 'boolean', default: DEFAULTS.watchMissions },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
+        { id: 'simulate', label: 'Simulate a change (console preview)', type: 'button', action: 'simulate' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
         { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, test)', type: 'button', action: 'post-digest-now' },
         { id: 'reset-baselines', label: 'Reset all baselines (re-learn)', type: 'button', action: 'reset-baselines' },
@@ -1399,9 +1607,59 @@
             if (on && masterEnabled && cachedToken) runCycle('missions-on');
         }
     }
+    // Apply a representative set of edits to a cloned entity list (in place) so
+    // the simulation can show what a real digest looks like. Returns a log.
+    function applySyntheticEdits(list) {
+        const log = [];
+        const find = t => list.find(o => o && o.type === t);
+        const ffz = find(T_FFZ), asset = find(T_ASSET), fp = find(T_FP), gm = find(T_GM);
+        if (ffz) {
+            if (ffz.restrictions && !Array.isArray(ffz.restrictions) && typeof ffz.restrictions.minAlt === 'number') { ffz.restrictions.minAlt = +(ffz.restrictions.minAlt + 3.05).toFixed(2); log.push(`FFZ ${ffz.name}: minAlt +~10ft`); }
+            if (Array.isArray(ffz.coords) && ffz.coords[0]) { ffz.coords[0] = { lat: ffz.coords[0].lat + 0.0001, lng: ffz.coords[0].lng }; log.push(`FFZ ${ffz.name}: moved a vertex`); }
+        }
+        if (asset) { asset.name = (asset.name || 'asset') + ' (RENAMED)'; log.push(`Asset renamed`); }
+        if (gm) { list.splice(list.indexOf(gm), 1); log.push(`deleted GM ${gm.name}`); }
+        list.push({ id: 'SIM-NEW-1', type: T_FFZ, name: 'SIM freezone_new', validated: false, arcs: [], restrictions: { minAlt: 850, maxAlt: 870 }, coords: [{ lat: 31.9, lng: -102.0 }, { lat: 31.9002, lng: -102.0 }, { lat: 31.9002, lng: -101.9997 }, { lat: 31.9, lng: -101.9997 }, { lat: 31.9, lng: -102.0 }] });
+        log.push('added SIM FFZ');
+        if (fp && Array.isArray(fp.arcs) && fp.arcs.length) {
+            if (typeof fp.arcs[0].min_alt === 'number') { fp.arcs[0].min_alt += 3; log.push(`FP ${fp.name}: seg alt +3m`); }
+            const last = fp.arcs[fp.arcs.length - 1];
+            if (last.point_b) { fp.arcs.push({ id: 999999001, point_a: last.point_b, point_b: { lat: last.point_b.lat + 0.0005, lng: last.point_b.lng + 0.0005 }, min_alt: last.min_alt, max_alt: last.max_alt }); log.push(`FP ${fp.name}: added a segment`); }
+        }
+        return log;
+    }
+    // Console-preview the digest for synthetic edits on a REAL site — no baseline
+    // reset, no waiting, no channel noise. Shows the exact Slack-rendered text.
+    async function simulateDigest() {
+        if (!cachedToken) console.warn(`${TAG} sim: no token (DEM/AGL may be limited, digest preview still works)`);
+        let target = null;
+        const m = (location.hash || '').match(/#\/site\/(\d+)\//);
+        if (m) target = { id: m[1], name: nameFor(m[1]) || '' };
+        if (!target && siteList.length) target = siteList[0];
+        if (!target) { const l = await fetchSiteList(); if (l && l.length) { siteList = l; target = l[0]; } }
+        if (!target) { console.warn(`${TAG} sim: no site available`); return; }
+        console.log(`%c${TAG} SIMULATION — site ${target.id} (${target.name || ''})`, 'color:#5fd0ff;font-weight:700');
+        const r = await fetchSiteSetup(target.id);
+        if (r.authLost || r.error) { console.warn(`${TAG} sim: fetch failed`, r); return; }
+        const base = stripVolatile(r.data);
+        const beforeFP = siteFP(base);
+        const list = extractList(JSON.parse(JSON.stringify(base)));
+        const edits = applySyntheticEdits(list);
+        let rows = diffSetup(beforeFP, siteFP(list));
+        rows = await finalizeSetupRows(rows);
+        const changeRows = rows.map(row => ({ siteId: target.id, siteName: target.name || '', change: row.change, etype: row.etype, ename: row.ename, objectId: row.objectId, field: row.field, was: row.was, is: row.is }));
+        const sites = rollup(changeRows);
+        console.log(`%c   synthetic edits: ${edits.join(' | ')}`, 'color:#9aa0a6');
+        console.log('%c────── PARENT (as Slack would render) ──────', 'color:#5fd0ff');
+        console.log(buildParent(sites, ptParts().day + ' — SIMULATION', '(sim)', new Date().toISOString()));
+        console.log('%c────── THREAD ──────', 'color:#5fd0ff');
+        for (const ch of buildThreadChunks(sites)) console.log(ch);
+        console.log(`%c${TAG} simulation done — ${rows.length} change rows (nothing was written; live data untouched).`, 'color:#5fd0ff;font-weight:700');
+    }
     function handleAction(actionId) {
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
         else if (actionId === 'status') { showStatus(); }
+        else if (actionId === 'simulate') { simulateDigest(); }
         else if (actionId === 'post-digest-now') {
             // Test/preview: post a digest of the last 24h WITHOUT touching the
             // daily schedule cutoff, so it never interferes with the real 6pm run.
