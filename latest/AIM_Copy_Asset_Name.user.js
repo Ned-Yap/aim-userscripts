@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.152
+// @version      4.153
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -18,6 +18,7 @@
 // @connect      raw.githubusercontent.com
 // @connect      api.opentopodata.org
 // @connect      services6.arcgis.com
+// @connect      services1.arcgis.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -48,7 +49,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.152';
+    const SCRIPT_VERSION = '4.153';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -144,7 +145,11 @@
         inventoryMi: 15,      // inventory radius for airports/airspace listing
         stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
     };
-    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true };
+    // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
+    // high-voltage transmission-line GEOMETRY. Independent of our KMLs;
+    // used to cross-check shielding coverage. Informational only.
+    const AIR_HIFLD_LINES_URL = 'https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Electric_Power_Transmission_Lines/FeatureServer/0';
     let airMasterEnabled = true;
     function loadAirThresholds() {
         const out = Object.assign({}, AIR_THRESH_DEFAULTS);
@@ -2181,7 +2186,10 @@
     // caller can surface the failure — never silently returns partial data.
     async function airQueryFAA(service, params) {
         const qs = new URLSearchParams(Object.assign({ f: 'json' }, params)).toString();
-        const url = `${AIR_FAA_BASE}/${service}/FeatureServer/0/query?${qs}`;
+        // `service` is an FAA AIS service name, or a full layer URL for
+        // non-FAA sources (HIFLD).
+        const base = /^https?:/i.test(service) ? service : `${AIR_FAA_BASE}/${service}/FeatureServer/0`;
+        const url = `${base}/query?${qs}`;
         const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
         if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
         let d;
@@ -2205,18 +2213,23 @@
     // hazards (flares, towers), and counting those as "the site" would
     // make every marked hazard self-flag. NFZs are excluded too (no-fly).
     const AIR_SITE_TYPES = new Set([3, 8, 15, 16, 98]);
+    // Each point carries `src` — which entity (and FP segment) it belongs
+    // to — so "185 ft from site" can say WHAT it's 185 ft from.
     function airCollectSitePoints(ents) {
         const pts = [];
         (ents || []).forEach(e => {
             if (!AIR_SITE_TYPES.has(e.type)) return;
+            const nm = e.name || (e.id != null ? `#${e.id}` : '?');
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
-                e.arcs.forEach(a => {
-                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng });
-                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng });
+                e.arcs.forEach((a, i) => {
+                    const src = `FP "${nm}" seg #${i + 1}`;
+                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng, src });
+                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng, src });
                 });
             } else {
+                const src = `${typeReg(e.type).short} "${nm}"`;
                 const cs = entityCoords(e);
-                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng }); });
+                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng, src }); });
             }
         });
         return pts;
@@ -2264,12 +2277,9 @@
                 'Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
             airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
                 'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT', true)) : Promise.resolve(null),
-            airEnabled.laanc ? grab('LAANC grids', airQueryFAA('FAA_UAS_FacilityMap_Data', {
-                geometry: `${minLng - 0.003},${minLat - 0.003},${maxLng + 0.003},${maxLat + 0.003}`,
-                geometryType: 'esriGeometryEnvelope', inSR: '4326',
-                spatialRel: 'esriSpatialRelIntersects',
-                outFields: 'CEILING,UNIT,APT1_NAME,APT1_FAAID', returnGeometry: 'false',
-            })) : Promise.resolve(null),
+            airEnabled.laanc ? grab('LAANC grids', airPointQuery('FAA_UAS_FacilityMap_Data', clat, clng,
+                5 * MI_TO_M + siteRadM,   // grids within ~5 mi — enough for the overlay without tile-storming the map
+                'CEILING,UNIT,APT1_NAME,APT1_FAAID', true)) : Promise.resolve(null),
         ]);
         // SUA + Prohibited share a schema; Stadiums is a point layer whose
         // LATITUDE/LONGITUDE attributes are DMS STRINGS — read the returned
@@ -2284,11 +2294,16 @@
                 Math.max(th.inventoryMi * MI_TO_M, th.stadiumNm * NM_TO_M) + siteRadM,
                 'NAME,CITY,STATE,STATUS_CODE', true)) : Promise.resolve(null),
         ]);
+        const hifldRes = airEnabled.translines
+            ? await grab('Transmission lines (HIFLD)', airPointQuery(AIR_HIFLD_LINES_URL, clat, clng,
+                5 * MI_TO_M + siteRadM, 'VOLTAGE,VOLT_CLASS,OWNER,TYPE,STATUS,INFERRED', true))
+            : null;
         const violations = [];
         const boxIssue = (lat, lng, note, severity) => violations.push({
             shape: 'polygon', polygon: boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]), note, severity,
         });
-        const inventory = { airports: [], obstacles: [], airspace: [], sua: [], stadiums: [], laanc: null, obstacleTruncated: false };
+        const inventory = { airports: [], obstacles: [], airspace: [], sua: [], stadiums: [], translines: [], laanc: null, obstacleTruncated: false };
+        const laancGrids = [];   // [{ring, center, ceiling, color}] — for the map overlay
 
         // ---- 1. Controlled airspace (inside surface class = red; surface
         //         boundary within the strip standoff = warn; overhead shelf
@@ -2361,7 +2376,7 @@
                 inventory.airports.push(entry);
                 if (entry.hit) {
                     boxIssue(near.pt.lat, near.pt.lng,
-                        `violation: ${kind.toLowerCase()} "${entry.name}"${entry.ident ? ` (${entry.ident})` : ''} is ${distNm.toFixed(2)} NM ${brg} of the site — inside the ${th.stripNm} NM manned-aircraft standoff (${priv})`, 'high');
+                        `violation: ${kind.toLowerCase()} "${entry.name}"${entry.ident ? ` (${entry.ident})` : ''} is ${distNm.toFixed(2)} NM ${brg} of ${near.pt.src || 'the site'} — inside the ${th.stripNm} NM manned-aircraft standoff (${priv})`, 'high');
                 }
             });
             inventory.airports.sort((x, y) => x.distNm - y.distNm);
@@ -2385,11 +2400,11 @@
                 const agl = typeof a.AGL === 'number' ? a.AGL : null;
                 const type = (a.Type_Code || '?').trim();
                 const lit = (a.Lighting || '').trim();
-                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, hit: false };
+                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (near.pt && near.pt.src) || null, hit: false };
                 if (couldHit && distFt < th.obstacleFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
                     boxIssue(oLat, oLng,
-                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? 'effectively ON the site (< 100 ft — DOF coords are only accurate to tens of ft)' : `${distFt.toLocaleString()} ft from the nearest site entity`} (threshold ${th.obstacleFt} ft)`, 'high');
+                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${distFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${th.obstacleFt} ft)`, 'high');
                 }
                 inventory.obstacles.push(entry);
             });
@@ -2428,15 +2443,16 @@
                 }
                 const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
                 const floorTxt = surface ? 'surface' : `floor ${isFinite(floor) ? floor.toLocaleString() : '?'} ft ${floorCode || ''}`.trim();
+                // INFORMATIONAL by user decision (2026-07-02): we never fly
+                // above 400 ft so MOA/Alert/Warning airspace can't conflict.
+                // The ONE exception kept as a violation: sitting INSIDE a
+                // surface-level Prohibited/Restricted area — those forbid
+                // UAS at ANY altitude, including ours.
                 if (inside && surface && hard) {
-                    boxIssue(clat, clng, `violation: site is INSIDE ${a.NAME} (${type} — ${floorTxt}) — flight prohibited/restricted without authorization`, 'high');
-                    inventory.sua.push({ sev: 'high', text: `INSIDE ${a.NAME} (${type}, ${floorTxt})` });
+                    boxIssue(clat, clng, `violation: site is INSIDE ${a.NAME} (${type} — ${floorTxt}) — flight prohibited/restricted at ALL altitudes without authorization`, 'high');
+                    inventory.sua.push({ sev: 'high', text: `INSIDE ${a.NAME} (${type}, ${floorTxt}) — no-fly at all altitudes` });
                 } else if (inside && surface) {
-                    boxIssue(clat, clng, `violation: site is inside ${a.NAME} (${type} — ${floorTxt}) — active military/manned traffic possible, check activity times`, 'warn');
-                    inventory.sua.push({ sev: 'warn', text: `Inside ${a.NAME} (${type}, ${floorTxt}) — check activity times` });
-                } else if (!inside && surface && hard && +distNm.toFixed(2) < th.stripNm) {
-                    boxIssue(clat, clng, `violation: ${a.NAME} (${type} — ${floorTxt}) is ~${distNm.toFixed(2)} NM from the site (standoff ${th.stripNm} NM)`, 'warn');
-                    inventory.sua.push({ sev: 'warn', text: `${a.NAME} (${type}, ${floorTxt}) ~${distNm.toFixed(2)} NM away` });
+                    inventory.sua.push({ sev: 'info', text: `Inside ${a.NAME} (${type}, ${floorTxt}) — informational: military/manned traffic possible, check activity times` });
                 } else if (inside) {
                     inventory.sua.push({ sev: 'info', text: `Under ${a.NAME} (${type}) — ${floorTxt} (above our ops)` });
                 } else {
@@ -2472,38 +2488,162 @@
             inventory.stadiums.sort((x, y) => x.distNm - y.distNm);
         }
 
-        // ---- 4. LAANC grid ceiling over the site. No grid over the site =
-        //         uncontrolled for LAANC purposes (400 ft Part-107 default). ----
+        // ---- 4. LAANC grid ceiling over the site. Grids within ~5 mi are
+        //         kept (with geometry) for the map overlay; the violation
+        //         check only considers grids that actually cover a site
+        //         point. No grid over the site = uncontrolled for LAANC
+        //         purposes (400 ft Part-107 default). ----
         if (laRes && Array.isArray(laRes.features)) {
-            if (!laRes.features.length) {
-                inventory.laanc = { sev: 'ok', text: 'Site is not in any LAANC facility grid (400 ft Part-107 default applies)' };
-            } else {
-                let worst = null;
-                laRes.features.forEach(f => {
-                    const a = f.attributes || {};
-                    if (typeof a.CEILING !== 'number') return;
-                    if (!worst || a.CEILING < worst.CEILING) worst = a;
+            const laancColor = (c) => c === 0 ? '#ff3333' : c <= 100 ? '#ff8c00' : c <= 200 ? '#ffd54f' : c < 400 ? '#a0e060' : '#5fff5f';
+            let worst = null;
+            laRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (typeof a.CEILING !== 'number') return;
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                const ring = rings[0];
+                // Grids are axis-aligned 1-minute rectangles — a bbox test
+                // against the site points is exact enough for containment.
+                let gMinLat = Infinity, gMaxLat = -Infinity, gMinLng = Infinity, gMaxLng = -Infinity;
+                ring.forEach(p => {
+                    if (p.lat < gMinLat) gMinLat = p.lat; if (p.lat > gMaxLat) gMaxLat = p.lat;
+                    if (p.lng < gMinLng) gMinLng = p.lng; if (p.lng > gMaxLng) gMaxLng = p.lng;
                 });
-                if (worst) {
-                    const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
-                    if (worst.CEILING < th.maxOpAglFt) {
-                        boxIssue(clat, clng,
-                            `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
-                            worst.CEILING === 0 ? 'high' : 'warn');
-                        inventory.laanc = { sev: worst.CEILING === 0 ? 'high' : 'warn', text: `LAANC grid ceiling ${worst.CEILING} ft AGL over site (our max ${th.maxOpAglFt} ft) — ${apt}` };
-                    } else {
-                        inventory.laanc = { sev: 'ok', text: `LAANC grid over site: ceiling ${worst.CEILING} ft AGL (≥ our ${th.maxOpAglFt} ft) — ${apt}` };
-                    }
+                const overSite = sitePts.some(p => p.lat >= gMinLat && p.lat <= gMaxLat && p.lng >= gMinLng && p.lng <= gMaxLng);
+                laancGrids.push({
+                    ring: ring.map(p => [p.lat, p.lng]),
+                    center: [(gMinLat + gMaxLat) / 2, (gMinLng + gMaxLng) / 2],
+                    ceiling: a.CEILING, color: laancColor(a.CEILING), overSite,
+                });
+                if (overSite && (!worst || a.CEILING < worst.CEILING)) worst = a;
+            });
+            if (!worst) {
+                inventory.laanc = { sev: 'ok', text: `Site is not in any LAANC facility grid (400 ft Part-107 default applies)${laancGrids.length ? ` — ${laancGrids.length} grid(s) nearby drawn on the map` : ''}` };
+            } else {
+                const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
+                if (worst.CEILING < th.maxOpAglFt) {
+                    boxIssue(clat, clng,
+                        `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
+                        worst.CEILING === 0 ? 'high' : 'warn');
+                    inventory.laanc = { sev: worst.CEILING === 0 ? 'high' : 'warn', text: `LAANC grid ceiling ${worst.CEILING} ft AGL over site (our max ${th.maxOpAglFt} ft) — ${apt}` };
+                } else {
+                    inventory.laanc = { sev: 'ok', text: `LAANC grid over site: ceiling ${worst.CEILING} ft AGL (≥ our ${th.maxOpAglFt} ft) — ${apt}` };
                 }
             }
         }
 
-        return { violations, inventory, errors, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
+        // ---- 5. HIFLD transmission lines (informational overlay + list).
+        //         Federal high-voltage line geometry — independent of our
+        //         KMLs, so it cross-checks shielding coverage by eye. ----
+        if (hifldRes && Array.isArray(hifldRes.features)) {
+            hifldRes.features.forEach(f => {
+                const a = f.attributes || {};
+                const paths = ((f.geometry && f.geometry.paths) || [])
+                    .map(pth => pth.map(xy => [xy[1], xy[0]]))
+                    .filter(pth => pth.length >= 2);
+                if (!paths.length) return;
+                // Min distance: line vertices → nearest site point, with a
+                // cheap centroid prefilter per vertex.
+                let best = Infinity, bestSrc = null;
+                paths.forEach(pth => pth.forEach(([plat, plng]) => {
+                    const dc = approxMeters(clat, clng, plat, plng);
+                    if (dc - siteRadM > best) return;
+                    const near = airMinToSite(plat, plng, sitePts);
+                    if (near.d < best) { best = near.d; bestSrc = near.pt && near.pt.src; }
+                }));
+                const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
+                inventory.translines.push({
+                    volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
+                    distFt: Math.round(best * M_TO_FT), distMi: best / MI_TO_M,
+                    src: bestSrc, paths,
+                });
+            });
+            inventory.translines.sort((x, y) => x.distFt - y.distFt);
+        }
+
+        return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
+    }
+
+    // ---- Map highlights: while the report panel is open, EVERYTHING in
+    // the inventory gets a lightweight marker on the map (violations are
+    // additionally real Validator issues — these highlights are visual
+    // only, interactive:false so they never eat map clicks). Cleared when
+    // the panel closes. ----
+    let airMapLayers = [];
+    function airClearMapHighlights() {
+        const map = getLeafletMap();
+        airMapLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        airMapLayers = [];
+    }
+    function airDrawMapHighlights(res) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) { console.warn(`${TAG} airspace highlights: no map/L reachable`); return; }
+        airClearMapHighlights();
+        const add = (mk) => { try { mk.addTo(map); airMapLayers.push(mk); } catch (e) {} };
+        try {
+            // LAANC grids first (underneath everything else).
+            (res.laancGrids || []).forEach(g => {
+                add(L.polygon(g.ring, { color: g.color, weight: 1, opacity: 0.7, fillColor: g.color, fillOpacity: g.overSite ? 0.18 : 0.08, interactive: false }));
+                if (g.ceiling < 400) {
+                    add(L.marker(g.center, {
+                        interactive: false, keyboard: false,
+                        icon: L.divIcon({ className: '', iconSize: [40, 14], iconAnchor: [20, 7],
+                            html: `<div style="color:${g.color};font:bold 11px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;">${g.ceiling}</div>` }),
+                    }));
+                }
+            });
+            // HIFLD transmission lines — orange dashed, distinct from KML styling.
+            (res.inventory.translines || []).forEach(t => {
+                t.paths.forEach(pth => add(L.polyline(pth, { color: '#ff9a3d', weight: 3, dashArray: '7,7', opacity: 0.85, interactive: false })));
+            });
+            // Obstacles — dots (violations bigger + red).
+            (res.inventory.obstacles || []).forEach(o => {
+                if (!isFinite(o.lat)) return;
+                add(L.circleMarker([o.lat, o.lng], {
+                    radius: o.hit ? 9 : 5, color: o.hit ? '#ff5555' : '#7adfe6', weight: 2,
+                    fillColor: o.hit ? '#5a0f0f' : '#0a2730', fillOpacity: 0.85, interactive: false,
+                }));
+            });
+            // Airports / stadiums — rings.
+            (res.inventory.airports || []).forEach(a => {
+                if (!isFinite(a.lat)) return;
+                add(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: false }));
+            });
+            (res.inventory.stadiums || []).forEach(s => {
+                if (!isFinite(s.lat)) return;
+                add(L.circleMarker([s.lat, s.lng], { radius: 13, color: s.hit ? '#ffb020' : '#5fff5f', weight: 3, fillColor: s.hit ? '#ffb020' : '#5fff5f', fillOpacity: 0.15, interactive: false }));
+            });
+            console.log(`${TAG} airspace highlights: ${airMapLayers.length} layer(s) drawn`);
+        } catch (e) {
+            console.warn(`${TAG} airDrawMapHighlights threw:`, e);
+        }
+    }
+    // Pulsing yellow ring so a row-click jump is findable on a busy map.
+    function airPulseAt(lat, lng) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) return;
+        let ring;
+        try {
+            ring = L.circleMarker([lat, lng], { radius: 8, color: '#ffee33', weight: 4, fillOpacity: 0, interactive: false });
+            ring.addTo(map);
+        } catch (e) { return; }
+        let t = 0;
+        const iv = setInterval(() => {
+            t++;
+            const phase = t % 16;   // one pulse ≈ 0.8 s
+            try { ring.setRadius(8 + phase * 2.5); ring.setStyle({ opacity: Math.max(0, 1 - phase / 15) }); } catch (e) {}
+            if (t >= 64) { clearInterval(iv); try { map.removeLayer(ring); } catch (e) {} }
+        }, 50);
     }
 
     function closeAirspacePanel() {
         const el = document.getElementById(AIRSPACE_PANEL_ID);
         if (el) el.remove();
+        airClearMapHighlights();
     }
 
     // Floating inventory panel — everything found, violations first.
@@ -2543,7 +2683,7 @@
             (inv.airspace || []).forEach(a => line(a.sev, airEsc(a.text)));
         }
         if (airEnabled.sua) {
-            section('Special use / prohibited airspace');
+            section('Special use / prohibited airspace (informational)');
             (inv.sua || []).forEach(a => line(a.sev, airEsc(a.text)));
         }
         if (airEnabled.laanc && inv.laanc) {
@@ -2564,6 +2704,17 @@
                 `<strong>${airEsc(s.name)}</strong>${s.city ? `, ${airEsc(s.city)}` : ''} — ${s.distNm.toFixed(2)} NM / ${s.distMi.toFixed(1)} mi ${s.brg}`,
                 { lat: s.lat, lng: s.lng, zoom: 13 }));
         }
+        if (airEnabled.translines) {
+            section(`Transmission lines — HIFLD federal data (within ~5 mi · orange dashed on map)`);
+            if (!inv.translines.length) line('ok', 'None within range');
+            inv.translines.slice(0, 8).forEach(t => {
+                const rep = t.paths[0][Math.floor(t.paths[0].length / 2)];
+                line('info',
+                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
+                    { lat: rep[0], lng: rep[1], zoom: 15 });
+            });
+            if (inv.translines.length > 8) line('info', `…and ${inv.translines.length - 8} more (all drawn on map)`);
+        }
         if (airEnabled.obstacles) {
             const byType = {};
             inv.obstacles.forEach(o => { byType[o.type] = (byType[o.type] || 0) + 1; });
@@ -2571,7 +2722,7 @@
             section(`FAA obstacles (${inv.obstacles.length}${inv.obstacleTruncated ? '+ (list truncated at 2000)' : ''} within ~5 mi)`);
             line('info', summary);
             inv.obstacles.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from site`,
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}`,
                 { lat: o.lat, lng: o.lng, zoom: 17 }));
             inv.obstacles.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
                 `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
@@ -2612,6 +2763,7 @@
                 if (!map || !isFinite(jlat)) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
                 try { map.setView([jlat, jlng], isFinite(jzoom) ? jzoom : 15); }
                 catch (err) { console.warn(`${TAG} airspace jump setView threw:`, err); }
+                airPulseAt(jlat, jlng);
             }
         });
         // Minimal header drag.
@@ -2641,7 +2793,11 @@
         res.violations.forEach(v => out.push(`  🔴 ${v.note.replace(/^violation: /, '')}`));
         (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
         if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
-        if (airEnabled.sua) { out.push('Special use / prohibited:'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.sua) { out.push('Special use / prohibited (informational):'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.translines && inv.translines.length) {
+            out.push('Transmission lines (HIFLD):');
+            inv.translines.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
+        }
         if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
         if (airEnabled.stadiums && inv.stadiums.length) {
             out.push('Stadiums:');
@@ -2666,6 +2822,7 @@
             airLastIssues = res.violations.map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
             postValidatorIssues(sid);
             renderAirspacePanel(res, sid, getCurrentSiteName());
+            airDrawMapHighlights(res);
             const errNote = res.errors.length ? ` (${res.errors.length} FAA quer${res.errors.length === 1 ? 'y' : 'ies'} FAILED — partial)` : '';
             console.log(`${TAG} airspace check: ${res.violations.length} violation(s), `
                 + `${res.inventory.airports.length} airport(s), ${res.inventory.obstacles.length} obstacle(s)${errNote}`);
@@ -3985,7 +4142,8 @@
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
                 { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
-                { id: 'sua', label: 'Check · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
+                { id: 'sua', label: 'Info · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
+                { id: 'translines', label: 'Info · HIFLD transmission lines overlay', type: 'boolean', default: AIR_ENABLE_DEFAULTS.translines },
                 { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },
                 { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
                 { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },

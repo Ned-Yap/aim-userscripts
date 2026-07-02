@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Airspace Checker round 3 — Asset Inspector v4.153 (dev/latest)
+
+Five upgrades: (1) **Every distance now names the entity** — "TOWER 300 ft AGL is 728 ft from FP \"flight_path_2\" seg #154" instead of "from the nearest site entity". (2) **Map highlights while the report is open** — every inventory item gets a marker (red = violation, cyan dots = obstacles, green rings = airports, orange dashed = transmission lines), cleared when the panel closes; clicking a row now drops a **pulsing yellow ring** at the target so you can find it on a busy map. (3) **LAANC grid overlay** — nearby LAANC grids draw as colored rectangles (red 0 ft → green 400 ft) with ceiling labels. (4) **HIFLD transmission lines** — federal high-voltage line geometry drawn orange-dashed with voltage + owner + distance per line (e.g. "345 kV — ONCOR — 84 ft from Ast \"ARICK D 1\""); independent cross-check of our shielding KMLs. (5) **Special Use / MOA airspace demoted to informational** (we never fly above 400 ft) — the one exception still flagged: sitting INSIDE a surface Prohibited/Restricted area, which bans UAS at all altitudes.
+
+---
+
 ## 2026-07-02 — 📍 Create GMs at flagged obstacles — Asset Inspector v4.152 (dev/latest)
 
 When the Airspace Check flags FAA obstacles, a **📍 Create GMs** button appears in the panel: preview list → confirm → creates a real General Marker at each flagged obstacle via the site-setup API (create-only, never edits existing entities). Tower-family obstacles (tower / T-L / windmill / stack / pole) get marker type **tower** — so they immediately feed the SOP Tower-standoff check — others get **hazard**; `marker_height` carries the FAA height. Names are `FAA Tower 300ft` style, auto-suffixed `-2`/`-3` for uniqueness (Percepto rejects duplicate names and doesn't allow parentheses). Skips any obstacle that already has a GM within 150 ft. Reload the page after creating to see them (Percepto renders from its own state).
