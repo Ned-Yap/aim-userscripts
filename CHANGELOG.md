@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Airspace overlay polish — Asset Inspector v4.154 (dev/latest)
+
+From live feedback: **every LAANC grid now shows its ceiling label** (400s included — no label no longer means "unknown"); **hovering any highlight marker identifies it** (obstacle dots show type + height + lit + distance-from-entity, airport rings show name/type/distance, transmission lines show voltage + owner); **clicking a transmission-line row now jumps to the line's nearest-to-site point** instead of mid-path out in open country.
+
+---
+
 ## 2026-07-02 — Airspace Checker round 3 — Asset Inspector v4.153 (dev/latest)
 
 Five upgrades: (1) **Every distance now names the entity** — "TOWER 300 ft AGL is 728 ft from FP \"flight_path_2\" seg #154" instead of "from the nearest site entity". (2) **Map highlights while the report is open** — every inventory item gets a marker (red = violation, cyan dots = obstacles, green rings = airports, orange dashed = transmission lines), cleared when the panel closes; clicking a row now drops a **pulsing yellow ring** at the target so you can find it on a busy map. (3) **LAANC grid overlay** — nearby LAANC grids draw as colored rectangles (red 0 ft → green 400 ft) with ceiling labels. (4) **HIFLD transmission lines** — federal high-voltage line geometry drawn orange-dashed with voltage + owner + distance per line (e.g. "345 kV — ONCOR — 84 ft from Ast \"ARICK D 1\""); independent cross-check of our shielding KMLs. (5) **Special Use / MOA airspace demoted to informational** (we never fly above 400 ft) — the one exception still flagged: sitting INSIDE a surface Prohibited/Restricted area, which bans UAS at all altitudes.

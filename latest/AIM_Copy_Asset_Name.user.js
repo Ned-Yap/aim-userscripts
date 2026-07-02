@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.153
+// @version      4.154
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -49,7 +49,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.153';
+    const SCRIPT_VERSION = '4.154';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2546,18 +2546,18 @@
                 if (!paths.length) return;
                 // Min distance: line vertices → nearest site point, with a
                 // cheap centroid prefilter per vertex.
-                let best = Infinity, bestSrc = null;
+                let best = Infinity, bestSrc = null, bestPt = null;
                 paths.forEach(pth => pth.forEach(([plat, plng]) => {
                     const dc = approxMeters(clat, clng, plat, plng);
                     if (dc - siteRadM > best) return;
                     const near = airMinToSite(plat, plng, sitePts);
-                    if (near.d < best) { best = near.d; bestSrc = near.pt && near.pt.src; }
+                    if (near.d < best) { best = near.d; bestSrc = near.pt && near.pt.src; bestPt = [plat, plng]; }
                 }));
                 const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
                 inventory.translines.push({
                     volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
                     distFt: Math.round(best * M_TO_FT), distMi: best / MI_TO_M,
-                    src: bestSrc, paths,
+                    src: bestSrc, nearPt: bestPt, paths,
                 });
             });
             inventory.translines.sort((x, y) => x.distFt - y.distFt);
@@ -2583,40 +2583,47 @@
         if (!map || !L) { console.warn(`${TAG} airspace highlights: no map/L reachable`); return; }
         airClearMapHighlights();
         const add = (mk) => { try { mk.addTo(map); airMapLayers.push(mk); } catch (e) {} };
+        // Hover tooltips need interactive layers; only enable when this
+        // Leaflet build ships Tooltip (guards against a stripped bundle).
+        const canTip = !!(L.Tooltip && L.CircleMarker && L.CircleMarker.prototype.bindTooltip);
+        const tip = (mk, html) => { if (canTip) { try { mk.bindTooltip(html, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} } return mk; };
         try {
-            // LAANC grids first (underneath everything else).
+            // LAANC grids first (underneath everything else). Every grid gets
+            // its ceiling label — 400s included, so "no label" never reads as
+            // "unknown".
             (res.laancGrids || []).forEach(g => {
                 add(L.polygon(g.ring, { color: g.color, weight: 1, opacity: 0.7, fillColor: g.color, fillOpacity: g.overSite ? 0.18 : 0.08, interactive: false }));
-                if (g.ceiling < 400) {
-                    add(L.marker(g.center, {
-                        interactive: false, keyboard: false,
-                        icon: L.divIcon({ className: '', iconSize: [40, 14], iconAnchor: [20, 7],
-                            html: `<div style="color:${g.color};font:bold 11px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;">${g.ceiling}</div>` }),
-                    }));
-                }
+                add(L.marker(g.center, {
+                    interactive: false, keyboard: false,
+                    icon: L.divIcon({ className: '', iconSize: [40, 14], iconAnchor: [20, 7],
+                        html: `<div style="color:${g.color};font:bold 11px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;">${g.ceiling}</div>` }),
+                }));
             });
             // HIFLD transmission lines — orange dashed, distinct from KML styling.
             (res.inventory.translines || []).forEach(t => {
-                t.paths.forEach(pth => add(L.polyline(pth, { color: '#ff9a3d', weight: 3, dashArray: '7,7', opacity: 0.85, interactive: false })));
+                const html = `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''}<br>HIFLD federal transmission line`;
+                t.paths.forEach(pth => add(tip(L.polyline(pth, { color: '#ff9a3d', weight: 3, dashArray: '7,7', opacity: 0.85, interactive: canTip }), html)));
             });
-            // Obstacles — dots (violations bigger + red).
+            // Obstacles — dots (violations bigger + red). Hover for details.
             (res.inventory.obstacles || []).forEach(o => {
                 if (!isFinite(o.lat)) return;
-                add(L.circleMarker([o.lat, o.lng], {
+                add(tip(L.circleMarker([o.lat, o.lng], {
                     radius: o.hit ? 9 : 5, color: o.hit ? '#ff5555' : '#7adfe6', weight: 2,
-                    fillColor: o.hit ? '#5a0f0f' : '#0a2730', fillOpacity: 0.85, interactive: false,
-                }));
+                    fillColor: o.hit ? '#5a0f0f' : '#0a2730', fillOpacity: 0.85, interactive: canTip,
+                }), `<strong>FAA ${airEsc(o.type)}</strong> — ${o.agl != null ? `${o.agl} ft AGL` : 'height ?'}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'}<br>${o.distFt < 100 ? 'on site' : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft` : `${o.distMi.toFixed(1)} mi`}${o.src ? ` from ${airEsc(o.src)}` : ''}`));
             });
-            // Airports / stadiums — rings.
+            // Airports / stadiums — rings. Hover for name + distance.
             (res.inventory.airports || []).forEach(a => {
                 if (!isFinite(a.lat)) return;
-                add(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: false }));
+                add(tip(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
+                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}`));
             });
             (res.inventory.stadiums || []).forEach(s => {
                 if (!isFinite(s.lat)) return;
-                add(L.circleMarker([s.lat, s.lng], { radius: 13, color: s.hit ? '#ffb020' : '#5fff5f', weight: 3, fillColor: s.hit ? '#ffb020' : '#5fff5f', fillOpacity: 0.15, interactive: false }));
+                add(tip(L.circleMarker([s.lat, s.lng], { radius: 13, color: s.hit ? '#ffb020' : '#5fff5f', weight: 3, fillColor: s.hit ? '#ffb020' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
+                    `<strong>${airEsc(s.name)}</strong>${s.city ? `, ${airEsc(s.city)}` : ''}<br>Stadium — TFR ${s.distNm.toFixed(2)} NM`));
             });
-            console.log(`${TAG} airspace highlights: ${airMapLayers.length} layer(s) drawn`);
+            console.log(`${TAG} airspace highlights: ${airMapLayers.length} layer(s) drawn (tooltips ${canTip ? 'on' : 'unavailable'})`);
         } catch (e) {
             console.warn(`${TAG} airDrawMapHighlights threw:`, e);
         }
@@ -2708,7 +2715,9 @@
             section(`Transmission lines — HIFLD federal data (within ~5 mi · orange dashed on map)`);
             if (!inv.translines.length) line('ok', 'None within range');
             inv.translines.slice(0, 8).forEach(t => {
-                const rep = t.paths[0][Math.floor(t.paths[0].length / 2)];
+                // Jump to the line's nearest-to-site vertex — not mid-path,
+                // which can be miles out in open country.
+                const rep = t.nearPt || t.paths[0][Math.floor(t.paths[0].length / 2)];
                 line('info',
                     `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
                     { lat: rep[0], lng: rep[1], zoom: 15 });
