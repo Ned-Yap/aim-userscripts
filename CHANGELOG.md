@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — FAA chart vs hide-satellite fix — Map Styler v34.87 (dev/latest)
+
+Live probe caught a v34.86 bug: with **Hide satellite base tiles** on, the styler classified our own FAA chart overlay as a satellite layer (its `tiles.arcgis.com` URL matches the `/arcgis/` satellite pattern) and hid it immediately. The chart layer (and the console probe's layer) are now excluded from satellite matching.
+
+---
+
 ## 2026-07-02 — FAA Airspace Charts overlay — Map Styler v34.86 (dev/latest)
 
 New **FAA Airspace Charts** section in the Control Panel (Map Styler): toggle a translucent **VFR Sectional** (or **Terminal Area**) chart over the map to see controlled airspace rings, towers, obstacles and airports right in AIM. Tiles come straight from the FAA's own public ArcGIS service, which the FAA updates on the official 56-day chart cycle — always current, nothing to maintain. Off by default (zero cost when unused); opacity slider; renders above the imagery but below all entities/overlays. Charts natively exist at zoom 8–12, so deep pad zoom shows an upscaled (soft) chart — expected for a 1:500,000 product.

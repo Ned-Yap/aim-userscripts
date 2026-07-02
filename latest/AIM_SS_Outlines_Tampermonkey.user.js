@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.86
+// @version      34.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -33,7 +33,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.86';
+    const SCRIPT_VERSION = '34.87';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1023,6 +1023,13 @@
     // when a heavy mission opens and zooms in. Driven by Perf Shield's
     // "Hide orthomosaic imagery" toggle (PERF_TOGGLE key 'hide-ortho').
     let perfHideOrtho = false;
+    // FAA chart overlay state — declared up here (not next to its functions
+    // further down) because applyMapBackgroundVisibility references
+    // _aimChartLayer and can run early; see the TDZ lesson in
+    // feedback_perf_shield_tdz_pattern.
+    let _aimChartLayer = null;      // live TileLayer we added
+    let _aimChartLayerKey = '';     // source key it was built for
+    let _aimChartLayerMap = null;   // map instance it was added to
     const _SAT_URL_PATTERNS = [
         /esri/i, /arcgis/i, /world_?imagery/i,
         /mapbox.*satellite/i, /tiles?\.virtualearth/i,
@@ -1047,6 +1054,12 @@
             map.eachLayer(layer => {
                 if (!layer || !layer._url || typeof layer._url !== 'string') return;
                 const url = layer._url;
+                // Never treat OUR FAA chart overlay as a satellite base —
+                // its tiles.arcgis.com URL matches /arcgis/i below, so
+                // hide-satellite would hide the chart the moment both are
+                // on (v34.86 bug, caught by the probe). Match on the FAA
+                // AIS org id so the console-probe layer is excluded too.
+                if (layer === _aimChartLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
                 // Diagnostic: print every unique tile layer URL once. Helps
                 // identify Percepto's actual satellite provider when our
                 // built-in patterns don't match. Always logs (not just when
@@ -1272,9 +1285,7 @@
             minNativeZoom: 10, maxNativeZoom: 12,  // verified: 404 outside 10–12; coverage = Class B areas only
         },
     };
-    let _aimChartLayer = null;      // live TileLayer we added
-    let _aimChartLayerKey = '';     // source key it was built for
-    let _aimChartLayerMap = null;   // map instance it was added to
+    // (State lives up by the perf flags — see the TDZ note there.)
 
     // Build a TileLayer without assuming a global L: prefer the page's
     // Leaflet (unsafeWindow.L — same source the Map-init prototype patch
