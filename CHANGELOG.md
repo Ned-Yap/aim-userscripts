@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 📍 Create GMs at flagged obstacles — Asset Inspector v4.152 (dev/latest)
+
+When the Airspace Check flags FAA obstacles, a **📍 Create GMs** button appears in the panel: preview list → confirm → creates a real General Marker at each flagged obstacle via the site-setup API (create-only, never edits existing entities). Tower-family obstacles (tower / T-L / windmill / stack / pole) get marker type **tower** — so they immediately feed the SOP Tower-standoff check — others get **hazard**; `marker_height` carries the FAA height. Names are `FAA Tower 300ft` style, auto-suffixed `-2`/`-3` for uniqueness (Percepto rejects duplicate names and doesn't allow parentheses). Skips any obstacle that already has a GM within 150 ft. Reload the page after creating to see them (Percepto renders from its own state).
+
+---
+
 ## 2026-07-02 — Airspace Checker round 2 — Asset Inspector v4.151 (dev/latest)
 
 Three upgrades from live testing feedback: (1) **Click any airport, stadium, or obstacle row in the panel to jump the map there** (airports/stadiums zoom to context, obstacles zoom in close). (2) **General Markers no longer count as "the site"** in proximity checks — GMs mark external hazards (flares, towers), so measuring from them made every marked hazard self-flag; distances now measure from FFZs, flight paths, assets, base stations, and safe zones only (NFZs also excluded). (3) **Two new checks**: **Special Use / Prohibited airspace** (inside a surface Restricted/Prohibited area = red; inside a surface MOA/Alert area = warn with "check activity times"; overhead MOAs noted with floors) and **Stadium TFRs** (the standing 3 NM / 3,000 ft TFR during major events).

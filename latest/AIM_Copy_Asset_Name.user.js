@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.151
+// @version      4.152
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -48,7 +48,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.151';
+    const SCRIPT_VERSION = '4.152';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2589,6 +2589,7 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
+                ${(inv.obstacles || []).some(o => o.hit) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -2596,6 +2597,7 @@
         // Delegated clicks (survive rebuilds, dodge Leaflet's capture).
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
+            if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
             if (e.target.closest('[data-air-copy]')) {
                 const text = airBuildReport(res, sid, siteName);
                 navigator.clipboard.writeText(text).then(
@@ -2683,6 +2685,141 @@
         postValidatorIssues(sid);
         closeAirspacePanel();
         showToast(sopLastIssues.length ? 'Cleared airspace issues (SOP issues kept).' : 'Cleared validator issues.');
+    }
+
+    // ---- 📍 Create GMs at flagged obstacles (preview → confirm → create).
+    // Turns each FLAGGED FAA obstacle into a real General Marker via the
+    // POST /map_objects/ create rails (create-only — never edits existing
+    // entities). Tower-family obstacles get general_marker_type 'tower' so
+    // they feed the SOP Tower-standoff check; everything else 'hazard'.
+    // marker_height carries the FAA height AGL (stored in meters like all
+    // Percepto values). Dedup: skips an obstacle if ANY existing GM sits
+    // within AIR_GM_DEDUP_FT of it. Names are server-unique ("-2"/"-3"
+    // suffixes — Percepto rejects duplicate names and only allows
+    // letters/numbers/space/_/- so "(2)" isn't possible).
+    const AIR_GM_DEDUP_FT = 150;
+    const AIR_GM_MODAL_ID = 'aim-airspace-gm-modal';
+    const AIR_TOWER_TYPES = /TOWER|T-L|POLE|WINDMILL|STACK|ANTENNA/i;
+    function airGmTitleType(type) {
+        const t = (type || '').trim();
+        if (/^T-L/i.test(t)) return 'T-L Tower';
+        return t.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+    }
+    function airBuildGmPlan(res, sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const existingGms = ents.filter(e => e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        const uniqueName = (base) => {
+            if (!usedNames.has(base)) { usedNames.add(base); return base; }
+            let i = 2, n;
+            do { n = `${base}-${i++}`; } while (usedNames.has(n));
+            usedNames.add(n);
+            return n;
+        };
+        const plan = { create: [], skipped: [] };
+        (res.inventory.obstacles || []).filter(o => o.hit).forEach(o => {
+            const nearGm = existingGms.find(g => approxMeters(o.lat, o.lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < AIR_GM_DEDUP_FT);
+            if (nearGm) {
+                plan.skipped.push({ o, reason: `existing GM "${nearGm.name}" within ${AIR_GM_DEDUP_FT} ft` });
+                return;
+            }
+            const name = uniqueName(genCleanName(`FAA ${airGmTitleType(o.type)} ${o.agl != null ? o.agl : '?'}ft`));
+            plan.create.push({
+                o, name,
+                markerType: AIR_TOWER_TYPES.test(o.type) ? 'tower' : 'hazard',
+                heightM: o.agl != null ? o.agl / M_TO_FT : 0,
+            });
+        });
+        return plan;
+    }
+    async function airCreateGms(plan, sid) {
+        const out = { created: 0, failed: 0, errors: [] };
+        const csrf = getCsrfToken();
+        if (!csrf) { out.errors.push('no csrftoken cookie — cannot authenticate'); return out; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} site cfg fetch failed:`, e); }
+        // Clone an existing GM's write body as the template when one exists
+        // (guarantees every field the server wants); else a minimal body.
+        const bucket = mapObjectsBySite[sid];
+        const tmplGm = bucket && bucket.entities && bucket.entities.find(e => e.type === 19 && Array.isArray(e.coords) && e.coords.length);
+        let tmplBody = null;
+        if (tmplGm) { try { tmplBody = buildWriteBody(tmplGm, siteCfg); } catch (e) {} }
+        for (const item of plan.create) {
+            let b;
+            if (tmplBody) b = JSON.parse(JSON.stringify(tmplBody));
+            else b = { type: 19, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, restrictions: [], arcs: [], is_unshielded: false };
+            delete b.id;
+            b.type = 19;
+            b.name = item.name;
+            b.site_id = sid;
+            b.points = [{ lat: item.o.lat, lng: item.o.lng }];
+            b.general_marker_type = item.markerType;
+            b.marker_height = Math.round(item.heightM * 100) / 100;
+            b.validated = false;
+            b.arcs = [];
+            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`;
+            b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                    body: JSON.stringify(b),
+                });
+                const txt = await r.text();
+                let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (r.status === 200 && json && json.map_objects) out.created++;
+                else { out.failed++; out.errors.push(`${item.name}: server ${r.status} ${(txt || '').slice(0, 120)}`); }
+            } catch (e) { out.failed++; out.errors.push(`${item.name}: POST threw ${e && e.message || e}`); }
+        }
+        return out;
+    }
+    function closeAirGmModal() {
+        const el = document.getElementById(AIR_GM_MODAL_ID);
+        if (el) el.remove();
+    }
+    function showAirGmModal(res, sid) {
+        closeAirGmModal();
+        const plan = airBuildGmPlan(res, sid);
+        if (!plan.create.length && !plan.skipped.length) { showToast('No flagged obstacles to mark'); return; }
+        const rows = plan.create.map(c =>
+            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft</div>`).join('')
+            + plan.skipped.map(s =>
+            `<div style="margin:3px 0;opacity:0.65;"><span style="color:#ffb020">－</span> ${airEsc(airGmTitleType(s.o.type))} ${s.o.agl != null ? `${s.o.agl} ft` : ''} — skipped: ${airEsc(s.reason)}</div>`).join('');
+        const wrap = document.createElement('div');
+        wrap.id = AIR_GM_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:120px;right:80px;width:430px;max-height:60vh;z-index:2147483001;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.55);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;border-bottom:1px solid rgba(122,223,230,0.25);color:#7adfe6;font-weight:700;">📍 Create GMs at flagged obstacles</div>
+            <div style="padding:8px 12px;overflow-y:auto;">
+                <div style="margin-bottom:6px;">This creates <strong>${plan.create.length}</strong> new General Marker${plan.create.length === 1 ? '' : 's'} on site ${airEsc(sid)} via the site-setup API (create-only — existing entities are never touched).</div>
+                ${rows}
+            </div>
+            <div style="padding:8px 12px;border-top:1px solid rgba(122,223,230,0.25);display:flex;gap:8px;justify-content:flex-end;">
+                <button data-air-gm-cancel style="background:none;border:1px solid rgba(223,233,240,0.4);color:#dfe9f0;border-radius:5px;padding:3px 12px;cursor:pointer;">Cancel</button>
+                <button data-air-gm-go ${plan.create.length ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);border:1px solid #5fff5f;color:#5fff5f;border-radius:5px;padding:3px 12px;cursor:pointer;">Create ${plan.create.length}</button>
+            </div>`;
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-air-gm-cancel]')) { closeAirGmModal(); return; }
+            const goBtn = e.target.closest('[data-air-gm-go]');
+            if (goBtn && plan.create.length) {
+                goBtn.disabled = true;
+                goBtn.textContent = 'Creating…';
+                const out = await airCreateGms(plan, sid);
+                closeAirGmModal();
+                if (out.errors.length) console.warn(`${TAG} create GMs errors:`, out.errors);
+                console.log(`${TAG} create GMs: ${out.created} created, ${out.failed} failed`);
+                if (out.created) delete mapObjectsBySite[sid];   // stale — refetch next use
+                showToast(out.failed
+                    ? `GMs: ${out.created} created, ${out.failed} FAILED — see console`
+                    : `GMs: ${out.created} created ✓ — reload the page to see them on the map`,
+                    out.failed ? 'rgba(255,96,96,0.55)' : undefined);
+            }
+        });
+        document.body.appendChild(wrap);
     }
 
     function findEntityAtLatLng(lat, lng, siteID) {
