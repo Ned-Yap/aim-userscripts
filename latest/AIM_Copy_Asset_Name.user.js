@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.148
+// @version      4.149
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -17,6 +17,7 @@
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
 // @connect      api.opentopodata.org
+// @connect      services6.arcgis.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -47,7 +48,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.148';
+    const SCRIPT_VERSION = '4.149';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -124,6 +125,52 @@
     }
     let sopThresholds = loadSopThresholds();
     let sopEnabled = loadSopEnabled();
+
+    // ---- Airspace Checker (v4.149) — external-world safety checks against
+    // the FAA AIS public ArcGIS FeatureServers (no auth, no key; see memory
+    // reference-faa-airspace-data). Own Control Panel card, same
+    // AIM_VALIDATOR_ISSUES handoff to AIM Issues as the SOP validators. ----
+    const AIRSPACE_SCRIPT_ID = 'aim-airspace-checker';
+    const AIR_THRESH_KEY = 'aim-airspace-thresholds';
+    const AIR_ENABLE_KEY = 'aim-airspace-enabled';
+    const AIR_FAA_BASE = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services';
+    const NM_TO_M = 1852;
+    const MI_TO_M = 1609.344;
+    const AIR_THRESH_DEFAULTS = {
+        stripNm: 3,           // manned strip / helipad standoff (nautical miles)
+        obstacleFt: 2640,     // obstacle proximity to any site entity (ft; 0.5 mi)
+        obstacleMinAglFt: 50, // ignore obstacles shorter than this
+        maxOpAglFt: 210,      // our max operating AGL — LAANC ceilings below this flag
+        inventoryMi: 15,      // inventory radius for airports/airspace listing
+    };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true };
+    let airMasterEnabled = true;
+    function loadAirThresholds() {
+        const out = Object.assign({}, AIR_THRESH_DEFAULTS);
+        try {
+            const raw = elevGmGet(AIR_THRESH_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in AIR_THRESH_DEFAULTS) if (typeof o[k] === 'number') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadAirThresholds threw:`, e); }
+        return out;
+    }
+    function saveAirThresholds() {
+        try { elevGmSet(AIR_THRESH_KEY, JSON.stringify(airThresholds)); }
+        catch (e) { console.warn(`${TAG} saveAirThresholds threw:`, e); }
+    }
+    function loadAirEnabled() {
+        const out = Object.assign({}, AIR_ENABLE_DEFAULTS);
+        try {
+            const raw = elevGmGet(AIR_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in AIR_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadAirEnabled threw:`, e); }
+        return out;
+    }
+    function saveAirEnabled() {
+        try { elevGmSet(AIR_ENABLE_KEY, JSON.stringify(airEnabled)); }
+        catch (e) { console.warn(`${TAG} saveAirEnabled threw:`, e); }
+    }
+    let airThresholds = loadAirThresholds();
+    let airEnabled = loadAirEnabled();
 
     // ============================================================
     // Leaflet map ref (read from Map Styler's __aim_map__ patch when
@@ -2026,6 +2073,26 @@
         catch (e) { console.warn(`${TAG} validator channel unavailable:`, e); }
         return sopValidatorChannel;
     }
+    // AIM Issues REPLACES every validator issue on each VALIDATOR_ISSUES
+    // message (re-runs replace, never accumulate) — and BOTH the SOP
+    // validators and the Airspace Checker feed that channel. So each
+    // sender stashes its own last batch here and we always post the
+    // UNION; clearing one side keeps the other side's issues drawn.
+    let sopLastIssues = [], sopIssuesSite = null;
+    let airLastIssues = [], airIssuesSite = null;
+    function postValidatorIssues(sid) {
+        const ch = ensureValidatorChannel();
+        if (!ch) return false;
+        // A batch stashed for a different site is stale — drop it rather
+        // than re-drawing it onto the site the user navigated to.
+        if (sopIssuesSite !== sid) { sopLastIssues = []; sopIssuesSite = sid; }
+        if (airIssuesSite !== sid) { airLastIssues = []; airIssuesSite = sid; }
+        const all = sopLastIssues.concat(airLastIssues);
+        if (all.length) ch.postMessage({ type: 'VALIDATOR_ISSUES', siteID: sid, issues: all });
+        else ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
+        return true;
+    }
+
     function drawSopIssues() {
         const sid = getCurrentSiteID();
         if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
@@ -2062,12 +2129,9 @@
                 showToast('Validating site…');
             };
             const violations = await runSopValidators(sid, onProgress);
-            const ch = ensureValidatorChannel();
-            if (!ch) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
-            ch.postMessage({
-                type: 'VALIDATOR_ISSUES', siteID: sid,
-                issues: violations.map(v => ({ shape: 'polygon', polygon: v.polygon, note: v.note })),
-            });
+            sopIssuesSite = sid;
+            sopLastIssues = violations.map(v => ({ shape: 'polygon', polygon: v.polygon, note: v.note }));
+            if (!postValidatorIssues(sid)) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
             const byCheck = {};
             violations.forEach(v => { byCheck[v.check] = (byCheck[v.check] || 0) + 1; });
             const breakdown = Object.keys(byCheck).map(k => `${k} ${byCheck[k]}`).join(', ') || 'none';
@@ -2080,9 +2144,413 @@
     }
     function clearSopIssues() {
         const sid = getCurrentSiteID();
-        const ch = ensureValidatorChannel();
-        if (ch) ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
-        showToast('Cleared validator issues.');
+        sopIssuesSite = sid;
+        sopLastIssues = [];
+        postValidatorIssues(sid);
+        showToast(airLastIssues.length ? 'Cleared SOP issues (airspace issues kept).' : 'Cleared validator issues.');
+    }
+
+    // ============================================================
+    // AIRSPACE CHECKER — is the site safe relative to the OUTSIDE
+    // world? Queries the FAA AIS ArcGIS FeatureServers by geometry:
+    //   Class_Airspace         → inside / near surface controlled airspace
+    //   US_Airport             → manned strips + helipads within standoff
+    //   Digital_Obstacle_File  → towers / turbines near site entities
+    //   FAA_UAS_FacilityMap    → LAANC grid ceilings over the site
+    // Violations go to AIM Issues as ephemeral Validator issues (union
+    // with the SOP validators' batch — see postValidatorIssues); the
+    // full inventory (violating or not) renders in a floating panel.
+    // ============================================================
+    const AIRSPACE_PANEL_ID = 'aim-airspace-panel';
+    const AIR_KIND = { AD: 'Airport', HP: 'Heliport', SP: 'Seaplane Base', GL: 'Gliderport', UL: 'Ultralight', BP: 'Balloonport' };
+    const AIR_COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    function airEsc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function airBearing(fromLat, fromLng, toLat, toLng) {
+        const φ1 = fromLat * Math.PI / 180, φ2 = toLat * Math.PI / 180;
+        const Δλ = (toLng - fromLng) * Math.PI / 180;
+        const y = Math.sin(Δλ) * Math.cos(φ2);
+        const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+        const deg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        return AIR_COMPASS[Math.round(deg / 22.5) % 16];
+    }
+    // One FAA layer query via GM_xmlhttpRequest (cross-origin; @connect
+    // services6.arcgis.com). Throws on HTTP / ArcGIS-level errors so the
+    // caller can surface the failure — never silently returns partial data.
+    async function airQueryFAA(service, params) {
+        const qs = new URLSearchParams(Object.assign({ f: 'json' }, params)).toString();
+        const url = `${AIR_FAA_BASE}/${service}/FeatureServer/0/query?${qs}`;
+        const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
+        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+        let d;
+        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+        if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
+        return d;
+    }
+    function airPointQuery(service, lat, lng, meters, outFields, returnGeometry) {
+        return airQueryFAA(service, {
+            geometry: `${lng},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+            distance: String(Math.round(meters)), units: 'esriSRUnit_Meter',
+            spatialRel: 'esriSpatialRelIntersects', outFields,
+            returnGeometry: returnGeometry ? 'true' : 'false', outSR: '4326',
+        });
+    }
+    // Every vertex of every site entity — the "site" for distance purposes,
+    // so a strip 3 NM from the site's far edge flags even when the centroid
+    // is further out.
+    function airCollectSitePoints(ents) {
+        const pts = [];
+        (ents || []).forEach(e => {
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+                e.arcs.forEach(a => {
+                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng });
+                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng });
+                });
+            } else {
+                const cs = entityCoords(e);
+                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng }); });
+            }
+        });
+        return pts;
+    }
+    function airMinToSite(lat, lng, sitePts) {
+        let best = Infinity, bestPt = null;
+        for (const p of sitePts) {
+            const d = approxMeters(lat, lng, p.lat, p.lng);
+            if (d < best) { best = d; bestPt = p; }
+        }
+        return { d: best, pt: bestPt };
+    }
+
+    // Run the enabled airspace checks. Returns { violations, inventory,
+    // errors, meta }. violations entries are channel-ready ({shape,
+    // polygon, note}) plus severity for the panel.
+    async function runAirspaceCheck(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const sitePts = airCollectSitePoints(ents);
+        if (!sitePts.length) return { fatal: 'No site geometry found — open a site with entities first.' };
+        let clat = 0, clng = 0;
+        sitePts.forEach(p => { clat += p.lat; clng += p.lng; });
+        clat /= sitePts.length; clng /= sitePts.length;
+        let siteRadM = 0;
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        sitePts.forEach(p => {
+            const d = approxMeters(clat, clng, p.lat, p.lng);
+            if (d > siteRadM) siteRadM = d;
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        });
+        const th = airThresholds;
+        const errors = [];
+        const grab = (label, promise) => promise.catch(e => {
+            errors.push(`${label}: ${e && e.message ? e.message : e}`);
+            return null;
+        });
+        const invM = Math.max(th.inventoryMi * MI_TO_M, th.stripNm * NM_TO_M) + siteRadM;
+        const obsInvM = Math.max(5 * MI_TO_M, th.obstacleFt / M_TO_FT) + siteRadM;
+        const [apRes, obRes, asRes, laRes] = await Promise.all([
+            airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
+                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
+            airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
+                'Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
+            airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
+                'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT', true)) : Promise.resolve(null),
+            airEnabled.laanc ? grab('LAANC grids', airQueryFAA('FAA_UAS_FacilityMap_Data', {
+                geometry: `${minLng - 0.003},${minLat - 0.003},${maxLng + 0.003},${maxLat + 0.003}`,
+                geometryType: 'esriGeometryEnvelope', inSR: '4326',
+                spatialRel: 'esriSpatialRelIntersects',
+                outFields: 'CEILING,UNIT,APT1_NAME,APT1_FAAID', returnGeometry: 'false',
+            })) : Promise.resolve(null),
+        ]);
+        const violations = [];
+        const boxIssue = (lat, lng, note, severity) => violations.push({
+            shape: 'polygon', polygon: boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]), note, severity,
+        });
+        const inventory = { airports: [], obstacles: [], airspace: [], laanc: null, obstacleTruncated: false };
+
+        // ---- 1. Controlled airspace (inside surface class = red; surface
+        //         boundary within the strip standoff = warn; overhead shelf
+        //         = inventory note only — shelf floors sit far above us). ----
+        if (asRes && Array.isArray(asRes.features)) {
+            // Containment sampled over site vertices (capped — a polygon that
+            // contains none of ~300 spread vertices doesn't contain the site).
+            const step = Math.max(1, Math.ceil(sitePts.length / 300));
+            const samples = sitePts.filter((_, i) => i % step === 0);
+            const groups = new Map();
+            asRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!a.NAME || a.CLASS === 'A') return;   // Class A starts at FL180 — irrelevant
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                let g = groups.get(a.NAME);
+                if (!g) { g = { name: a.NAME, cls: a.CLASS || '?', insideFloor: null, surface: false, surfaceDistM: Infinity, minFloor: Infinity }; groups.set(a.NAME, g); }
+                const floor = typeof a.LOWER_VAL === 'number' ? a.LOWER_VAL : null;
+                if (floor != null && floor < g.minFloor) g.minFloor = floor;
+                const isSurface = floor != null && floor <= 0;
+                if (isSurface) g.surface = true;
+                for (const ring of rings) {
+                    const inside = samples.some(p => pointInPolygon(p.lat, p.lng, ring));
+                    if (inside && floor != null && (g.insideFloor == null || floor < g.insideFloor)) g.insideFloor = floor;
+                    if (isSurface) {
+                        const d = pointToPolygonMeters(clat, clng, ring);
+                        if (d < g.surfaceDistM) g.surfaceDistM = d;
+                    }
+                }
+            });
+            groups.forEach(g => {
+                const distNm = isFinite(g.surfaceDistM) ? Math.max(0, g.surfaceDistM - siteRadM) / NM_TO_M : null;
+                if (g.insideFloor != null && g.insideFloor <= 0) {
+                    boxIssue(clat, clng,
+                        `violation: site is INSIDE ${g.name} (surface Class ${g.cls}) — controlled airspace, authorization/LAANC required`, 'high');
+                    inventory.airspace.push({ sev: 'high', text: `INSIDE ${g.name} — surface Class ${g.cls}` });
+                } else if (g.surface && distNm != null && +distNm.toFixed(2) < th.stripNm) {
+                    boxIssue(clat, clng,
+                        `violation: surface Class ${g.cls} airspace "${g.name}" is ~${distNm.toFixed(2)} NM from the site (standoff ${th.stripNm} NM)`, 'warn');
+                    inventory.airspace.push({ sev: 'warn', text: `${g.name} (surface Class ${g.cls}) ~${distNm.toFixed(2)} NM away` });
+                } else if (g.insideFloor != null && g.insideFloor > 0) {
+                    inventory.airspace.push({ sev: 'info', text: `Under ${g.name} shelf — Class ${g.cls} floor ${g.insideFloor.toLocaleString()} ft (no surface conflict)` });
+                } else if (g.surface && distNm != null && distNm < th.inventoryMi * MI_TO_M / NM_TO_M) {
+                    inventory.airspace.push({ sev: 'ok', text: `${g.name} (surface Class ${g.cls}) ~${distNm.toFixed(1)} NM away` });
+                }
+            });
+            if (!inventory.airspace.length) inventory.airspace.push({ sev: 'ok', text: `No controlled airspace within ${th.inventoryMi} mi (Class G / E-above only)` });
+        }
+
+        // ---- 2. Manned strips / helipads within the standoff. Distance is
+        //         to the NEAREST site entity vertex, not the centroid. ----
+        if (apRes && Array.isArray(apRes.features)) {
+            apRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                const lat = f.geometry.y, lng = f.geometry.x;
+                const near = airMinToSite(lat, lng, sitePts);
+                const distNm = near.d / NM_TO_M;
+                const distMi = near.d / MI_TO_M;
+                const kind = AIR_KIND[(a.TYPE_CODE || '').trim()] || (a.TYPE_CODE || 'Facility');
+                const priv = a.PRIVATEUSE === 1 ? 'private' : 'public';
+                const brg = airBearing(clat, clng, lat, lng);
+                const entry = {
+                    name: (a.NAME || a.IDENT || '?').trim(), ident: (a.IDENT || '').trim(),
+                    kind, priv, distMi, distNm, brg,
+                    hit: +distNm.toFixed(2) < th.stripNm,   // flag on the displayed value
+                };
+                inventory.airports.push(entry);
+                if (entry.hit) {
+                    boxIssue(near.pt.lat, near.pt.lng,
+                        `violation: ${kind.toLowerCase()} "${entry.name}"${entry.ident ? ` (${entry.ident})` : ''} is ${distNm.toFixed(2)} NM ${brg} of the site — inside the ${th.stripNm} NM manned-aircraft standoff (${priv})`, 'high');
+                }
+            });
+            inventory.airports.sort((x, y) => x.distNm - y.distNm);
+        }
+
+        // ---- 3. FAA obstacles near site entities (towers, turbines…). ----
+        if (obRes && Array.isArray(obRes.features)) {
+            if (obRes.exceededTransferLimit || obRes.features.length >= 2000) inventory.obstacleTruncated = true;
+            const threshM = th.obstacleFt / M_TO_FT;
+            obRes.features.forEach(f => {
+                const a = f.attributes || {};
+                // Lat_DD/Long_DD are STRINGS in the DOF service ('31.829789').
+                const oLat = Number(a.Lat_DD), oLng = Number(a.Long_DD);
+                if (!isFinite(oLat) || !isFinite(oLng) || (oLat === 0 && oLng === 0)) return;
+                const dc = approxMeters(clat, clng, oLat, oLng);
+                // bbox-style prefilter: only pay the exact nearest-vertex scan
+                // when the obstacle could plausibly be within the threshold.
+                const couldHit = dc - siteRadM <= threshM * 1.5;
+                const near = couldHit ? airMinToSite(oLat, oLng, sitePts) : { d: dc, pt: null };
+                const distFt = Math.round(near.d * M_TO_FT);
+                const agl = typeof a.AGL === 'number' ? a.AGL : null;
+                const type = (a.Type_Code || '?').trim();
+                const lit = (a.Lighting || '').trim();
+                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, hit: false };
+                if (couldHit && distFt < th.obstacleFt && agl != null && agl >= th.obstacleMinAglFt) {
+                    entry.hit = true;
+                    boxIssue(oLat, oLng,
+                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt} ft from the nearest site entity (threshold ${th.obstacleFt} ft)`, 'high');
+                }
+                inventory.obstacles.push(entry);
+            });
+            inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
+        }
+
+        // ---- 4. LAANC grid ceiling over the site. No grid over the site =
+        //         uncontrolled for LAANC purposes (400 ft Part-107 default). ----
+        if (laRes && Array.isArray(laRes.features)) {
+            if (!laRes.features.length) {
+                inventory.laanc = { sev: 'ok', text: 'Site is not in any LAANC facility grid (400 ft Part-107 default applies)' };
+            } else {
+                let worst = null;
+                laRes.features.forEach(f => {
+                    const a = f.attributes || {};
+                    if (typeof a.CEILING !== 'number') return;
+                    if (!worst || a.CEILING < worst.CEILING) worst = a;
+                });
+                if (worst) {
+                    const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
+                    if (worst.CEILING < th.maxOpAglFt) {
+                        boxIssue(clat, clng,
+                            `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
+                            worst.CEILING === 0 ? 'high' : 'warn');
+                        inventory.laanc = { sev: worst.CEILING === 0 ? 'high' : 'warn', text: `LAANC grid ceiling ${worst.CEILING} ft AGL over site (our max ${th.maxOpAglFt} ft) — ${apt}` };
+                    } else {
+                        inventory.laanc = { sev: 'ok', text: `LAANC grid over site: ceiling ${worst.CEILING} ft AGL (≥ our ${th.maxOpAglFt} ft) — ${apt}` };
+                    }
+                }
+            }
+        }
+
+        return { violations, inventory, errors, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
+    }
+
+    function closeAirspacePanel() {
+        const el = document.getElementById(AIRSPACE_PANEL_ID);
+        if (el) el.remove();
+    }
+
+    // Floating inventory panel — everything found, violations first.
+    function renderAirspacePanel(res, sid, siteName) {
+        closeAirspacePanel();
+        const inv = res.inventory;
+        const th = airThresholds;
+        const sevDot = (sev) => ({
+            high: '<span style="color:#ff5555">●</span>',
+            warn: '<span style="color:#ffb020">●</span>',
+            info: '<span style="color:#7adfe6">●</span>',
+            ok:   '<span style="color:#5fff5f">●</span>',
+        }[sev] || '');
+        const h = [];
+        const section = (title) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${title}</div>`);
+        const line = (sev, html) => h.push(`<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
+
+        const vioCount = res.violations.length;
+        h.push(`<div style="margin-bottom:4px;">${vioCount
+            ? `<span style="color:#ff5555;font-weight:700;">${vioCount} violation${vioCount === 1 ? '' : 's'}</span> — drawn as Validator issues (needs AIM Issues enabled)`
+            : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
+        if (res.errors && res.errors.length) {
+            res.errors.forEach(e => line('high', `<span style="color:#ff8080">FAA query failed — ${airEsc(e)} (results below are PARTIAL)</span>`));
+        }
+
+        if (airEnabled.airspace) {
+            section('Controlled airspace');
+            (inv.airspace || []).forEach(a => line(a.sev, airEsc(a.text)));
+        }
+        if (airEnabled.laanc && inv.laanc) {
+            section('LAANC ceiling');
+            line(inv.laanc.sev, airEsc(inv.laanc.text));
+        }
+        if (airEnabled.strips) {
+            section(`Airports &amp; helipads (within ${th.inventoryMi} mi · standoff ${th.stripNm} NM)`);
+            if (!inv.airports.length) line('ok', 'None within range');
+            inv.airports.slice(0, 25).forEach(a => line(a.hit ? 'high' : 'ok',
+                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+            if (inv.airports.length > 25) line('info', `…and ${inv.airports.length - 25} more`);
+        }
+        if (airEnabled.obstacles) {
+            const byType = {};
+            inv.obstacles.forEach(o => { byType[o.type] = (byType[o.type] || 0) + 1; });
+            const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none';
+            section(`FAA obstacles (${inv.obstacles.length}${inv.obstacleTruncated ? '+ (list truncated at 2000)' : ''} within ~5 mi)`);
+            line('info', summary);
+            inv.obstacles.filter(o => o.hit).forEach(o => line('high',
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${o.distFt.toLocaleString()} ft from site`));
+            inv.obstacles.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${o.distMi.toFixed(1)} mi`));
+        }
+
+        const wrap = document.createElement('div');
+        wrap.id = AIRSPACE_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:480px;max-height:72vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(122,223,230,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div data-air-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
+                <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
+                <span style="flex:1"></span>
+                <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${h.join('')}</div>`;
+        // Delegated clicks (survive rebuilds, dodge Leaflet's capture).
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
+            if (e.target.closest('[data-air-copy]')) {
+                const text = airBuildReport(res, sid, siteName);
+                navigator.clipboard.writeText(text).then(
+                    () => showToast('Airspace report copied'),
+                    () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+            }
+        });
+        // Minimal header drag.
+        const dragEl = () => wrap.querySelector('[data-air-drag]');
+        let drag = null;
+        dragEl().addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!drag) return;
+            wrap.style.left = `${e.clientX - drag.dx}px`;
+            wrap.style.top = `${e.clientY - drag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { drag = null; });
+        document.body.appendChild(wrap);
+    }
+
+    // Plain-text report (for Slack / notes). Mirrors the panel content.
+    function airBuildReport(res, sid, siteName) {
+        const inv = res.inventory;
+        const out = [`AIRSPACE CHECK — ${siteName || `site ${sid}`}`];
+        out.push(res.violations.length ? `${res.violations.length} VIOLATION(S):` : 'No violations.');
+        res.violations.forEach(v => out.push(`  🔴 ${v.note.replace(/^violation: /, '')}`));
+        (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
+        if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
+        if (airEnabled.strips) {
+            out.push(`Airports & helipads (nearest first):`);
+            inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+        }
+        if (airEnabled.obstacles) out.push(`FAA obstacles within ~5 mi: ${inv.obstacles.length}${inv.obstacleTruncated ? '+' : ''} (nearest ${inv.obstacles.length ? `${inv.obstacles[0].type} at ${inv.obstacles[0].distFt.toLocaleString()} ft` : '—'})`);
+        return out.join('\n');
+    }
+
+    function airspaceRun() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        showToast('Airspace check: querying FAA data…');
+        Promise.resolve(fetchMapObjects(sid, false)).then(async () => {
+            const res = await runAirspaceCheck(sid);
+            if (res.fatal) { showToast(res.fatal, 'rgba(255,96,96,0.55)'); return; }
+            airIssuesSite = sid;
+            airLastIssues = res.violations.map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            postValidatorIssues(sid);
+            renderAirspacePanel(res, sid, getCurrentSiteName());
+            const errNote = res.errors.length ? ` (${res.errors.length} FAA quer${res.errors.length === 1 ? 'y' : 'ies'} FAILED — partial)` : '';
+            console.log(`${TAG} airspace check: ${res.violations.length} violation(s), `
+                + `${res.inventory.airports.length} airport(s), ${res.inventory.obstacles.length} obstacle(s)${errNote}`);
+            showToast(res.violations.length
+                ? `Airspace: ${res.violations.length} violation(s) drawn${errNote}`
+                : `Airspace: no violations ✓${errNote}`,
+                res.violations.length || res.errors.length ? 'rgba(255,96,96,0.55)' : undefined);
+        }).catch(e => {
+            console.warn(`${TAG} airspaceRun threw:`, e);
+            showToast('Airspace check failed — see console', 'rgba(255,96,96,0.55)');
+        });
+    }
+    function airspaceClear() {
+        const sid = getCurrentSiteID();
+        airIssuesSite = sid;
+        airLastIssues = [];
+        postValidatorIssues(sid);
+        closeAirspacePanel();
+        showToast(sopLastIssues.length ? 'Cleared airspace issues (SOP issues kept).' : 'Cleared validator issues.');
     }
 
     function findEntityAtLatLng(lat, lng, siteID) {
@@ -3115,7 +3583,42 @@
                     clearSopIssues();
                 }
             }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === AIRSPACE_SCRIPT_ID) {
+                handleAirspaceToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === AIRSPACE_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'air-run') {
+                    if (!airMasterEnabled) { showToast('Airspace Checker is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    airspaceRun();
+                } else if (msg.actionId === 'air-clear') {
+                    airspaceClear();
+                }
+            }
         };
+    }
+    // Idempotent — the panel runs in TOP + IFRAME so duplicate SET_TOGGLE
+    // is normal (same contract as handleSopToggle below).
+    function handleAirspaceToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'air-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === airMasterEnabled) return;
+            airMasterEnabled = v;
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(airEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === airEnabled[id]) return;
+            airEnabled[id] = v;
+            saveAirEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(airThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === airThresholds[id]) return;
+            airThresholds[id] = msg.value;
+            saveAirThresholds();
+        }
     }
     // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
     // the panel runs in TOP + IFRAME so duplicate SET_TOGGLE is normal.
@@ -3192,6 +3695,29 @@
                 { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
                 { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
                 { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.149: Airspace Checker — its own card under the same SOP
+        // Validators group. External-world checks (FAA data) vs the SOP
+        // card's internal-geometry checks.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: AIRSPACE_SCRIPT_ID, name: 'Airspace Checker',
+            description: 'Checks the site against FAA data: controlled airspace, manned strips/helipads within the standoff, obstacles (towers/turbines), and LAANC grid ceilings. Violations are drawn as Validator issues; the full inventory opens in a panel.',
+            version: SCRIPT_VERSION, group: 'SOP Validators', scope: 'site-setup', priority: 20,
+            toggles: [
+                { id: 'air-master', label: 'Enable Airspace Checker', type: 'boolean', default: true, master: true },
+                { id: 'inventoryMi', label: 'Inventory radius', type: 'number', min: 5, max: 50, step: 1, default: AIR_THRESH_DEFAULTS.inventoryMi, unit: 'mi' },
+                { id: 'airspace', label: 'Check · Controlled airspace (inside / near)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.airspace },
+                { id: 'strips', label: 'Check · Manned strips & helipads standoff', type: 'boolean', default: AIR_ENABLE_DEFAULTS.strips },
+                { id: 'stripNm', label: 'Manned-aircraft standoff', type: 'number', min: 0.5, max: 20, step: 0.5, default: AIR_THRESH_DEFAULTS.stripNm, unit: 'NM' },
+                { id: 'obstacles', label: 'Check · FAA obstacles (towers / turbines)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.obstacles },
+                { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
+                { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
+                { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
+                { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
+                { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
+                { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
             ],
             hotkeys: [],
         });
