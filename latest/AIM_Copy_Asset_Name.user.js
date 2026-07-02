@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.150
+// @version      4.151
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -48,7 +48,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.150';
+    const SCRIPT_VERSION = '4.151';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -142,8 +142,9 @@
         obstacleMinAglFt: 50, // ignore obstacles shorter than this
         maxOpAglFt: 210,      // our max operating AGL — LAANC ceilings below this flag
         inventoryMi: 15,      // inventory radius for airports/airspace listing
+        stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
     };
-    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true };
     let airMasterEnabled = true;
     function loadAirThresholds() {
         const out = Object.assign({}, AIR_THRESH_DEFAULTS);
@@ -2196,12 +2197,18 @@
             returnGeometry: returnGeometry ? 'true' : 'false', outSR: '4326',
         });
     }
-    // Every vertex of every site entity — the "site" for distance purposes,
-    // so a strip 3 NM from the site's far edge flags even when the centroid
-    // is further out.
+    // Every vertex of every FLYABLE site entity — the "site" for distance
+    // purposes, so a strip 3 NM from the site's far edge flags even when
+    // the centroid is further out. Only geometry the drone actually
+    // occupies counts: FFZ / FP / Asset / Base Station / Safe Zone.
+    // General Markers are EXCLUDED — coworkers drop GMs on external
+    // hazards (flares, towers), and counting those as "the site" would
+    // make every marked hazard self-flag. NFZs are excluded too (no-fly).
+    const AIR_SITE_TYPES = new Set([3, 8, 15, 16, 98]);
     function airCollectSitePoints(ents) {
         const pts = [];
         (ents || []).forEach(e => {
+            if (!AIR_SITE_TYPES.has(e.type)) return;
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
                 e.arcs.forEach(a => {
                     if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng });
@@ -2264,11 +2271,24 @@
                 outFields: 'CEILING,UNIT,APT1_NAME,APT1_FAAID', returnGeometry: 'false',
             })) : Promise.resolve(null),
         ]);
+        // SUA + Prohibited share a schema; Stadiums is a point layer whose
+        // LATITUDE/LONGITUDE attributes are DMS STRINGS — read the returned
+        // geometry instead. (LOWER_VAL is a string here too, unlike
+        // Class_Airspace — Number() everything.)
+        const [suaRes, prohibRes, stadRes] = await Promise.all([
+            airEnabled.sua ? grab('Special Use Airspace', airPointQuery('Special_Use_Airspace', clat, clng, invM,
+                'NAME,TYPE_CODE,LOWER_VAL,LOWER_CODE,UPPER_VAL,CONT_AGENT', true)) : Promise.resolve(null),
+            airEnabled.sua ? grab('Prohibited Areas', airPointQuery('Prohibited_Areas', clat, clng, invM,
+                'NAME,TYPE_CODE,LOWER_VAL,LOWER_CODE,UPPER_VAL,CONT_AGENT', true)) : Promise.resolve(null),
+            airEnabled.stadiums ? grab('Stadiums', airPointQuery('Stadiums', clat, clng,
+                Math.max(th.inventoryMi * MI_TO_M, th.stadiumNm * NM_TO_M) + siteRadM,
+                'NAME,CITY,STATE,STATUS_CODE', true)) : Promise.resolve(null),
+        ]);
         const violations = [];
         const boxIssue = (lat, lng, note, severity) => violations.push({
             shape: 'polygon', polygon: boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]), note, severity,
         });
-        const inventory = { airports: [], obstacles: [], airspace: [], laanc: null, obstacleTruncated: false };
+        const inventory = { airports: [], obstacles: [], airspace: [], sua: [], stadiums: [], laanc: null, obstacleTruncated: false };
 
         // ---- 1. Controlled airspace (inside surface class = red; surface
         //         boundary within the strip standoff = warn; overhead shelf
@@ -2335,7 +2355,7 @@
                 const brg = airBearing(clat, clng, lat, lng);
                 const entry = {
                     name: (a.NAME || a.IDENT || '?').trim(), ident: (a.IDENT || '').trim(),
-                    kind, priv, distMi, distNm, brg,
+                    kind, priv, distMi, distNm, brg, lat, lng,
                     hit: +distNm.toFixed(2) < th.stripNm,   // flag on the displayed value
                 };
                 inventory.airports.push(entry);
@@ -2374,6 +2394,82 @@
                 inventory.obstacles.push(entry);
             });
             inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
+        }
+
+        // ---- 3b. Special Use Airspace + Prohibited Areas. Restricted (R) /
+        //          Prohibited (P) reaching the surface are hard no-fly: red
+        //          if the site is inside, warn if within the standoff. MOA /
+        //          Alert / Warning areas are awareness-level (manned military
+        //          traffic): warn if inside at the surface, info otherwise. ----
+        const suaFeatures = [].concat(
+            (suaRes && suaRes.features) || [],
+            (prohibRes && prohibRes.features) || []);
+        if (airEnabled.sua && suaFeatures.length) {
+            const step = Math.max(1, Math.ceil(sitePts.length / 300));
+            const samples = sitePts.filter((_, i) => i % step === 0);
+            const hardTypes = new Set(['P', 'R']);   // prohibited / restricted
+            suaFeatures.forEach(f => {
+                const a = f.attributes || {};
+                if (!a.NAME) return;
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                const type = (a.TYPE_CODE || '?').trim();
+                const floor = Number(a.LOWER_VAL);   // STRING in this service
+                const floorCode = (a.LOWER_CODE || '').trim();
+                const surface = floorCode === 'SFC' || (isFinite(floor) && floor <= 0);
+                const hard = hardTypes.has(type);
+                let inside = false, distM = Infinity;
+                for (const ring of rings) {
+                    if (!inside && samples.some(p => pointInPolygon(p.lat, p.lng, ring))) inside = true;
+                    const d = pointToPolygonMeters(clat, clng, ring);
+                    if (d < distM) distM = d;
+                }
+                const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
+                const floorTxt = surface ? 'surface' : `floor ${isFinite(floor) ? floor.toLocaleString() : '?'} ft ${floorCode || ''}`.trim();
+                if (inside && surface && hard) {
+                    boxIssue(clat, clng, `violation: site is INSIDE ${a.NAME} (${type} — ${floorTxt}) — flight prohibited/restricted without authorization`, 'high');
+                    inventory.sua.push({ sev: 'high', text: `INSIDE ${a.NAME} (${type}, ${floorTxt})` });
+                } else if (inside && surface) {
+                    boxIssue(clat, clng, `violation: site is inside ${a.NAME} (${type} — ${floorTxt}) — active military/manned traffic possible, check activity times`, 'warn');
+                    inventory.sua.push({ sev: 'warn', text: `Inside ${a.NAME} (${type}, ${floorTxt}) — check activity times` });
+                } else if (!inside && surface && hard && +distNm.toFixed(2) < th.stripNm) {
+                    boxIssue(clat, clng, `violation: ${a.NAME} (${type} — ${floorTxt}) is ~${distNm.toFixed(2)} NM from the site (standoff ${th.stripNm} NM)`, 'warn');
+                    inventory.sua.push({ sev: 'warn', text: `${a.NAME} (${type}, ${floorTxt}) ~${distNm.toFixed(2)} NM away` });
+                } else if (inside) {
+                    inventory.sua.push({ sev: 'info', text: `Under ${a.NAME} (${type}) — ${floorTxt} (above our ops)` });
+                } else {
+                    inventory.sua.push({ sev: 'ok', text: `${a.NAME} (${type}, ${floorTxt}) ~${distNm.toFixed(1)} NM away` });
+                }
+            });
+        }
+        if (airEnabled.sua && !inventory.sua.length) {
+            inventory.sua.push({ sev: 'ok', text: `No special-use / prohibited airspace within ${th.inventoryMi} mi` });
+        }
+
+        // ---- 3c. Stadiums — standing TFR (14 CFR 99.7): 3 NM / SFC–3000 ft
+        //          AGL during MLB / NFL / NCAA D1 / major events. ----
+        if (stadRes && Array.isArray(stadRes.features)) {
+            stadRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                if ((a.STATUS_CODE || '').trim() && (a.STATUS_CODE || '').trim() !== 'Open') return;
+                const near = airMinToSite(f.geometry.y, f.geometry.x, sitePts);
+                const distNm = near.d / NM_TO_M;
+                const brg = airBearing(clat, clng, f.geometry.y, f.geometry.x);
+                const hit = +distNm.toFixed(2) < th.stadiumNm;
+                inventory.stadiums.push({
+                    name: (a.NAME || '?').trim(), city: (a.CITY || '').trim(),
+                    distNm, distMi: near.d / MI_TO_M, brg, hit,
+                    lat: f.geometry.y, lng: f.geometry.x,
+                });
+                if (hit) {
+                    boxIssue(near.pt.lat, near.pt.lng,
+                        `violation: stadium "${(a.NAME || '?').trim()}" is ${distNm.toFixed(2)} NM ${brg} of the site — inside the ${th.stadiumNm} NM stadium TFR radius (active SFC–3,000 ft AGL during major events)`, 'warn');
+                }
+            });
+            inventory.stadiums.sort((x, y) => x.distNm - y.distNm);
         }
 
         // ---- 4. LAANC grid ceiling over the site. No grid over the site =
@@ -2428,7 +2524,11 @@
         }[sev] || '');
         const h = [];
         const section = (title) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${title}</div>`);
-        const line = (sev, html) => h.push(`<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
+        // Rows with a location carry data-air-jump="lat,lng,zoom" — the
+        // delegated click handler pans the map there.
+        const line = (sev, html, jump) => h.push(jump
+            ? `<div data-air-jump="${jump.lat},${jump.lng},${jump.zoom}" title="Click to view on map" style="margin:2px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">${sevDot(sev)} ${html}</div>`
+            : `<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
 
         const vioCount = res.violations.length;
         h.push(`<div style="margin-bottom:4px;">${vioCount
@@ -2442,6 +2542,10 @@
             section('Controlled airspace');
             (inv.airspace || []).forEach(a => line(a.sev, airEsc(a.text)));
         }
+        if (airEnabled.sua) {
+            section('Special use / prohibited airspace');
+            (inv.sua || []).forEach(a => line(a.sev, airEsc(a.text)));
+        }
         if (airEnabled.laanc && inv.laanc) {
             section('LAANC ceiling');
             line(inv.laanc.sev, airEsc(inv.laanc.text));
@@ -2450,8 +2554,15 @@
             section(`Airports &amp; helipads (within ${th.inventoryMi} mi · standoff ${th.stripNm} NM)`);
             if (!inv.airports.length) line('ok', 'None within range');
             inv.airports.slice(0, 25).forEach(a => line(a.hit ? 'high' : 'ok',
-                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`,
+                (typeof a.lat === 'number') ? { lat: a.lat, lng: a.lng, zoom: 13 } : null));
             if (inv.airports.length > 25) line('info', `…and ${inv.airports.length - 25} more`);
+        }
+        if (airEnabled.stadiums && inv.stadiums.length) {
+            section(`Stadiums (TFR ${th.stadiumNm} NM during events)`);
+            inv.stadiums.slice(0, 5).forEach(s => line(s.hit ? 'warn' : 'ok',
+                `<strong>${airEsc(s.name)}</strong>${s.city ? `, ${airEsc(s.city)}` : ''} — ${s.distNm.toFixed(2)} NM / ${s.distMi.toFixed(1)} mi ${s.brg}`,
+                { lat: s.lat, lng: s.lng, zoom: 13 }));
         }
         if (airEnabled.obstacles) {
             const byType = {};
@@ -2460,9 +2571,11 @@
             section(`FAA obstacles (${inv.obstacles.length}${inv.obstacleTruncated ? '+ (list truncated at 2000)' : ''} within ~5 mi)`);
             line('info', summary);
             inv.obstacles.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from site`));
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from site`,
+                { lat: o.lat, lng: o.lng, zoom: 17 }));
             inv.obstacles.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
-                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`));
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
+                { lat: o.lat, lng: o.lng, zoom: 17 }));
         }
 
         const wrap = document.createElement('div');
@@ -2488,6 +2601,15 @@
                 navigator.clipboard.writeText(text).then(
                     () => showToast('Airspace report copied'),
                     () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+                return;
+            }
+            const jumpEl = e.target.closest('[data-air-jump]');
+            if (jumpEl) {
+                const [jlat, jlng, jzoom] = jumpEl.getAttribute('data-air-jump').split(',').map(Number);
+                const map = getLeafletMap();
+                if (!map || !isFinite(jlat)) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                try { map.setView([jlat, jlng], isFinite(jzoom) ? jzoom : 15); }
+                catch (err) { console.warn(`${TAG} airspace jump setView threw:`, err); }
             }
         });
         // Minimal header drag.
@@ -2517,7 +2639,12 @@
         res.violations.forEach(v => out.push(`  🔴 ${v.note.replace(/^violation: /, '')}`));
         (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
         if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.sua) { out.push('Special use / prohibited:'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
         if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
+        if (airEnabled.stadiums && inv.stadiums.length) {
+            out.push('Stadiums:');
+            inv.stadiums.slice(0, 5).forEach(s => out.push(`  - ${s.name}${s.city ? `, ${s.city}` : ''} — ${s.distNm.toFixed(2)} NM ${s.brg}${s.hit ? ' (INSIDE TFR RADIUS)' : ''}`));
+        }
         if (airEnabled.strips) {
             out.push(`Airports & helipads (nearest first):`);
             inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
@@ -3721,6 +3848,9 @@
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
                 { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
+                { id: 'sua', label: 'Check · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
+                { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },
+                { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
                 { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
                 { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
             ],

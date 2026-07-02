@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Airspace Checker round 2 — Asset Inspector v4.151 (dev/latest)
+
+Three upgrades from live testing feedback: (1) **Click any airport, stadium, or obstacle row in the panel to jump the map there** (airports/stadiums zoom to context, obstacles zoom in close). (2) **General Markers no longer count as "the site"** in proximity checks — GMs mark external hazards (flares, towers), so measuring from them made every marked hazard self-flag; distances now measure from FFZs, flight paths, assets, base stations, and safe zones only (NFZs also excluded). (3) **Two new checks**: **Special Use / Prohibited airspace** (inside a surface Restricted/Prohibited area = red; inside a surface MOA/Alert area = warn with "check activity times"; overhead MOAs noted with floors) and **Stadium TFRs** (the standing 3 NM / 3,000 ft TFR during major events).
+
+---
+
 ## 2026-07-02 — Airspace Checker distance polish — Asset Inspector v4.150 (dev/latest)
 
 Obstacle distances now read sanely: under 100 ft shows **"on site (< 100 ft)"** (the FAA Digital Obstacle File's coordinates are only accurate to tens of feet, so "8 ft from site" was false precision), under ~1 mi shows feet, beyond that miles. Same wording in the drawn violation notes.
