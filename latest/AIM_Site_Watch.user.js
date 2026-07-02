@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.14
+// @version      0.15
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
-// @description  Personal background auditor. Polls every Percepto site's setup JSON on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Configurable in the AIM Control Panel ("Site Watch").
+// @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.14';
+    const SCRIPT_VERSION = '0.15';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -111,6 +111,7 @@
         maxPerCycle: 25,        // sites processed per wake — bounds burst + first-run baselining
         siteListRefreshHours: 24,
         digestHourPT: 18,       // local-PT hour the daily Slack digest fires at (18 = 6pm PT)
+        watchMissions: false,   // also poll each site's missions (/available_app/) as a 2nd source
     };
     const WAKE_MS = 15 * 60 * 1000;     // scheduler wake interval
     const LEASE_TTL_MS = 90 * 1000;     // leader lease validity — short, so a vanished tab frees it fast
@@ -135,7 +136,8 @@
     let cycleRunning = false;
     let siteList = [];          // [{id, name}]
     let siteListFetchedAt = 0;
-    let state = loadState();    // { sites: { [id]: {hash, state, lastChangeAt, lastCheckAt, nextCheckAt, slot} } }
+    // { sites: {[id]:{hash,state,lastChangeAt,lastCheckAt,nextCheckAt,slot}}, missions: {[id]:{…same…}} }
+    let state = loadState();
 
     // =====================================================================
     // GM storage wrappers (@grant declared above so these are real, not no-ops)
@@ -152,12 +154,14 @@
 
     function loadState() {
         const s = gmGet(STATE_KEY, null);
-        return (s && s.sites) ? s : { sites: {} };
+        const st = (s && s.sites) ? s : { sites: {} };
+        if (!st.missions) st.missions = {};     // 2nd source (missions); migrate older state
+        return st;
     }
     function persistState() { gmSet(STATE_KEY, state); }
     function persistMeta() { gmSet(META_KEY, { siteListFetchedAt, siteList }); }
     function saveConfig() {
-        gmSet(CONFIG_KEY, { coldHours: cfg.coldHours, hotHours: cfg.hotHours, hotWindowHours: cfg.hotWindowHours, digestHourPT: cfg.digestHourPT });
+        gmSet(CONFIG_KEY, { coldHours: cfg.coldHours, hotHours: cfg.hotHours, hotWindowHours: cfg.hotWindowHours, digestHourPT: cfg.digestHourPT, watchMissions: cfg.watchMissions });
     }
     function loadConfig() { const c = gmGet(CONFIG_KEY, null); if (c) Object.assign(cfg, c); }
 
@@ -409,6 +413,27 @@
         return { data };
     }
 
+    // Missions for a site — same cookie auth, one link per site returning ALL
+    // that site's missions. Same shape as fetchSiteSetup: {data} | {authLost} | {error}.
+    async function fetchMissions(siteId) {
+        const url = `/available_app/?site_id=${encodeURIComponent(siteId)}&type=1`;
+        let resp;
+        try { resp = await fetchWithTimeout(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 20000); }
+        catch (e) { return { error: 'network', detail: String(e) }; }
+        if (resp.status === 401 || resp.status === 403) return { authLost: true };
+        if (resp.redirected && /\/(login|signin|auth|account)/i.test(resp.url)) return { authLost: true };
+        if (!resp.ok) return { error: 'http', status: resp.status };
+        const ct = resp.headers.get('content-type') || '';
+        const text = await resp.text();
+        if (!/json/i.test(ct)) {
+            if (/<form|login|sign\s*in|password|csrf/i.test(text)) return { authLost: true, reason: 'login-page' };
+            return { error: 'non-json' };
+        }
+        let data;
+        try { data = JSON.parse(text); } catch (e) { return { error: 'parse' }; }
+        return { data };
+    }
+
     async function fetchSiteList() {
         let resp;
         try { resp = await fetchWithTimeout('/sites/', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 20000); }
@@ -555,6 +580,119 @@
     function csvRow(arr) { return arr.map(csvCell).join(','); }
 
     // =====================================================================
+    // Mission fingerprint + diff
+    // ---------------------------------------------------------------------
+    // We DON'T raw-diff the mission payload. Instead each mission is reduced to
+    // a compact "fingerprint" holding ONLY the things worth watching: name,
+    // active flag, distance, duration, total steps, per-type step counts, and a
+    // per-step value bag (altitude / speed / GPS / camera pitch / any value).
+    // Everything else — regenerating instruction ids, recomputed route_points,
+    // the app_data consumption breakdown, mirror fields — is simply never put in
+    // the fingerprint, so it can't create noise. The fingerprint is BOTH what we
+    // hash (change detection) and what we diff (the report). No strip list.
+    // Distance/duration are derived and can shift when a site's FFZ/shielding is
+    // edited and the route reroutes — that's intentionally still flagged; you'll
+    // usually see a matching row from the Site-Setup source the same day.
+    // =====================================================================
+    function num(v, dp) { return (typeof v === 'number' && isFinite(v)) ? +v.toFixed(dp) : null; }
+    function missionStepFP(ins, i) {
+        const t = ins.type_name || ('type' + ins.type);
+        const geo = (t === 'navigate' || t === 'snapshot');
+        const fp = { i, t };
+        if (ins.location && typeof ins.location === 'object' && ins.location.lat != null) {
+            fp.lat = num(+ins.location.lat, 7);
+            fp.lng = num(+ins.location.lng, 7);
+        }
+        if (typeof ins.value1 === 'number') fp[geo ? 'alt' : 'value'] = num(ins.value1, 2);
+        else if (ins.value1 != null && typeof ins.value1 !== 'object') fp.value = ins.value1;   // bool / string
+        if (typeof ins.value2 === 'number') fp[geo ? 'speed' : 'value2'] = num(ins.value2, 3);
+        if (ins.extra_options && typeof ins.extra_options === 'object') {
+            for (const k of Object.keys(ins.extra_options)) fp['opt_' + k] = ins.extra_options[k];
+        }
+        return fp;
+    }
+    function missionFP(m) {
+        const instr = Array.isArray(m.instructions) ? m.instructions : [];
+        const typeCounts = {};
+        for (const ins of instr) { const t = ins.type_name || ('type' + ins.type); typeCounts[t] = (typeCounts[t] || 0) + 1; }
+        const ad = m.app_data || {};
+        return {
+            id: String(m.id != null ? m.id : ''),
+            name: m.name || '',
+            active: m.is_active !== false,
+            mtype: m.type,
+            distance: ad.flight_distance != null ? ad.flight_distance : null,   // meters
+            duration: ad.flight_time != null ? ad.flight_time : null,           // seconds
+            steps: instr.length,
+            typeCounts,
+            stepFP: instr.map(missionStepFP),
+        };
+    }
+    // Whole-payload → array of fingerprints, keyed/sorted by mission id so array
+    // reordering never registers as a change.
+    function missionFingerprints(payload) {
+        return extractList(payload).map(missionFP).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    }
+    function activeLabel(a) { return a ? 'active' : 'inactive'; }
+    // Compare two step fingerprints (same index) → labeled value changes.
+    function diffStepFP(oldS, newS, i, tName, emit) {
+        const keys = new Set([...Object.keys(oldS || {}), ...Object.keys(newS || {})]);
+        for (const k of keys) {
+            if (k === 'i' || k === 't') continue;
+            const a = oldS ? oldS[k] : undefined;
+            const b = newS ? newS[k] : undefined;
+            if (stableStringify(a) === stableStringify(b)) continue;
+            emit(`step[${i}].${tName}.${k}`, a, b);
+        }
+    }
+    // Summarized diff of two fingerprint arrays. Returns rows in the same shape
+    // as diffObjects (etype fixed to 'mission' so the CSV/digest can split it out).
+    function diffMissions(oldFPs, newFPs) {
+        const rows = [];
+        const oldMap = new Map(); (oldFPs || []).forEach(f => oldMap.set(f.id, f));
+        const newMap = new Map(); (newFPs || []).forEach(f => newMap.set(f.id, f));
+        const push = (change, f, field, was, is) => rows.push({ change, etype: 'mission', ename: f.name || f.id, objectId: f.id, field, was: fmtVal(was), is: fmtVal(is) });
+        // Deleted
+        for (const [id, f] of oldMap) {
+            if (!newMap.has(id)) push('removed', f, '(mission)', `${f.steps} steps`, '');
+        }
+        // Added
+        for (const [id, f] of newMap) {
+            if (!oldMap.has(id)) push('added', f, '(mission)', '', `${f.steps} steps`);
+        }
+        // Modified
+        for (const [id, nf] of newMap) {
+            const of = oldMap.get(id);
+            if (!of) continue;
+            if (of.name !== nf.name) push('modified', nf, 'name', of.name, nf.name);
+            if (of.active !== nf.active) push('modified', nf, 'active', activeLabel(of.active), activeLabel(nf.active));
+            if (of.distance !== nf.distance) push('modified', nf, 'distance', of.distance == null ? '' : `${of.distance} m`, nf.distance == null ? '' : `${nf.distance} m`);
+            if (of.duration !== nf.duration) push('modified', nf, 'duration', of.duration == null ? '' : `${of.duration} s`, nf.duration == null ? '' : `${nf.duration} s`);
+            if (of.steps !== nf.steps) push('modified', nf, 'step_count', of.steps, nf.steps);
+            // Per-type count deltas
+            const types = new Set([...Object.keys(of.typeCounts || {}), ...Object.keys(nf.typeCounts || {})]);
+            for (const t of types) {
+                const a = (of.typeCounts || {})[t] || 0, b = (nf.typeCounts || {})[t] || 0;
+                if (a !== b) push('modified', nf, `count.${t}`, a, b);
+            }
+            if (of.steps === nf.steps) {
+                // Same length → indices line up → per-step value diff.
+                for (let i = 0; i < nf.steps; i++) {
+                    diffStepFP(of.stepFP[i], nf.stepFP[i], i, (nf.stepFP[i] && nf.stepFP[i].t) || '', (field, was, is) => push('modified', nf, field, was, is));
+                }
+            } else {
+                // Count changed → alignment breaks; report the first position where
+                // the step-type sequence diverges (everything below it shifted).
+                const n = Math.min(of.steps, nf.steps);
+                let k = 0;
+                while (k < n && (of.stepFP[k].t === nf.stepFP[k].t)) k++;
+                push('modified', nf, 'first_change_at', '', `step ${k}${nf.stepFP[k] ? ' (' + nf.stepFP[k].t + ')' : ''}`);
+            }
+        }
+        return rows;
+    }
+
+    // =====================================================================
     // Scheduler
     // =====================================================================
     function nameFor(id) {
@@ -563,6 +701,11 @@
     }
     function latestPath(id) { return `${WATCH_DIR}/${id}/latest.json.gz`; }
     function snapPath(id, slot) { return `${WATCH_DIR}/${id}/snap-${String(slot).padStart(3, '0')}.json.gz`; }
+    // Missions live under the same site folder, prefixed so they never collide
+    // with the setup snapshots. We store the compact fingerprint (below), not the
+    // raw payload — it's the whitelist of fields we care about, and much smaller.
+    function mLatestPath(id) { return `${WATCH_DIR}/${id}/mission-latest.json.gz`; }
+    function mSnapPath(id, slot) { return `${WATCH_DIR}/${id}/mission-snap-${String(slot).padStart(3, '0')}.json.gz`; }
     function scheduleNext(st, mode) {
         const hours = (mode === 'hot') ? cfg.hotHours : cfg.coldHours;
         st.nextCheckAt = Date.now() + hours * 3600e3;
@@ -720,6 +863,7 @@
                 ts, siteId: row[idx.site_id] || '', siteName: row[idx.site_name] || '',
                 change: row[idx.change] || '', etype: row[idx.entity_type] || '', ename: row[idx.entity_name] || '',
                 objectId: row[idx.object_id] || '', field: row[idx.field] || '',
+                was: row[idx.was] || '', is: row[idx.is] || '',
             });
         }
         return out;
@@ -735,19 +879,34 @@
         return seg || path;
     }
     function pad(s, n) { s = String(s == null ? '' : s); return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length); }
+    // Readable label for a mission change field (keeps the step index).
+    function missionFieldLabel(field) {
+        if (field === 'step_count') return 'steps';
+        if (field.indexOf('count.') === 0) return field.slice(6) + ' count';
+        if (field === 'first_change_at') return 'first change';
+        const m = /^step\[(\d+)\]\.([^.]+)\.(.+)$/.exec(field);
+        if (m) return `step${m[1]} ${m[3]}`;    // e.g. "step2 alt"
+        return field;                            // name / active / distance / duration
+    }
 
     // Group flat CSV rows → per-site, per-entity rollup.
     function rollup(changeRows) {
-        const sites = new Map();   // siteId → {name, ents:Map(key→{change,etype,ename,fields:Set})}
+        const sites = new Map();   // siteId → {name, ents:Map(key→{change,etype,ename,fields:Set,tuples:[]})}
         for (const c of changeRows) {
             if (!sites.has(c.siteId)) sites.set(c.siteId, { name: c.siteName, ents: new Map() });
             const site = sites.get(c.siteId);
             if (c.siteName && !site.name) site.name = c.siteName;
-            const key = c.objectId || ('note:' + c.field);   // site-level notes have no objectId
-            if (!site.ents.has(key)) site.ents.set(key, { change: c.change, etype: c.etype, ename: c.ename || c.objectId, fields: new Set() });
+            const mission = c.etype === 'mission';
+            // Missions are keyed by object id so a mission's rows group together;
+            // setup notes without an objectId fall back to the field.
+            const key = (mission ? 'm:' : '') + (c.objectId || ('note:' + c.field));
+            if (!site.ents.has(key)) site.ents.set(key, { change: c.change, etype: c.etype, ename: c.ename || c.objectId, fields: new Set(), tuples: [], mission });
             const e = site.ents.get(key);
             const f = collapseField(c.field);
             if (f) e.fields.add(f);
+            // Keep the actual old→new values for missions so the digest can show
+            // them (setup rows stay summarized as field names only). Cap per entity.
+            if (mission && e.tuples.length < 12 && c.field && c.field !== '(mission)') e.tuples.push({ field: c.field, was: c.was, is: c.is });
         }
         return sites;
     }
@@ -764,14 +923,15 @@
         const arr = orderedSites(sites);
         const CAP = 50;
         arr.slice(0, CAP).forEach(([id, s]) => {
-            let a = 0, r = 0, m = 0;
-            for (const e of s.ents.values()) { if (e.change === 'added') a++; else if (e.change === 'removed') r++; else m++; }
+            let a = 0, r = 0, m = 0, mis = 0;
+            for (const e of s.ents.values()) { if (e.change === 'added') a++; else if (e.change === 'removed') r++; else m++; if (e.mission) mis++; }
             const url = siteSetupUrl(id);
             const name = slackEsc(s.name || '(unnamed)').replace(/\|/g, '/');   // | breaks <url|text>
 
             const cnt = s.ents.size;
             const tally = [a ? `${a} added` : '', r ? `${r} removed` : '', m ? `${m} modified` : ''].filter(Boolean).join(' · ');
-            lines.push(`• <${url}|${name}> (${id}) — ${cnt} entit${cnt === 1 ? 'y' : 'ies'}: ${tally}`);
+            const misLbl = mis ? ` _(incl. ${mis} mission${mis === 1 ? '' : 's'})_` : '';
+            lines.push(`• <${url}|${name}> (${id}) — ${cnt} entit${cnt === 1 ? 'y' : 'ies'}: ${tally}${misLbl}`);
         });
         if (arr.length > CAP) lines.push(`…and ${arr.length - CAP} more site(s).`);
         return lines.join('\n');
@@ -791,9 +951,13 @@
             const lines = [];
             ents.slice(0, ROWCAP).forEach(e => {
                 let detail;
-                if (e.change === 'added') detail = '(new entity)';
-                else if (e.change === 'removed') detail = '(removed)';
-                else {
+                if (e.change === 'added') detail = e.mission ? '(new mission)' : '(new entity)';
+                else if (e.change === 'removed') detail = e.mission ? '(deleted)' : '(removed)';
+                else if (e.mission && e.tuples.length) {
+                    // Missions show the actual old → new values, not just field names.
+                    detail = e.tuples.slice(0, 6).map(t => `${missionFieldLabel(t.field)} ${t.was || '∅'}→${t.is || '∅'}`).join(' · ')
+                        + (e.tuples.length > 6 ? ` +${e.tuples.length - 6}` : '');
+                } else {
                     const fl = [...e.fields];
                     detail = fl.length ? (fl.length + ' field' + (fl.length === 1 ? '' : 's') + ': ' + fl.slice(0, 6).join(', ') + (fl.length > 6 ? ` +${fl.length - 6}` : '')) : '(modified)';
                 }
@@ -913,17 +1077,14 @@
     // Rich per-site console line: progress (batch + running total), site name,
     // id, colored result. Changed/error lines also append clickable URLs (passed
     // as separate args so DevTools linkifies them).
-    function logSiteResult(i, batchLen, s, res) {
+    function siteMissionsUrl(id) { return `${location.origin}/available_app/?site_id=${id}&type=1`; }
+    function logSiteResult(i, batchLen, s, res, source) {
         const id = s.id;
         const name = nameFor(id) || s.name || '(unnamed)';
         const c = RESULT_COLOR[res] || '#cccccc';
-        // Batch position always; a running "done/total" only WHILE the sweep is
-        // still climbing (e.g. baselining) — drop it once fully baselined so it
-        // doesn't pin at the saturated 443/443.
-        const done = Object.keys(state.sites).length;
-        const total = siteList.length;
-        const prog = (total && done < total) ? `${i}/${batchLen} · ${done}/${total}` : `${i}/${batchLen}`;
-        const line = `%c(${prog})%c ${name} %c(${id})%c → ${res}`;
+        const tag = source === 'mission' ? ' [missions]' : '';
+        const prog = `${i}/${batchLen}`;
+        const line = `%c(${prog})%c ${name} %c(${id})${tag}%c → ${res}`;
         const styles = [
             'color:#9aa0a6',
             'color:#e6e6e6;font-weight:600',
@@ -931,7 +1092,8 @@
             `color:${c};font-weight:700`,
         ];
         if (res === 'changed' || res === 'error') {
-            console.log(line, ...styles, '\n   setup →', siteSetupUrl(id), '\n   json →', siteJsonUrl(id));
+            const link = source === 'mission' ? ['\n   missions →', siteMissionsUrl(id)] : ['\n   setup →', siteSetupUrl(id), '\n   json →', siteJsonUrl(id)];
+            console.log(line, ...styles, ...link);
         } else {
             console.log(line, ...styles);
         }
@@ -1015,6 +1177,81 @@
         return 'changed';
     }
 
+    // Mission source — same lifecycle as checkSite, against state.missions and
+    // the fingerprint snapshots. Returns 'auth'|'error'|'baseline'|'checked'|'changed'.
+    async function checkMissions(s, pendingCsv) {
+        const id = s.id;
+        const r = await fetchMissions(id);
+        if (r.authLost) return 'auth';
+        if (r.error) {
+            console.warn(TAG, `site ${id} missions fetch ${r.error}`, r.status || '');
+            const st = state.missions[id];
+            if (st) scheduleNext(st, 'cold');
+            return 'error';
+        }
+        const fps = missionFingerprints(r.data);    // whitelist fingerprint — the ONLY signal
+        const norm = stableStringify(fps);
+        const hash = await sha256Hex(norm);
+        let st = state.missions[id];
+
+        if (!st) {
+            st = state.missions[id] = { hash, state: 'cold', lastChangeAt: 0, lastCheckAt: Date.now(), nextCheckAt: 0 };
+            try {
+                const gz = bytesToB64(await gzipToBytes(norm));
+                await ghPut(mLatestPath(id), gz, `[site-watch] baseline missions ${id}`, await safeGetSha(mLatestPath(id)));
+            } catch (e) { console.error(TAG, `mission baseline commit site ${id} failed`, e); }
+            scheduleNext(st, 'cold');
+            return 'baseline';
+        }
+
+        st.lastCheckAt = Date.now();
+
+        if (hash === st.hash) {
+            if (st.state === 'hot' && (Date.now() - (st.lastChangeAt || 0)) >= cfg.hotWindowHours * 3600e3) {
+                st.state = 'cold';
+                console.log(`${TAG} site ${id} missions demoted to COLD (quiet ${cfg.hotWindowHours}h)`);
+            }
+            scheduleNext(st, st.state);
+            return 'checked';
+        }
+
+        console.log(`${TAG} site ${id} MISSIONS CHANGED`);
+        let prevFPs = null;
+        try {
+            const meta = await ghGetMeta(mLatestPath(id));
+            if (meta) prevFPs = JSON.parse(await gunzipFromBytes(b64ToBytes(meta.base64)));
+        } catch (e) { console.warn(TAG, `site ${id} could not load previous mission snapshot`, e); }
+
+        const ts = new Date().toISOString();
+        const nm = nameFor(id) || s.name || '';
+        if (prevFPs) {
+            const rows = diffMissions(prevFPs, fps);
+            if (rows.length) {
+                for (const row of rows) pendingCsv.push(csvRow([ts, id, nm, row.change, row.etype, row.ename, row.objectId, row.field, row.was, row.is]));
+            } else {
+                pendingCsv.push(csvRow([ts, id, nm, 'modified', 'mission', '', '', '(non-structural change)', '', '']));
+            }
+            console.log(`${TAG} site ${id}: ${rows.length} mission change(s)`);
+        } else {
+            pendingCsv.push(csvRow([ts, id, nm, 'modified', 'mission', '', '', '(changed; no prior snapshot)', '', '']));
+        }
+
+        try {
+            const gz = bytesToB64(await gzipToBytes(norm));
+            await ghPut(mLatestPath(id), gz, `[site-watch] update missions ${id}`, await safeGetSha(mLatestPath(id)));
+            const slot = ((st.slot || 0) % 10) + 1;
+            st.slot = slot;
+            const sp = mSnapPath(id, slot);
+            await ghPut(sp, gz, `[site-watch] mission snapshot site ${id} ${ts}`, await safeGetSha(sp));
+        } catch (e) { console.error(TAG, `site ${id} mission snapshot commit failed`, e); }
+
+        st.hash = hash;
+        st.state = 'hot';
+        st.lastChangeAt = Date.now();
+        scheduleNext(st, 'hot');
+        return 'changed';
+    }
+
     async function runCycle(trigger) {
         if (!masterEnabled) return;
         if (cycleRunning) return;
@@ -1041,33 +1278,39 @@
                 console.log(`${TAG} auth restored — resuming`);
             }
 
-            const due = siteList.filter(s => {
-                const st = state.sites[s.id];
-                return !st || (st.nextCheckAt || 0) <= now;
-            });
-            due.sort((a, b) => ((state.sites[a.id] && state.sites[a.id].nextCheckAt) || 0) - ((state.sites[b.id] && state.sites[b.id].nextCheckAt) || 0));
-            const batch = due.slice(0, cfg.maxPerCycle);
+            // Build a combined due list of (site, source) tasks. Setup always
+            // runs; missions only when the toggle is on. Both share the one
+            // maxPerCycle budget, sorted by whichever is most overdue.
+            const tasks = [];
+            for (const s of siteList) {
+                const su = state.sites[s.id];
+                if (!su || (su.nextCheckAt || 0) <= now) tasks.push({ s, source: 'setup', due: su ? (su.nextCheckAt || 0) : 0 });
+                if (cfg.watchMissions) {
+                    const mu = state.missions[s.id];
+                    if (!mu || (mu.nextCheckAt || 0) <= now) tasks.push({ s, source: 'mission', due: mu ? (mu.nextCheckAt || 0) : 0 });
+                }
+            }
+            tasks.sort((a, b) => a.due - b.due);
+            const batch = tasks.slice(0, cfg.maxPerCycle);
             if (!batch.length) return;
-            const hotCount = Object.values(state.sites).filter(st => st.state === 'hot').length;
-            const baselined = Object.keys(state.sites).length;
-            // Show baselining progress only while it's still incomplete; once all
-            // sites are baselined that number is saturated, so switch to HOT count.
-            const progress = baselined < siteList.length ? ` · ${baselined}/${siteList.length} baselined` : '';
-            console.log(`%c${TAG} cycle (${trigger}): checking ${batch.length} of ${due.length} due · ${siteList.length} sites · ${hotCount} HOT${progress}`, 'color:#5fd0ff;font-weight:600');
+            const hotCount = Object.values(state.sites).filter(st => st.state === 'hot').length
+                + (cfg.watchMissions ? Object.values(state.missions).filter(st => st.state === 'hot').length : 0);
+            const sourcesLbl = cfg.watchMissions ? 'setup+missions' : 'setup';
+            console.log(`%c${TAG} cycle (${trigger}): ${batch.length} of ${tasks.length} due tasks (${sourcesLbl}) · ${siteList.length} sites · ${hotCount} HOT`, 'color:#5fd0ff;font-weight:600');
 
             const pendingCsv = [];
             let checked = 0;
             let changed = 0;
             let i = 0;
-            for (const s of batch) {
+            for (const t of batch) {
                 if (pausedForAuth) break;
                 renewLeader();
-                const res = await checkSite(s, pendingCsv);
+                const res = t.source === 'mission' ? await checkMissions(t.s, pendingCsv) : await checkSite(t.s, pendingCsv);
                 i++;
                 if (res === 'auth') { pauseForAuth('cycle'); break; }
                 if (res === 'changed') changed++;
                 if (res === 'changed' || res === 'checked' || res === 'baseline') checked++;
-                logSiteResult(i, batch.length, s, res);
+                logSiteResult(i, batch.length, t.s, res, t.source);
                 await sleep(cfg.throttleMs);
             }
             if (pendingCsv.length) {
@@ -1075,7 +1318,13 @@
                 catch (e) { console.error(TAG, 'CSV append failed', e); }
             }
             persistState();
-            const stillDue = siteList.filter(s => { const st = state.sites[s.id]; return !st || (st.nextCheckAt || 0) <= Date.now(); }).length;
+            const doneAt = Date.now();
+            let stillDue = 0;
+            for (const s of siteList) {
+                const su = state.sites[s.id];
+                if (!su || (su.nextCheckAt || 0) <= doneAt) stillDue++;
+                if (cfg.watchMissions) { const mu = state.missions[s.id]; if (!mu || (mu.nextCheckAt || 0) <= doneAt) stillDue++; }
+            }
             const tail = stillDue > 0
                 ? `${stillDue} still due — next batch in ~${Math.round(WAKE_MS / 60000)} min (or click "Check all due now")`
                 : `all ${siteList.length} sites baselined — now watching on the adaptive schedule`;
@@ -1097,6 +1346,7 @@
         { id: 'hotHours', label: 'Active check interval (hours)', type: 'number', default: DEFAULTS.hotHours, min: 1, max: 24, step: 1 },
         { id: 'hotWindowHours', label: 'Stay-active window after a change (hours)', type: 'number', default: DEFAULTS.hotWindowHours, min: 3, max: 168, step: 1 },
         { id: 'digestHourPT', label: 'Daily Slack digest hour (PT, 24h)', type: 'number', default: DEFAULTS.digestHourPT, min: 0, max: 23, step: 1 },
+        { id: 'watchMissions', label: 'Also watch missions (steps · distance · values)', type: 'boolean', default: DEFAULTS.watchMissions },
         { id: 'check-now', label: 'Check all due now', type: 'button', action: 'check-now' },
         { id: 'status', label: 'Show status (console)', type: 'button', action: 'status' },
         { id: 'post-digest-now', label: 'Post Slack digest now (last 24h, test)', type: 'button', action: 'post-digest-now' },
@@ -1140,6 +1390,14 @@
             saveConfig();
             console.log(`${TAG} digestHourPT = ${n} (PT)`);
         }
+        if (id === 'watchMissions') {
+            const on = !!val;
+            if (cfg.watchMissions === on) return;   // idempotent (panel runs top + iframe)
+            cfg.watchMissions = on;
+            saveConfig();
+            console.log(`${TAG} watchMissions ${on ? 'ENABLED — missions will baseline over the next cycles' : 'disabled'}`);
+            if (on && masterEnabled && cachedToken) runCycle('missions-on');
+        }
     }
     function handleAction(actionId) {
         if (actionId === 'check-now') { console.log(`${TAG} manual check requested`); stealLeader(); runCycle('manual'); }
@@ -1168,7 +1426,7 @@
         }
     }
     function doResetBaselines(reason) {
-        state = { sites: {} };
+        state = { sites: {}, missions: {} };
         persistState();
         console.log(`${TAG} baselines reset (${reason})`);
     }

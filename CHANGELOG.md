@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-01 — Site Watch can now watch **missions** too — Site Watch v0.15 (dev/latest, personal)
+
+New optional second source. Control Panel → Site Watch → **"Also watch missions (steps · distance · values)"** (off by default). When on, each site's `/available_app/?...&type=1` mission list is polled on the same adaptive COLD/HOT schedule as Site Setup, and mission changes land in the same daily digest (tagged `mission`, grouped in one place). Each mission is reduced to a compact **fingerprint** of only what matters — so there's no field-diff noise — and the digest reports the actual **old → new values**: mission renamed, enabled→disabled, distance/duration changed, total step count, per-step-type counts (navigate/snapshot/wait/…), any step value (altitude / speed / GPS / camera pitch), and missions added or deleted (by name). When a step is inserted/removed the step count shifts everything below it, so it reports the count delta + the position it first diverges rather than a wall of false per-step changes. Distance/duration are derived and can shift when a site's FFZ/shielding is edited and the route reroutes — that's still flagged, and you'll usually see a matching Site-Setup row the same day. Missions store their own snapshots (`mission-latest.json.gz` / `mission-snap-NNN`) alongside the setup ones.
+
+---
+
 ## 2026-06-30 — Map Styler **PROMOTED TO PROD v34.85** — Coverage Validator rewrite + map-performance & altitude-shield improvements
 
 Map Styler goes prod **v34.77 → v34.85** for everyone (next Tampermonkey check). What now reaches coworkers:
