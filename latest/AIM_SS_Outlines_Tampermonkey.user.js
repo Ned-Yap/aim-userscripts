@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.92
+// @version      34.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -18,6 +18,7 @@
 // @connect      services1.arcgis.com
 // @connect      services6.arcgis.com
 // @connect      pdi.scinet.usda.gov
+// @connect      gis.rrc.texas.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -36,7 +37,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.92';
+    const SCRIPT_VERSION = '34.93';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -376,6 +377,25 @@
                     { id: `crop.${code}.show`, label: name, type: 'boolean', default: true },
                     { id: `crop.${code}.color`, label: `${name} color`, type: 'color', default: hex },
                 ]),
+            ],
+        },
+        {
+            // Texas Railroad Commission public GIS (v34.93) — the state's
+            // own well + pipeline records drawn over the pads. Wells are
+            // colored by RRC status (producing / plugged / injection /
+            // permitted…), orphan wells get a purple ring, and hovering a
+            // marker shows API + well number + status (click copies the
+            // API). Fetches the current view only, and only at zoom ≥ 12
+            // (the Permian has too many wells below that).
+            type: 'category',
+            id: 'rrc-cat',
+            label: 'Oil & Gas (Texas RRC)',
+            meta: '(wells · pipelines)',
+            master: { id: 'rrc.show', default: false },
+            children: [
+                { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
+                { id: 'rrc.orphans', label: 'Mark orphan wells (purple ring)', type: 'boolean', default: true },
+                { id: 'rrc.pipelines', label: 'RRC pipelines (operator + commodity)', type: 'boolean', default: false },
             ],
         },
         {
@@ -1047,6 +1067,8 @@
         applyAirspaceVectors();
         // 11e. USDA crop-cover overlay.
         applyCropLayer();
+        // 11f. Texas RRC wells / pipelines overlay.
+        applyRrcLayers();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -1555,6 +1577,167 @@
         _aimCropLayer = null;
         _aimCropLayerKey = '';
         _aimCropLayerMap = null;
+    }
+
+    // Texas RRC wells + pipelines (v34.93). Public MapServer at
+    // gis.rrc.texas.gov (rrc_public/RRC_Public_Viewer_Srvs): layer 1 =
+    // Well Locations (API, well number, status), layer 2 = Orphan Wells
+    // (API only), layer 13 = Pipelines (operator/commodity/diameter).
+    // View-envelope fetch like the airspace vectors; wells only at
+    // zoom ≥ 12 — a wide Permian view blows past the 1000-record cap.
+    const RRC_BASE = 'https://gis.rrc.texas.gov/server/rest/services/rrc_public/RRC_Public_Viewer_Srvs/MapServer';
+    const RRC_MIN_ZOOM = 12;
+    let _rrcLayers = [];
+    let _rrcKey = '';
+    let _rrcFetching = false;
+    let _rrcSeq = 0;
+    let _rrcZoomHintAt = 0;
+    function rrcWellColor(desc) {
+        const d2 = String(desc || '');
+        if (/plugged/i.test(d2)) return '#9aa4ad';
+        if (/dry/i.test(d2)) return '#c8a165';
+        if (/injection|disposal/i.test(d2)) return '#3f8cff';
+        if (/gas/i.test(d2)) return '#ff8c00';
+        if (/oil/i.test(d2)) return '#5fff5f';
+        if (/permit|location/i.test(d2)) return '#ffe14d';
+        if (/abandon|cancel/i.test(d2)) return '#6d7680';
+        return '#ffffff';
+    }
+    function rrcFmtApi(api8) {
+        const a = String(api8 || '').trim();
+        return a.length === 8 ? `42-${a.slice(0, 3)}-${a.slice(3)}` : a;
+    }
+    function rrcQuery(layerId, params, cb) {
+        const qs = new URLSearchParams(Object.assign({ f: 'json', outSR: '4326' }, params)).toString();
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${RRC_BASE}/${layerId}/query?${qs}`, timeout: 25000,
+            onload: (resp) => {
+                let j = null;
+                try { j = JSON.parse(resp.responseText); } catch (e) {}
+                if (!j || j.error) { console.warn(`${TAG} RRC layer ${layerId} query failed:`, resp.status, j && j.error); cb(null); return; }
+                cb(j);
+            },
+            onerror: () => { console.warn(`${TAG} RRC layer ${layerId}: network error`); cb(null); },
+            ontimeout: () => { console.warn(`${TAG} RRC layer ${layerId}: timed out`); cb(null); },
+        });
+    }
+    function removeRrcLayers() {
+        if (!_rrcLayers.length) { _rrcKey = ''; return; }
+        const map = getLeafletMap();
+        _rrcLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _rrcLayers = [];
+        _rrcKey = '';
+        console.log(`${TAG} RRC overlay removed`);
+    }
+    function applyRrcLayers() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        if (toggleState['rrc.show'] !== true) { removeRrcLayers(); return; }
+        const wantWells = toggleState['rrc.wells'] !== false;
+        const wantOrphans = toggleState['rrc.orphans'] !== false;
+        const wantPipes = toggleState['rrc.pipelines'] === true;
+        if (!wantWells && !wantPipes) { removeRrcLayers(); return; }
+        let zoom = 0, b = null;
+        try { zoom = map.getZoom(); b = map.getBounds(); } catch (e) { return; }
+        if (zoom < RRC_MIN_ZOOM) {
+            removeRrcLayers();
+            if (Date.now() - _rrcZoomHintAt > 60000) {
+                _rrcZoomHintAt = Date.now();
+                console.log(`${TAG} RRC overlay: zoom in to ≥ ${RRC_MIN_ZOOM} to load wells (too many below that)`);
+            }
+            return;
+        }
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        const w = b.getWest(), s2 = b.getSouth(), e = b.getEast(), n = b.getNorth();
+        // Refetch only when the view leaves the fetched envelope or the
+        // sublayer toggles change.
+        const padLng = Math.max((e - w) * 0.5, 0.01), padLat = Math.max((n - s2) * 0.5, 0.01);
+        const key = `${wantWells}|${wantOrphans}|${wantPipes}`;
+        const [kEnv, kOpts] = _rrcKey.split('#opts#').length === 2 ? _rrcKey.split('#opts#') : [null, null];
+        if (kOpts === key && kEnv) {
+            const env = kEnv.split(',').map(Number);
+            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) return;
+        }
+        if (_rrcFetching) return;
+        _rrcFetching = true;
+        const seq = ++_rrcSeq;
+        const fw = w - padLng, fs = s2 - padLat, fe = e + padLng, fn = n + padLat;
+        const envParams = {
+            geometry: `${fw},${fs},${fe},${fn}`, geometryType: 'esriGeometryEnvelope',
+            inSR: '4326', spatialRel: 'esriSpatialRelIntersects', returnGeometry: 'true',
+        };
+        const results = { wells: null, orphans: null, pipes: null };
+        let pendingN = (wantWells ? 1 : 0) + (wantWells && wantOrphans ? 1 : 0) + (wantPipes ? 1 : 0);
+        const finish = () => {
+            _rrcFetching = false;
+            if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
+            drawRrcLayers(results, wantOrphans);
+            _rrcKey = `${fw},${fs},${fe},${fn}#opts#${key}`;
+        };
+        const done = () => { if (--pendingN <= 0) finish(); };
+        if (!pendingN) { _rrcFetching = false; return; }
+        if (wantWells) {
+            rrcQuery(1, Object.assign({ outFields: 'API,GIS_WELL_NUMBER,GIS_SYMBOL_DESCRIPTION,RELIAB' }, envParams), (j) => { results.wells = j; done(); });
+            if (wantOrphans) rrcQuery(2, Object.assign({ outFields: 'API' }, envParams), (j) => { results.orphans = j; done(); });
+        }
+        if (wantPipes) {
+            rrcQuery(13, Object.assign({ outFields: 'OPERATOR,COMMODITY_DESCRIPTION,SYSTEM_NAME,DIAMETER,INTERSTATE' }, envParams), (j) => { results.pipes = j; done(); });
+        }
+    }
+    function drawRrcLayers(results, wantOrphans) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        _rrcLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _rrcLayers = [];
+        const canTip = !!(L.Tooltip && L.CircleMarker && L.CircleMarker.prototype.bindTooltip);
+        const esc = (v) => String(v == null ? '' : v).replace(/</g, '&lt;');
+        const add = (mk) => { try { mk.addTo(map); _rrcLayers.push(mk); } catch (e) {} };
+        let wellsN = 0, pipesN = 0;
+        const orphanApis = new Set();
+        if (wantOrphans && results.orphans && Array.isArray(results.orphans.features)) {
+            results.orphans.features.forEach(f => { if (f.attributes && f.attributes.API != null) orphanApis.add(String(f.attributes.API).trim()); });
+        }
+        if (results.pipes && Array.isArray(results.pipes.features)) {
+            results.pipes.features.forEach(f => {
+                const a = f.attributes || {};
+                ((f.geometry && f.geometry.paths) || []).forEach(pth => {
+                    if (!Array.isArray(pth) || pth.length < 2) return;
+                    const pl = L.polyline(pth.map(xy => [xy[1], xy[0]]), { color: '#2fd6c3', weight: 3, opacity: 0.8, dashArray: '10,4', interactive: canTip });
+                    if (canTip) { try { pl.bindTooltip(`<strong>${esc(a.OPERATOR || 'pipeline')}</strong><br>${esc(a.COMMODITY_DESCRIPTION || '')}${a.DIAMETER ? ` · ${esc(a.DIAMETER)}"` : ''}${a.SYSTEM_NAME ? `<br>${esc(a.SYSTEM_NAME)}` : ''}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
+                    add(pl);
+                    pipesN++;
+                });
+            });
+        }
+        if (results.wells && Array.isArray(results.wells.features)) {
+            results.wells.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                const api = String(a.API || '').trim();
+                const orphan = orphanApis.has(api);
+                const color = orphan ? '#c000ff' : rrcWellColor(a.GIS_SYMBOL_DESCRIPTION);
+                const mk = L.circleMarker([f.geometry.y, f.geometry.x], {
+                    radius: orphan ? 7 : 5, color, weight: orphan ? 3 : 2,
+                    fillColor: '#10161f', fillOpacity: 0.85, interactive: canTip,
+                });
+                if (canTip) {
+                    try {
+                        mk.bindTooltip(`<strong>API ${rrcFmtApi(api)}</strong>${a.GIS_WELL_NUMBER ? ` · Well ${esc(a.GIS_WELL_NUMBER)}` : ''}<br>${esc(a.GIS_SYMBOL_DESCRIPTION || '?')}${orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}<br><span style="opacity:0.7">click to copy API</span>`, { sticky: true, direction: 'top', opacity: 0.95 });
+                        mk.on('click', () => {
+                            try { navigator.clipboard.writeText(rrcFmtApi(api)); } catch (e) {}
+                            console.log(`${TAG} RRC well API copied: ${rrcFmtApi(api)}`);
+                        });
+                    } catch (e) {}
+                }
+                add(mk);
+                wellsN++;
+            });
+            if (results.wells.exceededTransferLimit) {
+                console.warn(`${TAG} RRC wells: view exceeds the 1000-record cap — showing the first 1000, zoom in for full coverage`);
+            }
+        }
+        console.log(`${TAG} RRC overlay: ${wellsN} well(s)${orphanApis.size ? ` (${orphanApis.size} orphan in view)` : ''}, ${pipesN} pipeline segment(s)`);
     }
 
     // Vector airspace boundaries (v34.89). Queries the FAA AIS
@@ -6257,6 +6440,8 @@
         removeAirspaceVectors();
         // And the crop-cover overlay.
         removeCropLayer();
+        // And the RRC wells/pipelines overlay.
+        removeRrcLayers();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:

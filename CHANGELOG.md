@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 🛢 Oil & Gas overlay (Texas RRC) — Map Styler v34.93 (dev/latest)
+
+New **"Oil & Gas (Texas RRC)"** section: the Railroad Commission's own public well and pipeline records drawn over the pads. **Wells** colored by RRC status (producing oil green, gas orange, injection/disposal blue, plugged gray, permitted-location yellow, dry tan); **orphan wells ringed purple**; hover any well for its API number (formatted 42-XXX-XXXXX), well number, and status — **click to copy the API** for RRC lookups. Optional **RRC pipelines** layer (teal dashed) with operator, commodity, and diameter on hover. Off by default; loads the current view only, at zoom 12+ (a wide Permian view has more wells than the server will return).
+
+---
+
 ## 2026-07-02 — Per-crop controls — Map Styler v34.92 (dev/latest)
 
 The crop overlay's Control Panel section (now just **"Crops"**) has **per-crop visibility checkboxes and color pickers** for all 16 dusted crop types — hide the ones you don't care about, recolor the ones you do (each defaults to its official CDL color). Changes re-render the layer immediately. Opacity remains one slider for the whole layer (the USDA server's colormap has no per-class transparency).
