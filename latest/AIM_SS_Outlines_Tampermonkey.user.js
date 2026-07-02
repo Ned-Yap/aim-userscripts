@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.91
+// @version      34.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -36,7 +36,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.91';
+    const SCRIPT_VERSION = '34.92';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -131,6 +131,27 @@
         return out;
     }
 
+    // Duster-relevant USDA CDL classes: [code, name, official-color hex].
+    // Declared ABOVE the TOGGLES schema — it generates the per-crop
+    // visibility/color rows in the Crops section.
+    const CDL_DUSTED = [
+        [1,  'Corn',         '#ffd300'],
+        [2,  'Cotton',       '#ff2626'],
+        [3,  'Rice',         '#00a8e2'],
+        [4,  'Sorghum',      '#ff9e0b'],
+        [5,  'Soybeans',     '#267000'],
+        [6,  'Sunflower',    '#ffff00'],
+        [10, 'Peanuts',      '#70a600'],
+        [21, 'Barley',       '#e2007c'],
+        [22, 'Durum Wheat',  '#89622d'],
+        [23, 'Spring Wheat', '#d8b56b'],
+        [24, 'Winter Wheat', '#a57000'],
+        [28, 'Oats',         '#a05989'],
+        [36, 'Alfalfa',      '#ffa6e2'],
+        [41, 'Sugarbeets',   '#a800e2'],
+        [42, 'Dry Beans',    '#a60000'],
+        [43, 'Potatoes',     '#702600'],
+    ];
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
         {
@@ -336,8 +357,8 @@
             // transparent. 10 m resolution from the 2024 CDL onward.
             type: 'category',
             id: 'crops-cat',
-            label: 'Crop Cover (USDA)',
-            meta: '(where the crop dusters are)',
+            label: 'Crops',
+            meta: '(USDA CDL · where the crop dusters are)',
             master: { id: 'crops.show', default: false },
             children: [
                 { id: 'crops.mode', label: 'Show', type: 'select',
@@ -346,8 +367,15 @@
                       { value: 'all', label: 'All land cover (raw CDL)' },
                   ],
                   default: 'dusted' },
-                { id: 'crops.opacity', label: 'Opacity', type: 'number',
+                // Layer-wide opacity: the CDL colormap is per-class RGB only,
+                // so per-crop opacity isn't possible server-side.
+                { id: 'crops.opacity', label: 'Opacity (whole layer)', type: 'number',
                   min: 0.1, max: 1, step: 0.05, default: 0.7, unit: 'fill' },
+                { type: 'header', label: 'Per-crop visibility & color' },
+                ...CDL_DUSTED.flatMap(([code, name, hex]) => [
+                    { id: `crop.${code}.show`, label: name, type: 'boolean', default: true },
+                    { id: `crop.${code}.color`, label: `${name} color`, type: 'color', default: hex },
+                ]),
             ],
         },
         {
@@ -1400,25 +1428,7 @@
     // verified live over Midland (cotton/wheat/sorghum fields only).
     // Latest CDL year read from the service's timeExtent on first enable.
     const CDL_IMAGE_URL = 'https://pdi.scinet.usda.gov/image/rest/services/CDL_WM/ImageServer';
-    // Duster-relevant CDL classes with their official layer colors.
-    const CDL_DUSTED = [
-        [1,   255, 211, 0],     // Corn
-        [2,   255, 38, 38],     // Cotton
-        [3,   0, 168, 226],     // Rice
-        [4,   255, 158, 11],    // Sorghum
-        [5,   38, 112, 0],      // Soybeans
-        [6,   255, 255, 0],     // Sunflower
-        [10,  112, 166, 0],     // Peanuts
-        [21,  226, 0, 124],     // Barley
-        [22,  137, 98, 45],     // Durum Wheat
-        [23,  216, 181, 107],   // Spring Wheat
-        [24,  167, 112, 0],     // Winter Wheat
-        [28,  160, 89, 137],    // Oats
-        [36,  255, 166, 226],   // Alfalfa
-        [41,  168, 0, 226],     // Sugarbeets
-        [42,  166, 0, 0],       // Dry Beans
-        [43,  112, 38, 0],      // Potatoes
-    ];
+    // (Crop class table CDL_DUSTED lives above the TOGGLES schema.)
     const CDL_TIME_FALLBACK = 1735689600000;   // 2025-01-01 — latest at build time
     let _aimCropLayer = null;
     let _aimCropLayerKey = '';
@@ -1449,13 +1459,24 @@
             ontimeout: () => { _cdlTimeFetching = false; _cdlTimeMs = CDL_TIME_FALLBACK; },
         });
     }
+    function cdlHexToRgb(hex, fallback) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+        const h = m ? m[1] : String(fallback).slice(1);
+        return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    }
+    // Rule reflects the per-crop toggles: hidden crops drop out of the
+    // Remap entirely (transparent); colors come from the pickers.
+    // Returns null when every crop is hidden — caller shows nothing.
     function cdlRenderingRule() {
         const inputRanges = [], outputValues = [], colormap = [];
-        CDL_DUSTED.forEach(([code, r, g, b]) => {
+        CDL_DUSTED.forEach(([code, name, hex]) => {
+            if (toggleState[`crop.${code}.show`] === false) return;
+            const [r, g, b] = cdlHexToRgb(toggleState[`crop.${code}.color`], hex);
             inputRanges.push(code, code + 1);
             outputValues.push(code);
             colormap.push([code, r, g, b]);
         });
+        if (!colormap.length) return null;
         return JSON.stringify({
             rasterFunction: 'Colormap',
             rasterFunctionArguments: {
@@ -1477,7 +1498,13 @@
             const rawOpacity = Number(toggleState['crops.opacity']);
             const opacity = isNaN(rawOpacity) ? 0.7 : rawOpacity;
             const timeMs = _cdlTimeMs || CDL_TIME_FALLBACK;
-            const key = `${mode}|${timeMs}`;
+            const rule = mode === 'dusted' ? cdlRenderingRule() : null;
+            if (mode === 'dusted' && !rule) {
+                // Every crop hidden — nothing to render.
+                removeCropLayer();
+                return;
+            }
+            const key = `${mode}|${timeMs}|${rule || ''}`;
             if (!_aimCropLayer || _aimCropLayerKey !== key || _aimCropLayerMap !== map) {
                 removeCropLayer();
                 const layer = makeAimTileLayer('', {
@@ -1488,7 +1515,6 @@
                     attribution: 'USDA NASS CDL',
                 });
                 if (!layer) { console.warn(`${TAG} crop layer: no Leaflet TileLayer constructor reachable`); return; }
-                const rule = mode === 'dusted' ? cdlRenderingRule() : null;
                 // exportImage-per-tile: web-mercator tile bbox from coords.
                 layer.getTileUrl = function(coords) {
                     const o = 20037508.342789244;

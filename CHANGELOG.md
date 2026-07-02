@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Per-crop controls — Map Styler v34.92 (dev/latest)
+
+The crop overlay's Control Panel section (now just **"Crops"**) has **per-crop visibility checkboxes and color pickers** for all 16 dusted crop types — hide the ones you don't care about, recolor the ones you do (each defaults to its official CDL color). Changes re-render the layer immediately. Opacity remains one slider for the whole layer (the USDA server's colormap has no per-class transparency).
+
+---
+
 ## 2026-07-02 — 🌾 Crop Cover overlay (USDA) — Map Styler v34.91 (dev/latest)
 
 New **"Crop Cover (USDA)"** section: overlays the USDA Cropland Data Layer — where the crops are is where the **crop dusters** are. Default mode shows **dusted crops only** (cotton, sorghum, winter/spring wheat, corn, alfalfa, peanuts, soybeans, rice + 8 more, in the official CDL colors) with everything else transparent, via a server-side filter; or switch to the full raw CDL. Off by default, opacity slider, auto-uses the latest CDL year (10 m resolution from 2024 onward). Verified over Midland: cotton fields red, winter wheat tan, sorghum orange.
