@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.90
+// @version      34.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -17,6 +17,7 @@
 // @connect      api.github.com
 // @connect      services1.arcgis.com
 // @connect      services6.arcgis.com
+// @connect      pdi.scinet.usda.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -35,7 +36,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.90';
+    const SCRIPT_VERSION = '34.91';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -325,6 +326,28 @@
                 // zoom (the raster chart blurs past z12). OFF by default: it
                 // costs one FAA query per map area, zero when off.
                 { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // USDA Cropland Data Layer overlay (v34.91) — where the crops
+            // are is where the CROP DUSTERS are. Dusted-crops mode renders
+            // only duster-relevant classes (cotton/sorghum/wheat/corn/…)
+            // via a server-side Remap→Colormap rule, everything else
+            // transparent. 10 m resolution from the 2024 CDL onward.
+            type: 'category',
+            id: 'crops-cat',
+            label: 'Crop Cover (USDA)',
+            meta: '(where the crop dusters are)',
+            master: { id: 'crops.show', default: false },
+            children: [
+                { id: 'crops.mode', label: 'Show', type: 'select',
+                  options: [
+                      { value: 'dusted', label: 'Dusted crops only' },
+                      { value: 'all', label: 'All land cover (raw CDL)' },
+                  ],
+                  default: 'dusted' },
+                { id: 'crops.opacity', label: 'Opacity', type: 'number',
+                  min: 0.1, max: 1, step: 0.05, default: 0.7, unit: 'fill' },
             ],
         },
         {
@@ -994,6 +1017,8 @@
         applyFaaChartLayer();
         // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
         applyAirspaceVectors();
+        // 11e. USDA crop-cover overlay.
+        applyCropLayer();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -1365,6 +1390,145 @@
         _aimChartLayer = null;
         _aimChartLayerKey = '';
         _aimChartLayerMap = null;
+    }
+
+    // USDA Cropland Data Layer overlay (v34.91). CroplandCROS image
+    // service (pdi.scinet.usda.gov) wrapped as a Leaflet tile layer whose
+    // getTileUrl builds an exportImage request per tile. "Dusted crops"
+    // mode sends a Remap→Colormap renderingRule so only duster-relevant
+    // classes render (official CDL colors), everything else transparent —
+    // verified live over Midland (cotton/wheat/sorghum fields only).
+    // Latest CDL year read from the service's timeExtent on first enable.
+    const CDL_IMAGE_URL = 'https://pdi.scinet.usda.gov/image/rest/services/CDL_WM/ImageServer';
+    // Duster-relevant CDL classes with their official layer colors.
+    const CDL_DUSTED = [
+        [1,   255, 211, 0],     // Corn
+        [2,   255, 38, 38],     // Cotton
+        [3,   0, 168, 226],     // Rice
+        [4,   255, 158, 11],    // Sorghum
+        [5,   38, 112, 0],      // Soybeans
+        [6,   255, 255, 0],     // Sunflower
+        [10,  112, 166, 0],     // Peanuts
+        [21,  226, 0, 124],     // Barley
+        [22,  137, 98, 45],     // Durum Wheat
+        [23,  216, 181, 107],   // Spring Wheat
+        [24,  167, 112, 0],     // Winter Wheat
+        [28,  160, 89, 137],    // Oats
+        [36,  255, 166, 226],   // Alfalfa
+        [41,  168, 0, 226],     // Sugarbeets
+        [42,  166, 0, 0],       // Dry Beans
+        [43,  112, 38, 0],      // Potatoes
+    ];
+    const CDL_TIME_FALLBACK = 1735689600000;   // 2025-01-01 — latest at build time
+    let _aimCropLayer = null;
+    let _aimCropLayerKey = '';
+    let _aimCropLayerMap = null;
+    let _cdlTimeMs = null;
+    let _cdlTimeFetching = false;
+    function fetchCdlLatestTime() {
+        if (_cdlTimeMs || _cdlTimeFetching || typeof GM_xmlhttpRequest !== 'function') return;
+        _cdlTimeFetching = true;
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${CDL_IMAGE_URL}?f=json`, timeout: 20000,
+            onload: (resp) => {
+                _cdlTimeFetching = false;
+                try {
+                    const j = JSON.parse(resp.responseText);
+                    const te = j && j.timeInfo && j.timeInfo.timeExtent;
+                    if (Array.isArray(te) && te[1]) {
+                        _cdlTimeMs = te[1];
+                        console.log(`${TAG} CDL latest year timestamp: ${new Date(_cdlTimeMs).toISOString().substring(0, 10)}`);
+                        // Rebuild so tiles pick up the real year.
+                        if (_aimCropLayer) { removeCropLayer(); applyCropLayer(); }
+                        return;
+                    }
+                } catch (e) {}
+                _cdlTimeMs = CDL_TIME_FALLBACK;
+            },
+            onerror: () => { _cdlTimeFetching = false; _cdlTimeMs = CDL_TIME_FALLBACK; },
+            ontimeout: () => { _cdlTimeFetching = false; _cdlTimeMs = CDL_TIME_FALLBACK; },
+        });
+    }
+    function cdlRenderingRule() {
+        const inputRanges = [], outputValues = [], colormap = [];
+        CDL_DUSTED.forEach(([code, r, g, b]) => {
+            inputRanges.push(code, code + 1);
+            outputValues.push(code);
+            colormap.push([code, r, g, b]);
+        });
+        return JSON.stringify({
+            rasterFunction: 'Colormap',
+            rasterFunctionArguments: {
+                Colormap: colormap,
+                Raster: {
+                    rasterFunction: 'Remap',
+                    rasterFunctionArguments: { InputRanges: inputRanges, OutputValues: outputValues, AllowUnmatched: false },
+                },
+            },
+        });
+    }
+    function applyCropLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            if (toggleState['crops.show'] !== true) { removeCropLayer(); return; }
+            fetchCdlLatestTime();
+            const mode = String(toggleState['crops.mode'] || 'dusted');
+            const rawOpacity = Number(toggleState['crops.opacity']);
+            const opacity = isNaN(rawOpacity) ? 0.7 : rawOpacity;
+            const timeMs = _cdlTimeMs || CDL_TIME_FALLBACK;
+            const key = `${mode}|${timeMs}`;
+            if (!_aimCropLayer || _aimCropLayerKey !== key || _aimCropLayerMap !== map) {
+                removeCropLayer();
+                const layer = makeAimTileLayer('', {
+                    opacity,
+                    minNativeZoom: 6, maxNativeZoom: 15,   // CDL is 10 m — z15 is native detail; upscale beyond
+                    maxZoom: 23,
+                    zIndex: 9991,   // above the sectional, still under all vector panes
+                    attribution: 'USDA NASS CDL',
+                });
+                if (!layer) { console.warn(`${TAG} crop layer: no Leaflet TileLayer constructor reachable`); return; }
+                const rule = mode === 'dusted' ? cdlRenderingRule() : null;
+                // exportImage-per-tile: web-mercator tile bbox from coords.
+                layer.getTileUrl = function(coords) {
+                    const o = 20037508.342789244;
+                    const size = (2 * o) / Math.pow(2, coords.z);
+                    const xmin = -o + coords.x * size;
+                    const ymax = o - coords.y * size;
+                    const params = new URLSearchParams({
+                        bbox: `${xmin},${ymax - size},${xmin + size},${ymax}`,
+                        bboxSR: '3857', imageSR: '3857',
+                        size: '256,256', format: 'png32', transparent: 'true',
+                        time: String(timeMs), f: 'image',
+                    });
+                    if (rule) params.set('renderingRule', rule);
+                    return `${CDL_IMAGE_URL}/exportImage?${params.toString()}`;
+                };
+                map.addLayer(layer);
+                _aimCropLayer = layer;
+                _aimCropLayerKey = key;
+                _aimCropLayerMap = map;
+                console.log(`${TAG} crop cover ON (${mode}, opacity ${opacity})`);
+            } else if (typeof _aimCropLayer.setOpacity === 'function' && _aimCropLayer.options.opacity !== opacity) {
+                _aimCropLayer.setOpacity(opacity);
+            }
+            if (_aimCropLayer && typeof map.hasLayer === 'function' && !map.hasLayer(_aimCropLayer)) {
+                map.addLayer(_aimCropLayer);
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyCropLayer failed:`, e);
+        }
+    }
+    function removeCropLayer() {
+        if (!_aimCropLayer) return;
+        try {
+            const map = _aimCropLayerMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimCropLayer);
+            console.log(`${TAG} crop cover removed`);
+        } catch (e) {}
+        _aimCropLayer = null;
+        _aimCropLayerKey = '';
+        _aimCropLayerMap = null;
     }
 
     // Vector airspace boundaries (v34.89). Queries the FAA AIS
@@ -6065,6 +6229,8 @@
         removeFaaChartLayer();
         // Same for the vector airspace boundaries.
         removeAirspaceVectors();
+        // And the crop-cover overlay.
+        removeCropLayer();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:

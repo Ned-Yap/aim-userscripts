@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 🌾 Crop Cover overlay (USDA) — Map Styler v34.91 (dev/latest)
+
+New **"Crop Cover (USDA)"** section: overlays the USDA Cropland Data Layer — where the crops are is where the **crop dusters** are. Default mode shows **dusted crops only** (cotton, sorghum, winter/spring wheat, corn, alfalfa, peanuts, soybeans, rice + 8 more, in the official CDL colors) with everything else transparent, via a server-side filter; or switch to the full raw CDL. Off by default, opacity slider, auto-uses the latest CDL year (10 m resolution from 2024 onward). Verified over Midland: cotton fields red, winter wheat tan, sorghum orange.
+
+---
+
 ## 2026-07-02 — Noise filters + windmill standoff — Asset Inspector v4.157, Map Styler v34.90 (dev/latest)
 
 **Asset Inspector v4.157** — the report now hides what doesn't matter, all thresholds editable in the Control Panel: **HIFLD transmission lines** hidden beyond 1,000 ft of the site; **T-L tower dots** hidden beyond the same 1,000 ft; **other FAA obstacles** hidden beyond 1.5 NM; **TFRs** ignored beyond 3 NM (panel shows "none within 3 NM (N elsewhere in the state)"). New **windmill/turbine standoff (500 ft default)** — turbines flag at their own tighter threshold, and the drawn issue **box wraps both the turbine and the violating FFZ/FP/Asset** so the pair reads at a glance. On the test site this cut the obstacle list from 136 rows to 6. Auto-created **windmill GMs are now HAZARD markers** (towers stay tower-typed).
