@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.17
+// @version      0.18
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.17';
+    const SCRIPT_VERSION = '0.18';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -130,6 +130,7 @@
     })();
     let digestRunning = false;
     let digestRetryAfter = 0;       // backoff timestamp after a failed digest post
+    let mySlackId = null;           // this user's Slack member id (for Simulate DM), resolved from GitHub login
     const tabId = 'tab-' + Math.random().toString(36).slice(2) + '-' + Date.now();
     let amLeader = false;
     let pausedForAuth = false;
@@ -962,7 +963,7 @@
             if (!meta) { console.warn(TAG, 'slack-config.json missing — digest disabled'); slackConfig = null; gmSet(SLACK_CONFIG_KEY, ''); return; }
             const cfgObj = JSON.parse(b64ToText(meta.base64 || ''));
             if (cfgObj && cfgObj.botToken && cfgObj.channelId) {
-                slackConfig = { botToken: cfgObj.botToken, channelId: cfgObj.channelId };
+                slackConfig = { botToken: cfgObj.botToken, channelId: cfgObj.channelId, users: cfgObj.users || {} };
                 gmSet(SLACK_CONFIG_KEY, JSON.stringify(slackConfig));
                 console.log(`${TAG} Slack config loaded — channel ${slackConfig.channelId}`);
             } else {
@@ -974,10 +975,10 @@
 
     // POST a message (optionally threaded). Resolves to the message ts on
     // success, null on any failure. Never throws.
-    async function slackPost(text, threadTs) {
+    async function slackPost(text, threadTs, channelOverride) {
         if (!slackEnabled()) return null;
         try {
-            const body = { channel: slackConfig.channelId, text };
+            const body = { channel: channelOverride || slackConfig.channelId, text };
             if (threadTs) body.thread_ts = threadTs;
             const resp = await ghRequest({
                 method: 'POST', url: SLACK_POST_URL,
@@ -989,6 +990,24 @@
             console.warn(`${TAG} Slack post failed: HTTP ${resp.status} ${parsed ? parsed.error : (resp.responseText || '').slice(0, 200)}`);
             return null;
         } catch (e) { console.warn(TAG, 'slackPost threw', e); return null; }
+    }
+
+    // This user's Slack member id, for the Simulate DM: resolve the GitHub login
+    // from the PAT (GET /user) and map it via slack-config.json's `users`. Cached.
+    async function resolveMySlackId() {
+        if (mySlackId) return mySlackId;
+        if (!cachedToken) return null;
+        if (!slackConfig || !slackConfig.users) await fetchSlackConfig();
+        if (!slackConfig || !slackConfig.users) return null;
+        try {
+            const resp = await ghRequest({ method: 'GET', url: `${GITHUB_API_BASE}/user`, headers: ghHeaders(), timeout: 15000 });
+            if (resp.status === 200) {
+                const login = (JSON.parse(resp.responseText) || {}).login;
+                if (login && slackConfig.users[login]) mySlackId = slackConfig.users[login];
+                else console.warn(`${TAG} no Slack DM mapping for GitHub login "${login}" in slack-config.json users`);
+            }
+        } catch (e) { console.warn(TAG, 'resolveMySlackId threw', e); }
+        return mySlackId;
     }
 
     // ---- PT clock (DST-correct via Intl) ----
@@ -1649,11 +1668,27 @@
         rows = await finalizeSetupRows(rows);
         const changeRows = rows.map(row => ({ siteId: target.id, siteName: target.name || '', change: row.change, etype: row.etype, ename: row.ename, objectId: row.objectId, field: row.field, was: row.was, is: row.is }));
         const sites = rollup(changeRows);
+        const parent = buildParent(sites, ptParts().day + ' — SIMULATION', '(sim)', new Date().toISOString());
+        const chunks = buildThreadChunks(sites);
         console.log(`%c   synthetic edits: ${edits.join(' | ')}`, 'color:#9aa0a6');
         console.log('%c────── PARENT (as Slack would render) ──────', 'color:#5fd0ff');
-        console.log(buildParent(sites, ptParts().day + ' — SIMULATION', '(sim)', new Date().toISOString()));
+        console.log(parent);
         console.log('%c────── THREAD ──────', 'color:#5fd0ff');
-        for (const ch of buildThreadChunks(sites)) console.log(ch);
+        for (const ch of chunks) console.log(ch);
+        // Also DM it to you so you see the real Slack rendering (not the channel —
+        // no coworker noise). Clearly marked as a simulation in the parent header.
+        if (slackEnabled()) {
+            const dm = await resolveMySlackId();
+            if (dm) {
+                const banner = ':test_tube: *SIMULATION — this is a Site Watch preview on fake edits, nothing changed.*';
+                const parentTs = await slackPost(banner + '\n\n' + parent, null, dm);
+                if (parentTs) {
+                    let sent = 0;
+                    for (const ch of chunks) { if (await slackPost(ch, parentTs, dm)) sent++; await sleep(400); }
+                    console.log(`%c${TAG} simulation also DM'd to your Slack (${sent + 1} message(s)).`, 'color:#5fd0ff;font-weight:700');
+                } else console.warn(`${TAG} sim: Slack DM post failed (see above)`);
+            } else console.warn(`${TAG} sim: couldn't resolve your Slack DM — console preview only. Add your GitHub login → Slack ID to slack-config.json users.`);
+        } else console.log(`${TAG} sim: Slack not configured — console preview only.`);
         console.log(`%c${TAG} simulation done — ${rows.length} change rows (nothing was written; live data untouched).`, 'color:#5fd0ff;font-weight:700');
     }
     function handleAction(actionId) {

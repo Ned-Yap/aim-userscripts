@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Site Watch: Simulate now DMs the preview to your Slack — Site Watch v0.18 (dev/latest, personal)
+
+The **Simulate a change** button now also posts the rendered digest to **your Slack DM** (not the CSM channel — no coworker noise), so you can see the real Slack formatting, not just the console. The bot resolves your Slack ID from your GitHub login via the `users` map in `slack-config.json`. The DM is clearly banner-marked as a simulation on fake edits. Falls back to console-only if Slack isn't configured or your login isn't in the users map.
+
+---
+
 ## 2026-07-01 — Site Watch: "Reset all baselines" now auto-starts the re-baseline — Site Watch v0.17 (dev/latest, personal)
 
 Small UX fix: clicking **Reset all baselines** used to just clear stored state and then look like "nothing happened" — you had to also click **Check all due now** to make it re-scan. Now the reset kicks a cycle immediately (when master is on + token set), so re-baselining starts right away (silently, ~25 sites/cycle, auto-advancing). If master is off or no token, it says so instead.
