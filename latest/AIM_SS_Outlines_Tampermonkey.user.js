@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.87
+// @version      34.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -15,6 +15,7 @@
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
+// @connect      services1.arcgis.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -33,7 +34,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.87';
+    const SCRIPT_VERSION = '34.88';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -282,6 +283,7 @@
                 { id: 'trans-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-trans' },
                 { type: 'header', label: 'KML data tools' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
+                { id: 'trans-seed-hifld', label: 'Seed lines from HIFLD (federal data)', type: 'button', action: 'seed-hifld-trans' },
             ],
         },
         {
@@ -3470,6 +3472,88 @@
         return { dropped, maxPmIdx };
     }
 
+    // --- Seed trans KML from HIFLD (v34.88) ---
+    // Fetches the federal HIFLD Electric_Power_Transmission_Lines geometry
+    // for the CURRENT MAP VIEW and stages each line as a pending "added"
+    // op on the trans category — the exact same pending-adds pipeline the
+    // draw tool uses, so lines render as pending, are vertex-editable
+    // before commit, and go to GitHub via the normal "Commit pending
+    // changes" button (which also self-creates the KML on 404 for new
+    // sites). HIFLD covers TRANSMISSION (typically 69 kV+), not local
+    // distribution — it seeds trans.kml only.
+    const HIFLD_LINES_URL = 'https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Electric_Power_Transmission_Lines/FeatureServer/0';
+    const HIFLD_SEED_MAX_LINES = 300;   // sanity cap per seed action
+    function seedTransLinesFromHIFLD() {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') { showKMLToast('Map not ready — try again in a moment.', 3000); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        let b;
+        try { b = map.getBounds().pad(0.25); } catch (e) { showKMLToast('Could not read map bounds.', 3000); return; }
+        const existingCount = (kmlFeatures[kmlKey(siteID, 'trans')] || []).length;
+        const co0 = getCommitOps(siteID, 'trans');
+        const warn = [
+            `Seed transmission lines from HIFLD federal data for the CURRENT MAP VIEW?`,
+            ``,
+            `They are staged as PENDING adds (dashed) — review/edit, then use "Commit pending changes" to write ${siteID}-trans.kml.`,
+        ];
+        if (existingCount) warn.splice(2, 0, `⚠ This site already has ${existingCount} trans line(s) — seeding may create DUPLICATES of lines you already drew.`);
+        if (co0.added && co0.added.length) warn.splice(2, 0, `⚠ ${co0.added.length} pending add(s) already staged — seeding adds on top of them.`);
+        if (!confirm(warn.join('\n'))) return;
+        showKMLToast('Fetching HIFLD transmission lines for this view…', 8000);
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`,
+            geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'OBJECTID_1,VOLTAGE,VOLT_CLASS,OWNER',
+            returnGeometry: 'true', outSR: '4326',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${HIFLD_LINES_URL}/query?${params.toString()}`,
+            timeout: 30000,
+            onload: (resp) => {
+                if (resp.status !== 200) { showKMLToast(`HIFLD fetch failed: HTTP ${resp.status}.`, 6000); return; }
+                let json;
+                try { json = JSON.parse(resp.responseText); } catch (e) { showKMLToast('HIFLD fetch failed: bad JSON.', 5000); return; }
+                if (json.error) { showKMLToast(`HIFLD fetch failed: ${json.error.message || 'ArcGIS error'}.`, 6000); return; }
+                const feats = json.features || [];
+                if (!feats.length) { showKMLToast('HIFLD has no transmission lines in this view.', 5000); return; }
+                const co = getCommitOps(siteID, 'trans');
+                let staged = 0, skippedCap = 0;
+                feats.forEach(f => {
+                    const a = f.attributes || {};
+                    const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)}kV` : (a.VOLT_CLASS || 'kV?');
+                    // KML-legal-ish name; owner trimmed so placemark names stay readable.
+                    const owner = String(a.OWNER || '').trim().replace(/[<>&"]/g, '').substring(0, 30);
+                    ((f.geometry && f.geometry.paths) || []).forEach((pth, pi) => {
+                        if (!Array.isArray(pth) || pth.length < 2) return;
+                        if (staged >= HIFLD_SEED_MAX_LINES) { skippedCap++; return; }
+                        // ArcGIS [x,y] IS KML [lng,lat] order — no swap needed.
+                        co.added.push({
+                            name: `HIFLD ${volt}${owner ? ` ${owner}` : ''} #${a.OBJECTID_1 != null ? a.OBJECTID_1 : '?'}${pi ? `-${pi + 1}` : ''}`,
+                            coords: pth.map(xy => [xy[0], xy[1]]),
+                        });
+                        staged++;
+                    });
+                });
+                if (!staged) { showKMLToast('HIFLD returned lines but none had usable geometry.', 5000); return; }
+                setCommitOps(siteID, 'trans', co);
+                console.log(`${TAG} HIFLD seed: staged ${staged} line(s) as pending trans adds${skippedCap ? ` (${skippedCap} over the ${HIFLD_SEED_MAX_LINES}-line cap skipped — zoom in and seed again)` : ''}`);
+                showKMLToast(`Staged ${staged} HIFLD line(s) as pending trans adds${skippedCap ? ` (${skippedCap} skipped — over cap, zoom in for the rest)` : ''}. Review on the map, then "Commit pending changes".`, 9000);
+                if (isActive) runUpdate();
+                try { broadcastPowerLineStatus(); } catch (e) {}
+            },
+            onerror: () => showKMLToast('HIFLD fetch failed: network error.', 5000),
+            ontimeout: () => showKMLToast('HIFLD fetch failed: timed out.', 5000),
+        });
+    }
+
     function commitPendingOps(type) {
         const siteID = getCurrentSiteID();
         if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
@@ -6303,6 +6387,7 @@
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }

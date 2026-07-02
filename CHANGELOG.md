@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Seed trans KML from HIFLD — Map Styler v34.88 (dev/latest)
+
+New **"Seed lines from HIFLD (federal data)"** button under Transmission lines → KML data tools: fetches the federal HIFLD transmission-line geometry for the **current map view** and stages each line as a pending add — the same pipeline as hand-drawing, so seeded lines render as pending, are vertex-editable, and go to GitHub via the normal **Commit pending changes** (which self-creates `<siteID>-trans.kml` on new sites). Warns before seeding if the site already has trans lines (possible duplicates). Names come through as `HIFLD 345kV ONCOR… #id`. HIFLD covers transmission (~69 kV+) only — distribution stays hand-drawn.
+
+---
+
 ## 2026-07-02 — Airspace overlay polish — Asset Inspector v4.154 (dev/latest)
 
 From live feedback: **every LAANC grid now shows its ceiling label** (400s included — no label no longer means "unknown"); **hovering any highlight marker identifies it** (obstacle dots show type + height + lit + distance-from-entity, airport rings show name/type/distance, transmission lines show voltage + owner); **clicking a transmission-line row now jumps to the line's nearest-to-site point** instead of mid-path out in open country.
