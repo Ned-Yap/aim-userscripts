@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Site Watch: Simulate now covers missions too — Site Watch v0.19 (dev/latest, personal)
+
+The **Simulate** button now also applies representative **mission** edits (rename, step altitude, distance, disable a mission, add a step, add + delete a mission) and folds them into the same preview, so the sample digest (console + your Slack DM) shows **both** Site-Setup and mission changes together — exactly like a real combined digest, with the `(incl. N missions)` note in the parent. Setup-only sites just show setup.
+
+---
+
 ## 2026-07-02 — Site Watch: Simulate now DMs the preview to your Slack — Site Watch v0.18 (dev/latest, personal)
 
 The **Simulate a change** button now also posts the rendered digest to **your Slack DM** (not the CSM channel — no coworker noise), so you can see the real Slack formatting, not just the console. The bot resolves your Slack ID from your GitHub login via the `users` map in `slack-config.json`. The DM is clearly banner-marked as a simulation on fake edits. Falls back to console-only if Slack isn't configured or your login isn't in the users map.

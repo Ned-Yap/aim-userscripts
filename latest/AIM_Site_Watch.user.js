@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.18
+// @version      0.19
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.18';
+    const SCRIPT_VERSION = '0.19';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -1647,6 +1647,27 @@
         }
         return log;
     }
+    // Same idea for the mission source — mutate a cloned mission list in place.
+    function applySyntheticMissionEdits(list) {
+        const log = [];
+        if (!list.length) return log;
+        const m0 = list[0];
+        if (m0) {
+            m0.name = (m0.name || 'mission') + ' (RENAMED)'; log.push(`mission renamed`);
+            const step = (m0.instructions || []).find(s => typeof s.value1 === 'number' && (s.type_name === 'navigate' || s.type_name === 'snapshot'));
+            if (step) { step.value1 = +(step.value1 + 3.05).toFixed(2); log.push('mission step alt +~10ft'); }
+            if (m0.app_data && typeof m0.app_data.flight_distance === 'number') { m0.app_data.flight_distance += 40; log.push('mission distance +40m'); }
+        }
+        if (list[1]) { list[1].is_active = false; log.push(`mission disabled`); }
+        if (list[2] && Array.isArray(list[2].instructions) && list[2].instructions.length) {
+            list[2].instructions.splice(1, 0, { id: 999, type_name: 'wait', type: 5, value1: 15, value2: null, setmission_dict: { wait: { id: 999, value: 15 } }, extra_options: {}, location: null });
+            log.push(`mission added a wait step`);
+        }
+        if (list.length > 3) { const del = list.pop(); log.push(`deleted mission ${del.name}`); }
+        list.push({ id: 'SIM-M-1', name: 'SIM MISSION ALPHA', is_active: true, type: 1, app_data: { flight_distance: 1200, flight_time: 300 }, instructions: [{ id: 1, type_name: 'takeoff', type: 0, value1: 20 }, { id: 2, type_name: 'navigate', type: 1, value1: 800, value2: 12, location: { lat: 31.9, lng: -101.9 } }] });
+        log.push('added SIM mission');
+        return log;
+    }
     // Console-preview the digest for synthetic edits on a REAL site — no baseline
     // reset, no waiting, no channel noise. Shows the exact Slack-rendered text.
     async function simulateDigest() {
@@ -1666,7 +1687,18 @@
         const edits = applySyntheticEdits(list);
         let rows = diffSetup(beforeFP, siteFP(list));
         rows = await finalizeSetupRows(rows);
-        const changeRows = rows.map(row => ({ siteId: target.id, siteName: target.name || '', change: row.change, etype: row.etype, ename: row.ename, objectId: row.objectId, field: row.field, was: row.was, is: row.is }));
+        const mkRow = row => ({ siteId: target.id, siteName: target.name || '', change: row.change, etype: row.etype, ename: row.ename, objectId: row.objectId, field: row.field, was: row.was, is: row.is });
+        const changeRows = rows.map(mkRow);
+        // Also simulate mission changes so the preview covers BOTH sources.
+        try {
+            const rm = await fetchMissions(target.id);
+            if (rm && rm.data) {
+                const beforeM = missionFingerprints(rm.data);
+                const mlist = extractList(JSON.parse(JSON.stringify(rm.data)));
+                for (const e of applySyntheticMissionEdits(mlist)) edits.push(e);
+                for (const row of diffMissions(beforeM, missionFingerprints(mlist))) changeRows.push(mkRow(row));
+            } else console.warn(`${TAG} sim: no missions on this site — setup-only preview`);
+        } catch (e) { console.warn(`${TAG} sim: mission preview failed`, e); }
         const sites = rollup(changeRows);
         const parent = buildParent(sites, ptParts().day + ' — SIMULATION', '(sim)', new Date().toISOString());
         const chunks = buildThreadChunks(sites);
