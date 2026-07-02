@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.149
+// @version      4.150
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -48,7 +48,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.149';
+    const SCRIPT_VERSION = '4.150';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2369,7 +2369,7 @@
                 if (couldHit && distFt < th.obstacleFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
                     boxIssue(oLat, oLng,
-                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt} ft from the nearest site entity (threshold ${th.obstacleFt} ft)`, 'high');
+                        `violation: FAA obstacle ${type} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? 'effectively ON the site (< 100 ft — DOF coords are only accurate to tens of ft)' : `${distFt.toLocaleString()} ft from the nearest site entity`} (threshold ${th.obstacleFt} ft)`, 'high');
                 }
                 inventory.obstacles.push(entry);
             });
@@ -2415,6 +2415,11 @@
         closeAirspacePanel();
         const inv = res.inventory;
         const th = airThresholds;
+        // DOF horizontal accuracy is tens of feet — a single-digit distance
+        // is false precision, so anything under 100 ft reads "on site".
+        const obsDist = (o) => o.distFt < 100 ? 'on site (&lt; 100 ft)'
+            : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft`
+            : `${o.distMi.toFixed(1)} mi`;
         const sevDot = (sev) => ({
             high: '<span style="color:#ff5555">●</span>',
             warn: '<span style="color:#ffb020">●</span>',
@@ -2455,9 +2460,9 @@
             section(`FAA obstacles (${inv.obstacles.length}${inv.obstacleTruncated ? '+ (list truncated at 2000)' : ''} within ~5 mi)`);
             line('info', summary);
             inv.obstacles.filter(o => o.hit).forEach(o => line('high',
-                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${o.distFt.toLocaleString()} ft from site`));
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from site`));
             inv.obstacles.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
-                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${o.distMi.toFixed(1)} mi`));
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`));
         }
 
         const wrap = document.createElement('div');

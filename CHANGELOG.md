@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Airspace Checker distance polish — Asset Inspector v4.150 (dev/latest)
+
+Obstacle distances now read sanely: under 100 ft shows **"on site (< 100 ft)"** (the FAA Digital Obstacle File's coordinates are only accurate to tens of feet, so "8 ft from site" was false precision), under ~1 mi shows feet, beyond that miles. Same wording in the drawn violation notes.
+
+---
+
 ## 2026-07-02 — 🛩 Airspace Checker — Asset Inspector v4.149 (dev/latest)
 
 New **Airspace Checker** Control Panel card (under SOP Validators, Site Setup scope): one click checks the whole site against live FAA data — **controlled airspace** (inside a surface Class B/C/D/E area = red; surface airspace within the standoff = warn; overhead shelves noted), **manned strips & helipads** (every FAA-registered airport, heliport, hospital pad, and private crop-duster strip within 3 NM of the *nearest site entity* — not the centroid), **FAA obstacles** (towers/turbines from the Digital Obstacle File near site entities, with height + lighting), and **LAANC grid ceilings** below our max operating altitude. Violations are drawn on the map as Validator issues (same pipeline as the SOP validators — needs AIM Issues); a floating inventory panel lists everything found with distance + bearing, plus a **Copy report** button. All thresholds editable (3 NM standoff, obstacle distance, min obstacle height, max op altitude, inventory radius). SOP and Airspace issue batches now coexist — running one no longer erases the other's flags. Verified against site 1583: correctly flags Skywest airfield at 1.74 NM and two lit towers within 0.5 mi.
