@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-01 — Site Watch: "Reset all baselines" now auto-starts the re-baseline — Site Watch v0.17 (dev/latest, personal)
+
+Small UX fix: clicking **Reset all baselines** used to just clear stored state and then look like "nothing happened" — you had to also click **Check all due now** to make it re-scan. Now the reset kicks a cycle immediately (when master is on + token set), so re-baselining starts right away (silently, ~25 sites/cycle, auto-advancing). If master is off or no token, it says so instead.
+
+---
+
 ## 2026-07-01 — Site Watch setup digest is now value-level (like missions) + simulation mode — Site Watch v0.16 (dev/latest, personal)
 
 Rebuilt the Site-Setup diff on the same fingerprint engine as missions, so the digest stops saying `1 field: non-structural / geometry / polygon` and instead reports **what changed, per entity, old → new** — each changed entity on one line (Name · Type · all its changes grouped): per-type **entity counts** (`FFZ 42→43`), **min/max alt** (in **AGL feet** via a DEM lookup done only when an alt actually changed, ASL-ft fallback), **vertex count** + **N vertices moved**, **polygon area** (`9,966→15,908 ft²`), FP **segment count**, per-segment **length**/**alt** keyed by the now-stable **arc id**, FP **segment added/removed** with **GPS endpoints**, **name** changes, **added/deleted** entities (type + name), and point/base scalars (heading, docking_heading, doors_status, etc.). The fingerprint is both the change-detector and the report, so noise-only saves no longer fire. Raw payload snapshots are still stored (full forensic history preserved). **New "Simulate a change (console preview)" button** applies representative edits to a real site in memory and prints the exact Slack-rendered digest to the console — so you can see/tune the format immediately without a baseline reset or waiting for 6pm; nothing is written and live data is untouched. **One-time action on update: "Reset all baselines"** (the change-hash basis moved from raw payload → fingerprint). Validated end-to-end against the real 231-entity site 1583 dump. Issues cross-check (added/resolved/deleted) remains a planned fast-follow.

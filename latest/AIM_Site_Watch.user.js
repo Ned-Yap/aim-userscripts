@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Watch
 // @namespace    http://tampermonkey.net/
-// @version      0.16
+// @version      0.17
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Watch.user.js
 // @description  Personal background auditor. Polls every Percepto site's setup JSON (and optionally its missions) on an ADAPTIVE schedule (daily when quiet, every few hours after a change) and records what changed: a running field-level diff CSV plus a rotating gzip snapshot history, committed to the private aim-userscripts-data repo. Daily Slack digest. Configurable in the AIM Control Panel ("Site Watch").
@@ -74,7 +74,7 @@
 
     // ---- identity / channel ----
     const SCRIPT_ID = 'aim-site-watch';
-    const SCRIPT_VERSION = '0.16';
+    const SCRIPT_VERSION = '0.17';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
 
     // ---- GitHub (data repo) ----
@@ -1681,6 +1681,10 @@
             // Tell every other tab (esp. the leader) to clear too, so its stale
             // in-memory state can't overwrite the reset on its next cycle.
             try { if (controlChannel) controlChannel.postMessage({ type: 'SW_RESET_SYNC', scriptId: SCRIPT_ID, from: tabId }); } catch (e) { console.warn(TAG, 'reset broadcast', e); }
+            // Kick a cycle immediately so re-baselining starts now (silently),
+            // instead of waiting for the next 15-min wake or a manual Check.
+            if (masterEnabled && cachedToken) { console.log(`${TAG} reset — starting re-baseline now`); stealLeader(); runCycle('reset'); }
+            else console.log(`${TAG} reset done — enable master + set token, then "Check all due now" to re-baseline`);
         }
     }
     function doResetBaselines(reason) {
