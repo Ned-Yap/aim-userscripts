@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.155
+// @version      4.156
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -19,6 +19,7 @@
 // @connect      api.opentopodata.org
 // @connect      services6.arcgis.com
 // @connect      services1.arcgis.com
+// @connect      tfr.faa.gov
 // @run-at       document-end
 // ==/UserScript==
 
@@ -49,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.155';
+    const SCRIPT_VERSION = '4.156';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -145,7 +146,7 @@
         inventoryMi: 15,      // inventory radius for airports/airspace listing
         stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
     };
-    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true };
     // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
     // high-voltage transmission-line GEOMETRY. Independent of our KMLs;
     // used to cross-check shielding coverage. Informational only.
@@ -2086,6 +2087,7 @@
     // UNION; clearing one side keeps the other side's issues drawn.
     let sopLastIssues = [], sopIssuesSite = null;
     let airLastIssues = [], airIssuesSite = null;
+    let tfrLastIssues = [], tfrIssuesSite = null;   // live TFRs — replaced by the auto-sweep independently
     function postValidatorIssues(sid) {
         const ch = ensureValidatorChannel();
         if (!ch) return false;
@@ -2093,7 +2095,8 @@
         // than re-drawing it onto the site the user navigated to.
         if (sopIssuesSite !== sid) { sopLastIssues = []; sopIssuesSite = sid; }
         if (airIssuesSite !== sid) { airLastIssues = []; airIssuesSite = sid; }
-        const all = sopLastIssues.concat(airLastIssues);
+        if (tfrIssuesSite !== sid) { tfrLastIssues = []; tfrIssuesSite = sid; }
+        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues);
         if (all.length) ch.postMessage({ type: 'VALIDATOR_ISSUES', siteID: sid, issues: all });
         else ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
         return true;
@@ -2256,6 +2259,166 @@
             if (d < best) { best = d; bestPt = p; }
         }
         return { d: best, pt: bestPt };
+    }
+
+    // ---- Live TFRs (v4.156) ----
+    // List: tfr.faa.gov/tfrapi/exportTfrList (JSON; state per entry).
+    // Geometry: tfr.faa.gov/download/detail_<id>.xml (XNOTAM) — one or
+    // more <TFRAreaGroup>, each an <Avx> vertex polygon (codeType GRC,
+    // coords as "43.98973026N" decimal+hemisphere) or a CIR center +
+    // <valRadiusArc>, plus altitude bounds and effective/expire windows.
+    // The site's 2-letter state (for list filtering) comes from the
+    // nearest FAA airport — cached per site.
+    const AIR_TFR_LIST_URL = 'https://tfr.faa.gov/tfrapi/exportTfrList';
+    const AIR_TFR_DETAIL_URL = (id) => `https://tfr.faa.gov/download/detail_${String(id).replace(/\//g, '_')}.xml`;
+    const AIR_TFR_LIST_TTL_MS = 10 * 60 * 1000;
+    const AIR_TFR_MAX_DETAILS = 25;      // per sweep — TX alone can run ~15
+    let airTfrListCache = null;          // { at, list }
+    const airTfrDetailCache = {};        // notam_id -> parsed groups
+    const airSiteStateCache = {};        // siteID -> 'TX'
+    function airParseHemi(s) {
+        const m = String(s || '').trim().match(/^([\d.]+)([NSEW])$/);
+        if (!m) return NaN;
+        const v = Number(m[1]);
+        return (m[2] === 'S' || m[2] === 'W') ? -v : v;
+    }
+    // Regex parse (not DOMParser) so the offline harness can exercise it.
+    function airParseTfrXml(xml) {
+        const groups = [];
+        const gRe = /<TFRAreaGroup>([\s\S]*?)<\/TFRAreaGroup>/g;
+        let gm;
+        while ((gm = gRe.exec(xml))) {
+            const g = gm[1];
+            const s1 = (re) => { const m = g.match(re); return m ? m[1] : null; };
+            const lowVal = Number(s1(/<valDistVerLower>([^<]*)</)); // NaN if absent
+            const lowCode = (s1(/<codeDistVerLower>([^<]*)</) || '').trim();
+            const dateEff = s1(/<dateEffective>([^<]*)</);
+            const dateExp = s1(/<dateExpire>([^<]*)</);
+            const ring = [];
+            let circle = null;
+            const avxRe = /<Avx>([\s\S]*?)<\/Avx>/g;
+            let am;
+            while ((am = avxRe.exec(g))) {
+                const av = am[1];
+                const lat = airParseHemi((av.match(/<geoLat>([^<]*)</) || [])[1]);
+                const lng = airParseHemi((av.match(/<geoLong>([^<]*)</) || [])[1]);
+                const t = ((av.match(/<codeType>([^<]*)</) || [])[1] || '').trim();
+                if (t === 'CIR' && isFinite(lat) && isFinite(lng)) {
+                    const rad = Number(s1(/<valRadiusArc>([^<]*)</));
+                    const uom = (s1(/<uomRadiusArc>([^<]*)</) || 'NM').trim();
+                    if (isFinite(rad) && rad > 0) {
+                        circle = { lat, lng, radM: rad * (uom === 'KM' ? 1000 : uom === 'M' ? 1 : NM_TO_M) };
+                    }
+                } else if (isFinite(lat) && isFinite(lng)) {
+                    ring.push([lat, lng]);
+                }
+            }
+            if (ring.length < 3 && circle) {
+                for (let i = 0; i < 36; i++) {
+                    const th2 = i * Math.PI / 18;
+                    ring.push([
+                        circle.lat + (circle.radM * Math.cos(th2)) / 110540,
+                        circle.lng + (circle.radM * Math.sin(th2)) / (111320 * Math.cos(circle.lat * Math.PI / 180)),
+                    ]);
+                }
+            }
+            if (ring.length >= 3) {
+                // Lower bound of 0 / SFC / missing ⇒ reaches the ground where
+                // WE fly. A high-only TFR (e.g. lower 5000 ft) is info-level.
+                const surface = !isFinite(lowVal) || lowVal <= 0 || lowCode === 'SFC';
+                groups.push({ ring, surface, lowVal: isFinite(lowVal) ? lowVal : 0, dateEff, dateExp });
+            }
+        }
+        return groups;
+    }
+    async function airGetTfrList() {
+        if (airTfrListCache && Date.now() - airTfrListCache.at < AIR_TFR_LIST_TTL_MS) return airTfrListCache.list;
+        const r = await elevGmRequest({ method: 'GET', url: AIR_TFR_LIST_URL, timeout: 20000, headers: { 'Accept': 'application/json' } });
+        if (!r.ok) throw new Error(`TFR list HTTP ${r.status || 'network error'}`);
+        let list;
+        try { list = JSON.parse(r.responseText); } catch (e) { throw new Error('TFR list: bad JSON'); }
+        if (!Array.isArray(list)) throw new Error('TFR list: unexpected shape');
+        airTfrListCache = { at: Date.now(), list };
+        return list;
+    }
+    async function airGetSiteState(sid, clat, clng) {
+        if (airSiteStateCache[sid]) return airSiteStateCache[sid];
+        const res = await airPointQuery('US_Airport', clat, clng, 80 * MI_TO_M, 'STATE', true);
+        let best = null, bestD = Infinity;
+        (res.features || []).forEach(f => {
+            if (!f.geometry || typeof f.geometry.y !== 'number') return;
+            const d = approxMeters(clat, clng, f.geometry.y, f.geometry.x);
+            if (d < bestD) { bestD = d; best = (f.attributes && f.attributes.STATE || '').trim(); }
+        });
+        if (best) airSiteStateCache[sid] = best;
+        return best;
+    }
+    // TFR-only check. Self-contained (builds its own site geometry) so the
+    // 20-min auto-sweep can run it without a full report. Returns
+    // { violations:[{shape,polygon,note,severity,kind:'tfr'}], tfrs:[…] }.
+    async function runTfrCheck(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const sitePts = airCollectSitePoints(ents);
+        if (!sitePts.length) return { violations: [], tfrs: [], skipped: 'no site geometry' };
+        let clat = 0, clng = 0;
+        sitePts.forEach(p => { clat += p.lat; clng += p.lng; });
+        clat /= sitePts.length; clng /= sitePts.length;
+        let siteRadM = 0;
+        sitePts.forEach(p => { const d = approxMeters(clat, clng, p.lat, p.lng); if (d > siteRadM) siteRadM = d; });
+        const st = airThresholds;
+        const state = await airGetSiteState(sid, clat, clng);
+        if (!state) return { violations: [], tfrs: [], skipped: 'could not determine site state (no FAA airport within 80 mi?)' };
+        const list = await airGetTfrList();
+        const candidates = list.filter(t => (t.state || '').trim().toUpperCase() === state.toUpperCase()).slice(0, AIR_TFR_MAX_DETAILS);
+        const violations = [];
+        const tfrs = [];
+        const step = Math.max(1, Math.ceil(sitePts.length / 300));
+        const samples = sitePts.filter((_, i) => i % step === 0);
+        for (const t of candidates) {
+            const id = t.notam_id;
+            if (!airTfrDetailCache[id]) {
+                try {
+                    const r = await elevGmRequest({ method: 'GET', url: AIR_TFR_DETAIL_URL(id), timeout: 20000 });
+                    airTfrDetailCache[id] = r.ok ? airParseTfrXml(r.responseText) : [];
+                } catch (e) { airTfrDetailCache[id] = []; }
+            }
+            const groups = airTfrDetailCache[id];
+            if (!groups.length) {
+                tfrs.push({ id, type: t.type, desc: t.description, status: 'no-geometry', text: `TFR ${id} (${t.type}) — ${t.description} · geometry unavailable, check tfr.faa.gov` });
+                continue;
+            }
+            const now = Date.now();
+            groups.forEach((g2, gi) => {
+                const expMs = g2.dateExp ? Date.parse(g2.dateExp + 'Z') : NaN;
+                const effMs = g2.dateEff ? Date.parse(g2.dateEff + 'Z') : NaN;
+                if (isFinite(expMs) && expMs < now) return;   // already over
+                const inside = samples.some(p => pointInPolygon(p.lat, p.lng, g2.ring.map(([la, lo]) => ({ lat: la, lng: lo }))));
+                const ringLL = g2.ring.map(([la, lo]) => ({ lat: la, lng: lo }));
+                const distM = inside ? 0 : pointToPolygonMeters(clat, clng, ringLL);
+                const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
+                const relevant = inside || +distNm.toFixed(2) < st.stripNm;
+                const upcoming = isFinite(effMs) && effMs > now;
+                const window2 = `${g2.dateEff || '?'} → ${g2.dateExp || '?'} UTC`;
+                const entry = {
+                    id, type: t.type, desc: t.description, ring: g2.ring,
+                    status: !relevant ? 'far' : upcoming ? 'upcoming' : 'active',
+                    inside, distNm, window: window2,
+                    text: `TFR ${id} (${t.type}) — ${inside ? 'OVER THE SITE' : `${distNm.toFixed(2)} NM away`}${g2.surface ? '' : ` · floor ${g2.lowVal.toLocaleString()} ft (above our ops)`} · ${window2}`,
+                };
+                tfrs.push(entry);
+                if (relevant && g2.surface) {
+                    violations.push({
+                        shape: 'polygon',
+                        polygon: boxAroundPoint(inside ? clat : ringLL[0].lat, inside ? clng : ringLL[0].lng, 8).map(p => [p.lat, p.lng]),
+                        note: `violation: ${upcoming ? 'UPCOMING ' : 'ACTIVE '}TFR ${id} (${t.type}) is ${inside ? 'OVER the site' : `${distNm.toFixed(2)} NM from the site`} — ${window2} · ${t.description}`,
+                        severity: inside && !upcoming ? 'high' : 'warn',
+                        kind: 'tfr',
+                    });
+                }
+            });
+        }
+        return { violations, tfrs };
     }
 
     // Run the enabled airspace checks. Returns { violations, inventory,
@@ -2586,6 +2749,21 @@
             inventory.translines.sort((x, y) => x.distFt - y.distFt);
         }
 
+        // ---- 6. Live TFRs (self-contained sub-check — also runs alone on
+        //         the auto-sweep timer). ----
+        inventory.tfrs = [];
+        inventory.tfrSkipped = null;
+        if (airEnabled.tfr) {
+            try {
+                const t = await runTfrCheck(sid);
+                inventory.tfrs = t.tfrs;
+                inventory.tfrSkipped = t.skipped || null;
+                t.violations.forEach(v => violations.push(v));
+            } catch (e) {
+                errors.push(`Live TFRs: ${e && e.message ? e.message : e}`);
+            }
+        }
+
         return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
     }
 
@@ -2621,6 +2799,12 @@
                     icon: L.divIcon({ className: '', iconSize: [40, 14], iconAnchor: [20, 7],
                         html: `<div style="color:${g.color};font:bold 11px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;">${g.ceiling}</div>` }),
                 }));
+            });
+            // Live TFR rings — red dotted (the most urgent overlay).
+            (res.inventory.tfrs || []).forEach(t2 => {
+                if (!t2.ring || t2.ring.length < 3 || t2.status === 'far') return;
+                add(tip(L.polygon(t2.ring, { color: '#ff3333', weight: 3, dashArray: '2,8', fill: true, fillColor: '#ff3333', fillOpacity: 0.07, interactive: canTip }),
+                    `<strong>TFR ${airEsc(t2.id)}</strong> (${airEsc(t2.type)})<br>${airEsc(t2.window || '')}`));
             });
             // HIFLD transmission lines — orange dashed, distinct from KML styling.
             (res.inventory.translines || []).forEach(t => {
@@ -2711,6 +2895,22 @@
         if (airEnabled.airspace) {
             section('Controlled airspace');
             (inv.airspace || []).forEach(a => line(a.sev, airEsc(a.text)));
+        }
+        if (airEnabled.tfr) {
+            section('Live TFRs (auto-rechecked every 20 min)');
+            if (inv.tfrSkipped) line('info', `Skipped: ${airEsc(inv.tfrSkipped)}`);
+            else if (!(inv.tfrs || []).length) line('ok', 'No TFRs in this state');
+            // Relevant ones in full; far ones summarized (TX alone can have
+            // a dozen 250+ NM away).
+            const tfrNear = (inv.tfrs || []).filter(t2 => t2.status !== 'far');
+            const tfrFar = (inv.tfrs || []).filter(t2 => t2.status === 'far').sort((x, y) => x.distNm - y.distNm);
+            tfrNear.forEach(t2 => line(
+                t2.status === 'active' && t2.inside ? 'high' : t2.status === 'active' || t2.status === 'upcoming' ? 'warn' : 'info',
+                airEsc(t2.text),
+                (t2.ring && t2.ring.length) ? { lat: t2.ring[0][0], lng: t2.ring[0][1], zoom: 12 } : null));
+            tfrFar.slice(0, 3).forEach(t2 => line('ok', airEsc(t2.text),
+                (t2.ring && t2.ring.length) ? { lat: t2.ring[0][0], lng: t2.ring[0][1], zoom: 12 } : null));
+            if (tfrFar.length > 3) line('ok', `…and ${tfrFar.length - 3} more distant TFRs in the state (none near the site)`);
         }
         if (airEnabled.sua) {
             section('Special use / prohibited airspace (informational)');
@@ -2825,6 +3025,12 @@
         res.violations.forEach(v => out.push(`  🔴 ${v.note.replace(/^violation: /, '')}`));
         (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
         if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.tfr) {
+            out.push('Live TFRs:');
+            if (inv.tfrSkipped) out.push(`  - skipped: ${inv.tfrSkipped}`);
+            else if (!(inv.tfrs || []).length) out.push('  - none in this state');
+            (inv.tfrs || []).forEach(t2 => out.push(`  - ${t2.text}`));
+        }
         if (airEnabled.sua) { out.push('Special use / prohibited (informational):'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
         if (airEnabled.translines && inv.translines.length) {
             out.push('Transmission lines (HIFLD):');
@@ -2851,7 +3057,9 @@
             const res = await runAirspaceCheck(sid);
             if (res.fatal) { showToast(res.fatal, 'rgba(255,96,96,0.55)'); return; }
             airIssuesSite = sid;
-            airLastIssues = res.violations.map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            airLastIssues = res.violations.filter(v => v.kind !== 'tfr').map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            tfrIssuesSite = sid;
+            tfrLastIssues = res.violations.filter(v => v.kind === 'tfr').map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
             postValidatorIssues(sid);
             renderAirspacePanel(res, sid, getCurrentSiteName());
             airDrawMapHighlights(res);
@@ -2871,9 +3079,54 @@
         const sid = getCurrentSiteID();
         airIssuesSite = sid;
         airLastIssues = [];
+        tfrIssuesSite = sid;
+        tfrLastIssues = [];
         postValidatorIssues(sid);
         closeAirspacePanel();
         showToast(sopLastIssues.length ? 'Cleared airspace issues (SOP issues kept).' : 'Cleared validator issues.');
+    }
+
+    // ---- TFR auto-sweep: TFRs appear and expire on their own, so the
+    // check re-runs itself — on site load and every 20 min — and posts /
+    // clears TFR Validator issues automatically. Silent unless something
+    // changed. IFRAME only (that's where the map + AIM Issues render). ----
+    const AIR_TFR_SWEEP_MS = 20 * 60 * 1000;
+    let airTfrSweepSite = null;
+    let airTfrLastCount = -1;
+    async function airTfrAutoSweep(trigger) {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!airMasterEnabled || !airEnabled.tfr || !airEnabled.tfrAuto) return;
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        try {
+            await Promise.resolve(fetchMapObjects(sid, false));
+            const t = await runTfrCheck(sid);
+            if (t.skipped) return;
+            const issues = t.violations.map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            const changed = airTfrSweepSite !== sid || issues.length !== airTfrLastCount;
+            airTfrSweepSite = sid;
+            airTfrLastCount = issues.length;
+            tfrIssuesSite = sid;
+            tfrLastIssues = issues;
+            if (issues.length || changed) postValidatorIssues(sid);
+            if (issues.length && changed) {
+                showToast(`⚠ TFR alert: ${issues.length} TFR${issues.length === 1 ? '' : 's'} affecting this site — see map`, 'rgba(255,96,96,0.55)');
+            }
+            console.log(`${TAG} TFR auto-sweep (${trigger}): site ${sid}, ${t.tfrs.length} TFR(s) in state, ${issues.length} affecting site`);
+        } catch (e) {
+            console.warn(`${TAG} TFR auto-sweep failed:`, e);
+        }
+    }
+    if (CONTEXT === 'IFRAME') {
+        setInterval(() => airTfrAutoSweep('interval'), AIR_TFR_SWEEP_MS);
+        // First sweep shortly after load (give site detection + entity
+        // fetch a moment); re-sweep on SPA navigation between sites.
+        setTimeout(() => airTfrAutoSweep('initial'), 45 * 1000);
+        let _airTfrNavTimer = null;
+        window.addEventListener('hashchange', () => {
+            clearTimeout(_airTfrNavTimer);
+            _airTfrNavTimer = setTimeout(() => airTfrAutoSweep('site-change'), 20 * 1000);
+        });
     }
 
     // ---- 📍 Create GMs at flagged obstacles (preview → confirm → create).
@@ -4174,6 +4427,8 @@
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
                 { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
+                { id: 'tfr', label: 'Check · Live TFRs (tfr.faa.gov)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfr },
+                { id: 'tfrAuto', label: 'Auto-recheck TFRs (site load + every 20 min)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfrAuto },
                 { id: 'sua', label: 'Info · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
                 { id: 'translines', label: 'Info · HIFLD transmission lines overlay', type: 'boolean', default: AIR_ENABLE_DEFAULTS.translines },
                 { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },

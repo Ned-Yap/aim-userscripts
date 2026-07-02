@@ -6,6 +6,20 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 🔴 Live TFRs + transline distance fix — Asset Inspector v4.155–v4.156 (dev/latest)
+
+**v4.156 — Live TFRs.** The Airspace Checker now pulls the live FAA TFR list (tfr.faa.gov), fetches + parses the geometry of every TFR in the site's state (polygons and circles, with altitude floors and effective windows), and: flags a violation when an active or upcoming surface TFR is over the site or inside the 3 NM standoff; lists everything in a "Live TFRs" panel section (distant ones summarized); draws relevant TFR rings red-dotted on the map. **Auto-recheck runs on site load and every 20 minutes** — TFR issues appear and clear themselves as TFRs are issued and expire, with a toast when one starts affecting your site. High-altitude-only TFRs are informational (we never fly above 400 ft).
+
+**v4.155 — transmission line distances were wrong.** HIFLD lines have sparse vertices, so vertex-based distances could be miles off; now projected onto line segments. On site 1583 the 345 kV line is actually **2 ft** from an asset (was reported 84 ft) and a "4,855 ft" line is really **34 ft** away. Row-click jumps now land exactly where the line passes the site.
+
+---
+
+## 2026-07-02 — Vector airspace boundaries — Map Styler v34.89 (dev/latest)
+
+New **"Airspace boundaries (vector)"** toggle in the FAA Airspace Charts section (OFF by default — zero cost unless enabled): draws Class B/C/D/E boundaries as sharp vector polygons at any zoom (the raster sectional blurs past z12), styled to sectional conventions (B solid blue, C solid magenta, D dashed blue, E dashed magenta, faint for 700/1200 ft transition floors). Hover a boundary for name + floor/ceiling. Fetches once per map area (padded 2× so nearby panning doesn't refetch).
+
+---
+
 ## 2026-07-02 — Seed trans KML from HIFLD — Map Styler v34.88 (dev/latest)
 
 New **"Seed lines from HIFLD (federal data)"** button under Transmission lines → KML data tools: fetches the federal HIFLD transmission-line geometry for the **current map view** and stages each line as a pending add — the same pipeline as hand-drawing, so seeded lines render as pending, are vertex-editable, and go to GitHub via the normal **Commit pending changes** (which self-creates `<siteID>-trans.kml` on new sites). Warns before seeding if the site already has trans lines (possible duplicates). Names come through as `HIFLD 345kV ONCOR… #id`. HIFLD covers transmission (~69 kV+) only — distribution stays hand-drawn.

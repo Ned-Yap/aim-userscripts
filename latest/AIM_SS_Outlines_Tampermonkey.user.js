@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.88
+// @version      34.89
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -16,6 +16,7 @@
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
 // @connect      services1.arcgis.com
+// @connect      services6.arcgis.com
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -34,7 +35,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.88';
+    const SCRIPT_VERSION = '34.89';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -319,6 +320,11 @@
                   default: 'sectional' },
                 { id: 'faachart.opacity', label: 'Opacity', type: 'number',
                   min: 0.1, max: 1, step: 0.05, default: 0.55, unit: 'fill' },
+                // Vector airspace boundaries (v34.89) — Class B/C/D/E polygons
+                // from the FAA Class_Airspace FeatureServer, drawn sharp at any
+                // zoom (the raster chart blurs past z12). OFF by default: it
+                // costs one FAA query per map area, zero when off.
+                { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
             ],
         },
         {
@@ -986,6 +992,8 @@
         applyOrthoVisibility();
         // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
         applyFaaChartLayer();
+        // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
+        applyAirspaceVectors();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -1357,6 +1365,117 @@
         _aimChartLayer = null;
         _aimChartLayerKey = '';
         _aimChartLayerMap = null;
+    }
+
+    // Vector airspace boundaries (v34.89). Queries the FAA AIS
+    // Class_Airspace FeatureServer for the current view (padded 2×, so
+    // panning nearby doesn't refetch) and draws Class B/C/D/E rings as
+    // Leaflet polygons — sharp at pad zoom where the raster sectional is
+    // a blur. Hover a boundary for name + floor/ceiling (when this
+    // Leaflet build ships Tooltip). Class A skipped (FL180+).
+    const _ASP_QUERY_URL = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/Class_Airspace/FeatureServer/0/query';
+    let _aimAspLayers = [];
+    let _aimAspEnvelope = null;    // envelope the current layers were fetched for
+    let _aimAspFetching = false;
+    let _aimAspSeq = 0;
+    function _stylerL() {
+        try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) return unsafeWindow.L; } catch (e) {}
+        try { return window.L || null; } catch (e) {}
+        return null;
+    }
+    function applyAirspaceVectors() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        if (toggleState['faachart.vectors'] !== true) { removeAirspaceVectors(); return; }
+        let b;
+        try { b = map.getBounds(); } catch (e) { return; }
+        const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+        const env = _aimAspEnvelope;
+        if ((env && w >= env.w && e <= env.e && s >= env.s && n <= env.n) || _aimAspFetching) return;
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        _aimAspFetching = true;
+        const seq = ++_aimAspSeq;
+        const padLng = Math.max(e - w, 0.05), padLat = Math.max(n - s, 0.05);
+        const fetched = { w: w - padLng, s: s - padLat, e: e + padLng, n: n + padLat };
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${fetched.w},${fetched.s},${fetched.e},${fetched.n}`,
+            geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT',
+            returnGeometry: 'true', outSR: '4326',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${_ASP_QUERY_URL}?${params.toString()}`,
+            timeout: 25000,
+            onload: (resp) => {
+                _aimAspFetching = false;
+                if (seq !== _aimAspSeq) return;   // superseded by a newer request
+                if (toggleState['faachart.vectors'] !== true) return;   // toggled off mid-flight
+                let json;
+                try { json = JSON.parse(resp.responseText); } catch (err) { console.warn(`${TAG} airspace vectors: bad JSON`); return; }
+                if (resp.status !== 200 || json.error) {
+                    console.warn(`${TAG} airspace vectors fetch failed:`, resp.status, json && json.error);
+                    return;
+                }
+                _aimAspEnvelope = fetched;
+                drawAirspaceVectors(json.features || []);
+            },
+            onerror: () => { _aimAspFetching = false; console.warn(`${TAG} airspace vectors: network error`); },
+            ontimeout: () => { _aimAspFetching = false; console.warn(`${TAG} airspace vectors: timed out`); },
+        });
+    }
+    function drawAirspaceVectors(feats) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        // wipe previous set (envelope changed)
+        _aimAspLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _aimAspLayers = [];
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        // Roughly the sectional's own conventions: B solid blue, C solid
+        // magenta, D dashed blue, E dashed magenta (fainter for the
+        // 700/1200 ft transition floors that cover most of the country).
+        const styleFor = (cls, floor) => {
+            if (cls === 'B') return { color: '#3f8cff', weight: 2.5 };
+            if (cls === 'C') return { color: '#d05fd0', weight: 2.5 };
+            if (cls === 'D') return { color: '#3f8cff', weight: 2, dashArray: '7,5' };
+            return floor > 0
+                ? { color: '#b08ab0', weight: 1.2, dashArray: '3,7', opacity: 0.6 }
+                : { color: '#d05fd0', weight: 1.8, dashArray: '4,6' };
+        };
+        let drawn = 0;
+        feats.forEach(f => {
+            const a = f.attributes || {};
+            if (!a.CLASS || a.CLASS === 'A') return;
+            const floor = typeof a.LOWER_VAL === 'number' ? a.LOWER_VAL : Number(a.LOWER_VAL) || 0;
+            const st = styleFor(a.CLASS, floor);
+            ((f.geometry && f.geometry.rings) || []).forEach(r => {
+                if (!Array.isArray(r) || r.length < 3) return;
+                try {
+                    const poly = L.polygon(r.map(xy => [xy[1], xy[0]]), Object.assign({
+                        fill: false, opacity: 0.85, interactive: canTip,
+                    }, st));
+                    if (canTip) {
+                        const top = (typeof a.UPPER_VAL === 'number' && a.UPPER_VAL > 0) ? `${a.UPPER_VAL.toLocaleString()} ft` : '∞';
+                        try { poly.bindTooltip(`<strong>${String(a.NAME || '').replace(/</g, '&lt;')}</strong><br>Class ${a.CLASS} · ${floor <= 0 ? 'surface' : floor.toLocaleString() + ' ft'} → ${top}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {}
+                    }
+                    poly.addTo(map);
+                    _aimAspLayers.push(poly);
+                    drawn++;
+                } catch (e) {}
+            });
+        });
+        console.log(`${TAG} airspace vectors: ${drawn} boundary ring(s) drawn`);
+    }
+    function removeAirspaceVectors() {
+        if (!_aimAspLayers.length) { _aimAspEnvelope = null; return; }
+        const map = getLeafletMap();
+        _aimAspLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _aimAspLayers = [];
+        _aimAspEnvelope = null;
+        console.log(`${TAG} airspace vectors removed`);
     }
 
     // Apply the three Map-performance levers (satellite hide, ortho low-res,
@@ -5940,6 +6059,8 @@
         // Remove the FAA chart overlay so deactivating the styler never
         // strands a chart layer we can no longer manage.
         removeFaaChartLayer();
+        // Same for the vector airspace boundaries.
+        removeAirspaceVectors();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
