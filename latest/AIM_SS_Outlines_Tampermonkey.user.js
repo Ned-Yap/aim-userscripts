@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.95
+// @version      34.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.95';
+    const SCRIPT_VERSION = '34.97';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -394,6 +394,8 @@
             meta: '(wells · pipelines)',
             master: { id: 'rrc.show', default: false },
             children: [
+                { id: 'rrc.bufferFt', label: 'Include wells within (of site bounds)', type: 'number', min: 0, max: 10560, step: 100, default: 500, unit: 'ft' },
+                { id: 'rrc.baseRadiusMi', label: 'No Site Setup yet: fetch around base station', type: 'number', min: 0.5, max: 10, step: 0.5, default: 2, unit: 'mi' },
                 { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
                 { id: 'rrc.orphans', label: 'Mark orphan wells (purple ring)', type: 'boolean', default: true },
                 { id: 'rrc.pipelines', label: 'RRC pipelines (operator + commodity)', type: 'boolean', default: false },
@@ -1587,14 +1589,58 @@
     // View-envelope fetch like the airspace vectors; wells only at
     // zoom ≥ 12 — a wide Permian view blows past the 1000-record cap.
     const RRC_BASE = 'https://gis.rrc.texas.gov/server/rest/services/rrc_public/RRC_Public_Viewer_Srvs/MapServer';
-    const RRC_MIN_ZOOM = 12;
     let _rrcLayers = [];
     let _rrcKey = '';
     let _rrcFetching = false;
     let _rrcSeq = 0;
-    let _rrcZoomHintAt = 0;
     let _rrcTruncated = false;   // last wells fetch hit the 1000-record cap
     let _rrcToastAt = 0;
+    // Site bounding box (all entity types) — the RRC fetch area is the
+    // SITE bounds + a small buffer (user decision 2026-07-02: "I really
+    // only want around the site, ~500 ft"), not the map view. Bounded
+    // area ⇒ no zoom gating, no record-cap roulette, one fetch per site.
+    let _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false };
+    function rrcEnsureSiteBBox(sid) {
+        if (_rrcSiteBBox.siteID === sid && !_rrcSiteBBox.loading) return _rrcSiteBBox.bbox;
+        if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.loading) return null;
+        _rrcSiteBBox = { siteID: sid, bbox: null, loading: true, failed: false };
+        fetch(MAP_OBJECTS_URL + encodeURIComponent(sid), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+                let nonBaseN = 0;
+                const basePts = [];
+                const eat = (c) => {
+                    if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return;
+                    if (c.lat < minLat) minLat = c.lat; if (c.lat > maxLat) maxLat = c.lat;
+                    if (c.lng < minLng) minLng = c.lng; if (c.lng > maxLng) maxLng = c.lng;
+                };
+                list.forEach(e => {
+                    const cs = Array.isArray(e.coords) ? e.coords : (Array.isArray(e.points) ? e.points : []);
+                    if (e.type === 8) {
+                        // Base stations tracked separately — they anchor the
+                        // "no Site Setup yet" fallback radius.
+                        cs.forEach(c => { if (c && typeof c.lat === 'number') basePts.push({ lat: c.lat, lng: c.lng }); });
+                    } else if (cs.length || (e.arcs && e.arcs.length)) {
+                        nonBaseN++;
+                    }
+                    cs.forEach(eat);
+                    (e.arcs || []).forEach(a => { if (a) { eat(a.point_a); eat(a.point_b); } });
+                });
+                if (getCurrentSiteID() !== sid) { _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false }; return; }
+                _rrcSiteBBox = isFinite(minLat)
+                    ? { siteID: sid, bbox: [minLng, minLat, maxLng, maxLat], basePts, nonBaseN, loading: false, failed: false }
+                    : { siteID: sid, bbox: null, basePts, nonBaseN: 0, loading: false, failed: true };
+                if (!_rrcSiteBBox.bbox) console.warn(`${TAG} RRC: site ${sid} has no entity geometry — nothing to bound the well fetch`);
+                applyRrcLayers();
+            })
+            .catch(err => {
+                _rrcSiteBBox = { siteID: sid, bbox: null, loading: false, failed: true };
+                console.warn(`${TAG} RRC: site bounds fetch failed:`, err);
+            });
+        return null;
+    }
     function rrcWellColor(desc) {
         const d2 = String(desc || '');
         if (/plugged/i.test(d2)) return '#9aa4ad';
@@ -1679,47 +1725,51 @@
     }
     function applyRrcLayers() {
         const map = getLeafletMap();
-        if (!map || typeof map.getBounds !== 'function') return;
+        if (!map || typeof map.addLayer !== 'function') return;
         if (toggleState['rrc.show'] !== true) { removeRrcLayers(); return; }
         const wantWells = toggleState['rrc.wells'] !== false;
         const wantOrphans = toggleState['rrc.orphans'] !== false;
         const wantPipes = toggleState['rrc.pipelines'] === true;
         if (!wantWells && !wantPipes) { removeRrcLayers(); return; }
-        let zoom = 0, b = null;
-        try { zoom = map.getZoom(); b = map.getBounds(); } catch (e) { return; }
-        if (zoom < RRC_MIN_ZOOM) {
-            removeRrcLayers();
-            if (Date.now() - _rrcZoomHintAt > 60000) {
-                _rrcZoomHintAt = Date.now();
-                console.log(`${TAG} RRC overlay: zoom in to ≥ ${RRC_MIN_ZOOM} to load wells (too many below that)`);
-            }
-            return;
-        }
         if (typeof GM_xmlhttpRequest !== 'function') return;
-        const w = b.getWest(), s2 = b.getSouth(), e = b.getEast(), n = b.getNorth();
-        // Refetch only when the view leaves the fetched envelope or the
-        // sublayer toggles change.
-        const padLng = Math.max((e - w) * 0.25, 0.005), padLat = Math.max((n - s2) * 0.25, 0.005);
-        const key = `${wantWells}|${wantOrphans}|${wantPipes}`;
-        const _kp = _rrcKey.split('#opts#');
-        const kEnv = _kp.length === 2 ? _kp[0] : null;
-        const kOpts = _kp.length === 2 ? _kp[1].split('#view#')[0] : null;
-        if (kOpts === key && kEnv) {
-            const env = kEnv.split(',').map(Number);
-            const covered = w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3];
-            // A TRUNCATED fetch (1000-record cap) is NOT authoritative — a
-            // pad inside the envelope can be missing its wells. Any view
-            // change while truncated triggers a fresh, tighter fetch; only
-            // an identical view is skipped.
-            if (covered && !_rrcTruncated) return;
-            if (covered && _rrcTruncated && `${w},${s2},${e},${n}` === (_rrcKey.split('#view#')[1] || '')) return;
+        const sid = getCurrentSiteID();
+        if (!sid) { removeRrcLayers(); return; }
+        const bbox = rrcEnsureSiteBBox(sid);
+        if (!bbox && _rrcSiteBBox.siteID !== sid) return;    // bounds fetch not started/finished
+        if (_rrcSiteBBox.loading) return;                     // in flight — re-applies when done
+        const rawBuf = Number(toggleState['rrc.bufferFt']);
+        const bufferFt = isNaN(rawBuf) ? 500 : rawBuf;
+        const rawBaseMi = Number(toggleState['rrc.baseRadiusMi']);
+        const baseRadiusMi = isNaN(rawBaseMi) ? 2 : rawBaseMi;
+        // Fetch area: the SITE bounds + buffer when a setup exists; on a
+        // fresh site (base station only) fall back to a radius around the
+        // base so wells show before any FFZ/FP is drawn.
+        let env = null, envMode = '';
+        if (bbox && _rrcSiteBBox.nonBaseN > 0) {
+            const midLat = (bbox[1] + bbox[3]) / 2;
+            const dLat = bufferFt / 364000;                                     // ~ft per degree latitude
+            const dLng = bufferFt / (364000 * Math.cos(midLat * Math.PI / 180));
+            env = [bbox[0] - dLng, bbox[1] - dLat, bbox[2] + dLng, bbox[3] + dLat];
+            envMode = `site+${bufferFt}ft`;
+        } else if (_rrcSiteBBox.basePts && _rrcSiteBBox.basePts.length) {
+            const bp = _rrcSiteBBox.basePts[0];
+            const radFt = baseRadiusMi * 5280;
+            const dLat = radFt / 364000;
+            const dLng = radFt / (364000 * Math.cos(bp.lat * Math.PI / 180));
+            env = [bp.lng - dLng, bp.lat - dLat, bp.lng + dLng, bp.lat + dLat];
+            envMode = `base+${baseRadiusMi}mi`;
+        } else {
+            removeRrcLayers();
+            return;   // no geometry at all — logged by the bounds fetch
         }
-        if (_rrcFetching) return;
+        const key = `${sid}|${envMode}|${wantWells}|${wantOrphans}|${wantPipes}`;
+        if (_rrcKey === key || _rrcFetching) return;
         _rrcFetching = true;
         const seq = ++_rrcSeq;
-        const fw = w - padLng, fs = s2 - padLat, fe = e + padLng, fn = n + padLat;
+        console.log(`${TAG} RRC fetch area: ${envMode}`);
         const envParams = {
-            geometry: `${fw},${fs},${fe},${fn}`, geometryType: 'esriGeometryEnvelope',
+            geometry: env.join(','),
+            geometryType: 'esriGeometryEnvelope',
             inSR: '4326', spatialRel: 'esriSpatialRelIntersects', returnGeometry: 'true',
         };
         const results = { wells: null, orphans: null, pipes: null };
@@ -1728,7 +1778,7 @@
             _rrcFetching = false;
             if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
             drawRrcLayers(results, wantOrphans);
-            _rrcKey = `${fw},${fs},${fe},${fn}#opts#${key}#view#${w},${s2},${e},${n}`;
+            _rrcKey = key;
         };
         const done = () => { if (--pendingN <= 0) finish(); };
         if (!pendingN) { _rrcFetching = false; return; }

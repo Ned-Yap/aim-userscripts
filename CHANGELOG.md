@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — RRC fetch = site bounds only — Map Styler v34.96–v34.97 (dev/latest)
+
+The Oil & Gas overlay no longer loads wells for the whole map view — it fetches **only around the site**: the site's entity bounds plus a buffer (**500 ft default, editable**). On a **fresh site with no Site Setup yet**, it falls back to a radius around the **base station** (**2 mi default, editable**). One bounded fetch per site: no zoom gating, no 1,000-record cap roulette, and nothing drawn miles away that nobody asked about. Buffer changes refetch immediately.
+
+---
+
 ## 2026-07-02 — Missing well pins fix — Map Styler v34.95 (dev/latest)
 
 Wells could be missing from pads you were looking straight at: a zoomed-out first fetch hits the state server's **1,000-record cap**, and the overlay then kept serving that truncated set even after zooming in. Truncated fetches are no longer treated as complete — any view change while truncated re-fetches tighter bounds, so zooming to a pad now fills in its wells. The cap also shows a **visible toast** ("too many in view — showing the first 1000, zoom in") instead of a console-only note, and the fetch envelope is tighter to stay under the cap more often.
