@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.36
+// @version      4.164
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -13,28 +13,44 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      api.opentopodata.org
+// @connect      services6.arcgis.com
+// @connect      services1.arcgis.com
+// @connect      tfr.faa.gov
 // @run-at       document-end
 // ==/UserScript==
 
-// NOTE: the base @name stays "AIM Copy Asset Name" — it's the Tampermonkey
-// install IDENTITY, and changing it would create a duplicate install instead
-// of auto-updating. The DISPLAY name is "AIM Site Setup Tools" via @name:en
-// (a localized display-only name; identity is the non-localized @name, so
-// updates keep flowing). In-app the name comes through everywhere else: the
-// Control Panel REGISTER `name`, the SUM panel title, the button, and the
-// [AIM SITE SETUP] log tag. SCRIPT_ID + GM keys stay 'aim-copy-asset'/'aim-ai-*'
-// for prefs/cache continuity.
+// NOTE: the base @name stays "Latest - AIM Copy Asset Name" — it's the
+// Tampermonkey install IDENTITY, and changing it would create a duplicate
+// install instead of auto-updating. The DISPLAY name is "AIM Site Setup Tools"
+// via @name:en (a localized display-only name; identity is the non-localized
+// @name, so updates keep flowing). In-app the name comes through everywhere
+// else: the Control Panel REGISTER `name`, the SUM panel title, the button,
+// and the [AIM SITE SETUP] log tag. SCRIPT_ID + GM keys stay
+// 'aim-copy-asset'/'aim-ai-*' for prefs/cache continuity.
 
 (function() {
     'use strict';
+
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM SITE SETUP] Lite mode — CSM tool inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.36';
+    const SCRIPT_VERSION = '4.164';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -48,6 +64,131 @@
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
+
+    // ============================================================
+    // SOP Validators (Phase 4) — state + thresholds.
+    // Geometric Site-Setup SOP checks (proximity / overlap) computed off
+    // the same cached entity set the SUM uses, reusing the Phase-3 spatial
+    // core. Surfaced as its OWN "SOP Validators" Control Panel section
+    // (second registration, scriptId aim-sop-validators) where each check
+    // has a master toggle + an EDITABLE threshold. Findings are handed to
+    // AIM Issues over the AIM_VALIDATOR_ISSUES channel, which draws them as
+    // ephemeral 'Validator' issues (note 'violation: …'). Thresholds are
+    // stored in FEET (the unit coworkers reason about standoffs in);
+    // geometry math is in meters, converted at the boundary (3.28084).
+    // ============================================================
+    const SOP_SCRIPT_ID = 'aim-sop-validators';
+    const VALIDATOR_CHANNEL_NAME = 'AIM_VALIDATOR_ISSUES';
+    const SOP_THRESH_KEY = 'aim-sop-thresholds';
+    const SOP_ENABLE_KEY = 'aim-sop-enabled';
+    // Defaults: FFZ must stay ≥15 ft from an asset boundary; a flight path
+    // ≥15 ft from an asset; two FFZs may not overlap (0 ft separation =
+    // flag overlap only — raise to flag near-misses). All user-editable.
+    const SOP_THRESH_DEFAULTS = {
+        ffzAssetFt: 15, fpAssetFt: 15, ffzFfzFt: 0,
+        fpOverlapFt: 6.56,                      // min shared altitude band (= 2 m, the SOP/server minimum), connected FP / FP-in-FFZ
+        aglFloorMinFt: 90, aglFloorMaxFt: 210,  // floor (min alt) must sit in this AGL band
+        nfzMinFt: 30, nfzSepFt: 15,             // NFZ min side; NFZ→NFZ/FFZ separation
+        bandSoftFt: 40, bandHardFt: 200,        // alt-band height (max−min): soft warn / hard flag
+        gmTowerFt: 60,                          // "Tower" general-markers must stay this far from FFZ/FP
+        fpFfzAngleDeg: 15,                      // FP→FFZ boundary crossing angle hard min (ideal 45°)
+    };
+    const SOP_ENABLE_DEFAULTS = {
+        ffzAsset: true, fpAsset: true, ffzFfz: true,
+        fpOverlap: true, aglFloor: true, nfzSize: true, nfzProx: true,
+        bandHeight: true, altInverted: true, fpDegenerate: true, gmTower: true,
+        fpFfzAngle: true,
+    };
+    let sopValidatorChannel = null;
+    let sopMasterEnabled = true;
+    function loadSopThresholds() {
+        const out = Object.assign({}, SOP_THRESH_DEFAULTS);
+        try {
+            const raw = elevGmGet(SOP_THRESH_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in SOP_THRESH_DEFAULTS) if (typeof o[k] === 'number') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadSopThresholds threw:`, e); }
+        return out;
+    }
+    function saveSopThresholds() {
+        try { elevGmSet(SOP_THRESH_KEY, JSON.stringify(sopThresholds)); }
+        catch (e) { console.warn(`${TAG} saveSopThresholds threw:`, e); }
+    }
+    function loadSopEnabled() {
+        const out = Object.assign({}, SOP_ENABLE_DEFAULTS);
+        try {
+            const raw = elevGmGet(SOP_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in SOP_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadSopEnabled threw:`, e); }
+        return out;
+    }
+    function saveSopEnabled() {
+        try { elevGmSet(SOP_ENABLE_KEY, JSON.stringify(sopEnabled)); }
+        catch (e) { console.warn(`${TAG} saveSopEnabled threw:`, e); }
+    }
+    let sopThresholds = loadSopThresholds();
+    let sopEnabled = loadSopEnabled();
+
+    // ---- Airspace Checker (v4.149) — external-world safety checks against
+    // the FAA AIS public ArcGIS FeatureServers (no auth, no key; see memory
+    // reference-faa-airspace-data). Own Control Panel card, same
+    // AIM_VALIDATOR_ISSUES handoff to AIM Issues as the SOP validators. ----
+    const AIRSPACE_SCRIPT_ID = 'aim-airspace-checker';
+    const AIR_THRESH_KEY = 'aim-airspace-thresholds';
+    const AIR_ENABLE_KEY = 'aim-airspace-enabled';
+    const AIR_FAA_BASE = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services';
+    const NM_TO_M = 1852;
+    const MI_TO_M = 1609.344;
+    const AIR_THRESH_DEFAULTS = {
+        stripNm: 3,           // manned strip / helipad standoff (nautical miles)
+        obstacleFt: 500,      // obstacle proximity to flight geometry (was 2640 — user field-tuned 2026-07-03)
+        obstacleMinAglFt: 50, // ignore obstacles shorter than this
+        maxOpAglFt: 210,      // our max operating AGL — LAANC ceilings below this flag
+        inventoryMi: 15,      // inventory radius for airports/airspace listing
+        stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
+        // Display/noise filters + special standoffs (2026-07-02 user spec):
+        windmillFt: 500,      // windmill/turbine violation standoff (tighter than obstacleFt)
+        tlTowerFt: 100,       // T-L tower standoff from FLIGHT geometry (user 2026-07-03)
+        tlClearFt: 50,        // vertical fly-over clearance — T-L tower doesn't flag when the segment floor clears its top by this
+        obstacleShowNm: 1.5,  // hide non-T-L obstacles beyond this (panel + dots)
+        translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
+        tfrShowNm: 3,         // TFRs beyond this are ignored entirely
+    };
+    const AIR_ENABLE_DEFAULTS = { airspace: true, strips: true, obstacles: true, laanc: true, sua: true, stadiums: true, translines: true, tfr: true, tfrAuto: true };
+    // HIFLD (Homeland Infrastructure Foundation-Level Data) — federal
+    // high-voltage transmission-line GEOMETRY. Independent of our KMLs;
+    // used to cross-check shielding coverage. Informational only.
+    const AIR_HIFLD_LINES_URL = 'https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Electric_Power_Transmission_Lines/FeatureServer/0';
+    let airMasterEnabled = true;
+    function loadAirThresholds() {
+        const out = Object.assign({}, AIR_THRESH_DEFAULTS);
+        try {
+            const raw = elevGmGet(AIR_THRESH_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in AIR_THRESH_DEFAULTS) if (typeof o[k] === 'number') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadAirThresholds threw:`, e); }
+        return out;
+    }
+    function saveAirThresholds() {
+        try { elevGmSet(AIR_THRESH_KEY, JSON.stringify(airThresholds)); }
+        catch (e) { console.warn(`${TAG} saveAirThresholds threw:`, e); }
+    }
+    function loadAirEnabled() {
+        const out = Object.assign({}, AIR_ENABLE_DEFAULTS);
+        try {
+            const raw = elevGmGet(AIR_ENABLE_KEY, null);
+            if (raw) { const o = JSON.parse(raw); for (const k in AIR_ENABLE_DEFAULTS) if (typeof o[k] === 'boolean') out[k] = o[k]; }
+        } catch (e) { console.warn(`${TAG} loadAirEnabled threw:`, e); }
+        return out;
+    }
+    function saveAirEnabled() {
+        try { elevGmSet(AIR_ENABLE_KEY, JSON.stringify(airEnabled)); }
+        catch (e) { console.warn(`${TAG} saveAirEnabled threw:`, e); }
+    }
+    let airThresholds = loadAirThresholds();
+    // Migration (v4.163): the general-obstacle standoff default dropped
+    // 2640 → 500 ft. A stored 2640 is almost certainly the OLD DEFAULT
+    // rather than a deliberate choice — update it once.
+    if (airThresholds.obstacleFt === 2640) { airThresholds.obstacleFt = 500; saveAirThresholds(); }
+    let airEnabled = loadAirEnabled();
 
     // ============================================================
     // Leaflet map ref (read from Map Styler's __aim_map__ patch when
@@ -239,7 +380,8 @@
     // Same pattern as MBT v0.40+; see feedback-percepto-location-
     // altitude-endpoint memory for the discovery story.
     // ============================================================
-    const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // ai = Asset Inspector
+    const CACHE_KEY_ELEVATIONS = 'aim-ai-elev-cache'; // LEGACY global blob (v4.66 and earlier) — now READ-ONLY fallback, migrated per-site on access
+    const elevSiteKey = (siteID) => `aim-ai-elev-v2-${siteID}`; // v4.67 — per-site DEM cache (small loads/writes, bounded, aligns with the per-site shared files)
     const CACHE_KEY_COLUMN_ORDER = 'aim-ai-column-order'; // ordered list of visible column keys
     const CACHE_KEY_COLUMN_WIDTHS = 'aim-ai-column-widths'; // {colKey: px} per-user resized widths
     const CACHE_KEY_BASE_GM = 'aim-ai-base-gm';            // {siteID: gmEntityId} chosen basestation marker (route feature)
@@ -247,8 +389,10 @@
     const CACHE_KEY_SHOW_SAMPLES = 'aim-ai-show-samples'; // boolean — sample dots on map
     const CACHE_KEY_VIEW_PRESETS = 'aim-ai-view-presets'; // [{name, columnOrder, typeFilter, ...filters, sortKey, sortDir, unitsFt}]
     const ELEV_KEY_PRECISION = 5; // 5 decimals ≈ 1m
-    const ELEV_CONCURRENCY = 4;
-    let elevationCache = null;
+    const ELEV_CONCURRENCY = 8; // v4.68 — raised 4→8: small/medium batches finish ~2× faster (the throttle caps the worst case anyway). Shared by the Flight Path Editor too.
+    let elevationCache = null;      // per-site cache for elevCacheSiteID
+    let elevCacheSiteID = null;     // which site elevationCache holds
+    let legacyElevCache = null;     // lazy-loaded old global blob — READ-ONLY fallback
     let elevQueue = [];
     let elevActive = 0;
     const elevInFlight = {};
@@ -278,14 +422,32 @@
             console.warn(`${TAG} ⚠ GM_setValue not available — check @grant directives. Persistence is BROKEN until fixed.`);
         }
     }
+    // PER-SITE cache (v4.67): load only the current site's points, not one
+    // global blob of every site ever. Swaps when the site changes (flushing the
+    // previous site first). The old global blob is kept as a read-only fallback
+    // (loadLegacyElevCache) so nothing already cached is lost — points are
+    // migrated into the per-site cache on first access.
     function loadElevationCache() {
-        if (elevationCache) return elevationCache;
-        try { elevationCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        const sid = getCurrentSiteID() || elevCacheSiteID || '_nosite_';
+        if (elevationCache && elevCacheSiteID === sid) return elevationCache;
+        if (elevationCache && elevCacheSiteID && elevCacheSiteID !== sid) flushElevationCache(); // persist the site we're leaving
+        elevCacheSiteID = sid;
+        try { elevationCache = elevGmGet(elevSiteKey(sid), {}) || {}; }
         catch (e) { elevationCache = {}; }
         const n = Object.keys(elevationCache).length;
-        const sizeKb = Math.round(JSON.stringify(elevationCache).length / 1024);
-        console.log(`${TAG} DEM elevation cache loaded: ${n.toLocaleString()} points (${sizeKb} KB)${n === 0 ? ' — empty (first run / cleared / Tampermonkey storage evicted)' : ''}`);
+        console.log(`${TAG} DEM cache for site ${sid}: ${n.toLocaleString()} points (per-site)${n === 0 ? ' — empty; will fill from shared cache / legacy / fetch' : ''}`);
         return elevationCache;
+    }
+    // Old global blob — loaded once, lazily, only when a per-site lookup misses.
+    // Read-only: we never write it, so the write-amplification is gone. Its points
+    // get copied into the per-site cache as they're touched (self-migrating).
+    function loadLegacyElevCache() {
+        if (legacyElevCache) return legacyElevCache;
+        try { legacyElevCache = elevGmGet(CACHE_KEY_ELEVATIONS, {}) || {}; }
+        catch (e) { legacyElevCache = {}; }
+        const n = Object.keys(legacyElevCache).length;
+        if (n) console.log(`${TAG} legacy global DEM cache available as read-only fallback: ${n.toLocaleString()} points (migrating per-site on access; run __aimAIElevPurgeLegacy() once per-site is warm to reclaim ~${Math.round(JSON.stringify(legacyElevCache).length / 1024)} KB)`);
+        return legacyElevCache;
     }
     // Cache write strategy (v3.37):
     //   - CHECKPOINT every ELEV_SAVE_BATCH new entries (50).
@@ -302,47 +464,151 @@
     let elevDirtyCount = 0;
     let elevSaveTimer = null;
     function saveElevationCache() {
-        if (!elevationCache) return;
+        if (!elevationCache || !elevCacheSiteID || elevCacheSiteID === '_nosite_') return;
+        const key = elevSiteKey(elevCacheSiteID);
         elevDirtyCount++;
         if (elevDirtyCount >= ELEV_SAVE_BATCH) {
             if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
             const totalCount = Object.keys(elevationCache).length;
             elevDirtyCount = 0;
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            try { elevGmSet(key, elevationCache); }
             catch (e) { console.warn(`${TAG} elevation cache write failed:`, e); }
-            console.log(`${TAG} DEM cache checkpoint: ${totalCount.toLocaleString()} total entries persisted`);
+            console.log(`${TAG} DEM cache checkpoint (site ${elevCacheSiteID}): ${totalCount.toLocaleString()} points persisted`);
             return;
         }
         if (elevSaveTimer) clearTimeout(elevSaveTimer);
         elevSaveTimer = setTimeout(() => {
             elevSaveTimer = null;
             elevDirtyCount = 0;
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+            try { elevGmSet(key, elevationCache); }
             catch (e) { console.warn(`${TAG} elevation cache trailing-write failed:`, e); }
         }, 1000);
     }
     function flushElevationCache() {
         if (elevSaveTimer) { clearTimeout(elevSaveTimer); elevSaveTimer = null; }
-        if (!elevationCache) return;
+        if (!elevationCache || !elevCacheSiteID || elevCacheSiteID === '_nosite_') return;
         elevDirtyCount = 0;
-        try { elevGmSet(CACHE_KEY_ELEVATIONS, elevationCache); }
+        try { elevGmSet(elevSiteKey(elevCacheSiteID), elevationCache); }
         catch (e) {}
     }
     function elevCacheKey(lat, lng) {
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
     }
+
+    // ============================================================
+    // ELEVATION SOURCE (v4.69) — Open-Topo-Data (free, no key, BATCHED
+    // 100 pts/request, US 10 m NED, ≈100k pts/day) is the PRIMARY source;
+    // Percepto's /location_altitude/ stays fully intact as the fallback.
+    //
+    //   • Flip back to Percepto any time: set elevPrimary = 'percepto'
+    //     below, or run __aimAIElevSource('percepto') in the console
+    //     (e.g. if the Percepto limit gets raised). Nothing is deleted.
+    //   • Percepto also auto-backstops: OTD failures + any point outside
+    //     NED coverage fall through to Percepto per-point.
+    //   • Datum guard: first OTD batch is spot-checked against Percepto;
+    //     if they disagree by > OTD_DATUM_TOL_M the OTD source is disabled
+    //     (so we never bake a wrong vertical datum into altitude bands).
+    // ============================================================
+    let elevPrimary = 'opentopodata';        // 'opentopodata' | 'percepto'
+    const OTD_DATASET = 'ned10m';            // US 10 m, NAVD88 ≈ MSL (matches Percepto/Google)
+    const OTD_URL = `https://api.opentopodata.org/v1/${OTD_DATASET}`;
+    const OTD_MAX_BATCH = 100;               // API max locations per request
+    const OTD_MIN_INTERVAL_MS = 1100;        // public limit ≤ 1 req/s
+    const OTD_DATUM_TOL_M = 3;               // OTD vs Percepto disagreement that trips distrust
+    let otdBatch = [];                        // [{lat,lng,key,resolve}]
+    let otdTimer = null, otdLastSend = 0;
+    let otdDisabled = false, otdDatumChecked = false;
+
+    function elevSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    // A single Percepto per-point fetch (the existing queue) — returns meters|null.
+    function perceptoFetchPoint(lat, lng) {
+        const key = elevCacheKey(lat, lng);
+        return new Promise(resolve => { elevQueue.push({ lat, lng, key, resolve }); pumpElevQueue(); });
+    }
+    async function otdFetchBatch(points) {
+        const loc = points.map(p => `${p.lat},${p.lng}`).join('|');
+        try {
+            const r = await elevGmRequest({ method: 'GET', url: `${OTD_URL}?locations=${encodeURIComponent(loc)}`, timeout: 15000 });
+            if (!r.ok) return null;
+            const j = JSON.parse(r.responseText);
+            if (!j || j.status !== 'OK' || !Array.isArray(j.results)) return null;
+            return j.results.map(x => (x && typeof x.elevation === 'number') ? x.elevation : null);
+        } catch (e) { return null; }
+    }
+    function enqueueOTD(lat, lng, key) {
+        return new Promise(resolve => { otdBatch.push({ lat, lng, key, resolve }); scheduleOTDFlush(); });
+    }
+    function scheduleOTDFlush() {
+        if (otdTimer) return;
+        const wait = Math.max(otdBatch.length >= OTD_MAX_BATCH ? 0 : 70, OTD_MIN_INTERVAL_MS - (Date.now() - otdLastSend));
+        otdTimer = setTimeout(() => { otdTimer = null; flushOTD().catch(e => console.warn(`${TAG} OTD flush threw`, e)); }, wait);
+    }
+    async function flushOTD() {
+        if (!otdBatch.length) return;
+        const batch = otdBatch.splice(0, OTD_MAX_BATCH);
+        otdLastSend = Date.now();
+        const elevs = await otdFetchBatch(batch);
+        if (elevs) {
+            const gaps = [];
+            batch.forEach((b, i) => {
+                const m = elevs[i];
+                if (m != null) { loadElevationCache()[b.key] = m; b.resolve(m); }
+                else gaps.push(b); // outside NED coverage → Percepto backstop
+            });
+            saveElevationCache();
+            gaps.forEach(b => perceptoFetchPoint(b.lat, b.lng).then(m => b.resolve(m)));
+            if (!otdDatumChecked) verifyOtdDatum(batch, elevs);
+        } else {
+            // whole request failed (down / rate-limited) → Percepto backstop for the batch
+            console.warn(`${TAG} Open-Topo-Data request failed — backstopping ${batch.length} point(s) via Percepto`);
+            batch.forEach(b => perceptoFetchPoint(b.lat, b.lng).then(m => b.resolve(m)));
+        }
+        if (otdBatch.length) scheduleOTDFlush();
+    }
+    async function verifyOtdDatum(batch, elevs) {
+        otdDatumChecked = true;
+        try {
+            const samples = [];
+            for (let i = 0; i < batch.length && samples.length < 3; i++) if (typeof elevs[i] === 'number') samples.push({ b: batch[i], otd: elevs[i] });
+            if (!samples.length) { otdDatumChecked = false; return; } // try again next batch
+            const diffs = [];
+            for (const s of samples) {
+                const pm = await perceptoFetchPoint(s.b.lat, s.b.lng);
+                if (typeof pm === 'number') diffs.push(Math.abs(pm - s.otd));
+                await elevSleep(150);
+            }
+            if (!diffs.length) { console.log(`${TAG} OTD datum check skipped (Percepto unavailable) — trusting Open-Topo-Data ${OTD_DATASET} (NAVD88 ≈ MSL)`); return; }
+            const maxDiff = Math.max(...diffs);
+            if (maxDiff > OTD_DATUM_TOL_M) {
+                otdDisabled = true;
+                console.warn(`${TAG} ⚠ Open-Topo-Data disagrees with Percepto by ${maxDiff.toFixed(1)} m (> ${OTD_DATUM_TOL_M} m) — DISABLING OTD, falling back to Percepto so altitude bands stay correct. Run __aimAIElevSource('opentopodata') to retry.`);
+            } else {
+                console.log(`${TAG} ✓ Open-Topo-Data datum verified vs Percepto (max Δ ${maxDiff.toFixed(1)} m) — using ${OTD_DATASET} as the primary DEM source`);
+            }
+        } catch (e) { console.warn(`${TAG} OTD datum check threw`, e); }
+    }
+
     function getElevationFromCache(lat, lng) {
-        return loadElevationCache()[elevCacheKey(lat, lng)];
+        const key = elevCacheKey(lat, lng);
+        const cache = loadElevationCache();
+        if (cache[key] != null) return cache[key];
+        // miss → consult the legacy global blob; migrate the hit up so future
+        // lookups stay in the (small) per-site cache and legacy fades out.
+        const legacy = loadLegacyElevCache();
+        const v = legacy[key];
+        if (v != null) { cache[key] = v; saveElevationCache(); }
+        return v;
     }
     function fetchElevation(lat, lng) {
         const key = elevCacheKey(lat, lng);
-        const cache = loadElevationCache();
-        if (cache[key] != null) return Promise.resolve(cache[key]);
+        const cached = getElevationFromCache(lat, lng);
+        if (cached != null) return Promise.resolve(cached);
         if (elevInFlight[key]) return elevInFlight[key];
-        const p = new Promise(resolve => {
-            elevQueue.push({ lat, lng, key, resolve });
-            pumpElevQueue();
-        }).then(meters => { delete elevInFlight[key]; return meters; });
+        const useOtd = (elevPrimary === 'opentopodata') && !otdDisabled;
+        const p = (useOtd
+            ? enqueueOTD(lat, lng, key)                                   // batched Open-Topo-Data (primary)
+            : new Promise(resolve => { elevQueue.push({ lat, lng, key, resolve }); pumpElevQueue(); }) // Percepto (fallback / flip-back)
+        ).then(meters => { delete elevInFlight[key]; return meters; });
         elevInFlight[key] = p;
         return p;
     }
@@ -375,6 +641,88 @@
             })
         ));
     }
+
+    // ---- elevation service bridge (v4.66) ----
+    // Let sibling AIM scripts in the same window (e.g. the Flight Path Editor's smart
+    // altitude) reuse THIS script's warm GM cache + shared-GitHub team cache + fetch
+    // queue, instead of each hammering /location_altitude/ on its own (it rate-limits
+    // hard — HTTP 429). getCached()/getNearest() are free (no network); fetch()/bulk() go
+    // through the same dedup + persistence + shared-cache push everything else here uses.
+    // Exposed on unsafeWindow because GM storage is per-script (siblings can't read it).
+    //
+    // getNearest(): the cache is a DENSE grid (a site with AGL analysis has tens of
+    // thousands of points ~10 m apart), but an exact 5-dp key match only hits if the
+    // caller samples the exact same coordinate. A flight path drawn fresh never does — so
+    // we return the CLOSEST cached point within maxMeters. DEM barely changes over a few
+    // metres, so this turns the whole cached site into free terrain for any sample point.
+    // Nearest-point lookup. Scans the (small) per-site cache first; only if that
+    // misses does it scan the legacy global blob (bbox-prefiltered, so the other
+    // sites' points are rejected cheaply). Each parsed array is memoized + size-
+    // invalidated independently.
+    let _nnSiteArr = null, _nnSiteSize = -1, _nnSiteId = null;
+    let _nnLegArr = null, _nnLegSize = -1;
+    function nearestInArr(arr, lat, lng, maxM) {
+        const cosLat = Math.cos(lat * Math.PI / 180) || 1e-6;
+        const dLat = maxM / 111320, dLng = maxM / (111320 * cosLat);
+        let bestM = null, bestD = Infinity;
+        for (const p of arr) {
+            if (Math.abs(p.la - lat) > dLat || Math.abs(p.ln - lng) > dLng) continue; // cheap bbox prefilter
+            const dy = (p.la - lat) * 111320, dx = (p.ln - lng) * 111320 * cosLat;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; bestM = p.m; }
+        }
+        return (bestM != null && bestD <= maxM * maxM) ? bestM : null;
+    }
+    function parseCacheArr(cache) {
+        return Object.keys(cache).map(k => { const c = k.split(','); return { la: +c[0], ln: +c[1], m: cache[k] }; })
+            .filter(p => Number.isFinite(p.la) && Number.isFinite(p.ln) && typeof p.m === 'number');
+    }
+    function elevNearest(lat, lng, maxMeters) {
+        try {
+            const maxM = maxMeters || 25;
+            const cache = loadElevationCache();
+            const keys = Object.keys(cache);
+            if (!_nnSiteArr || _nnSiteSize !== keys.length || _nnSiteId !== elevCacheSiteID) {
+                _nnSiteArr = parseCacheArr(cache); _nnSiteSize = keys.length; _nnSiteId = elevCacheSiteID;
+            }
+            const hit = nearestInArr(_nnSiteArr, lat, lng, maxM);
+            if (hit != null) return hit;
+            // fall back to the legacy global blob (lazy)
+            const legacy = loadLegacyElevCache();
+            const lk = Object.keys(legacy);
+            if (!lk.length) return null;
+            if (!_nnLegArr || _nnLegSize !== lk.length) { _nnLegArr = parseCacheArr(legacy); _nnLegSize = lk.length; }
+            return nearestInArr(_nnLegArr, lat, lng, maxM);
+        } catch (e) { return null; }
+    }
+    try {
+        unsafeWindow.__aimAIElevation = {
+            version: SCRIPT_VERSION,
+            getCached: (lat, lng) => { try { const v = getElevationFromCache(lat, lng); return (v == null ? null : v); } catch (e) { return null; } },
+            getNearest: (lat, lng, maxMeters) => elevNearest(lat, lng, maxMeters),
+            cacheSize: () => { try { return Object.keys(loadElevationCache()).length; } catch (e) { return 0; } },
+            fetch: (lat, lng) => fetchElevation(lat, lng),
+            bulk: (points, onProgress) => bulkFetchElevations(points, onProgress),
+        };
+        unsafeWindow.console && unsafeWindow.console.log(`${TAG} elevation service exposed on window.__aimAIElevation (per-site cache + nearest-lookup + queue reuse for sibling scripts) · primary source: ${elevPrimary}`);
+        // Console switch for the DEM source — e.g. flip back to Percepto if its limit gets raised.
+        unsafeWindow.__aimAIElevSource = (s) => {
+            elevPrimary = (s === 'percepto') ? 'percepto' : 'opentopodata';
+            if (elevPrimary === 'opentopodata') { otdDisabled = false; otdDatumChecked = false; }
+            console.log(`${TAG} elevation source → ${elevPrimary}`);
+            return elevPrimary;
+        };
+        // One-shot reclaim: once the per-site caches are warm, drop the old global
+        // blob to free ~1.5 MB of GM storage. Safe — per-site + shared files cover it.
+        unsafeWindow.__aimAIElevPurgeLegacy = () => {
+            try {
+                const n = Object.keys(loadLegacyElevCache()).length;
+                elevGmSet(CACHE_KEY_ELEVATIONS, {}); legacyElevCache = {}; _nnLegArr = null; _nnLegSize = -1;
+                console.log(`${TAG} purged legacy global DEM blob (${n.toLocaleString()} points). Per-site caches are now the only store.`);
+                return n;
+            } catch (e) { console.warn(`${TAG} purge failed`, e); return 0; }
+        };
+    } catch (e) {}
 
     // Best-effort centroid for any entity type. Returns {lat, lng} or null.
     // Assets/Markers: first coord. Polygons (FFZ/NFZ): average of coords.
@@ -683,7 +1031,7 @@
             }
         });
         if (added > 0) {
-            try { elevGmSet(CACHE_KEY_ELEVATIONS, cache); } catch (e) {}
+            flushElevationCache(); // persist into the per-site key
             console.log(`${TAG} merged shared cache for site ${siteID}: +${added.toLocaleString()} points from teammates (updated ${parsed.updatedAt || '?'})`);
         } else {
             console.log(`${TAG} shared cache for site ${siteID} loaded, but local already has all ${Object.keys(parsed.entries).length.toLocaleString()} entries`);
@@ -913,6 +1261,20 @@
         const y = dphi;
         return Math.sqrt(x*x + y*y) * R;
     }
+    // Rough planar area (m²) of a lat/lng ring via local equirectangular
+    // projection + shoelace. Accurate enough for small zones (FFZ/NFZ).
+    function polygonAreaM2(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return null;
+        const mPerLat = 111320;
+        const mPerLng = (111320 * Math.cos(coords[0].lat * Math.PI / 180)) || 1e-9;
+        let a = 0;
+        for (let i = 0, n = coords.length; i < n; i++) {
+            const p = coords[i], q = coords[(i + 1) % n];
+            if (!p || !q || typeof p.lat !== 'number' || typeof q.lat !== 'number') return null;
+            a += (p.lng * mPerLng) * (q.lat * mPerLat) - (q.lng * mPerLng) * (p.lat * mPerLat);
+        }
+        return Math.abs(a) / 2;
+    }
     function pointToSegMeters(lat, lng, a, b) {
         const ax = a.lng, ay = a.lat;
         const bx = b.lng, by = b.lat;
@@ -987,6 +1349,39 @@
         }
         return dist;
     }
+    // Dijkstra returning predecessors too, so we can RECONSTRUCT the path (the
+    // dist-only variant above is enough for reachability/length but A2 needs the
+    // actual waypoint chain). Returns { dist: Map<k,m>, prev: Map<k,k> }.
+    function dijkstraPath(graph, startKey) {
+        const dist = new Map(), prev = new Map();
+        if (!graph.adj.has(startKey)) return { dist, prev };
+        dist.set(startKey, 0);
+        const visited = new Set();
+        const pq = [{ k: startKey, d: 0 }];
+        while (pq.length) {
+            let mi = 0;
+            for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i;
+            const { k, d } = pq.splice(mi, 1)[0];
+            if (visited.has(k)) continue;
+            visited.add(k);
+            (graph.adj.get(k) || []).forEach(({ to, w }) => {
+                const nd = d + w;
+                if (nd < (dist.has(to) ? dist.get(to) : Infinity)) {
+                    dist.set(to, nd); prev.set(to, k);
+                    pq.push({ k: to, d: nd });
+                }
+            });
+        }
+        return { dist, prev };
+    }
+    // Reconstruct the key-path startKey…endKey from a prev-map (inclusive).
+    function reconstructPath(prev, startKey, endKey) {
+        const path = [endKey];
+        let cur = endKey, guard = 0;
+        while (cur !== startKey && prev.has(cur) && guard++ < 100000) { cur = prev.get(cur); path.push(cur); }
+        if (cur !== startKey) return null; // unreachable
+        return path.reverse();
+    }
     // Nearest graph vertex to a lat/lng. Returns {key, dist(m), vert}|null.
     function nearestGraphVertex(graph, lat, lng) {
         let best = null;
@@ -1010,6 +1405,1989 @@
         }
         return best;
     }
+    // ============================================================
+    // SOP VALIDATOR GEOMETRY (Phase 4) — builds on the spatial core above.
+    //
+    // Ring rule (v4.52): the TRUE boundary is the raw drawn polygon. Most
+    // asset pads (incl. multi-vertex BATTERY/COMPRESSOR pads) are stored as
+    // a simple ring in correct order → use it RAW. simplifyPolygon's angular
+    // sort SCRAMBLES any non-star pad (reorders vertices into phantom
+    // cross-cut edges), which produced false "FFZ is 4 ft from asset" flags.
+    // The ONLY pads that need repair are genuine bowtie well-pads whose raw
+    // order self-intersects (an interior wellhead vertex); for those the
+    // convex hull drops the interior point and recovers the real rectangle.
+    // FFZ/NFZ polygons (16/4) are always drawn simple → raw. ringForEntity
+    // centralizes this. (Superseded the v3.99 "simplify all type-3" rule —
+    // 0/163 pads on site 1583 were actually self-intersecting; simplify was
+    // mangling 19 of them needlessly.)
+    // ============================================================
+    const M_TO_FT = 3.28084;
+    // True if any non-adjacent edge pair of the ring crosses (self-intersect).
+    function isSelfIntersecting(ring) {
+        const n = ring.length;
+        if (n < 4) return false;
+        for (let i = 0; i < n; i++) {
+            const a1 = ring[i], a2 = ring[(i + 1) % n];
+            for (let j = i + 1; j < n; j++) {
+                const b1 = ring[j], b2 = ring[(j + 1) % n];
+                if (a1 === b1 || a1 === b2 || a2 === b1 || a2 === b2) continue; // shared vertex
+                if (segmentsCross(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+    // Convex hull (Andrew's monotone chain). Returns CCW hull of the points.
+    function convexHull(points) {
+        if (!points || points.length < 3) return points || [];
+        const pts = points.slice().sort((a, b) => a.lng - b.lng || a.lat - b.lat);
+        const crs = (o, a, b) => (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng);
+        const lower = [];
+        for (const p of pts) {
+            while (lower.length >= 2 && crs(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper = [];
+        for (let i = pts.length - 1; i >= 0; i--) {
+            const p = pts[i];
+            while (upper.length >= 2 && crs(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+            upper.push(p);
+        }
+        lower.pop(); upper.pop();
+        const h = lower.concat(upper);
+        return h.length >= 3 ? h : points;
+    }
+    function ringForEntity(e) {
+        const ring = entityCoords(e);
+        if (!ring || ring.length < 3) return null;
+        if (e.type !== 3) return ring;                       // FFZ/NFZ drawn simple → raw
+        return isSelfIntersecting(ring) ? convexHull(ring) : ring;  // raw unless bowtie
+    }
+    // Projected closest point of p onto segment a-b (returns {lat,lng}).
+    function nearestOnSeg(p, a, b) {
+        const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat;
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 === 0 ? 0 : ((p.lng - ax) * dx + (p.lat - ay) * dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        return { lat: ay + t * dy, lng: ax + t * dx };
+    }
+    // Boundary-to-boundary minimum distance (m) between two rings. Walks
+    // every vertex of each ring against every edge of the other (both
+    // directions), so it returns the true closest approach EVEN WHEN one
+    // ring contains the other — an FFZ legitimately surrounds its asset and
+    // we want the inner gap, not 0. (For "do they overlap?" use
+    // polygonsIntersect, not this.)
+    function boundaryMinMeters(ringA, ringB) {
+        let best = Infinity;
+        const scan = (pts, ring) => {
+            for (const p of pts) {
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                    const c = nearestOnSeg(p, ring[j], ring[i]);
+                    const d = approxMeters(p.lat, p.lng, c.lat, c.lng);
+                    if (d < best) best = d;
+                }
+            }
+        };
+        scan(ringA, ringB);
+        scan(ringB, ringA);
+        return best;
+    }
+    // Do segments p1-p2 and p3-p4 properly cross? (lng=x, lat=y)
+    function segmentsCross(p1, p2, p3, p4) {
+        const cr = (ax, ay, bx, by, cx, cy) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+        const d1 = cr(p3.lng, p3.lat, p4.lng, p4.lat, p1.lng, p1.lat);
+        const d2 = cr(p3.lng, p3.lat, p4.lng, p4.lat, p2.lng, p2.lat);
+        const d3 = cr(p1.lng, p1.lat, p2.lng, p2.lat, p3.lng, p3.lat);
+        const d4 = cr(p1.lng, p1.lat, p2.lng, p2.lat, p4.lng, p4.lat);
+        return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+    }
+    // True if two polygon rings share area: any vertex of one inside the
+    // other, or any edge pair crosses.
+    function polygonsIntersect(ringA, ringB) {
+        for (const p of ringA) if (pointInPolygon(p.lat, p.lng, ringB)) return true;
+        for (const p of ringB) if (pointInPolygon(p.lat, p.lng, ringA)) return true;
+        for (let i = 0, j = ringA.length - 1; i < ringA.length; j = i++) {
+            for (let m = 0, n = ringB.length - 1; m < ringB.length; n = m++) {
+                if (segmentsCross(ringA[j], ringA[i], ringB[n], ringB[m])) return true;
+            }
+        }
+        return false;
+    }
+    // Minimum distance (m) from a flight path's arcs to a polygon ring:
+    // each ring vertex vs each arc segment, and each arc endpoint vs each
+    // ring edge (covers both vertex-on-segment and endpoint-near-edge).
+    function fpToRingMeters(fp, ring) {
+        let best = Infinity;
+        const arcs = Array.isArray(fp.arcs) ? fp.arcs : [];
+        for (const arc of arcs) {
+            if (!arc.point_a || !arc.point_b) continue;
+            for (const v of ring) {
+                const d = pointToSegMeters(v.lat, v.lng, arc.point_a, arc.point_b);
+                if (d < best) best = d;
+            }
+            for (const ep of [arc.point_a, arc.point_b]) {
+                for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                    const d = pointToSegMeters(ep.lat, ep.lng, ring[j], ring[i]);
+                    if (d < best) best = d;
+                }
+            }
+        }
+        return best;
+    }
+
+    // Altitude-band overlap (m): min(maxA,maxB) − max(minA,minB). Negative = a gap.
+    function altBandOverlapM(minA, maxA, minB, maxB) {
+        return Math.min(maxA, maxB) - Math.max(minA, minB);
+    }
+    // A small square polygon (4 corners) centered on a point, half-size in
+    // meters → [{lat,lng}…]. Marks point/segment violations (FP junctions,
+    // segment midpoints) where there's no entity ring to outline.
+    function boxAroundPoint(lat, lng, halfM) {
+        const dLat = halfM / 111320;
+        const dLng = halfM / ((111320 * Math.cos(lat * Math.PI / 180)) || 1e-6);
+        return [
+            { lat: lat - dLat, lng: lng - dLng },
+            { lat: lat - dLat, lng: lng + dLng },
+            { lat: lat + dLat, lng: lng + dLng },
+            { lat: lat + dLat, lng: lng - dLng },
+        ];
+    }
+    // Bounding-box width (E-W) / height (N-S) of a ring, in feet.
+    function bboxDimsFt(ring) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        for (const p of ring) {
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        }
+        return {
+            wFt: approxMeters(minLat, minLng, minLat, maxLng) * M_TO_FT,
+            hFt: approxMeters(minLat, minLng, maxLat, minLng) * M_TO_FT,
+        };
+    }
+    // Axis-aligned bbox of a ring (or any {lat,lng}[] list).
+    function bboxOfRing(ring) {
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        for (const p of ring) {
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        }
+        return { minLat, maxLat, minLng, maxLng };
+    }
+    // Cheap spatial prefilters (skip far pairs before the O(verts) math) so the
+    // validator stays fast on big sites. Margins are in meters → degrees.
+    function pointNearBbox(lat, lng, bb, marginM) {
+        const dLat = marginM / 111320;
+        const dLng = marginM / ((111320 * Math.cos(lat * Math.PI / 180)) || 1e-6);
+        return lat >= bb.minLat - dLat && lat <= bb.maxLat + dLat
+            && lng >= bb.minLng - dLng && lng <= bb.maxLng + dLng;
+    }
+    function bboxesNear(a, b, marginM, latRef) {
+        const dLat = marginM / 111320;
+        const dLng = marginM / ((111320 * Math.cos(latRef * Math.PI / 180)) || 1e-6);
+        return !(a.maxLat + dLat < b.minLat || a.minLat - dLat > b.maxLat
+              || a.maxLng + dLng < b.minLng || a.minLng - dLng > b.maxLng);
+    }
+    // True if segment a-b crosses any edge of the ring.
+    function ringCrossesSeg(ring, a, b) {
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            if (segmentsCross(a, b, ring[j], ring[i])) return true;
+        }
+        return false;
+    }
+    // Acute angle (0–90°) between segment a1-a2 and segment b1-b2. Computed
+    // in a cos(lat)-corrected meter frame so lng/lat scaling doesn't skew it.
+    // 0° = parallel (grazing), 90° = perpendicular. Null for a zero-length seg.
+    function segAngleDeg(a1, a2, b1, b2) {
+        const cos = Math.cos(((a1.lat + a2.lat + b1.lat + b2.lat) / 4) * Math.PI / 180) || 1e-6;
+        const ux = (a2.lng - a1.lng) * cos, uy = a2.lat - a1.lat;
+        const vx = (b2.lng - b1.lng) * cos, vy = b2.lat - b1.lat;
+        const du = Math.hypot(ux, uy), dv = Math.hypot(vx, vy);
+        if (du === 0 || dv === 0) return null;
+        let c = Math.abs(ux * vx + uy * vy) / (du * dv);  // |·| → acute angle
+        c = Math.max(-1, Math.min(1, c));
+        return Math.acos(c) * 180 / Math.PI;
+    }
+    // Ground elevation (m) under a point from the DEM cache, or null.
+    // drawSopIssues prefetches these before the AGL check runs.
+    function groundAtCached(lat, lng) {
+        const v = getElevationFromCache(lat, lng);
+        return (v == null) ? null : v;
+    }
+    // Sample points whose DEM ground the AGL check needs (FP arc endpoints +
+    // midpoints, FFZ vertices). Prefetched in bulk before runSopValidators.
+    function collectAglSamplePoints(ents) {
+        const pts = [];
+        (ents || []).forEach(e => {
+            if (e.type === 15 && Array.isArray(e.arcs)) {
+                e.arcs.forEach(arc => {
+                    if (arc.point_a) pts.push({ lat: arc.point_a.lat, lng: arc.point_a.lng });
+                    if (arc.point_b) pts.push({ lat: arc.point_b.lat, lng: arc.point_b.lng });
+                    if (arc.point_a && arc.point_b) pts.push({ lat: (arc.point_a.lat + arc.point_b.lat) / 2, lng: (arc.point_a.lng + arc.point_b.lng) / 2 });
+                });
+            } else if (e.type === 16 && Array.isArray(e.coords)) {
+                e.coords.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng }); });
+            }
+        });
+        return pts;
+    }
+
+    // Run the enabled SOP proximity checks for a site. Returns
+    // [{ check, severity, distFt, threshFt, note, polygon:[[lat,lng]…] }].
+    // Geometry in meters, thresholds/output in feet.
+    async function runSopValidators(siteID, onProgress) {
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket || !Array.isArray(bucket.entities)) return [];
+        const ents = bucket.entities;
+        const assets = ents.filter(e => e.type === 3 && entityCoords(e));
+        const ffzs   = ents.filter(e => e.type === 16 && entityCoords(e));
+        const fps    = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        const nameOf = (e) => (e && (e.name || (e.id != null ? `#${e.id}` : null))) || '?';
+        const ringCache = new Map();
+        const getRing = (e) => { if (!ringCache.has(e)) ringCache.set(e, ringForEntity(e)); return ringCache.get(e); };
+        // Within 10% of the threshold = warn, otherwise a hard violation.
+        const sev = (distFt, threshFt) => (threshFt > 0 && distFt > threshFt * 0.9) ? 'warn' : 'high';
+        const out = [];
+
+        // Shared setup for the altitude / NFZ checks (4b/4c).
+        const nfzs = ents.filter(e => e.type === 4 && entityCoords(e));
+        const allArcs = [];
+        fps.forEach(fp => (fp.arcs || []).forEach((arc, i) => {
+            if (arc && arc.point_a && arc.point_b
+                && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number') {
+                // segNum = 1-based position in the path (matches Percepto's
+                // on-map segment badge); segId = arc.id (stable-ish reference).
+                allArcs.push({ arc, fp, segNum: i + 1, segId: (arc.id != null ? arc.id : '?') });
+            }
+        }));
+        // "FP "name" seg #N (id X)" — names a specific segment in a note so a
+        // junction violation isn't an ambiguous "flight_path_1 ↔ flight_path_1".
+        const segRef = (rec) => `FP "${nameOf(rec.fp)}" seg #${rec.segNum} (id ${rec.segId})`;
+        const arcMid = (arc) => ({ lat: (arc.point_a.lat + arc.point_b.lat) / 2, lng: (arc.point_a.lng + arc.point_b.lng) / 2 });
+        const arcBand = (arc) => (typeof arc.min_alt === 'number' && typeof arc.max_alt === 'number') ? { min: arc.min_alt, max: arc.max_alt } : null;
+        const ffzBand = (e) => (e.restrictions && typeof e.restrictions.minAlt === 'number' && typeof e.restrictions.maxAlt === 'number') ? { min: e.restrictions.minAlt, max: e.restrictions.maxAlt } : null;
+        const boxAt = (lat, lng) => boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]);
+
+        // Precomputed FFZ bboxes + per-arc bbox for the spatial prefilters that
+        // keep the O(n²) checks fast on large sites.
+        const ffzBox = new Map();
+        ffzs.forEach(ffz => { const r = getRing(ffz); if (r) ffzBox.set(ffz, bboxOfRing(r)); });
+        const assetBox = new Map();
+        assets.forEach(a => { const r = getRing(a); if (r) assetBox.set(a, bboxOfRing(r)); });
+        const fpBox = new Map();
+        fps.forEach(fp => {
+            const pts = [];
+            (fp.arcs || []).forEach(a => { if (a.point_a) pts.push(a.point_a); if (a.point_b) pts.push(a.point_b); });
+            if (pts.length) fpBox.set(fp, bboxOfRing(pts));
+        });
+        const arcBox = (arc) => bboxOfRing([arc.point_a, arc.point_b]);
+        // Cooperative yielding: the whole run used to block the main thread for
+        // tens of seconds on big sites (Chrome "page unresponsive"). We now yield
+        // to the event loop whenever a check has run > ~35 ms, so the page stays
+        // live and a progress callback can update. perfNow falls back to Date.
+        const perfNow = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        let _lastYield = perfNow();
+        const yieldMaybe = async (done, total) => {
+            if (perfNow() - _lastYield > 35) {
+                if (onProgress) { try { onProgress(done, total); } catch (e) {} }
+                await new Promise(r => setTimeout(r));
+                _lastYield = perfNow();
+            }
+        };
+
+        // 1. FFZ ↔ Asset standoff — each FFZ surrounds one asset; flag if
+        //    the inner boundary gap drops below the threshold.
+        if (sopEnabled.ffzAsset && assets.length && ffzs.length) {
+            const th = sopThresholds.ffzAssetFt;
+            for (let fi = 0; fi < ffzs.length; fi++) {
+                const ffz = ffzs[fi];
+                const fr = getRing(ffz); if (!fr) continue;
+                const fb = ffzBox.get(ffz);
+                let nearest = null;
+                for (const a of assets) {
+                    const ab = assetBox.get(a);
+                    if (fb && ab && !bboxesNear(fb, ab, th / M_TO_FT + 5, fr[0].lat)) continue;
+                    const ar = getRing(a); if (!ar) continue;
+                    const d = boundaryMinMeters(fr, ar);
+                    if (!nearest || d < nearest.d) nearest = { a, d };
+                }
+                await yieldMaybe(fi, ffzs.length);
+                if (!nearest) continue;
+                const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
+                if (ft < th) {
+                    out.push({
+                        check: 'FFZ↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
+                        note: `violation: FFZ "${nameOf(ffz)}" is ${ft} ft from asset "${nameOf(nearest.a)}" (min ${th} ft)`,
+                        polygon: fr.map(p => [p.lat, p.lng]),
+                    });
+                }
+            }
+        }
+
+        // 2. FP ↔ Asset standoff — a flight path must stay ≥ threshold ft
+        //    from any asset boundary.
+        if (sopEnabled.fpAsset && assets.length && fps.length) {
+            const th = sopThresholds.fpAssetFt;
+            for (let ci = 0; ci < assets.length; ci++) {
+                const a = assets[ci];
+                const ar = getRing(a); if (!ar) continue;
+                const ab = assetBox.get(a);
+                let nearest = null;
+                for (const fp of fps) {
+                    const pb = fpBox.get(fp);
+                    if (ab && pb && !bboxesNear(ab, pb, th / M_TO_FT + 5, ar[0].lat)) continue;
+                    const d = fpToRingMeters(fp, ar);
+                    if (!nearest || d < nearest.d) nearest = { fp, d };
+                }
+                await yieldMaybe(ci, assets.length);
+                if (!nearest) continue;
+                const ft = Math.round(nearest.d * M_TO_FT);     // flag on the displayed value
+                if (ft < th) {
+                    out.push({
+                        check: 'FP↔Asset', severity: sev(ft, th), distFt: ft, threshFt: th,
+                        note: `violation: flight path "${nameOf(nearest.fp)}" is ${ft} ft from asset "${nameOf(a)}" (min ${th} ft)`,
+                        polygon: ar.map(p => [p.lat, p.lng]),
+                    });
+                }
+            }
+        }
+
+        // 3. FFZ ↔ FFZ — two FFZs must not overlap; with a positive
+        //    separation threshold they must also stay that far apart. Each
+        //    unordered pair reported once.
+        if (sopEnabled.ffzFfz && ffzs.length > 1) {
+            const th = sopThresholds.ffzFfzFt;
+            for (let i = 0; i < ffzs.length; i++) {
+                const ra = getRing(ffzs[i]); if (!ra) continue;
+                const ba = ffzBox.get(ffzs[i]);
+                for (let k = i + 1; k < ffzs.length; k++) {
+                    const bb = ffzBox.get(ffzs[k]);
+                    if (ba && bb && !bboxesNear(ba, bb, th / M_TO_FT + 1, ra[0].lat)) continue;
+                    const rb = getRing(ffzs[k]); if (!rb) continue;
+                    const overlap = polygonsIntersect(ra, rb);
+                    const gapFt = overlap ? 0 : Math.round(boundaryMinMeters(ra, rb) * M_TO_FT);
+                    if (overlap || gapFt < th) {
+                        const desc = overlap ? 'overlaps' : `is ${gapFt} ft from`;
+                        out.push({
+                            check: 'FFZ↔FFZ', severity: overlap ? 'high' : sev(gapFt, th), distFt: gapFt, threshFt: th,
+                            note: `violation: FFZ "${nameOf(ffzs[i])}" ${desc} FFZ "${nameOf(ffzs[k])}"${(th > 0 && !overlap) ? ` (min ${th} ft)` : ''}`,
+                            polygon: ra.map(p => [p.lat, p.lng]),
+                        });
+                    }
+                }
+                await yieldMaybe(i, ffzs.length);
+            }
+        }
+
+        // 4. FP alt-band overlap — connected FP segments (shared waypoint) and
+        //    FP segments entering an FFZ must share ≥ threshold of altitude
+        //    band so the drone has a continuous band to transition. Flag if the
+        //    overlap (min(maxA,maxB) − max(minA,minB)) is below the threshold.
+        if (sopEnabled.fpOverlap && allArcs.length) {
+            const thFt = sopThresholds.fpOverlapFt;
+            const thM = thFt / M_TO_FT;
+            // 4a. connected FP↔FP at shared vertices
+            const byVert = new Map();
+            allArcs.forEach((rec, idx) => {
+                [rec.arc.point_a, rec.arc.point_b].forEach(p => {
+                    const k = vkey(p);
+                    if (!byVert.has(k)) byVert.set(k, []);
+                    byVert.get(k).push({ rec, idx, p });
+                });
+            });
+            // Group by the shared vertex: a 3-way junction has 3 pairs, so
+            // reporting per-pair reads as duplicates. Emit ONE issue per
+            // junction listing every under-overlap segment pair (with seg
+            // #/id), drawn once at that vertex.
+            const seenPair = new Set();
+            byVert.forEach((list) => {
+                if (list.length < 2) return;
+                const bad = [];
+                for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+                    const A = list[i], B = list[j];
+                    if (A.idx === B.idx) continue;
+                    const pk = A.idx < B.idx ? `${A.idx}-${B.idx}` : `${B.idx}-${A.idx}`;
+                    if (seenPair.has(pk)) continue;
+                    seenPair.add(pk);
+                    const ba = arcBand(A.rec.arc), bb = arcBand(B.rec.arc);
+                    if (!ba || !bb) continue;
+                    // Compare in METERS — comparing the rounded ft would
+                    // false-flag arcs that overlap by exactly 2 m (= 6.562 ft).
+                    const ovM = altBandOverlapM(ba.min, ba.max, bb.min, bb.max);
+                    if (ovM < thM) bad.push({ A, B, ovFt: ovM * M_TO_FT });
+                }
+                if (!bad.length) return;
+                const anchor = list[0].p;  // the shared junction vertex
+                const lines = bad.map(p =>
+                    `#${p.A.rec.segNum} (id ${p.A.rec.segId}) ↔ #${p.B.rec.segNum} (id ${p.B.rec.segId}): ${p.ovFt < 0 ? 'no' : p.ovFt.toFixed(1) + ' ft'}`);
+                const fpNames = [...new Set(bad.flatMap(p => [nameOf(p.A.rec.fp), nameOf(p.B.rec.fp)]))].join(' / ');
+                out.push({
+                    check: 'FP↔FP alt', severity: 'high',
+                    distFt: Math.min.apply(null, bad.map(p => p.ovFt)), threshFt: thFt,
+                    note: `violation: FP junction (${fpNames}) — connected segments share < ${thFt} ft altitude overlap (need ${thFt} ft): ${lines.join('; ')}`,
+                    polygon: boxAt(anchor.lat, anchor.lng),
+                });
+            });
+            // 4b. FP segment entering an FFZ — needs alt overlap with the zone.
+            if (ffzs.length) {
+                for (let ai = 0; ai < allArcs.length; ai++) {
+                    const rec = allArcs[ai];
+                    const ba = arcBand(rec.arc);
+                    if (ba) {
+                        const ab = arcBox(rec.arc);
+                        for (const ffz of ffzs) {
+                            const fbb = ffzBox.get(ffz);
+                            if (fbb && !bboxesNear(ab, fbb, 2, rec.arc.point_a.lat)) continue;  // can't enter
+                            const fr = getRing(ffz); if (!fr) continue;
+                            const enters = pointInPolygon(rec.arc.point_a.lat, rec.arc.point_a.lng, fr)
+                                || pointInPolygon(rec.arc.point_b.lat, rec.arc.point_b.lng, fr)
+                                || ringCrossesSeg(fr, rec.arc.point_a, rec.arc.point_b);
+                            if (!enters) continue;
+                            const fb = ffzBand(ffz); if (!fb) continue;
+                            const ovM = altBandOverlapM(ba.min, ba.max, fb.min, fb.max);
+                            const ovFt = ovM * M_TO_FT;
+                            if (ovM < thM) {
+                                out.push({
+                                    check: 'FP↔FFZ alt', severity: 'high', distFt: ovFt, threshFt: thFt,
+                                    note: `violation: ${segRef(rec)} enters FFZ "${nameOf(ffz)}" but shares only ${ovFt < 0 ? 'NO' : ovFt.toFixed(1) + ' ft'} altitude overlap (need ${thFt} ft)`,
+                                    polygon: fr.map(p => [p.lat, p.lng]),
+                                });
+                            }
+                        }
+                    }
+                    await yieldMaybe(ai, allArcs.length);
+                }
+            }
+        }
+
+        // 5. AGL floor band — the floor (min altitude) of FP segments and FFZs
+        //    must sit between the low/high AGL thresholds. Ground comes from the
+        //    DEM cache (prefetched in drawSopIssues). Too low = 🔴 (ground
+        //    collision), too high = 🔵. Worst-case ground is used per side:
+        //    highest ground → lowest AGL (low check), lowest → highest AGL.
+        if (sopEnabled.aglFloor) {
+            const lo = sopThresholds.aglFloorMinFt, hi = sopThresholds.aglFloorMaxFt;
+            const checkFloor = (floorM, samplePts, label, polygon) => {
+                let gMax = null, gMin = null;
+                for (const p of samplePts) {
+                    const g = groundAtCached(p.lat, p.lng);
+                    if (g == null) continue;
+                    if (gMax == null || g > gMax) gMax = g;
+                    if (gMin == null || g < gMin) gMin = g;
+                }
+                if (gMax == null) return;                       // no DEM yet — skip silently
+                // Flag on the ROUNDED value the user sees, so a floor shown as
+                // "90 ft (min 90)" never flags — only "89 ft (min 90)" or less.
+                const aglLow = Math.round((floorM - gMax) * M_TO_FT);   // lowest AGL along it
+                const aglHigh = Math.round((floorM - gMin) * M_TO_FT);  // highest AGL along it
+                if (aglLow < lo) {
+                    out.push({ check: 'AGL floor low', severity: 'high', distFt: aglLow, threshFt: lo,
+                        note: `🔴 violation: ${label} floor is ${aglLow} ft AGL (min ${lo} ft)`, polygon });
+                } else if (aglHigh > hi) {
+                    out.push({ check: 'AGL floor high', severity: 'warn', distFt: aglHigh, threshFt: hi,
+                        note: `🔵 violation: ${label} floor is ${aglHigh} ft AGL (max ${hi} ft)`, polygon });
+                }
+            };
+            allArcs.forEach(rec => {
+                const ba = arcBand(rec.arc); if (!ba) return;
+                const mid = arcMid(rec.arc);
+                checkFloor(ba.min, [rec.arc.point_a, rec.arc.point_b, mid], segRef(rec), boxAt(mid.lat, mid.lng));
+            });
+            ffzs.forEach(ffz => {
+                const fb = ffzBand(ffz); const ring = getRing(ffz);
+                if (fb && ring) checkFloor(fb.min, ring, `FFZ "${nameOf(ffz)}"`, ring.map(p => [p.lat, p.lng]));
+            });
+        }
+
+        // 6. NFZ minimum size — bounding box ≥ threshold on BOTH sides.
+        if (sopEnabled.nfzSize && nfzs.length) {
+            const th = sopThresholds.nfzMinFt;
+            nfzs.forEach(nfz => {
+                const ring = entityCoords(nfz); if (!ring || ring.length < 3) return;
+                const dims = bboxDimsFt(ring);
+                const wFt = Math.round(dims.wFt), hFt = Math.round(dims.hFt);
+                if (Math.min(wFt, hFt) < th) {
+                    out.push({ check: 'NFZ size', severity: 'high', distFt: Math.min(wFt, hFt), threshFt: th,
+                        note: `violation: NFZ "${nameOf(nfz)}" is ${wFt}×${hFt} ft (min ${th}×${th} ft)`,
+                        polygon: ring.map(p => [p.lat, p.lng]) });
+                }
+            });
+        }
+
+        // 7. NFZ proximity — an NFZ must stay ≥ threshold from other NFZs and
+        //    from any FFZ edge.
+        if (sopEnabled.nfzProx && nfzs.length) {
+            const th = sopThresholds.nfzSepFt;
+            const pairFlag = (ra, rb, label, otherName) => {
+                const overlap = polygonsIntersect(ra, rb);
+                const gapFt = overlap ? 0 : Math.round(boundaryMinMeters(ra, rb) * M_TO_FT);
+                if (overlap || gapFt < th) {
+                    out.push({ check: label, severity: 'high', distFt: gapFt, threshFt: th,
+                        note: `violation: ${otherName} (${overlap ? 'overlaps' : gapFt + ' ft apart'}, min ${th} ft)`,
+                        polygon: ra.map(p => [p.lat, p.lng]) });
+                }
+            };
+            for (let i = 0; i < nfzs.length; i++) {
+                const ra = entityCoords(nfzs[i]); if (!ra || ra.length < 3) continue;
+                for (let k = i + 1; k < nfzs.length; k++) {
+                    const rb = entityCoords(nfzs[k]); if (!rb || rb.length < 3) continue;
+                    pairFlag(ra, rb, 'NFZ↔NFZ', `NFZ "${nameOf(nfzs[i])}" ↔ NFZ "${nameOf(nfzs[k])}"`);
+                }
+                for (const ffz of ffzs) {
+                    const fr = getRing(ffz); if (!fr) continue;
+                    pairFlag(ra, fr, 'NFZ↔FFZ', `NFZ "${nameOf(nfzs[i])}" ↔ FFZ "${nameOf(ffz)}"`);
+                }
+            }
+        }
+
+        // 8. Alt-band height — (max − min). Inspection bands are ~30 ft; soft
+        //    warn over the soft threshold, hard flag over the hard one (almost
+        //    always a data-entry typo). Applies to FP segments + FFZs.
+        if (sopEnabled.bandHeight) {
+            const soft = sopThresholds.bandSoftFt, hard = sopThresholds.bandHardFt;
+            const checkBand = (band, label, polygon) => {
+                if (!band) return;
+                const tallFt = Math.round((band.max - band.min) * M_TO_FT);  // flag on displayed value
+                if (tallFt > hard) {
+                    out.push({ check: 'Band height', severity: 'high', distFt: tallFt, threshFt: hard,
+                        note: `violation: ${label} altitude band is ${tallFt} ft tall (hard max ${hard} ft — likely a typo)`, polygon });
+                } else if (tallFt > soft) {
+                    out.push({ check: 'Band height', severity: 'warn', distFt: tallFt, threshFt: soft,
+                        note: `⚠ ${label} altitude band is ${tallFt} ft tall (soft max ${soft} ft)`, polygon });
+                }
+            };
+            allArcs.forEach(rec => { const m = arcMid(rec.arc); checkBand(arcBand(rec.arc), segRef(rec), boxAt(m.lat, m.lng)); });
+            ffzs.forEach(ffz => { const r = getRing(ffz); if (r) checkBand(ffzBand(ffz), `FFZ "${nameOf(ffz)}"`, r.map(p => [p.lat, p.lng])); });
+        }
+
+        // 9. Inverted / degenerate altitude band — min ≥ max (zero or inverted
+        //    envelope). Breaks flight planning. FP segments + FFZs.
+        if (sopEnabled.altInverted) {
+            allArcs.forEach(rec => {
+                const b = arcBand(rec.arc); if (!b || b.min < b.max) return;
+                const m = arcMid(rec.arc);
+                out.push({ check: 'Alt band inverted', severity: 'high', distFt: 0, threshFt: 0,
+                    note: `violation: ${segRef(rec)} has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
+                    polygon: boxAt(m.lat, m.lng) });
+            });
+            ffzs.forEach(ffz => {
+                const b = ffzBand(ffz), r = getRing(ffz); if (!b || !r || b.min < b.max) return;
+                out.push({ check: 'Alt band inverted', severity: 'high', distFt: 0, threshFt: 0,
+                    note: `violation: FFZ "${nameOf(ffz)}" has min ≥ max altitude (${Math.round(b.min * M_TO_FT)} ≥ ${Math.round(b.max * M_TO_FT)} ft)`,
+                    polygon: r.map(p => [p.lat, p.lng]) });
+            });
+        }
+
+        // 10. Zero-length / duplicate FP arcs — editing leftovers that confuse
+        //     routing. Zero-length = identical endpoints; duplicate = same
+        //     endpoint pair as an earlier arc.
+        if (sopEnabled.fpDegenerate && allArcs.length) {
+            const seenArc = new Set();
+            allArcs.forEach(rec => {
+                const ka = vkey(rec.arc.point_a), kb = vkey(rec.arc.point_b);
+                const m = arcMid(rec.arc);
+                if (ka === kb) {
+                    out.push({ check: 'FP arc degenerate', severity: 'high', distFt: 0, threshFt: 0,
+                        note: `violation: ${segRef(rec)} is a zero-length segment (endpoints identical)`,
+                        polygon: boxAt(m.lat, m.lng) });
+                    return;
+                }
+                const pk = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+                if (seenArc.has(pk)) {
+                    out.push({ check: 'FP arc degenerate', severity: 'warn', distFt: 0, threshFt: 0,
+                        note: `violation: ${segRef(rec)} is a duplicate segment (same endpoints as another arc)`,
+                        polygon: boxAt(m.lat, m.lng) });
+                } else seenArc.add(pk);
+            });
+        }
+
+        // 11. GM "Tower" standoff — general-markers of type 'tower' must stay
+        //     ≥ threshold ft from every FFZ edge and every flight-path segment.
+        if (sopEnabled.gmTower) {
+            const th = sopThresholds.gmTowerFt;
+            const towers = ents.filter(e => e.type === 19 && e.general_marker_type === 'tower'
+                && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+            for (let ti = 0; ti < towers.length; ti++) {
+                const gm = towers[ti];
+                const lat = gm.coords[0].lat, lng = gm.coords[0].lng;
+                const margM = th / M_TO_FT + 2;
+                let ffzD = Infinity, ffzN = null;
+                for (const ffz of ffzs) {
+                    const bb = ffzBox.get(ffz);
+                    if (bb && !pointNearBbox(lat, lng, bb, margM)) continue;
+                    const ring = getRing(ffz); if (!ring) continue;
+                    const d = pointToPolygonMeters(lat, lng, ring);   // 0 if the tower is inside
+                    if (d < ffzD) { ffzD = d; ffzN = ffz; }
+                }
+                let fpD = Infinity, fpN = null;
+                for (const rec of allArcs) {
+                    if (!pointNearBbox(lat, lng, arcBox(rec.arc), margM)) continue;
+                    const d = pointToSegMeters(lat, lng, rec.arc.point_a, rec.arc.point_b);
+                    if (d < fpD) { fpD = d; fpN = rec; }
+                }
+                const ffzFt = Math.round(ffzD * M_TO_FT);
+                const fpFt = Math.round(fpD * M_TO_FT);
+                const parts = [];
+                if (ffzN && ffzFt < th) parts.push(`FFZ "${nameOf(ffzN)}" ${ffzFt} ft`);
+                if (fpN && fpFt < th) parts.push(`${segRef(fpN)} ${fpFt} ft`);
+                if (parts.length) {
+                    out.push({ check: 'GM Tower standoff', severity: 'high',
+                        distFt: Math.min(ffzN ? ffzFt : Infinity, fpN ? fpFt : Infinity), threshFt: th,
+                        note: `violation: Tower GM "${nameOf(gm)}" within ${th} ft — ${parts.join('; ')}`,
+                        polygon: boxAt(lat, lng) });
+                }
+                await yieldMaybe(ti, towers.length);
+            }
+        }
+
+        // 12. FP → FFZ connection angle — an FP connects to an FFZ where its
+        //     segment endpoint lands ON an FFZ edge (mid-edge; never a corner).
+        //     The angle between that approaching segment and the edge it meets
+        //     must be ≥ threshold (ideal 45°); a grazing approach nearly
+        //     parallel to the edge (< 15°) is "too sharp". One finding per
+        //     connection point, drawn there. (Only the APPROACH segment — the
+        //     one whose far end is OUTSIDE the FFZ — is measured, so an internal
+        //     leg running along the boundary isn't mistaken for a sharp entry.)
+        if (sopEnabled.fpFfzAngle && allArcs.length && ffzs.length) {
+            const th = sopThresholds.fpFfzAngleDeg;
+            const CONNECT_FT = 10;   // FP endpoint within this of an FFZ edge = on it
+            const conn = new Map();
+            for (let ai = 0; ai < allArcs.length; ai++) {
+                const rec = allArcs[ai];
+                for (const [P, other] of [[rec.arc.point_a, rec.arc.point_b], [rec.arc.point_b, rec.arc.point_a]]) {
+                    let best = null;
+                    for (const ffz of ffzs) {
+                        const bb = ffzBox.get(ffz);
+                        if (bb && !pointNearBbox(P.lat, P.lng, bb, CONNECT_FT / M_TO_FT)) continue;
+                        const r = getRing(ffz); if (!r) continue;
+                        for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+                            const d = pointToSegMeters(P.lat, P.lng, r[j], r[i]) * M_TO_FT;
+                            if (!best || d < best.d) best = { d, e1: r[j], e2: r[i], ffz, ring: r };
+                        }
+                    }
+                    if (!best || best.d > CONNECT_FT) continue;
+                    if (pointInPolygon(other.lat, other.lng, best.ring)) continue;  // not an approach leg
+                    const deg = segAngleDeg(other, P, best.e1, best.e2);
+                    if (deg == null) continue;
+                    const key = `${best.ffz.id}|${vkey(P)}`;
+                    const prev = conn.get(key);
+                    if (!prev || deg < prev.deg) conn.set(key, { deg, ffz: best.ffz, rec, P });
+                }
+                await yieldMaybe(ai, allArcs.length);
+            }
+            conn.forEach(c => {
+                if (Math.round(c.deg) >= th) return;
+                out.push({ check: 'FP↔FFZ angle', severity: 'high', distFt: Math.round(c.deg), threshFt: th,
+                    note: `violation: ${segRef(c.rec)} connects to FFZ "${nameOf(c.ffz)}" at ${Math.round(c.deg)}° to the edge (min ${th}°, ideal 45°)`,
+                    polygon: boxAt(c.P.lat, c.P.lng) });
+            });
+        }
+        return out;
+    }
+
+    // ---- Validator → AIM Issues bridge (AIM_VALIDATOR_ISSUES channel) ----
+    function ensureValidatorChannel() {
+        if (sopValidatorChannel) return sopValidatorChannel;
+        try { sopValidatorChannel = new BroadcastChannel(VALIDATOR_CHANNEL_NAME); }
+        catch (e) { console.warn(`${TAG} validator channel unavailable:`, e); }
+        return sopValidatorChannel;
+    }
+    // AIM Issues REPLACES every validator issue on each VALIDATOR_ISSUES
+    // message (re-runs replace, never accumulate) — and BOTH the SOP
+    // validators and the Airspace Checker feed that channel. So each
+    // sender stashes its own last batch here and we always post the
+    // UNION; clearing one side keeps the other side's issues drawn.
+    let sopLastIssues = [], sopIssuesSite = null;
+    let airLastIssues = [], airIssuesSite = null;
+    let tfrLastIssues = [], tfrIssuesSite = null;   // live TFRs — replaced by the auto-sweep independently
+    function postValidatorIssues(sid) {
+        const ch = ensureValidatorChannel();
+        if (!ch) return false;
+        // A batch stashed for a different site is stale — drop it rather
+        // than re-drawing it onto the site the user navigated to.
+        if (sopIssuesSite !== sid) { sopLastIssues = []; sopIssuesSite = sid; }
+        if (airIssuesSite !== sid) { airLastIssues = []; airIssuesSite = sid; }
+        if (tfrIssuesSite !== sid) { tfrLastIssues = []; tfrIssuesSite = sid; }
+        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues);
+        if (all.length) ch.postMessage({ type: 'VALIDATOR_ISSUES', siteID: sid, issues: all });
+        else ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
+        return true;
+    }
+
+    function drawSopIssues() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        if (!(mapObjectsBySite[sid] && Array.isArray(mapObjectsBySite[sid].entities))) {
+            showToast(`Fetching entities for site ${sid}…`);
+        }
+        Promise.resolve(fetchMapObjects(sid, false)).then(() => {
+            const bucket = mapObjectsBySite[sid];
+            if (!bucket || !Array.isArray(bucket.entities)) {
+                showToast('Entities not ready — try again in a moment', 'rgba(255,96,96,0.55)');
+                return;
+            }
+            // The AGL-floor check needs DEM ground under every FP segment + FFZ
+            // — prefetch in bulk first so runSopValidators reads it from cache.
+            let demStep = Promise.resolve();
+            if (sopEnabled.aglFloor) {
+                const pts = collectAglSamplePoints(bucket.entities);
+                if (pts.length) {
+                    showToast(`Fetching ground elevations (${pts.length})…`);
+                    demStep = Promise.resolve(bulkFetchElevations(pts)).catch(e => {
+                        console.warn(`${TAG} AGL DEM prefetch threw:`, e);
+                    });
+                }
+            }
+            return demStep.then(async () => {
+            // Async + cooperative-yielding so a big site doesn't freeze the tab.
+            // The progress toast is re-shown periodically just to stay visible.
+            showToast('Validating site…');
+            let lastProgAt = Date.now();
+            const onProgress = (done, total) => {
+                const now = Date.now();
+                if (now - lastProgAt < 700) return;
+                lastProgAt = now;
+                showToast('Validating site…');
+            };
+            const violations = await runSopValidators(sid, onProgress);
+            sopIssuesSite = sid;
+            sopLastIssues = violations.map(v => ({ shape: 'polygon', polygon: v.polygon, note: v.note }));
+            if (!postValidatorIssues(sid)) { showToast('Validator channel unavailable', 'rgba(255,96,96,0.55)'); return; }
+            const byCheck = {};
+            violations.forEach(v => { byCheck[v.check] = (byCheck[v.check] || 0) + 1; });
+            const breakdown = Object.keys(byCheck).map(k => `${k} ${byCheck[k]}`).join(', ') || 'none';
+            console.log(`${TAG} SOP validators: ${violations.length} violation(s) [${breakdown}]`);
+            showToast(violations.length
+                ? `SOP: ${violations.length} violation(s) drawn (${breakdown}). Needs AIM Issues enabled.`
+                : 'SOP: no violations found ✓');
+            });
+        }).catch(e => console.warn(`${TAG} drawSopIssues threw:`, e));
+    }
+    function clearSopIssues() {
+        const sid = getCurrentSiteID();
+        sopIssuesSite = sid;
+        sopLastIssues = [];
+        postValidatorIssues(sid);
+        showToast(airLastIssues.length ? 'Cleared SOP issues (airspace issues kept).' : 'Cleared validator issues.');
+    }
+
+    // ============================================================
+    // AIRSPACE CHECKER — is the site safe relative to the OUTSIDE
+    // world? Queries the FAA AIS ArcGIS FeatureServers by geometry:
+    //   Class_Airspace         → inside / near surface controlled airspace
+    //   US_Airport             → manned strips + helipads within standoff
+    //   Digital_Obstacle_File  → towers / turbines near site entities
+    //   FAA_UAS_FacilityMap    → LAANC grid ceilings over the site
+    // Violations go to AIM Issues as ephemeral Validator issues (union
+    // with the SOP validators' batch — see postValidatorIssues); the
+    // full inventory (violating or not) renders in a floating panel.
+    // ============================================================
+    const AIRSPACE_PANEL_ID = 'aim-airspace-panel';
+    const AIR_KIND = { AD: 'Airport', HP: 'Heliport', SP: 'Seaplane Base', GL: 'Gliderport', UL: 'Ultralight', BP: 'Balloonport' };
+    const AIR_COMPASS = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+    function airEsc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function airBearing(fromLat, fromLng, toLat, toLng) {
+        const φ1 = fromLat * Math.PI / 180, φ2 = toLat * Math.PI / 180;
+        const Δλ = (toLng - fromLng) * Math.PI / 180;
+        const y = Math.sin(Δλ) * Math.cos(φ2);
+        const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+        const deg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        return AIR_COMPASS[Math.round(deg / 22.5) % 16];
+    }
+    // One FAA layer query via GM_xmlhttpRequest (cross-origin; @connect
+    // services6.arcgis.com). Throws on HTTP / ArcGIS-level errors so the
+    // caller can surface the failure — never silently returns partial data.
+    async function airQueryFAA(service, params) {
+        const qs = new URLSearchParams(Object.assign({ f: 'json' }, params)).toString();
+        // `service` is an FAA AIS service name, or a full layer URL for
+        // non-FAA sources (HIFLD).
+        const base = /^https?:/i.test(service) ? service : `${AIR_FAA_BASE}/${service}/FeatureServer/0`;
+        const url = `${base}/query?${qs}`;
+        const r = await elevGmRequest({ method: 'GET', url, timeout: 25000 });
+        if (!r.ok) throw new Error(`HTTP ${r.status || 'network error'}`);
+        let d;
+        try { d = JSON.parse(r.responseText); } catch (e) { throw new Error('bad JSON'); }
+        if (d.error) throw new Error(d.error.message || `ArcGIS error ${d.error.code}`);
+        return d;
+    }
+    function airPointQuery(service, lat, lng, meters, outFields, returnGeometry) {
+        return airQueryFAA(service, {
+            geometry: `${lng},${lat}`, geometryType: 'esriGeometryPoint', inSR: '4326',
+            distance: String(Math.round(meters)), units: 'esriSRUnit_Meter',
+            spatialRel: 'esriSpatialRelIntersects', outFields,
+            returnGeometry: returnGeometry ? 'true' : 'false', outSR: '4326',
+        });
+    }
+    // Every vertex of every FLYABLE site entity — the "site" for distance
+    // purposes, so a strip 3 NM from the site's far edge flags even when
+    // the centroid is further out. Only geometry the drone actually
+    // occupies counts: FFZ / FP / Asset / Base Station / Safe Zone.
+    // General Markers are EXCLUDED — coworkers drop GMs on external
+    // hazards (flares, towers), and counting those as "the site" would
+    // make every marked hazard self-flag. NFZs are excluded too (no-fly).
+    const AIR_SITE_TYPES = new Set([3, 8, 15, 16, 98]);
+    // Each point carries `src` — which entity (and FP segment) it belongs
+    // to — so "185 ft from site" can say WHAT it's 185 ft from.
+    function airCollectSitePoints(ents) {
+        const pts = [];
+        (ents || []).forEach(e => {
+            if (!AIR_SITE_TYPES.has(e.type)) return;
+            const nm = e.name || (e.id != null ? `#${e.id}` : '?');
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+                e.arcs.forEach((a, i) => {
+                    const src = `FP "${nm}" seg #${i + 1}`;
+                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng, src, t: 15 });
+                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng, src, t: 15 });
+                });
+            } else {
+                const src = `${typeReg(e.type).short} "${nm}"`;
+                const cs = entityCoords(e);
+                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng, src, t: e.type }); });
+            }
+        });
+        return pts;
+    }
+    // Project a point onto segment a–b (each [lat,lng]) in equirectangular
+    // meters. HIFLD lines have SPARSE vertices (a 20-mile line may only
+    // have points at bends) so vertex-to-site distances can be miles off —
+    // this is the point-to-SEGMENT lesson from the Coverage Validator.
+    function airClosestOnSeg(plat, plng, a, b) {
+        const cosLat = Math.cos(plat * Math.PI / 180);
+        const ax = (a[1] - plng) * 111320 * cosLat, ay = (a[0] - plat) * 110540;
+        const bx = (b[1] - plng) * 111320 * cosLat, by = (b[0] - plat) * 110540;
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? -(ax * dx + ay * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return { d: Math.sqrt(cx * cx + cy * cy), lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t };
+    }
+    // Slim ROTATED rectangle along the turbine→entity axis (v4.158 — the
+    // old axis-aligned bounding box ballooned on diagonal pairs; a
+    // corridor reads as "this thing ↔ that thing" at a glance).
+    function airWrapBox(aLat, aLng, bLat, bLng, halfWidthM) {
+        const midLat = (aLat + bLat) / 2;
+        const mPerLat = 110540, mPerLng = 111320 * Math.cos(midLat * Math.PI / 180);
+        let dx = (bLng - aLng) * mPerLng, dy = (bLat - aLat) * mPerLat;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        dx /= len; dy /= len;
+        // perpendicular half-width + extend both ends by the same margin
+        const px = -dy * halfWidthM, py = dx * halfWidthM;
+        const ex = dx * halfWidthM, ey = dy * halfWidthM;
+        const pt = (baseLat, baseLng, mx, my) => [baseLat + my / mPerLat, baseLng + mx / mPerLng];
+        return [
+            pt(aLat, aLng, -ex + px, -ey + py),
+            pt(bLat, bLng, ex + px, ey + py),
+            pt(bLat, bLng, ex - px, ey - py),
+            pt(aLat, aLng, -ex - px, -ey - py),
+        ];
+    }
+    // Site SEGMENTS (FP arcs + polygon edges) — vertex-only distances
+    // undershoot badly on long straight runs (user field case: turbine
+    // 259 ft from the middle of an FP segment measured 684 ft to its
+    // nearest vertex). Point entities (base/safe) stay points.
+    function airCollectSiteSegs(ents) {
+        const segs = [];
+        (ents || []).forEach(e => {
+            if (!AIR_SITE_TYPES.has(e.type)) return;
+            const nm = e.name || (e.id != null ? `#${e.id}` : '?');
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+                e.arcs.forEach((a, i) => {
+                    if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
+                        segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15,
+                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null });
+                    }
+                });
+            } else if (e.type === 3 || e.type === 16) {
+                const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+                const src = `${typeReg(e.type).short} "${nm}"`;
+                const floorM = (e.type === 16 && e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null;
+                for (let i = 0; i < cs.length; i++) {
+                    const a = cs[i], b = cs[(i + 1) % cs.length];
+                    if (cs.length >= 2 && (i < cs.length - 1 || cs.length >= 3)) {
+                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM });
+                    }
+                }
+            }
+        });
+        return segs;
+    }
+    // Min distance to the site as GEOMETRY (segments + standalone points).
+    // Returns { d, pt: {lat, lng, src} } — pt is the projected closest
+    // point ON the geometry, so wrap-corridors land on the segment itself.
+    function airMinToSiteGeom(lat, lng, segs, pts) {
+        let best = Infinity, bestPt = null;
+        for (const sg of segs) {
+            const c = airClosestOnSeg(lat, lng, [sg.aLat, sg.aLng], [sg.bLat, sg.bLng]);
+            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null }; }
+        }
+        for (const p of pts) {
+            const d = approxMeters(lat, lng, p.lat, p.lng);
+            if (d < best) { best = d; bestPt = p; }
+        }
+        return { d: best, pt: bestPt };
+    }
+    function airMinToSite(lat, lng, sitePts) {
+        let best = Infinity, bestPt = null;
+        for (const p of sitePts) {
+            const d = approxMeters(lat, lng, p.lat, p.lng);
+            if (d < best) { best = d; bestPt = p; }
+        }
+        return { d: best, pt: bestPt };
+    }
+
+    // ---- Live TFRs (v4.156) ----
+    // List: tfr.faa.gov/tfrapi/exportTfrList (JSON; state per entry).
+    // Geometry: tfr.faa.gov/download/detail_<id>.xml (XNOTAM) — one or
+    // more <TFRAreaGroup>, each an <Avx> vertex polygon (codeType GRC,
+    // coords as "43.98973026N" decimal+hemisphere) or a CIR center +
+    // <valRadiusArc>, plus altitude bounds and effective/expire windows.
+    // The site's 2-letter state (for list filtering) comes from the
+    // nearest FAA airport — cached per site.
+    const AIR_TFR_LIST_URL = 'https://tfr.faa.gov/tfrapi/exportTfrList';
+    const AIR_TFR_DETAIL_URL = (id) => `https://tfr.faa.gov/download/detail_${String(id).replace(/\//g, '_')}.xml`;
+    const AIR_TFR_LIST_TTL_MS = 10 * 60 * 1000;
+    const AIR_TFR_MAX_DETAILS = 25;      // per sweep — TX alone can run ~15
+    let airTfrListCache = null;          // { at, list }
+    const airTfrDetailCache = {};        // notam_id -> parsed groups
+    const airSiteStateCache = {};        // siteID -> 'TX'
+    function airParseHemi(s) {
+        const m = String(s || '').trim().match(/^([\d.]+)([NSEW])$/);
+        if (!m) return NaN;
+        const v = Number(m[1]);
+        return (m[2] === 'S' || m[2] === 'W') ? -v : v;
+    }
+    // Regex parse (not DOMParser) so the offline harness can exercise it.
+    function airParseTfrXml(xml) {
+        const groups = [];
+        const gRe = /<TFRAreaGroup>([\s\S]*?)<\/TFRAreaGroup>/g;
+        let gm;
+        while ((gm = gRe.exec(xml))) {
+            const g = gm[1];
+            const s1 = (re) => { const m = g.match(re); return m ? m[1] : null; };
+            const lowVal = Number(s1(/<valDistVerLower>([^<]*)</)); // NaN if absent
+            const lowCode = (s1(/<codeDistVerLower>([^<]*)</) || '').trim();
+            const dateEff = s1(/<dateEffective>([^<]*)</);
+            const dateExp = s1(/<dateExpire>([^<]*)</);
+            const ring = [];
+            let circle = null;
+            const avxRe = /<Avx>([\s\S]*?)<\/Avx>/g;
+            let am;
+            while ((am = avxRe.exec(g))) {
+                const av = am[1];
+                const lat = airParseHemi((av.match(/<geoLat>([^<]*)</) || [])[1]);
+                const lng = airParseHemi((av.match(/<geoLong>([^<]*)</) || [])[1]);
+                const t = ((av.match(/<codeType>([^<]*)</) || [])[1] || '').trim();
+                if (t === 'CIR' && isFinite(lat) && isFinite(lng)) {
+                    const rad = Number(s1(/<valRadiusArc>([^<]*)</));
+                    const uom = (s1(/<uomRadiusArc>([^<]*)</) || 'NM').trim();
+                    if (isFinite(rad) && rad > 0) {
+                        circle = { lat, lng, radM: rad * (uom === 'KM' ? 1000 : uom === 'M' ? 1 : NM_TO_M) };
+                    }
+                } else if (isFinite(lat) && isFinite(lng)) {
+                    ring.push([lat, lng]);
+                }
+            }
+            if (ring.length < 3 && circle) {
+                for (let i = 0; i < 36; i++) {
+                    const th2 = i * Math.PI / 18;
+                    ring.push([
+                        circle.lat + (circle.radM * Math.cos(th2)) / 110540,
+                        circle.lng + (circle.radM * Math.sin(th2)) / (111320 * Math.cos(circle.lat * Math.PI / 180)),
+                    ]);
+                }
+            }
+            if (ring.length >= 3) {
+                // Lower bound of 0 / SFC / missing ⇒ reaches the ground where
+                // WE fly. A high-only TFR (e.g. lower 5000 ft) is info-level.
+                const surface = !isFinite(lowVal) || lowVal <= 0 || lowCode === 'SFC';
+                groups.push({ ring, surface, lowVal: isFinite(lowVal) ? lowVal : 0, dateEff, dateExp });
+            }
+        }
+        return groups;
+    }
+    async function airGetTfrList() {
+        if (airTfrListCache && Date.now() - airTfrListCache.at < AIR_TFR_LIST_TTL_MS) return airTfrListCache.list;
+        const r = await elevGmRequest({ method: 'GET', url: AIR_TFR_LIST_URL, timeout: 20000, headers: { 'Accept': 'application/json' } });
+        if (!r.ok) throw new Error(`TFR list HTTP ${r.status || 'network error'}`);
+        let list;
+        try { list = JSON.parse(r.responseText); } catch (e) { throw new Error('TFR list: bad JSON'); }
+        if (!Array.isArray(list)) throw new Error('TFR list: unexpected shape');
+        airTfrListCache = { at: Date.now(), list };
+        return list;
+    }
+    async function airGetSiteState(sid, clat, clng) {
+        if (airSiteStateCache[sid]) return airSiteStateCache[sid];
+        const res = await airPointQuery('US_Airport', clat, clng, 80 * MI_TO_M, 'STATE', true);
+        let best = null, bestD = Infinity;
+        (res.features || []).forEach(f => {
+            if (!f.geometry || typeof f.geometry.y !== 'number') return;
+            const d = approxMeters(clat, clng, f.geometry.y, f.geometry.x);
+            if (d < bestD) { bestD = d; best = (f.attributes && f.attributes.STATE || '').trim(); }
+        });
+        if (best) airSiteStateCache[sid] = best;
+        return best;
+    }
+    // TFR-only check. Self-contained (builds its own site geometry) so the
+    // 20-min auto-sweep can run it without a full report. Returns
+    // { violations:[{shape,polygon,note,severity,kind:'tfr'}], tfrs:[…] }.
+    async function runTfrCheck(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const sitePts = airCollectSitePoints(ents);
+        if (!sitePts.length) return { violations: [], tfrs: [], skipped: 'no site geometry' };
+        let clat = 0, clng = 0;
+        sitePts.forEach(p => { clat += p.lat; clng += p.lng; });
+        clat /= sitePts.length; clng /= sitePts.length;
+        let siteRadM = 0;
+        sitePts.forEach(p => { const d = approxMeters(clat, clng, p.lat, p.lng); if (d > siteRadM) siteRadM = d; });
+        const st = airThresholds;
+        const state = await airGetSiteState(sid, clat, clng);
+        if (!state) return { violations: [], tfrs: [], skipped: 'could not determine site state (no FAA airport within 80 mi?)' };
+        const list = await airGetTfrList();
+        const candidates = list.filter(t => (t.state || '').trim().toUpperCase() === state.toUpperCase()).slice(0, AIR_TFR_MAX_DETAILS);
+        const violations = [];
+        const tfrs = [];
+        const step = Math.max(1, Math.ceil(sitePts.length / 300));
+        const samples = sitePts.filter((_, i) => i % step === 0);
+        for (const t of candidates) {
+            const id = t.notam_id;
+            if (!airTfrDetailCache[id]) {
+                try {
+                    const r = await elevGmRequest({ method: 'GET', url: AIR_TFR_DETAIL_URL(id), timeout: 20000 });
+                    airTfrDetailCache[id] = r.ok ? airParseTfrXml(r.responseText) : [];
+                } catch (e) { airTfrDetailCache[id] = []; }
+            }
+            const groups = airTfrDetailCache[id];
+            if (!groups.length) {
+                tfrs.push({ id, type: t.type, desc: t.description, status: 'no-geometry', text: `TFR ${id} (${t.type}) — ${t.description} · geometry unavailable, check tfr.faa.gov` });
+                continue;
+            }
+            const now = Date.now();
+            groups.forEach((g2, gi) => {
+                const expMs = g2.dateExp ? Date.parse(g2.dateExp + 'Z') : NaN;
+                const effMs = g2.dateEff ? Date.parse(g2.dateEff + 'Z') : NaN;
+                if (isFinite(expMs) && expMs < now) return;   // already over
+                const inside = samples.some(p => pointInPolygon(p.lat, p.lng, g2.ring.map(([la, lo]) => ({ lat: la, lng: lo }))));
+                const ringLL = g2.ring.map(([la, lo]) => ({ lat: la, lng: lo }));
+                const distM = inside ? 0 : pointToPolygonMeters(clat, clng, ringLL);
+                const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
+                const relevant = inside || +distNm.toFixed(2) < st.tfrShowNm;
+                const upcoming = isFinite(effMs) && effMs > now;
+                const window2 = `${g2.dateEff || '?'} → ${g2.dateExp || '?'} UTC`;
+                const entry = {
+                    id, type: t.type, desc: t.description, ring: g2.ring,
+                    status: !relevant ? 'far' : upcoming ? 'upcoming' : 'active',
+                    inside, distNm, window: window2,
+                    text: `TFR ${id} (${t.type}) — ${inside ? 'OVER THE SITE' : `${distNm.toFixed(2)} NM away`}${g2.surface ? '' : ` · floor ${g2.lowVal.toLocaleString()} ft (above our ops)`} · ${window2}`,
+                };
+                tfrs.push(entry);
+                if (relevant && g2.surface) {
+                    violations.push({
+                        shape: 'polygon',
+                        polygon: boxAroundPoint(inside ? clat : ringLL[0].lat, inside ? clng : ringLL[0].lng, 8).map(p => [p.lat, p.lng]),
+                        note: `violation: ${upcoming ? 'UPCOMING ' : 'ACTIVE '}TFR ${id} (${t.type}) is ${inside ? 'OVER the site' : `${distNm.toFixed(2)} NM from the site`} — ${window2} · ${t.description}`,
+                        severity: inside && !upcoming ? 'high' : 'warn',
+                        kind: 'tfr',
+                    });
+                }
+            });
+        }
+        return { violations, tfrs };
+    }
+
+    // Run the enabled airspace checks. Returns { violations, inventory,
+    // errors, meta }. violations entries are channel-ready ({shape,
+    // polygon, note}) plus severity for the panel.
+    async function runAirspaceCheck(sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const sitePts = airCollectSitePoints(ents);
+        if (!sitePts.length) return { fatal: 'No site geometry found — open a site with entities first.' };
+        let clat = 0, clng = 0;
+        sitePts.forEach(p => { clat += p.lat; clng += p.lng; });
+        clat /= sitePts.length; clng /= sitePts.length;
+        let siteRadM = 0;
+        let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+        sitePts.forEach(p => {
+            const d = approxMeters(clat, clng, p.lat, p.lng);
+            if (d > siteRadM) siteRadM = d;
+            if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+            if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+        });
+        const th = airThresholds;
+        // Segment geometry for accurate standoffs; standalone points cover
+        // base/safe (they have no edges).
+        const siteSegs = airCollectSiteSegs(ents);
+        const sitePtOnly = sitePts.filter(p => p.t === 8 || p.t === 98);
+        const flightSegs = siteSegs.filter(sg => sg.t === 15 || sg.t === 16);
+        const errors = [];
+        const grab = (label, promise) => promise.catch(e => {
+            errors.push(`${label}: ${e && e.message ? e.message : e}`);
+            return null;
+        });
+        const invM = Math.max(th.inventoryMi * MI_TO_M, th.stripNm * NM_TO_M) + siteRadM;
+        const obsInvM = Math.max(5 * MI_TO_M, th.obstacleFt / M_TO_FT) + siteRadM;
+        const [apRes, obRes, asRes, laRes] = await Promise.all([
+            airEnabled.strips ? grab('Airports', airPointQuery('US_Airport', clat, clng, invM,
+                'IDENT,NAME,ICAO_ID,TYPE_CODE,PRIVATEUSE,ELEVATION', true)) : Promise.resolve(null),
+            airEnabled.obstacles ? grab('Obstacles', airPointQuery('Digital_Obstacle_File', clat, clng, obsInvM,
+                'Type_Code,AGL,AMSL,Lighting,Quantity,City,Lat_DD,Long_DD', false)) : Promise.resolve(null),
+            airEnabled.airspace ? grab('Airspace', airPointQuery('Class_Airspace', clat, clng, invM,
+                'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT', true)) : Promise.resolve(null),
+            airEnabled.laanc ? grab('LAANC grids', airPointQuery('FAA_UAS_FacilityMap_Data', clat, clng,
+                5 * MI_TO_M + siteRadM,   // grids within ~5 mi — enough for the overlay without tile-storming the map
+                'CEILING,UNIT,APT1_NAME,APT1_FAAID', true)) : Promise.resolve(null),
+        ]);
+        // SUA + Prohibited share a schema; Stadiums is a point layer whose
+        // LATITUDE/LONGITUDE attributes are DMS STRINGS — read the returned
+        // geometry instead. (LOWER_VAL is a string here too, unlike
+        // Class_Airspace — Number() everything.)
+        const [suaRes, prohibRes, stadRes] = await Promise.all([
+            airEnabled.sua ? grab('Special Use Airspace', airPointQuery('Special_Use_Airspace', clat, clng, invM,
+                'NAME,TYPE_CODE,LOWER_VAL,LOWER_CODE,UPPER_VAL,CONT_AGENT', true)) : Promise.resolve(null),
+            airEnabled.sua ? grab('Prohibited Areas', airPointQuery('Prohibited_Areas', clat, clng, invM,
+                'NAME,TYPE_CODE,LOWER_VAL,LOWER_CODE,UPPER_VAL,CONT_AGENT', true)) : Promise.resolve(null),
+            airEnabled.stadiums ? grab('Stadiums', airPointQuery('Stadiums', clat, clng,
+                Math.max(th.inventoryMi * MI_TO_M, th.stadiumNm * NM_TO_M) + siteRadM,
+                'NAME,CITY,STATE,STATUS_CODE', true)) : Promise.resolve(null),
+        ]);
+        const hifldRes = airEnabled.translines
+            ? await grab('Transmission lines (HIFLD)', airPointQuery(AIR_HIFLD_LINES_URL, clat, clng,
+                5 * MI_TO_M + siteRadM, 'VOLTAGE,VOLT_CLASS,OWNER,TYPE,STATUS,INFERRED', true))
+            : null;
+        const violations = [];
+        const boxIssue = (lat, lng, note, severity) => violations.push({
+            shape: 'polygon', polygon: boxAroundPoint(lat, lng, 8).map(p => [p.lat, p.lng]), note, severity,
+        });
+        const inventory = { airports: [], obstacles: [], airspace: [], sua: [], stadiums: [], translines: [], laanc: null, obstacleTruncated: false };
+        const laancGrids = [];   // [{ring, center, ceiling, color}] — for the map overlay
+
+        // ---- 1. Controlled airspace (inside surface class = red; surface
+        //         boundary within the strip standoff = warn; overhead shelf
+        //         = inventory note only — shelf floors sit far above us). ----
+        if (asRes && Array.isArray(asRes.features)) {
+            // Containment sampled over site vertices (capped — a polygon that
+            // contains none of ~300 spread vertices doesn't contain the site).
+            const step = Math.max(1, Math.ceil(sitePts.length / 300));
+            const samples = sitePts.filter((_, i) => i % step === 0);
+            const groups = new Map();
+            asRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!a.NAME || a.CLASS === 'A') return;   // Class A starts at FL180 — irrelevant
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                let g = groups.get(a.NAME);
+                if (!g) { g = { name: a.NAME, cls: a.CLASS || '?', insideFloor: null, surface: false, surfaceDistM: Infinity, minFloor: Infinity }; groups.set(a.NAME, g); }
+                const floor = typeof a.LOWER_VAL === 'number' ? a.LOWER_VAL : null;
+                if (floor != null && floor < g.minFloor) g.minFloor = floor;
+                const isSurface = floor != null && floor <= 0;
+                if (isSurface) g.surface = true;
+                for (const ring of rings) {
+                    const inside = samples.some(p => pointInPolygon(p.lat, p.lng, ring));
+                    if (inside && floor != null && (g.insideFloor == null || floor < g.insideFloor)) g.insideFloor = floor;
+                    if (isSurface) {
+                        const d = pointToPolygonMeters(clat, clng, ring);
+                        if (d < g.surfaceDistM) g.surfaceDistM = d;
+                    }
+                }
+            });
+            groups.forEach(g => {
+                const distNm = isFinite(g.surfaceDistM) ? Math.max(0, g.surfaceDistM - siteRadM) / NM_TO_M : null;
+                if (g.insideFloor != null && g.insideFloor <= 0) {
+                    boxIssue(clat, clng,
+                        `violation: site is INSIDE ${g.name} (surface Class ${g.cls}) — controlled airspace, authorization/LAANC required`, 'high');
+                    inventory.airspace.push({ sev: 'high', text: `INSIDE ${g.name} — surface Class ${g.cls}` });
+                } else if (g.surface && distNm != null && +distNm.toFixed(2) < th.stripNm) {
+                    boxIssue(clat, clng,
+                        `violation: surface Class ${g.cls} airspace "${g.name}" is ~${distNm.toFixed(2)} NM from the site (standoff ${th.stripNm} NM)`, 'warn');
+                    inventory.airspace.push({ sev: 'warn', text: `${g.name} (surface Class ${g.cls}) ~${distNm.toFixed(2)} NM away` });
+                } else if (g.insideFloor != null && g.insideFloor > 0) {
+                    inventory.airspace.push({ sev: 'info', text: `Under ${g.name} shelf — Class ${g.cls} floor ${g.insideFloor.toLocaleString()} ft (no surface conflict)` });
+                } else if (g.surface && distNm != null && distNm < th.inventoryMi * MI_TO_M / NM_TO_M) {
+                    inventory.airspace.push({ sev: 'ok', text: `${g.name} (surface Class ${g.cls}) ~${distNm.toFixed(1)} NM away` });
+                }
+            });
+            if (!inventory.airspace.length) inventory.airspace.push({ sev: 'ok', text: `No controlled airspace within ${th.inventoryMi} mi (Class G / E-above only)` });
+        }
+
+        // ---- 2. Manned strips / helipads within the standoff. Distance is
+        //         to the NEAREST site entity vertex, not the centroid. ----
+        if (apRes && Array.isArray(apRes.features)) {
+            apRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                const lat = f.geometry.y, lng = f.geometry.x;
+                const near = airMinToSiteGeom(lat, lng, siteSegs, sitePtOnly);
+                const distNm = near.d / NM_TO_M;
+                const distMi = near.d / MI_TO_M;
+                const kind = AIR_KIND[(a.TYPE_CODE || '').trim()] || (a.TYPE_CODE || 'Facility');
+                const priv = a.PRIVATEUSE === 1 ? 'private' : 'public';
+                const brg = airBearing(clat, clng, lat, lng);
+                const entry = {
+                    name: (a.NAME || a.IDENT || '?').trim(), ident: (a.IDENT || '').trim(),
+                    kind, priv, distMi, distNm, brg, lat, lng,
+                    hit: +distNm.toFixed(2) < th.stripNm,   // flag on the displayed value
+                };
+                inventory.airports.push(entry);
+                if (entry.hit) {
+                    boxIssue(near.pt.lat, near.pt.lng,
+                        `violation: ${kind.toLowerCase()} "${entry.name}"${entry.ident ? ` (${entry.ident})` : ''} is ${distNm.toFixed(2)} NM ${brg} of ${near.pt.src || 'the site'} — inside the ${th.stripNm} NM manned-aircraft standoff (${priv})`, 'high');
+                }
+            });
+            inventory.airports.sort((x, y) => x.distNm - y.distNm);
+        }
+
+        // ---- 3. FAA obstacles near site entities (towers, turbines…). ----
+        if (obRes && Array.isArray(obRes.features)) {
+            if (obRes.exceededTransferLimit || obRes.features.length >= 2000) inventory.obstacleTruncated = true;
+            // Display filter is wider than any violation threshold, so the
+            // exact-scan prefilter keys off the largest relevant distance.
+            const dispTlM = th.translineShowFt / M_TO_FT;
+            const dispObsM = th.obstacleShowNm * NM_TO_M;
+            const scanM = Math.max(th.obstacleFt / M_TO_FT, th.windmillFt / M_TO_FT, dispObsM, dispTlM);
+            obRes.features.forEach(f => {
+                const a = f.attributes || {};
+                // Lat_DD/Long_DD are STRINGS in the DOF service ('31.829789').
+                const oLat = Number(a.Lat_DD), oLng = Number(a.Long_DD);
+                if (!isFinite(oLat) || !isFinite(oLng) || (oLat === 0 && oLng === 0)) return;
+                const dc = approxMeters(clat, clng, oLat, oLng);
+                const couldHit = dc - siteRadM <= scanM * 1.2;
+                const near = couldHit ? airMinToSiteGeom(oLat, oLng, siteSegs, sitePtOnly) : { d: dc, pt: null };
+                const distFt = Math.round(near.d * M_TO_FT);
+                const agl = typeof a.AGL === 'number' ? a.AGL : null;
+                const type = (a.Type_Code || '?').trim();
+                const lit = (a.Lighting || '').trim();
+                const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
+                const isWindmill = /WINDMILL|WIND TURBINE|WTG|TURBINE/i.test(type);
+                // Windmills get their own (tighter) standoff per SOP — and
+                // their distance is to the FLIGHT geometry (FFZ/FP), since a
+                // turbine near a non-flyable asset polygon is no hazard.
+                // ALL obstacles only matter where we FLY (user 2026-07-03,
+                // extended to towers same day) — measured vs flight
+                // segments, never assets/base/safe.
+                let useNear = near;
+                if (couldHit) {
+                    useNear = flightSegs.length ? airMinToSiteGeom(oLat, oLng, flightSegs, []) : { d: Infinity, pt: null };
+                }
+                const useDistFt = Math.round(useNear.d * M_TO_FT);
+                const vioFt = isWindmill ? th.windmillFt : isTL ? th.tlTowerFt : th.obstacleFt;
+                // Fly-over clearance (all types): no flag when the nearest
+                // segment's FLOOR (MSL) clears the obstacle's TOP (DOF AMSL)
+                // by tlClearFt. Short stuff we overfly goes quiet; anything
+                // taller than the band can never be cleared and stays on
+                // proximity alone.
+                let tlCleared = false;
+                if (useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
+                    tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
+                }
+                const entry = { type, agl, lit, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
+                if (couldHit && !tlCleared && isFinite(useDistFt) && useDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
+                    entry.hit = true;
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${useDistFt < 100 ? `effectively ON ${entry.src || 'the flight geometry'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${useDistFt.toLocaleString()} ft from ${entry.src || 'the nearest flight segment'}`} (threshold ${vioFt} ft)${useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs obstacle top ${a.AMSL.toLocaleString()} ft MSL` : ''}`;
+                    if (useNear.pt) {
+                        // Corridor spans the obstacle AND the violated FFZ/FP spot.
+                        violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, useNear.pt.lat, useNear.pt.lng, 15), note, severity: 'high' });
+                    } else {
+                        boxIssue(oLat, oLng, note, 'high');
+                    }
+                }
+                // Noise filter: T-L towers/poles only inside the transmission
+                // display radius; everything else inside obstacleShowNm.
+                entry.show = entry.hit || (isTL ? distFt <= th.translineShowFt : near.d <= dispObsM);
+                inventory.obstacles.push(entry);
+            });
+            inventory.obstacles.sort((x, y) => x.distFt - y.distFt);
+        }
+
+        // ---- 3b. Special Use Airspace + Prohibited Areas. Restricted (R) /
+        //          Prohibited (P) reaching the surface are hard no-fly: red
+        //          if the site is inside, warn if within the standoff. MOA /
+        //          Alert / Warning areas are awareness-level (manned military
+        //          traffic): warn if inside at the surface, info otherwise. ----
+        const suaFeatures = [].concat(
+            (suaRes && suaRes.features) || [],
+            (prohibRes && prohibRes.features) || []);
+        if (airEnabled.sua && suaFeatures.length) {
+            const step = Math.max(1, Math.ceil(sitePts.length / 300));
+            const samples = sitePts.filter((_, i) => i % step === 0);
+            const hardTypes = new Set(['P', 'R']);   // prohibited / restricted
+            suaFeatures.forEach(f => {
+                const a = f.attributes || {};
+                if (!a.NAME) return;
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                const type = (a.TYPE_CODE || '?').trim();
+                const floor = Number(a.LOWER_VAL);   // STRING in this service
+                const floorCode = (a.LOWER_CODE || '').trim();
+                const surface = floorCode === 'SFC' || (isFinite(floor) && floor <= 0);
+                const hard = hardTypes.has(type);
+                let inside = false, distM = Infinity;
+                for (const ring of rings) {
+                    if (!inside && samples.some(p => pointInPolygon(p.lat, p.lng, ring))) inside = true;
+                    const d = pointToPolygonMeters(clat, clng, ring);
+                    if (d < distM) distM = d;
+                }
+                const distNm = Math.max(0, distM - siteRadM) / NM_TO_M;
+                const floorTxt = surface ? 'surface' : `floor ${isFinite(floor) ? floor.toLocaleString() : '?'} ft ${floorCode || ''}`.trim();
+                // INFORMATIONAL by user decision (2026-07-02): we never fly
+                // above 400 ft so MOA/Alert/Warning airspace can't conflict.
+                // The ONE exception kept as a violation: sitting INSIDE a
+                // surface-level Prohibited/Restricted area — those forbid
+                // UAS at ANY altitude, including ours.
+                if (inside && surface && hard) {
+                    boxIssue(clat, clng, `violation: site is INSIDE ${a.NAME} (${type} — ${floorTxt}) — flight prohibited/restricted at ALL altitudes without authorization`, 'high');
+                    inventory.sua.push({ sev: 'high', text: `INSIDE ${a.NAME} (${type}, ${floorTxt}) — no-fly at all altitudes` });
+                } else if (inside && surface) {
+                    inventory.sua.push({ sev: 'info', text: `Inside ${a.NAME} (${type}, ${floorTxt}) — informational: military/manned traffic possible, check activity times` });
+                } else if (inside) {
+                    inventory.sua.push({ sev: 'info', text: `Under ${a.NAME} (${type}) — ${floorTxt} (above our ops)` });
+                } else {
+                    inventory.sua.push({ sev: 'ok', text: `${a.NAME} (${type}, ${floorTxt}) ~${distNm.toFixed(1)} NM away` });
+                }
+            });
+        }
+        if (airEnabled.sua && !inventory.sua.length) {
+            inventory.sua.push({ sev: 'ok', text: `No special-use / prohibited airspace within ${th.inventoryMi} mi` });
+        }
+
+        // ---- 3c. Stadiums — standing TFR (14 CFR 99.7): 3 NM / SFC–3000 ft
+        //          AGL during MLB / NFL / NCAA D1 / major events. ----
+        if (stadRes && Array.isArray(stadRes.features)) {
+            stadRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                if ((a.STATUS_CODE || '').trim() && (a.STATUS_CODE || '').trim() !== 'Open') return;
+                const near = airMinToSiteGeom(f.geometry.y, f.geometry.x, siteSegs, sitePtOnly);
+                const distNm = near.d / NM_TO_M;
+                const brg = airBearing(clat, clng, f.geometry.y, f.geometry.x);
+                const hit = +distNm.toFixed(2) < th.stadiumNm;
+                inventory.stadiums.push({
+                    name: (a.NAME || '?').trim(), city: (a.CITY || '').trim(),
+                    distNm, distMi: near.d / MI_TO_M, brg, hit,
+                    lat: f.geometry.y, lng: f.geometry.x,
+                });
+                if (hit) {
+                    boxIssue(near.pt.lat, near.pt.lng,
+                        `violation: stadium "${(a.NAME || '?').trim()}" is ${distNm.toFixed(2)} NM ${brg} of the site — inside the ${th.stadiumNm} NM stadium TFR radius (active SFC–3,000 ft AGL during major events)`, 'warn');
+                }
+            });
+            inventory.stadiums.sort((x, y) => x.distNm - y.distNm);
+        }
+
+        // ---- 4. LAANC grid ceiling over the site. Grids within ~5 mi are
+        //         kept (with geometry) for the map overlay; the violation
+        //         check only considers grids that actually cover a site
+        //         point. No grid over the site = uncontrolled for LAANC
+        //         purposes (400 ft Part-107 default). ----
+        if (laRes && Array.isArray(laRes.features)) {
+            const laancColor = (c) => c === 0 ? '#ff3333' : c <= 100 ? '#ff8c00' : c <= 200 ? '#ffd54f' : c < 400 ? '#a0e060' : '#5fff5f';
+            let worst = null;
+            laRes.features.forEach(f => {
+                const a = f.attributes || {};
+                if (typeof a.CEILING !== 'number') return;
+                const rings = ((f.geometry && f.geometry.rings) || [])
+                    .map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })))
+                    .filter(r => r.length >= 3);
+                if (!rings.length) return;
+                const ring = rings[0];
+                // Grids are axis-aligned 1-minute rectangles — a bbox test
+                // against the site points is exact enough for containment.
+                let gMinLat = Infinity, gMaxLat = -Infinity, gMinLng = Infinity, gMaxLng = -Infinity;
+                ring.forEach(p => {
+                    if (p.lat < gMinLat) gMinLat = p.lat; if (p.lat > gMaxLat) gMaxLat = p.lat;
+                    if (p.lng < gMinLng) gMinLng = p.lng; if (p.lng > gMaxLng) gMaxLng = p.lng;
+                });
+                const overSite = sitePts.some(p => p.lat >= gMinLat && p.lat <= gMaxLat && p.lng >= gMinLng && p.lng <= gMaxLng);
+                laancGrids.push({
+                    ring: ring.map(p => [p.lat, p.lng]),
+                    center: [(gMinLat + gMaxLat) / 2, (gMinLng + gMaxLng) / 2],
+                    ceiling: a.CEILING, color: laancColor(a.CEILING), overSite,
+                });
+                if (overSite && (!worst || a.CEILING < worst.CEILING)) worst = a;
+            });
+            if (!worst) {
+                inventory.laanc = { sev: 'ok', text: `Site is not in any LAANC facility grid (400 ft Part-107 default applies)${laancGrids.length ? ` — ${laancGrids.length} grid(s) nearby drawn on the map` : ''}` };
+            } else {
+                const apt = (worst.APT1_NAME || worst.APT1_FAAID || '?').trim();
+                if (worst.CEILING < th.maxOpAglFt) {
+                    boxIssue(clat, clng,
+                        `violation: LAANC facility grid over the site caps drone ops at ${worst.CEILING} ft AGL (our max ${th.maxOpAglFt} ft) — controlling facility: ${apt}`,
+                        worst.CEILING === 0 ? 'high' : 'warn');
+                    inventory.laanc = { sev: worst.CEILING === 0 ? 'high' : 'warn', text: `LAANC grid ceiling ${worst.CEILING} ft AGL over site (our max ${th.maxOpAglFt} ft) — ${apt}` };
+                } else {
+                    inventory.laanc = { sev: 'ok', text: `LAANC grid over site: ceiling ${worst.CEILING} ft AGL (≥ our ${th.maxOpAglFt} ft) — ${apt}` };
+                }
+            }
+        }
+
+        // ---- 5. HIFLD transmission lines (informational overlay + list).
+        //         Federal high-voltage line geometry — independent of our
+        //         KMLs, so it cross-checks shielding coverage by eye. ----
+        if (hifldRes && Array.isArray(hifldRes.features)) {
+            hifldRes.features.forEach(f => {
+                const a = f.attributes || {};
+                const paths = ((f.geometry && f.geometry.paths) || [])
+                    .map(pth => pth.map(xy => [xy[1], xy[0]]))
+                    .filter(pth => pth.length >= 2);
+                if (!paths.length) return;
+                // Min distance: site points → line SEGMENTS (projection, not
+                // vertices — sparse HIFLD vertices made both the distance and
+                // the jump point miles off). Coarse centroid→segment test
+                // prunes segments that can't beat the current best before
+                // paying the full site-point scan.
+                let best = Infinity, bestSrc = null, bestPt = null;
+                paths.forEach(pth => {
+                    for (let i = 0; i < pth.length - 1; i++) {
+                        const a = pth[i], b2 = pth[i + 1];
+                        const coarse = airClosestOnSeg(clat, clng, a, b2);
+                        if (coarse.d - siteRadM > best) continue;
+                        for (const sp of sitePts) {
+                            const c = airClosestOnSeg(sp.lat, sp.lng, a, b2);
+                            if (c.d < best) { best = c.d; bestSrc = sp.src; bestPt = [c.lat, c.lng]; }
+                        }
+                    }
+                });
+                const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)} kV` : (a.VOLT_CLASS || 'unknown kV');
+                const tDistFt = Math.round(best * M_TO_FT);
+                inventory.translines.push({
+                    volt, owner: (a.OWNER || '').trim(), status: (a.STATUS || '').trim(),
+                    distFt: tDistFt, distMi: best / MI_TO_M,
+                    src: bestSrc, nearPt: bestPt, paths,
+                    show: tDistFt <= th.translineShowFt,   // noise filter
+                });
+            });
+            inventory.translines.sort((x, y) => x.distFt - y.distFt);
+        }
+
+        // ---- 6. Live TFRs (self-contained sub-check — also runs alone on
+        //         the auto-sweep timer). ----
+        inventory.tfrs = [];
+        inventory.tfrSkipped = null;
+        if (airEnabled.tfr) {
+            try {
+                const t = await runTfrCheck(sid);
+                inventory.tfrs = t.tfrs;
+                inventory.tfrSkipped = t.skipped || null;
+                t.violations.forEach(v => violations.push(v));
+            } catch (e) {
+                errors.push(`Live TFRs: ${e && e.message ? e.message : e}`);
+            }
+        }
+
+        return { violations, inventory, errors, laancGrids, meta: { clat, clng, siteRadM, entCount: ents.length, ptCount: sitePts.length } };
+    }
+
+    // ---- Map highlights: while the report panel is open, EVERYTHING in
+    // the inventory gets a lightweight marker on the map (violations are
+    // additionally real Validator issues — these highlights are visual
+    // only, interactive:false so they never eat map clicks). Cleared when
+    // the panel closes. ----
+    let airMapLayers = [];
+    function airClearMapHighlights() {
+        const map = getLeafletMap();
+        airMapLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        airMapLayers = [];
+    }
+    function airDrawMapHighlights(res) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) { console.warn(`${TAG} airspace highlights: no map/L reachable`); return; }
+        airClearMapHighlights();
+        const add = (mk) => { try { mk.addTo(map); airMapLayers.push(mk); } catch (e) {} };
+        // Hover tooltips need interactive layers; only enable when this
+        // Leaflet build ships Tooltip (guards against a stripped bundle).
+        const canTip = !!(L.Tooltip && L.CircleMarker && L.CircleMarker.prototype.bindTooltip);
+        const tip = (mk, html) => { if (canTip) { try { mk.bindTooltip(html, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} } return mk; };
+        try {
+            // LAANC grids first (underneath everything else). Every grid gets
+            // its ceiling label — 400s included, so "no label" never reads as
+            // "unknown".
+            (res.laancGrids || []).forEach(g => {
+                add(L.polygon(g.ring, { color: g.color, weight: 1, opacity: 0.7, fillColor: g.color, fillOpacity: g.overSite ? 0.18 : 0.08, interactive: false }));
+                add(L.marker(g.center, {
+                    interactive: false, keyboard: false,
+                    icon: L.divIcon({ className: '', iconSize: [40, 14], iconAnchor: [20, 7],
+                        html: `<div style="color:${g.color};font:bold 11px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;">${g.ceiling}</div>` }),
+                }));
+            });
+            // Live TFR rings — red dotted (the most urgent overlay).
+            (res.inventory.tfrs || []).forEach(t2 => {
+                if (!t2.ring || t2.ring.length < 3 || t2.status === 'far') return;
+                add(tip(L.polygon(t2.ring, { color: '#ff3333', weight: 3, dashArray: '2,8', fill: true, fillColor: '#ff3333', fillOpacity: 0.07, interactive: canTip }),
+                    `<strong>TFR ${airEsc(t2.id)}</strong> (${airEsc(t2.type)})<br>${airEsc(t2.window || '')}`));
+            });
+            // HIFLD transmission lines — orange dashed, distinct from KML styling.
+            (res.inventory.translines || []).filter(t => t.show).forEach(t => {
+                const html = `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''}<br>HIFLD federal transmission line`;
+                t.paths.forEach(pth => add(tip(L.polyline(pth, { color: '#ff9a3d', weight: 3, dashArray: '7,7', opacity: 0.85, interactive: canTip }), html)));
+            });
+            // Obstacles — dots (violations bigger + red). Hover for details.
+            (res.inventory.obstacles || []).filter(o => o.show).forEach(o => {
+                if (!isFinite(o.lat)) return;
+                add(tip(L.circleMarker([o.lat, o.lng], {
+                    radius: o.hit ? 9 : 5, color: o.hit ? '#ff5555' : '#7adfe6', weight: 2,
+                    fillColor: o.hit ? '#5a0f0f' : '#0a2730', fillOpacity: 0.85, interactive: canTip,
+                }), `<strong>FAA ${airEsc(o.type)}</strong> — ${o.agl != null ? `${o.agl} ft AGL` : 'height ?'}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'}<br>${o.distFt < 100 ? 'on site' : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft` : `${o.distMi.toFixed(1)} mi`}${o.src ? ` from ${airEsc(o.src)}` : ''}`));
+            });
+            // Airports / stadiums — rings. Hover for name + distance.
+            (res.inventory.airports || []).forEach(a => {
+                if (!isFinite(a.lat)) return;
+                add(tip(L.circleMarker([a.lat, a.lng], { radius: 13, color: a.hit ? '#ff5555' : '#5fff5f', weight: 3, fillColor: a.hit ? '#ff5555' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
+                    `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''}<br>${airEsc(a.kind)}, ${a.priv} — ${a.distNm.toFixed(2)} NM ${a.brg}`));
+            });
+            (res.inventory.stadiums || []).forEach(s => {
+                if (!isFinite(s.lat)) return;
+                add(tip(L.circleMarker([s.lat, s.lng], { radius: 13, color: s.hit ? '#ffb020' : '#5fff5f', weight: 3, fillColor: s.hit ? '#ffb020' : '#5fff5f', fillOpacity: 0.15, interactive: canTip }),
+                    `<strong>${airEsc(s.name)}</strong>${s.city ? `, ${airEsc(s.city)}` : ''}<br>Stadium — TFR ${s.distNm.toFixed(2)} NM`));
+            });
+            console.log(`${TAG} airspace highlights: ${airMapLayers.length} layer(s) drawn (tooltips ${canTip ? 'on' : 'unavailable'})`);
+        } catch (e) {
+            console.warn(`${TAG} airDrawMapHighlights threw:`, e);
+        }
+    }
+    // Pulsing yellow ring so a row-click jump is findable on a busy map.
+    function airPulseAt(lat, lng) {
+        const map = getLeafletMap();
+        const L = getLeafletL();
+        if (!map || !L) return;
+        let ring;
+        try {
+            ring = L.circleMarker([lat, lng], { radius: 8, color: '#ffee33', weight: 4, fillOpacity: 0, interactive: false });
+            ring.addTo(map);
+        } catch (e) { return; }
+        let t = 0;
+        const iv = setInterval(() => {
+            t++;
+            const phase = t % 16;   // one pulse ≈ 0.8 s
+            try { ring.setRadius(8 + phase * 2.5); ring.setStyle({ opacity: Math.max(0, 1 - phase / 15) }); } catch (e) {}
+            if (t >= 64) { clearInterval(iv); try { map.removeLayer(ring); } catch (e) {} }
+        }, 50);
+    }
+
+    function closeAirspacePanel() {
+        const el = document.getElementById(AIRSPACE_PANEL_ID);
+        if (el) el.remove();
+        airClearMapHighlights();
+    }
+
+    // Floating inventory panel — everything found, violations first.
+    function renderAirspacePanel(res, sid, siteName) {
+        closeAirspacePanel();
+        const inv = res.inventory;
+        const th = airThresholds;
+        // DOF horizontal accuracy is tens of feet — a single-digit distance
+        // is false precision, so anything under 100 ft reads "on site".
+        const obsDist = (o) => o.distFt < 100 ? 'on site (&lt; 100 ft)'
+            : o.distFt < 5000 ? `${o.distFt.toLocaleString()} ft`
+            : `${o.distMi.toFixed(1)} mi`;
+        const sevDot = (sev) => ({
+            high: '<span style="color:#ff5555">●</span>',
+            warn: '<span style="color:#ffb020">●</span>',
+            info: '<span style="color:#7adfe6">●</span>',
+            ok:   '<span style="color:#5fff5f">●</span>',
+        }[sev] || '');
+        const h = [];
+        const section = (title) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${title}</div>`);
+        // Rows with a location carry data-air-jump="lat,lng,zoom" — the
+        // delegated click handler pans the map there.
+        const line = (sev, html, jump) => h.push(jump
+            ? `<div data-air-jump="${jump.lat},${jump.lng},${jump.zoom}" title="Click to view on map" style="margin:2px 0;line-height:1.45;cursor:pointer;" onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''">${sevDot(sev)} ${html}</div>`
+            : `<div style="margin:2px 0;line-height:1.45;">${sevDot(sev)} ${html}</div>`);
+
+        const vioCount = res.violations.length;
+        h.push(`<div style="margin-bottom:4px;">${vioCount
+            ? `<span style="color:#ff5555;font-weight:700;">${vioCount} violation${vioCount === 1 ? '' : 's'}</span> — drawn as Validator issues (needs AIM Issues enabled)`
+            : '<span style="color:#5fff5f;font-weight:700;">No airspace violations ✓</span>'}</div>`);
+        if (res.errors && res.errors.length) {
+            res.errors.forEach(e => line('high', `<span style="color:#ff8080">FAA query failed — ${airEsc(e)} (results below are PARTIAL)</span>`));
+        }
+
+        if (airEnabled.airspace) {
+            section('Controlled airspace');
+            (inv.airspace || []).forEach(a => line(a.sev, airEsc(a.text)));
+        }
+        if (airEnabled.tfr) {
+            section('Live TFRs (auto-rechecked every 20 min)');
+            const tfrNear = (inv.tfrs || []).filter(t2 => t2.status !== 'far');
+            const tfrFarCount = (inv.tfrs || []).length - tfrNear.length;
+            if (inv.tfrSkipped) line('info', `Skipped: ${airEsc(inv.tfrSkipped)}`);
+            else if (!tfrNear.length) line('ok', `No TFRs within ${th.tfrShowNm} NM${tfrFarCount ? ` (${tfrFarCount} elsewhere in the state)` : ''}`);
+            tfrNear.forEach(t2 => line(
+                t2.status === 'active' && t2.inside ? 'high' : t2.status === 'active' || t2.status === 'upcoming' ? 'warn' : 'info',
+                airEsc(t2.text),
+                (t2.ring && t2.ring.length) ? { lat: t2.ring[0][0], lng: t2.ring[0][1], zoom: 12 } : null));
+        }
+        if (airEnabled.sua) {
+            section('Special use / prohibited airspace (informational)');
+            (inv.sua || []).forEach(a => line(a.sev, airEsc(a.text)));
+        }
+        if (airEnabled.laanc && inv.laanc) {
+            section('LAANC ceiling');
+            line(inv.laanc.sev, airEsc(inv.laanc.text));
+        }
+        if (airEnabled.strips) {
+            section(`Airports &amp; helipads (within ${th.inventoryMi} mi · standoff ${th.stripNm} NM)`);
+            if (!inv.airports.length) line('ok', 'None within range');
+            inv.airports.slice(0, 25).forEach(a => line(a.hit ? 'high' : 'ok',
+                `<strong>${airEsc(a.name)}</strong>${a.ident ? ` (${airEsc(a.ident)})` : ''} — ${airEsc(a.kind)}, ${a.priv} · ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`,
+                (typeof a.lat === 'number') ? { lat: a.lat, lng: a.lng, zoom: 13 } : null));
+            if (inv.airports.length > 25) line('info', `…and ${inv.airports.length - 25} more`);
+        }
+        if (airEnabled.stadiums && inv.stadiums.length) {
+            section(`Stadiums (TFR ${th.stadiumNm} NM during events)`);
+            inv.stadiums.slice(0, 5).forEach(s => line(s.hit ? 'warn' : 'ok',
+                `<strong>${airEsc(s.name)}</strong>${s.city ? `, ${airEsc(s.city)}` : ''} — ${s.distNm.toFixed(2)} NM / ${s.distMi.toFixed(1)} mi ${s.brg}`,
+                { lat: s.lat, lng: s.lng, zoom: 13 }));
+        }
+        if (airEnabled.translines) {
+            const tlShown = inv.translines.filter(t => t.show);
+            const tlHidden = inv.translines.length - tlShown.length;
+            section(`Transmission lines — HIFLD federal data (within ${th.translineShowFt.toLocaleString()} ft · orange dashed on map)`);
+            if (!tlShown.length) line('ok', `None within ${th.translineShowFt.toLocaleString()} ft${tlHidden ? ` (${tlHidden} further out hidden)` : ''}`);
+            tlShown.slice(0, 8).forEach(t => {
+                // Jump to the line's nearest-to-site vertex — not mid-path,
+                // which can be miles out in open country.
+                const rep = t.nearPt || t.paths[0][Math.floor(t.paths[0].length / 2)];
+                line('info',
+                    `<strong>${airEsc(t.volt)}</strong>${t.owner ? ` — ${airEsc(t.owner)}` : ''} · ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`} from ${t.src ? airEsc(t.src) : 'site'}`,
+                    { lat: rep[0], lng: rep[1], zoom: 15 });
+            });
+            if (tlShown.length > 8) line('info', `…and ${tlShown.length - 8} more within range (drawn on map)`);
+            if (tlShown.length && tlHidden) line('ok', `${tlHidden} more beyond ${th.translineShowFt.toLocaleString()} ft hidden`);
+        }
+        if (airEnabled.obstacles) {
+            const obsShown = inv.obstacles.filter(o => o.show);
+            const obsHiddenN = inv.obstacles.length - obsShown.length;
+            const byType = {};
+            obsShown.forEach(o => { byType[o.type] = (byType[o.type] || 0) + 1; });
+            const summary = Object.keys(byType).sort((a, b) => byType[b] - byType[a]).map(t => `${airEsc(t)} ×${byType[t]}`).join(' · ') || 'none in range';
+            section(`FAA obstacles (${obsShown.length} shown · T-L within ${th.translineShowFt.toLocaleString()} ft, others within ${th.obstacleShowNm} NM)`);
+            line('info', `${summary}${obsHiddenN ? ` · ${obsHiddenN} further out hidden` : ''}${inv.obstacleTruncated ? ' · list truncated at 2000' : ''}`);
+            obsShown.filter(o => o.hit).forEach(o => line('high',
+                `<strong>${airEsc(o.type)}</strong> ${o.agl != null ? `${o.agl} ft AGL` : ''}${o.lit && o.lit !== 'N' ? ' (lit)' : ' (unlit)'} — ${obsDist(o)} from ${o.src ? airEsc(o.src) : 'site'}`,
+                { lat: o.lat, lng: o.lng, zoom: 17 }));
+            obsShown.filter(o => !o.hit).slice(0, 10).forEach(o => line('ok',
+                `${airEsc(o.type)} ${o.agl != null ? `${o.agl} ft AGL` : ''} — ${obsDist(o)}`,
+                { lat: o.lat, lng: o.lng, zoom: 17 }));
+        }
+
+        const wrap = document.createElement('div');
+        wrap.id = AIRSPACE_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:480px;max-height:72vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(122,223,230,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div data-air-drag style="cursor:move;padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
+                <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
+                <span style="flex:1"></span>
+                ${(inv.obstacles || []).some(o => o.hit) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${h.join('')}</div>`;
+        // Delegated clicks (survive rebuilds, dodge Leaflet's capture).
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-air-close]')) { closeAirspacePanel(); return; }
+            if (e.target.closest('[data-air-gms]')) { showAirGmModal(res, sid); return; }
+            if (e.target.closest('[data-air-copy]')) {
+                const text = airBuildReport(res, sid, siteName);
+                navigator.clipboard.writeText(text).then(
+                    () => showToast('Airspace report copied'),
+                    () => showToast('Copy failed', 'rgba(255,96,96,0.55)'));
+                return;
+            }
+            const jumpEl = e.target.closest('[data-air-jump]');
+            if (jumpEl) {
+                const [jlat, jlng, jzoom] = jumpEl.getAttribute('data-air-jump').split(',').map(Number);
+                const map = getLeafletMap();
+                if (!map || !isFinite(jlat)) { showToast('Map not available', 'rgba(255,96,96,0.55)'); return; }
+                try { map.setView([jlat, jlng], isFinite(jzoom) ? jzoom : 15); }
+                catch (err) { console.warn(`${TAG} airspace jump setView threw:`, err); }
+                airPulseAt(jlat, jlng);
+            }
+        });
+        // Minimal header drag.
+        const dragEl = () => wrap.querySelector('[data-air-drag]');
+        let drag = null;
+        dragEl().addEventListener('mousedown', (e) => {
+            if (e.target.closest('button')) return;
+            const r = wrap.getBoundingClientRect();
+            drag = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!drag) return;
+            wrap.style.left = `${e.clientX - drag.dx}px`;
+            wrap.style.top = `${e.clientY - drag.dy}px`;
+            wrap.style.right = 'auto';
+        });
+        document.addEventListener('mouseup', () => { drag = null; });
+        document.body.appendChild(wrap);
+    }
+
+    // Plain-text report (for Slack / notes). Mirrors the panel content.
+    function airBuildReport(res, sid, siteName) {
+        const inv = res.inventory;
+        const out = [`AIRSPACE CHECK — ${siteName || `site ${sid}`}`];
+        out.push(res.violations.length ? `${res.violations.length} VIOLATION(S):` : 'No violations.');
+        res.violations.forEach(v => out.push(`  🔴 ${v.note.replace(/^violation: /, '')}`));
+        (res.errors || []).forEach(e => out.push(`  ⚠ FAA query failed — ${e} (partial results)`));
+        if (airEnabled.airspace) { out.push('Airspace:'); (inv.airspace || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.tfr) {
+            const tNear = (inv.tfrs || []).filter(t2 => t2.status !== 'far');
+            out.push('Live TFRs:');
+            if (inv.tfrSkipped) out.push(`  - skipped: ${inv.tfrSkipped}`);
+            else if (!tNear.length) out.push(`  - none within ${airThresholds.tfrShowNm} NM`);
+            tNear.forEach(t2 => out.push(`  - ${t2.text}`));
+        }
+        if (airEnabled.sua) { out.push('Special use / prohibited (informational):'); (inv.sua || []).forEach(a => out.push(`  - ${a.text}`)); }
+        if (airEnabled.translines) {
+            const tlS = inv.translines.filter(t => t.show);
+            out.push(`Transmission lines (HIFLD, within ${airThresholds.translineShowFt} ft): ${tlS.length ? '' : 'none'}`);
+            tlS.slice(0, 8).forEach(t => out.push(`  - ${t.volt}${t.owner ? ` (${t.owner})` : ''} — ${t.distFt < 5000 ? `${t.distFt.toLocaleString()} ft` : `${t.distMi.toFixed(1)} mi`}${t.src ? ` from ${t.src}` : ''}`));
+        }
+        if (airEnabled.laanc && inv.laanc) out.push(`LAANC: ${inv.laanc.text}`);
+        if (airEnabled.stadiums && inv.stadiums.length) {
+            out.push('Stadiums:');
+            inv.stadiums.slice(0, 5).forEach(s => out.push(`  - ${s.name}${s.city ? `, ${s.city}` : ''} — ${s.distNm.toFixed(2)} NM ${s.brg}${s.hit ? ' (INSIDE TFR RADIUS)' : ''}`));
+        }
+        if (airEnabled.strips) {
+            out.push(`Airports & helipads (nearest first):`);
+            inv.airports.slice(0, 15).forEach(a => out.push(`  - ${a.name}${a.ident ? ` (${a.ident})` : ''} — ${a.kind}, ${a.priv}, ${a.distNm.toFixed(2)} NM / ${a.distMi.toFixed(1)} mi ${a.brg}`));
+        }
+        if (airEnabled.obstacles) {
+            const oS = inv.obstacles.filter(o => o.show);
+            out.push(`FAA obstacles in range: ${oS.length} (nearest ${oS.length ? `${oS[0].type} at ${oS[0].distFt.toLocaleString()} ft` : '—'})`);
+        }
+        return out.join('\n');
+    }
+
+    function airspaceRun() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showToast('No site loaded', 'rgba(255,96,96,0.55)'); return; }
+        showToast('Airspace check: querying FAA data…');
+        Promise.resolve(fetchMapObjects(sid, false)).then(async () => {
+            const res = await runAirspaceCheck(sid);
+            if (res.fatal) { showToast(res.fatal, 'rgba(255,96,96,0.55)'); return; }
+            airIssuesSite = sid;
+            airLastIssues = res.violations.filter(v => v.kind !== 'tfr').map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            tfrIssuesSite = sid;
+            tfrLastIssues = res.violations.filter(v => v.kind === 'tfr').map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            postValidatorIssues(sid);
+            renderAirspacePanel(res, sid, getCurrentSiteName());
+            airDrawMapHighlights(res);
+            const errNote = res.errors.length ? ` (${res.errors.length} FAA quer${res.errors.length === 1 ? 'y' : 'ies'} FAILED — partial)` : '';
+            console.log(`${TAG} airspace check: ${res.violations.length} violation(s), `
+                + `${res.inventory.airports.length} airport(s), ${res.inventory.obstacles.length} obstacle(s)${errNote}`);
+            showToast(res.violations.length
+                ? `Airspace: ${res.violations.length} violation(s) drawn${errNote}`
+                : `Airspace: no violations ✓${errNote}`,
+                res.violations.length || res.errors.length ? 'rgba(255,96,96,0.55)' : undefined);
+        }).catch(e => {
+            console.warn(`${TAG} airspaceRun threw:`, e);
+            showToast('Airspace check failed — see console', 'rgba(255,96,96,0.55)');
+        });
+    }
+    function airspaceClear() {
+        const sid = getCurrentSiteID();
+        airIssuesSite = sid;
+        airLastIssues = [];
+        tfrIssuesSite = sid;
+        tfrLastIssues = [];
+        postValidatorIssues(sid);
+        closeAirspacePanel();
+        showToast(sopLastIssues.length ? 'Cleared airspace issues (SOP issues kept).' : 'Cleared validator issues.');
+    }
+
+    // ---- TFR auto-sweep: TFRs appear and expire on their own, so the
+    // check re-runs itself — on site load and every 20 min — and posts /
+    // clears TFR Validator issues automatically. Silent unless something
+    // changed. IFRAME only (that's where the map + AIM Issues render). ----
+    const AIR_TFR_SWEEP_MS = 20 * 60 * 1000;
+    let airTfrSweepSite = null;
+    let airTfrLastCount = -1;
+    async function airTfrAutoSweep(trigger) {
+        if (CONTEXT !== 'IFRAME') return;
+        if (!airMasterEnabled || !airEnabled.tfr || !airEnabled.tfrAuto) return;
+        const sid = getCurrentSiteID();
+        if (!sid) return;
+        try {
+            await Promise.resolve(fetchMapObjects(sid, false));
+            const t = await runTfrCheck(sid);
+            if (t.skipped) return;
+            const issues = t.violations.map(v => ({ shape: v.shape, polygon: v.polygon, note: v.note }));
+            const changed = airTfrSweepSite !== sid || issues.length !== airTfrLastCount;
+            airTfrSweepSite = sid;
+            airTfrLastCount = issues.length;
+            tfrIssuesSite = sid;
+            tfrLastIssues = issues;
+            if (issues.length || changed) postValidatorIssues(sid);
+            if (issues.length && changed) {
+                showToast(`⚠ TFR alert: ${issues.length} TFR${issues.length === 1 ? '' : 's'} affecting this site — see map`, 'rgba(255,96,96,0.55)');
+            }
+            console.log(`${TAG} TFR auto-sweep (${trigger}): site ${sid}, ${t.tfrs.length} TFR(s) in state, ${issues.length} affecting site`);
+        } catch (e) {
+            console.warn(`${TAG} TFR auto-sweep failed:`, e);
+        }
+    }
+    if (CONTEXT === 'IFRAME') {
+        setInterval(() => airTfrAutoSweep('interval'), AIR_TFR_SWEEP_MS);
+        // First sweep shortly after load (give site detection + entity
+        // fetch a moment); re-sweep on SPA navigation between sites.
+        setTimeout(() => airTfrAutoSweep('initial'), 45 * 1000);
+        let _airTfrNavTimer = null;
+        window.addEventListener('hashchange', () => {
+            clearTimeout(_airTfrNavTimer);
+            _airTfrNavTimer = setTimeout(() => airTfrAutoSweep('site-change'), 20 * 1000);
+        });
+    }
+
+    // ---- 📍 Create GMs at flagged obstacles (preview → confirm → create).
+    // Turns each FLAGGED FAA obstacle into a real General Marker via the
+    // POST /map_objects/ create rails (create-only — never edits existing
+    // entities). Tower-family obstacles get general_marker_type 'tower' so
+    // they feed the SOP Tower-standoff check; everything else 'hazard'.
+    // marker_height carries the FAA height AGL (stored in meters like all
+    // Percepto values). Dedup: skips an obstacle if ANY existing GM sits
+    // within AIR_GM_DEDUP_FT of it. Names are server-unique ("-2"/"-3"
+    // suffixes — Percepto rejects duplicate names and only allows
+    // letters/numbers/space/_/- so "(2)" isn't possible).
+    const AIR_GM_DEDUP_FT = 150;
+    const AIR_GM_MODAL_ID = 'aim-airspace-gm-modal';
+    // Windmills are deliberately NOT tower-typed: user wants them as
+    // HAZARD markers (and the SOP Tower-standoff check shouldn't treat a
+    // turbine like a comms tower).
+    const AIR_TOWER_TYPES = /TOWER|T-L|POLE|STACK|ANTENNA/i;
+    function airGmTitleType(type) {
+        const t = (type || '').trim();
+        if (/^T-L/i.test(t)) return 'T-L Tower';
+        return t.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+    }
+    function airBuildGmPlan(res, sid) {
+        const bucket = mapObjectsBySite[sid];
+        const ents = (bucket && bucket.entities) || [];
+        const existingGms = ents.filter(e => e.type === 19 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+        const usedNames = new Set(ents.filter(e => e.name).map(e => e.name));
+        const uniqueName = (base) => {
+            if (!usedNames.has(base)) { usedNames.add(base); return base; }
+            let i = 2, n;
+            do { n = `${base}-${i++}`; } while (usedNames.has(n));
+            usedNames.add(n);
+            return n;
+        };
+        const plan = { create: [], skipped: [] };
+        (res.inventory.obstacles || []).filter(o => o.hit).forEach(o => {
+            const nearGm = existingGms.find(g => approxMeters(o.lat, o.lng, g.coords[0].lat, g.coords[0].lng) * M_TO_FT < AIR_GM_DEDUP_FT);
+            if (nearGm) {
+                plan.skipped.push({ o, reason: `existing GM "${nearGm.name}" within ${AIR_GM_DEDUP_FT} ft` });
+                return;
+            }
+            const name = uniqueName(genCleanName(`FAA ${airGmTitleType(o.type)} ${o.agl != null ? o.agl : '?'}ft`));
+            plan.create.push({
+                o, name,
+                markerType: AIR_TOWER_TYPES.test(o.type) ? 'tower' : 'hazard',
+                heightM: o.agl != null ? o.agl / M_TO_FT : 0,
+            });
+        });
+        return plan;
+    }
+    async function airCreateGms(plan, sid) {
+        const out = { created: 0, failed: 0, errors: [] };
+        const csrf = getCsrfToken();
+        if (!csrf) { out.errors.push('no csrftoken cookie — cannot authenticate'); return out; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(sid); } catch (e) { console.warn(`${TAG} site cfg fetch failed:`, e); }
+        // Clone an existing GM's write body as the template when one exists
+        // (guarantees every field the server wants); else a minimal body.
+        const bucket = mapObjectsBySite[sid];
+        const tmplGm = bucket && bucket.entities && bucket.entities.find(e => e.type === 19 && Array.isArray(e.coords) && e.coords.length);
+        let tmplBody = null;
+        if (tmplGm) { try { tmplBody = buildWriteBody(tmplGm, siteCfg); } catch (e) {} }
+        for (const item of plan.create) {
+            let b;
+            if (tmplBody) b = JSON.parse(JSON.stringify(tmplBody));
+            else b = { type: 19, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, restrictions: [], arcs: [], is_unshielded: false };
+            delete b.id;
+            b.type = 19;
+            b.name = item.name;
+            b.site_id = sid;
+            b.points = [{ lat: item.o.lat, lng: item.o.lng }];
+            b.general_marker_type = item.markerType;
+            b.marker_height = Math.round(item.heightM * 100) / 100;
+            b.validated = false;
+            b.arcs = [];
+            b.description = `FAA DOF obstacle${item.o.lit && item.o.lit !== 'N' ? ' (lit)' : ''} — auto-placed by Airspace Checker`;
+            b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf },
+                    body: JSON.stringify(b),
+                });
+                const txt = await r.text();
+                let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                if (r.status === 200 && json && json.map_objects) out.created++;
+                else { out.failed++; out.errors.push(`${item.name}: server ${r.status} ${(txt || '').slice(0, 120)}`); }
+            } catch (e) { out.failed++; out.errors.push(`${item.name}: POST threw ${e && e.message || e}`); }
+        }
+        return out;
+    }
+    function closeAirGmModal() {
+        const el = document.getElementById(AIR_GM_MODAL_ID);
+        if (el) el.remove();
+    }
+    function showAirGmModal(res, sid) {
+        closeAirGmModal();
+        const plan = airBuildGmPlan(res, sid);
+        if (!plan.create.length && !plan.skipped.length) { showToast('No flagged obstacles to mark'); return; }
+        const rows = plan.create.map(c =>
+            `<div style="margin:3px 0;"><span style="color:#5fff5f">＋</span> <strong>${airEsc(c.name)}</strong> — ${airEsc(c.markerType)}, height ${c.o.agl != null ? c.o.agl : '?'} ft</div>`).join('')
+            + plan.skipped.map(s =>
+            `<div style="margin:3px 0;opacity:0.65;"><span style="color:#ffb020">－</span> ${airEsc(airGmTitleType(s.o.type))} ${s.o.agl != null ? `${s.o.agl} ft` : ''} — skipped: ${airEsc(s.reason)}</div>`).join('');
+        const wrap = document.createElement('div');
+        wrap.id = AIR_GM_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:120px;right:80px;width:430px;max-height:60vh;z-index:2147483001;'
+            + 'background:rgba(16,22,32,0.98);border:1px solid rgba(122,223,230,0.55);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.6);'
+            + 'display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;border-bottom:1px solid rgba(122,223,230,0.25);color:#7adfe6;font-weight:700;">📍 Create GMs at flagged obstacles</div>
+            <div style="padding:8px 12px;overflow-y:auto;">
+                <div style="margin-bottom:6px;">This creates <strong>${plan.create.length}</strong> new General Marker${plan.create.length === 1 ? '' : 's'} on site ${airEsc(sid)} via the site-setup API (create-only — existing entities are never touched).</div>
+                ${rows}
+            </div>
+            <div style="padding:8px 12px;border-top:1px solid rgba(122,223,230,0.25);display:flex;gap:8px;justify-content:flex-end;">
+                <button data-air-gm-cancel style="background:none;border:1px solid rgba(223,233,240,0.4);color:#dfe9f0;border-radius:5px;padding:3px 12px;cursor:pointer;">Cancel</button>
+                <button data-air-gm-go ${plan.create.length ? '' : 'disabled'} style="background:rgba(95,255,95,0.15);border:1px solid #5fff5f;color:#5fff5f;border-radius:5px;padding:3px 12px;cursor:pointer;">Create ${plan.create.length}</button>
+            </div>`;
+        wrap.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-air-gm-cancel]')) { closeAirGmModal(); return; }
+            const goBtn = e.target.closest('[data-air-gm-go]');
+            if (goBtn && plan.create.length) {
+                goBtn.disabled = true;
+                goBtn.textContent = 'Creating…';
+                const out = await airCreateGms(plan, sid);
+                closeAirGmModal();
+                if (out.errors.length) console.warn(`${TAG} create GMs errors:`, out.errors);
+                console.log(`${TAG} create GMs: ${out.created} created, ${out.failed} failed`);
+                if (out.created) delete mapObjectsBySite[sid];   // stale — refetch next use
+                showToast(out.failed
+                    ? `GMs: ${out.created} created, ${out.failed} FAILED — see console`
+                    : `GMs: ${out.created} created ✓ — reload the page to see them on the map`,
+                    out.failed ? 'rgba(255,96,96,0.55)' : undefined);
+            }
+        });
+        document.body.appendChild(wrap);
+    }
+
     function findEntityAtLatLng(lat, lng, siteID) {
         const bucket = mapObjectsBySite[siteID];
         if (!bucket) return null;
@@ -1885,6 +4263,14 @@
             // OR a segment-number badge (.map-marker__arc-index — Flight Path
             // Editor's own right-click target too). Both stay native.
             if (target && target.closest && target.closest('.map-marker__flight-path-vertex, .map-marker__arc-index')) { dbg('bail: fp-vertex/arc-index'); return; }
+            // Mission Bank instruction markers (.instruction-marker) are owned
+            // by Mission Bank Tools' Composer — right-click there reorders the
+            // step. Don't pop the asset inspector for the entity beneath.
+            if (target && target.closest && target.closest('.instruction-marker')) { dbg('bail: mission instruction marker'); return; }
+            // Mission Bank Tools draws the site's assets on the Mission Bank map
+            // for its Generator (class aim-gen-asset) — right-click there belongs
+            // to the Generator, not the asset inspector. Step aside.
+            if (target && target.closest && target.closest('.aim-gen-asset')) { dbg('bail: mission generator asset'); return; }
             const map = getLeafletMap();
             if (!map) { dbg('bail: no map (Map Styler off?)'); return; }
             const container = map.getContainer();
@@ -1899,6 +4285,22 @@
             try { latlng = map.containerPointToLatLng([px, py]); }
             catch (err) { dbg('bail: containerPointToLatLng threw', err); return; }
             if (!latlng) { dbg('bail: no latlng'); return; }
+            // Advanced Draw: a right-click inside an unsaved drawn corridor re-opens it
+            // for editing. This global handler fires before the preview polygon's own
+            // contextmenu, so it has to be handled here (else the inspector pops instead).
+            try {
+                if (document.getElementById(GEN_MODAL_ID)) {
+                    const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+                    for (const f of ffzs) {
+                        if (f && f._adv && !f._committed && Array.isArray(f._advVerts) && Array.isArray(f.points) && f.points.length >= 3 && pointInPolygon(latlng.lat, latlng.lng, f.points)) {
+                            e.preventDefault(); e.stopPropagation();
+                            dbg('adv-draw corridor right-click → re-edit');
+                            advReEdit(f);
+                            return;
+                        }
+                    }
+                }
+            } catch (err) {}
             // Lazy-fetch if not loaded yet
             if (!mapObjectsBySite[siteID] && !fetchingSites.has(siteID)) {
                 fetchMapObjects(siteID);
@@ -1975,14 +4377,25 @@
                 const newToken = msg.token || '';
                 if (newToken !== elevSharedToken) {
                     elevSharedToken = newToken;
-                    if (newToken) console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
+                    if (newToken) {
+                        console.log(`${TAG} GitHub PAT cached (shared elev cache push enabled)`);
+                        // Pre-warm the shared default presets + admin status so
+                        // the Presets menu reflects the repo file (and reveals
+                        // admin controls) as soon as it's opened.
+                        fetchSharedPresets(true).catch(e => console.warn(`${TAG} shared presets prefetch failed:`, e));
+                        resolvePresetAdmin(true).catch(e => console.warn(`${TAG} preset-admin resolve failed:`, e));
+                    }
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                 }
-            } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SOP_SCRIPT_ID) {
+                handleSopToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SCRIPT_ID && CONTEXT === 'IFRAME') {
                 // Gate to IFRAME + focused tab (same pattern as Map Styler v34.28)
                 if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
                 if (msg.actionId === 'refresh-entities') {
@@ -1996,7 +4409,74 @@
                     }
                 }
             }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === SOP_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'sop-draw') {
+                    if (!sopMasterEnabled) { showToast('SOP validators are disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    drawSopIssues();
+                } else if (msg.actionId === 'sop-clear') {
+                    clearSopIssues();
+                }
+            }
+            else if (msg.type === 'SET_TOGGLE' && msg.scriptId === AIRSPACE_SCRIPT_ID) {
+                handleAirspaceToggle(msg);
+            }
+            else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === AIRSPACE_SCRIPT_ID && CONTEXT === 'IFRAME') {
+                if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+                if (msg.actionId === 'air-run') {
+                    if (!airMasterEnabled) { showToast('Airspace Checker is disabled (enable in Control Panel)', 'rgba(255,96,96,0.55)'); return; }
+                    airspaceRun();
+                } else if (msg.actionId === 'air-clear') {
+                    airspaceClear();
+                }
+            }
         };
+    }
+    // Idempotent — the panel runs in TOP + IFRAME so duplicate SET_TOGGLE
+    // is normal (same contract as handleSopToggle below).
+    function handleAirspaceToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'air-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === airMasterEnabled) return;
+            airMasterEnabled = v;
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(airEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === airEnabled[id]) return;
+            airEnabled[id] = v;
+            saveAirEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(airThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === airThresholds[id]) return;
+            airThresholds[id] = msg.value;
+            saveAirThresholds();
+        }
+    }
+    // Idempotent per [[feedback_set_toggle_handlers_must_be_idempotent]] —
+    // the panel runs in TOP + IFRAME so duplicate SET_TOGGLE is normal.
+    function handleSopToggle(msg) {
+        const id = msg.toggleId;
+        if (id === 'sop-master') {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === sopMasterEnabled) return;
+            sopMasterEnabled = v;
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopEnabled, id)) {
+            const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+            if (v === sopEnabled[id]) return;
+            sopEnabled[id] = v;
+            saveSopEnabled();
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(sopThresholds, id) && typeof msg.value === 'number') {
+            if (msg.value === sopThresholds[id]) return;
+            sopThresholds[id] = msg.value;
+            saveSopThresholds();
+        }
     }
     function registerWithControlPanel() {
         if (!controlChannel) return;
@@ -2010,6 +4490,81 @@
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
+            ],
+            hotkeys: [],
+        });
+        // v4.1: SOP Validators register as their OWN Control Panel card
+        // (second scriptId) so every check + its threshold is visible and
+        // editable in one place, scoped to Site Setup where SOP geometry
+        // applies. 'Draw issues' runs the checks and hands each violation to
+        // AIM Issues to flag on the map (authored 'Validator').
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: SOP_SCRIPT_ID, name: 'SOP Validators',
+            description: 'Geometric Site-Setup SOP checks (proximity / overlap). “Draw issues” flags each violation on the map as a Validator issue (needs AIM Issues enabled).',
+            version: SCRIPT_VERSION, group: 'SOP Validators', scope: 'site-setup', priority: 10,
+            toggles: [
+                { id: 'sop-master', label: 'Enable SOP validators', type: 'boolean', default: true, master: true },
+                { id: 'ffzAsset', label: 'Check · FFZ → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzAsset },
+                { id: 'ffzAssetFt', label: 'FFZ → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.ffzAssetFt, unit: 'ft' },
+                { id: 'fpAsset', label: 'Check · FP → Asset standoff', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpAsset },
+                { id: 'fpAssetFt', label: 'FP → Asset min', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.fpAssetFt, unit: 'ft' },
+                { id: 'ffzFfz', label: 'Check · FFZ ↔ FFZ overlap', type: 'boolean', default: SOP_ENABLE_DEFAULTS.ffzFfz },
+                { id: 'ffzFfzFt', label: 'FFZ ↔ FFZ min separation (0 = overlap only)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.ffzFfzFt, unit: 'ft' },
+                { id: 'fpOverlap', label: 'Check · FP alt-band overlap (FP↔FP, FP↔FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpOverlap },
+                { id: 'fpOverlapFt', label: 'FP min shared alt overlap', type: 'number', min: 0, max: 50, step: 0.1, default: SOP_THRESH_DEFAULTS.fpOverlapFt, unit: 'ft' },
+                { id: 'aglFloor', label: 'Check · AGL floor band (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.aglFloor },
+                { id: 'aglFloorMinFt', label: 'AGL floor min (🔴 below)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMinFt, unit: 'ft' },
+                { id: 'aglFloorMaxFt', label: 'AGL floor max (🔵 above)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.aglFloorMaxFt, unit: 'ft' },
+                { id: 'bandHeight', label: 'Check · Alt-band height (FP + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.bandHeight },
+                { id: 'bandSoftFt', label: 'Band height soft max (⚠ warn)', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.bandSoftFt, unit: 'ft' },
+                { id: 'bandHardFt', label: 'Band height hard max (flag)', type: 'number', min: 0, max: 1000, step: 1, default: SOP_THRESH_DEFAULTS.bandHardFt, unit: 'ft' },
+                { id: 'nfzSize', label: 'Check · NFZ minimum size', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzSize },
+                { id: 'nfzMinFt', label: 'NFZ min side', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzMinFt, unit: 'ft' },
+                { id: 'nfzProx', label: 'Check · NFZ proximity (NFZ + FFZ)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.nfzProx },
+                { id: 'nfzSepFt', label: 'NFZ min separation', type: 'number', min: 0, max: 200, step: 1, default: SOP_THRESH_DEFAULTS.nfzSepFt, unit: 'ft' },
+                { id: 'altInverted', label: 'Check · Inverted / zero alt band', type: 'boolean', default: SOP_ENABLE_DEFAULTS.altInverted },
+                { id: 'fpDegenerate', label: 'Check · Zero-length / duplicate FP arc', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpDegenerate },
+                { id: 'gmTower', label: 'Check · Tower GM standoff (FFZ + FP)', type: 'boolean', default: SOP_ENABLE_DEFAULTS.gmTower },
+                { id: 'gmTowerFt', label: 'Tower GM min standoff', type: 'number', min: 0, max: 500, step: 1, default: SOP_THRESH_DEFAULTS.gmTowerFt, unit: 'ft' },
+                { id: 'fpFfzAngle', label: 'Check · FP→FFZ connection angle', type: 'boolean', default: SOP_ENABLE_DEFAULTS.fpFfzAngle },
+                { id: 'fpFfzAngleDeg', label: 'FP→FFZ min angle to the edge (ideal 45°)', type: 'number', min: 0, max: 90, step: 1, default: SOP_THRESH_DEFAULTS.fpFfzAngleDeg, unit: '°' },
+                { id: 'sop-draw', label: '🚩 Draw issues (run validators)', type: 'button', action: 'sop-draw' },
+                { id: 'sop-clear', label: 'Clear validator issues', type: 'button', action: 'sop-clear' },
+            ],
+            hotkeys: [],
+        });
+        // v4.149: Airspace Checker — its own card under the same SOP
+        // Validators group. External-world checks (FAA data) vs the SOP
+        // card's internal-geometry checks.
+        controlChannel.postMessage({
+            type: 'REGISTER', scriptId: AIRSPACE_SCRIPT_ID, name: 'Airspace Validator',
+            description: 'Checks the site against FAA data: controlled airspace, manned strips/helipads within the standoff, obstacles (towers/turbines), and LAANC grid ceilings. Violations are drawn as Validator issues; the full inventory opens in a panel.',
+            version: SCRIPT_VERSION, group: 'Airspace Validator', scope: 'site-setup', priority: 20,
+            toggles: [
+                { id: 'air-master', label: 'Enable Airspace Checker', type: 'boolean', default: true, master: true },
+                { id: 'inventoryMi', label: 'Inventory radius', type: 'number', min: 5, max: 50, step: 1, default: AIR_THRESH_DEFAULTS.inventoryMi, unit: 'mi' },
+                { id: 'airspace', label: 'Check · Controlled airspace (inside / near)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.airspace },
+                { id: 'strips', label: 'Check · Manned strips & helipads standoff', type: 'boolean', default: AIR_ENABLE_DEFAULTS.strips },
+                { id: 'stripNm', label: 'Manned-aircraft standoff', type: 'number', min: 0.5, max: 20, step: 0.5, default: AIR_THRESH_DEFAULTS.stripNm, unit: 'NM' },
+                { id: 'obstacles', label: 'Check · FAA obstacles (towers / turbines)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.obstacles },
+                { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
+                { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
+                { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
+                { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
+                { id: 'tlClearFt', label: 'Fly-over clearance — all obstacles (floor above top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
+                { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },
+                { id: 'translineShowFt', label: 'Show transmission lines / T-L towers within', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.translineShowFt, unit: 'ft' },
+                { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
+                { id: 'maxOpAglFt', label: 'Our max operating altitude', type: 'number', min: 50, max: 400, step: 10, default: AIR_THRESH_DEFAULTS.maxOpAglFt, unit: 'ft' },
+                { id: 'tfr', label: 'Check · Live TFRs (tfr.faa.gov)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfr },
+                { id: 'tfrShowNm', label: 'Show / flag TFRs within', type: 'number', min: 0.5, max: 50, step: 0.5, default: AIR_THRESH_DEFAULTS.tfrShowNm, unit: 'NM' },
+                { id: 'tfrAuto', label: 'Auto-recheck TFRs (site load + every 20 min)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.tfrAuto },
+                { id: 'sua', label: 'Info · Special use / prohibited airspace', type: 'boolean', default: AIR_ENABLE_DEFAULTS.sua },
+                { id: 'translines', label: 'Info · HIFLD transmission lines overlay', type: 'boolean', default: AIR_ENABLE_DEFAULTS.translines },
+                { id: 'stadiums', label: 'Check · Stadium TFR (3 NM during events)', type: 'boolean', default: AIR_ENABLE_DEFAULTS.stadiums },
+                { id: 'stadiumNm', label: 'Stadium TFR radius', type: 'number', min: 1, max: 10, step: 0.5, default: AIR_THRESH_DEFAULTS.stadiumNm, unit: 'NM' },
+                { id: 'air-run', label: '🛩 Run airspace check', type: 'button', action: 'air-run' },
+                { id: 'air-clear', label: 'Clear airspace issues', type: 'button', action: 'air-clear' },
             ],
             hotkeys: [],
         });
@@ -2044,7 +4599,7 @@
     // emergAlt/segLen/unshielded/notes) are known but OFF by default —
     // they'd be mostly-blank for most rows. They surface via the Columns ▾
     // menu's "Hidden" list, or get switched on by a built-in preset.
-    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'route', 'battery', 'ptAlt', 'validated', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
+    const ALL_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'entId', 'subtype', 'equipment', 'state', 'assetAlt', 'assetHeightAgl', 'assetElevAsl', 'poiId', 'poleFeeder', 'poleUsage', 'poleIsSimple', 'gmGroup', 'altMin', 'altMax', 'emergAlt', 'altDelta', 'elevation', 'agl', 'segLen', 'area', 'route', 'battery', 'ptAlt', 'validated', 'waitApproved', 'unshielded', 'notes', 'droneName', 'droneId', 'lat', 'long', 'gps'];
     const DEFAULT_COL_KEYS = ['visibility', 'typeShort', 'name', 'segId', 'subtype', 'altMin', 'altMax', 'altDelta', 'elevation', 'agl', 'validated', 'lat', 'long', 'gps'];
 
     // Load the persisted column order from GM storage. Falls back to the
@@ -2186,6 +4741,217 @@
         elevGmSet(CACHE_KEY_VIEW_PRESETS, arr);
     }
 
+    // ============================================================
+    // v4.139 — SHARED DEFAULT PRESETS (admin-editable, repo-backed)
+    // ------------------------------------------------------------
+    // The "★ Built-in views" list can be overridden by a JSON file in
+    // the private data repo (sum-presets.json). When present it REPLACES
+    // the hard-coded BUILTIN_PRESETS for everyone; when absent / fetch
+    // fails / no token, BUILTIN_PRESETS is the permanent fallback so the
+    // menu never breaks. Admins (approvers.json) edit it via the Presets
+    // menu; it commits with the same PAT + Contents API the elevation
+    // cache already uses (GET → sha, PUT → upsert). The data repo is
+    // PRIVATE, so we must read via the authenticated Contents API — the
+    // no-auth raw CDN would 404.
+    // ============================================================
+    const SUM_PRESETS_PATH = 'sum-presets.json'; // in ELEV_REPO (private data repo)
+    let sharedPresets = null;         // array from sum-presets.json, or null if not loaded/absent
+    let sharedPresetsSha = null;      // GitHub file sha for conflict-aware PUT
+    let sharedPresetsFetched = false; // have we attempted a fetch this session
+    let sharedPresetsFetching = null; // in-flight promise (dedupe concurrent callers)
+
+    // Decode a GitHub Contents-API base64 blob (newline-wrapped) to UTF-8.
+    function decodeGithubBase64(content) {
+        const bin = atob(String(content || '').replace(/\s/g, ''));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
+    }
+
+    // Coerce one repo-loaded preset to the BUILTIN_PRESETS shape; drop
+    // anything malformed so a bad hand-edit can't break the menu.
+    function sanitizeSharedPreset(p) {
+        if (!p || typeof p !== 'object') return null;
+        if (typeof p.name !== 'string' || !p.name.trim()) return null;
+        if (!Array.isArray(p.columnOrder) || p.columnOrder.length === 0) return null;
+        const out = {
+            name: p.name.trim(),
+            desc: typeof p.desc === 'string' ? p.desc : '',
+            columnOrder: p.columnOrder.filter(k => typeof k === 'string'),
+            typeFilter: Array.isArray(p.typeFilter) ? p.typeFilter.map(String) : ['3', '4', '8', '15', '16', '19', '98'],
+            sortKey: typeof p.sortKey === 'string' ? p.sortKey : 'typePrio',
+            sortDir: (p.sortDir === 1 || p.sortDir === -1) ? p.sortDir : 1,
+            unitsFt: typeof p.unitsFt === 'boolean' ? p.unitsFt : true,
+        };
+        if (out.columnOrder.length === 0) return null;
+        if (p.numericFilters && typeof p.numericFilters === 'object') out.numericFilters = p.numericFilters;
+        ['validatedOnly', 'unvalidatedOnly', 'unshieldedOnly', 'notesOnly'].forEach(f => { if (p[f]) out[f] = true; });
+        return out;
+    }
+
+    // Fetch sum-presets.json via the Contents API (needs the PAT — the
+    // data repo is private). Caches the array + sha. Returns the array,
+    // or null when the file is absent / unreadable (caller falls back to
+    // BUILTIN_PRESETS). Deduped to one real request per session unless
+    // `force` is passed (used after an admin commit).
+    async function fetchSharedPresets(force) {
+        if (sharedPresetsFetching) return sharedPresetsFetching;
+        if (sharedPresetsFetched && !force) return sharedPresets;
+        const token = elevSharedToken;
+        if (!token) {
+            // No PAT — can't read the private file. Fall back to code.
+            sharedPresetsFetched = true;
+            return null;
+        }
+        sharedPresetsFetching = (async () => {
+            const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(SUM_PRESETS_PATH)}?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}`;
+            const r = await elevGmRequest({
+                method: 'GET', url,
+                headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+                timeout: 8000,
+            });
+            sharedPresetsFetched = true;
+            if (r.status === 404) {
+                console.log(`${TAG} no shared sum-presets.json yet — using built-in defaults`);
+                sharedPresets = null; sharedPresetsSha = null;
+                return null;
+            }
+            if (!r.ok) {
+                console.warn(`${TAG} GET sum-presets.json HTTP ${r.status} — keeping current defaults`);
+                return sharedPresets;
+            }
+            try {
+                const j = JSON.parse(r.responseText);
+                sharedPresetsSha = j.sha || null;
+                const parsed = JSON.parse(decodeGithubBase64(j.content));
+                const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.presets) ? parsed.presets : null);
+                if (!list) { console.warn(`${TAG} sum-presets.json malformed (no presets array) — using built-in defaults`); sharedPresets = null; return null; }
+                const clean = list.map(sanitizeSharedPreset).filter(Boolean);
+                sharedPresets = clean.length ? clean : null;
+                console.log(`${TAG} loaded ${clean.length} shared default preset(s) from repo`);
+                return sharedPresets;
+            } catch (e) {
+                console.warn(`${TAG} sum-presets.json parse failed — using built-in defaults:`, e);
+                return sharedPresets;
+            }
+        })();
+        try { return await sharedPresetsFetching; }
+        finally { sharedPresetsFetching = null; }
+    }
+
+    // The effective built-in views: repo-backed list if one is loaded,
+    // else the hard-coded BUILTIN_PRESETS fallback. Every consumer of the
+    // built-in list goes through here.
+    function getBuiltinPresets() {
+        return (Array.isArray(sharedPresets) && sharedPresets.length) ? sharedPresets : BUILTIN_PRESETS;
+    }
+
+    // ---- Admin gating for editing the shared defaults ----
+    // Only GitHub logins on approvers.json (in the data repo) may edit the
+    // shared default presets. Everyone else sees the built-ins apply-only.
+    // Resolution: GET /user for the login + GET approvers.json, both via the
+    // shared PAT. Resolved once per session (cached), re-resolved on token
+    // change. Editing shared defaults is a lead-level action, so we reuse
+    // the (narrow) approver list rather than the broader CSM whitelist.
+    const PRESETS_APPROVERS_PATH = 'approvers.json'; // in ELEV_REPO (data repo)
+    let presetAdminLogin = null;       // resolved GitHub login (lowercased) or null
+    let presetAdminApprovers = null;   // lowercased approver list, or null if unfetched
+    let presetAdminResolved = false;   // attempted resolution this session
+    let presetAdminResolving = null;   // in-flight promise (dedupe)
+
+    function isPresetAdmin() {
+        return !!(presetAdminLogin && Array.isArray(presetAdminApprovers) && presetAdminApprovers.includes(presetAdminLogin));
+    }
+    async function fetchGithubLogin(token) {
+        const r = await elevGmRequest({
+            method: 'GET', url: `${ELEV_GITHUB_API}/user`,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 8000,
+        });
+        if (!r.ok) return null;
+        try { const j = JSON.parse(r.responseText); return (j.login || '').toLowerCase() || null; }
+        catch (e) { return null; }
+    }
+    async function fetchApproversList(token) {
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(PRESETS_APPROVERS_PATH)}?ref=${ELEV_REPO_BRANCH}&_t=${Date.now()}`;
+        const r = await elevGmRequest({
+            method: 'GET', url,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+            timeout: 8000,
+        });
+        if (!r.ok) return null;
+        try {
+            const j = JSON.parse(r.responseText);
+            const parsed = JSON.parse(decodeGithubBase64(j.content));
+            const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.approvers) ? parsed.approvers : []);
+            return list.map(s => String(s).toLowerCase());
+        } catch (e) { console.warn(`${TAG} approvers.json parse failed:`, e); return null; }
+    }
+    async function resolvePresetAdmin(force) {
+        if (presetAdminResolving) return presetAdminResolving;
+        if (presetAdminResolved && !force) return isPresetAdmin();
+        const token = elevSharedToken;
+        if (!token) { presetAdminResolved = true; return false; }
+        presetAdminResolving = (async () => {
+            const [login, approvers] = await Promise.all([fetchGithubLogin(token), fetchApproversList(token)]);
+            presetAdminLogin = login;
+            presetAdminApprovers = approvers;
+            presetAdminResolved = true;
+            const ok = isPresetAdmin();
+            console.log(`${TAG} shared-preset admin = ${ok} (login ${login || '?'})`);
+            return ok;
+        })();
+        try { return await presetAdminResolving; }
+        finally { presetAdminResolving = null; }
+    }
+
+    // Serialize + PUT the shared default presets to the repo. Returns true
+    // on success. Refreshes the sha right before writing to minimize 409s,
+    // and updates sharedPresets + sharedPresetsSha in place so the menu
+    // reflects the commit without another fetch. Guarded by token + admin.
+    async function commitSharedPresets(arr, commitMsg) {
+        const token = elevSharedToken;
+        if (!token) { showToast('No GitHub token — set one in the Control Panel', 'rgba(255,96,96,0.55)'); return false; }
+        if (!isPresetAdmin()) { showToast('Not authorized to edit shared defaults', 'rgba(255,96,96,0.55)'); return false; }
+        const clean = (arr || []).map(sanitizeSharedPreset).filter(Boolean);
+        const payload = {
+            version: 1,
+            description: 'Shared default views for the Site Setup SUM panel (Asset Inspector). Edited in-app by approvers via Presets ▾; read by everyone. Each entry mirrors a BUILTIN_PRESETS object: name, desc, columnOrder, typeFilter, optional numericFilters (meters), sortKey, sortDir, unitsFt.',
+            updatedAt: new Date().toISOString(),
+            updatedBy: presetAdminLogin || '',
+            presets: clean,
+        };
+        const json = JSON.stringify(payload, null, 2);
+        const utf8 = new TextEncoder().encode(json);
+        let bin = '';
+        for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
+        const contentB64 = btoa(bin);
+        // Refresh the sha right before the write so a concurrent edit by
+        // another admin is far less likely to 409 us.
+        await fetchSharedPresets(true).catch(() => {});
+        const body = { message: commitMsg || '[AIM] update shared SUM default presets', content: contentB64, branch: ELEV_REPO_BRANCH };
+        if (sharedPresetsSha) body.sha = sharedPresetsSha;
+        const url = `${ELEV_GITHUB_API}/repos/${ELEV_REPO}/contents/${encodeURIComponent(SUM_PRESETS_PATH)}`;
+        const r = await elevGmRequest({
+            method: 'PUT', url,
+            headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' },
+            data: JSON.stringify(body),
+            timeout: 20000,
+        });
+        if (r.ok) {
+            try { const j = JSON.parse(r.responseText); sharedPresetsSha = (j.content && j.content.sha) || sharedPresetsSha; } catch (e) {}
+            sharedPresets = clean.length ? clean : null;
+            sharedPresetsFetched = true;
+            console.log(`${TAG} ✓ committed ${clean.length} shared default preset(s)`);
+            return true;
+        }
+        if (r.status === 401 || r.status === 403) showToast('Commit denied — your PAT needs write access to the data repo', 'rgba(255,96,96,0.55)');
+        else if (r.status === 409) showToast('Conflict — someone else just edited; reopen the menu and retry', 'rgba(255,96,96,0.55)');
+        else showToast(`Commit failed (HTTP ${r.status})`, 'rgba(255,96,96,0.55)');
+        console.warn(`${TAG} commit sum-presets.json failed HTTP ${r.status}:`, (r.responseText || '').substring(0, 200));
+        return false;
+    }
+
     // ---- v3.87 (Phase 2): cross-preset export ----
     // Copy ANY preset's table (its columns + filters) to the clipboard,
     // Sheets-ready, WITHOUT switching the live view — so the user can pull
@@ -2218,6 +4984,13 @@
             subtype: { label: 'Subtype', val: r => r.subtype || '' },
             equipment: { label: 'Equipment', val: r => r.equipment || '' },
             state: { label: 'State', val: r => r.state || '' },
+            assetAlt: { label: `Altitude (${u})`, val: r => num(r.assetAltM) },
+            assetHeightAgl: { label: `Height AGL (${u})`, val: r => num(r.assetHeightAglM) },
+            assetElevAsl: { label: `Elev ASL (${u})`, val: r => num(r.assetElevAslM) },
+            poiId: { label: 'POI ID', val: r => r.poiId != null ? String(r.poiId) : '' },
+            poleFeeder: { label: 'Pole Feeder', val: r => r.poleFeeder || '' },
+            poleUsage: { label: 'Pole Usage', val: r => r.poleUsage || '' },
+            poleIsSimple: { label: 'Pole Simple', val: r => r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE') },
             gmGroup: { label: 'GM Group', val: r => r.gmGroup || '' },
             altMin: { label: `Min Alt (${u})`, val: r => num(r.altMinM) },
             altMax: { label: `Max Alt (${u})`, val: r => num(r.altMaxM) },
@@ -2226,10 +4999,12 @@
             elevation: { label: `Elevation (${u})`, val: r => num(r.elevationM) },
             agl: { label: `AGL (${u})`, val: r => num(r.aglM) },
             segLen: { label: `Seg Len (${u})`, val: r => num(r.segLenM) },
+            area: { label: `Area (${u}²)`, val: r => r.areaM2 == null ? '' : String(Math.round(unitsFt ? r.areaM2 * 10.7639 : r.areaM2)) },
             route: { label: `Route (${u})`, val: r => num(r.routeM) },
             battery: { label: 'Battery', val: r => { const b = batteryFor(r.routeM, loadBatteryThresholds()); return b ? b.label.replace(/^⚠\s*/, '') : ''; } },
             ptAlt: { label: `Alt (${u})`, val: r => num(r.ptAltM) },
             validated: { label: 'Valid', val: r => r.validated === true ? 'yes' : (r.validated === false ? 'no' : '') },
+            waitApproved: { label: 'Wait Approved', val: r => r._isSegment ? (r.waitApproved === true ? 'TRUE' : 'FALSE') : '' },
             unshielded: { label: 'Unshielded', val: r => r.unshielded ? 'yes' : ((r.type === 16 || r.type === 3) ? 'no' : '') },
             notes: { label: 'Notes', val: r => r.notesText || '' },
             droneName: { label: 'Drone', val: r => r.droneName || '' },
@@ -2289,7 +5064,7 @@
         }
     }
     function allExportPresets() {
-        return BUILTIN_PRESETS.concat(loadViewPresets());
+        return getBuiltinPresets().concat(loadViewPresets());
     }
 
     // Snapshot the live SUM state into a plain preset object (sans name).
@@ -2574,6 +5349,51 @@
         if (!p) return { value: orig, pending: false, isNew: false };
         return { value: p.newValue, pending: true, isNew: !!p.isNewSubtype, oldValue: orig };
     }
+
+    // v4.70: pilot VALIDATION flag (entity-level boolean) for FFZ + FP.
+    // This is a pilot's post-flight sign-off — "flew it, no airspace
+    // obstacles (trans lines/towers/trees), cleared for autonomous flight"
+    // — NOT a derived SOP verdict. So it's a plain bulk ON/OFF flip, fully
+    // decoupled from the SOP Validators. Queued as an entity-level edit
+    // (arcId=null, field='validated'); for FPs one edit covers the whole
+    // path (the flag lives on the entity, not per-arc).
+    function getPendingValidated(entityId) {
+        return getPendingEdit(entityId, null, 'validated');
+    }
+    function queueValidatedEdit(entity, newVal) {
+        if (!entity) return false;
+        if (entity.type !== 15 && entity.type !== 16) return false; // FP + FFZ only
+        const target = !!newVal;
+        const current = !!entity.validated;
+        if (target === current) {
+            // No-op — clear any prior pending flip back to original.
+            if (getPendingValidated(entity.id)) discardPendingEdit(entity.id, null, 'validated');
+            return false;
+        }
+        queuePendingEdit({
+            entityId: entity.id,
+            arcId: null,
+            arcIndex: null,
+            isFfz: entity.type === 16,
+            isAsset: false,
+            field: 'validated',
+            oldValue: current,
+            newValue: target,
+            // Display + sidebar-lookup fields mirror the other edit kinds.
+            fpName: entity.name || '',
+            entityName: entity.name || '',
+            segmentName: entity.name || '',
+        });
+        return true;
+    }
+    function effectiveValidated(entity) {
+        const orig = !!(entity && entity.validated);
+        if (!entity) return { value: orig, pending: false };
+        const p = getPendingValidated(entity.id);
+        if (!p) return { value: orig, pending: false };
+        return { value: !!p.newValue, pending: true, oldValue: orig };
+    }
+
     // Helper: pull the arcId for the queue entry shape (null for FFZ).
     function rowArcId(r) {
         return (r._isSegment && r.arc) ? r.arc.id : null;
@@ -3275,6 +6095,16 @@
         const rollbackBtn = (!dryRun && window.__aim_ai_directApiRollback)
             ? `<button id="aim-ai-report-rollback" style="background:rgba(255,193,71,0.16);color:#ffd479;border:1px solid rgba(255,193,71,0.55);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">↩ Roll back this run</button>`
             : '';
+        // v4.71: Direct-API writes hit the server + our SUM cache, but
+        // Percepto's native sidebar + map render from their own React store,
+        // which only re-reads on a full page load. Offer a one-click reload
+        // (+ a note) so changes show up in the native UI without a manual F5.
+        const reloadNote = (!dryRun && ok > 0)
+            ? `<div style="margin-top:12px;padding:8px 12px;background:rgba(122,223,230,0.08);border:1px solid rgba(122,223,230,0.40);border-radius:4px;color:#7adfe6;font-size:11px;line-height:1.5">Saved to the server + the SUM table. Percepto's <strong>native sidebar + map</strong> still show the old values — reload to sync them.</div>`
+            : '';
+        const reloadBtn = (!dryRun && ok > 0)
+            ? `<button id="aim-ai-report-reload" style="background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:8px 16px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔄 Reload page</button>`
+            : '';
         box.innerHTML = `
             <div style="color:${accent};font-weight:700;font-size:16px;margin-bottom:4px">⚡ ${dryRun ? 'Dry run preview' : 'Direct-API apply'} — ${dryRun ? 'no data written' : 'complete'}</div>
             <div style="color:#cfd6dc;font-size:13px;margin-top:8px">
@@ -3283,14 +6113,18 @@
             ${errHtml}
             ${bridgeHtml}
             ${overlapHtml}
+            ${reloadNote}
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
                 ${rollbackBtn}
+                ${reloadBtn}
                 <button id="aim-ai-report-close" style="background:rgba(95,255,95,0.16);color:#5fff5f;border:1px solid rgba(95,255,95,0.5);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:700">Close</button>
             </div>
         `;
         m.appendChild(box);
         document.body.appendChild(m);
         box.querySelector('#aim-ai-report-close').onclick = () => m.remove();
+        const reloadEl = box.querySelector('#aim-ai-report-reload');
+        if (reloadEl) reloadEl.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
         const rb = box.querySelector('#aim-ai-report-rollback');
         if (rb) {
             rb.onclick = async () => {
@@ -3362,6 +6196,13 @@
                 const cur = ent.name || '';
                 if (cur !== e.oldValue) {
                     result.warnings.push(`"${e.oldValue}" name: queued rename to "${e.newValue}" but current name is "${cur}" (Percepto data changed since queue built — apply will overwrite).`);
+                }
+                return;
+            }
+            // v4.70: validation flag is boolean-valued.
+            if (e.field === 'validated') {
+                if (!!ent.validated !== !!e.oldValue) {
+                    result.warnings.push(`${e.entityName} validation: queued from ${e.oldValue ? '✓' : '✗'} but current is ${ent.validated ? '✓' : '✗'} (Percepto data changed since queue built — apply will overwrite).`);
                 }
                 return;
             }
@@ -3493,6 +6334,10 @@
     function applyEditsToBody(body, edits) {
         edits.forEach(e => {
             if (e.field === 'name') { body.name = e.newValue; return; }
+            // v4.70: entity-level pilot validation flag (FFZ + FP). Plain
+            // boolean on the entity — set it and the same upsert POST carries
+            // it. The verify rail confirms the server actually persisted it.
+            if (e.field === 'validated') { body.validated = !!e.newValue; return; }
             if (e.isFfz) {
                 if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
                 if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
@@ -3574,7 +6419,12 @@
     // (sentBody), not the raw queue — so auto-bridged ceilings verify
     // correctly. Checks every arc/restriction round-tripped + structure
     // (coord/arc counts) intact; a count change is a STRUCTURAL anomaly.
-    function verifyDirectSave(saved, sentBody, original) {
+    // v4.70: expectValidated (true/false) is passed ONLY when the group
+    // queued a 'validated' edit. We then confirm the server persisted the
+    // flag — Percepto might recompute/ignore it. Left null for every other
+    // run so an altitude-only save isn't failed by a server-side
+    // validated side-effect (e.g. an edit clearing pilot sign-off).
+    function verifyDirectSave(saved, sentBody, original, expectValidated) {
         if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
         const oc = (original.coords || []).length, sc = (saved.coords || []).length;
         if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
@@ -3604,6 +6454,10 @@
                 }
             }
         }
+        // Pilot validation flag — only when this group flipped it.
+        if (expectValidated != null && !!saved.validated !== !!expectValidated) {
+            return { ok: false, reason: `validated: sent ${!!expectValidated}, got ${!!saved.validated} (server didn't persist the flag)`, structural: false };
+        }
         return { ok: true };
     }
 
@@ -3627,10 +6481,13 @@
         }
         const body = buildWriteBody(entity, siteCfg);
         applyEditsToBody(body, group.edits);
+        const hasAltEdit = group.edits.some(e => e.field === 'min_alt' || e.field === 'max_alt');
         // Auto-bridge terrain seams on flight paths so adjacent segments
         // overlap (server rule) — raises ceilings only, AGL floor kept.
+        // v4.70: skip when no altitude edit is in play (validated-only /
+        // name-only saves must never nudge a segment's ceiling).
         let bridges = [];
-        if (!group.isFfz && Array.isArray(body.arcs)) {
+        if (!group.isFfz && hasAltEdit && Array.isArray(body.arcs)) {
             bridges = bridgeArcContinuity(body.arcs);
             if (bridges.length) {
                 const useFt = !!sumPanelState.unitsFt;
@@ -3699,7 +6556,8 @@
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
         const saved = resp.json && resp.json.map_objects;
-        const verify = verifyDirectSave(saved, body, entity);
+        const valEdit = group.edits.find(e => e.field === 'validated');
+        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null);
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
@@ -3868,6 +6726,7 @@
             const ent = byId.get(e.entityId);
             if (!ent) return;
             if (e.field === 'name') { ent.name = e.newValue; return; }
+            if (e.field === 'validated') { ent.validated = !!e.newValue; return; }
             if (e.isFfz) {
                 if (!ent.restrictions) ent.restrictions = {};
                 if (e.field === 'min_alt') ent.restrictions.minAlt = e.newValueM;
@@ -3890,6 +6749,18 @@
     async function runApplyPipeline(onProgress, opts) {
         const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
+        // v4.70: the editor path can't toggle the pilot Validation flag —
+        // it only drives Min/Max/name inputs (+ the asset Type select). So a
+        // queued 'validated' edit REQUIRES ⚡ Direct API. Refuse early with a
+        // clear message rather than silently reporting "no edits applied".
+        const hasValidatedEdit = groups.some(g => g.edits.some(e => e.field === 'validated'));
+        if (hasValidatedEdit && !directApi) {
+            applyState.running = false;
+            applyState.errors = [{ entityName: '(Bulk → Valid)', reason: 'Validation flips need ⚡ Direct API — enable the Direct API checkbox and re-run.' }];
+            showToast('Bulk → Valid needs ⚡ Direct API enabled', 'rgba(255,82,82,0.7)');
+            try { onProgress(applyState); } catch (e) {}
+            return;
+        }
         applyState.total = groups.reduce((s, g) => s + g.edits.length, 0);
         applyState.done = 0;
         applyState.errors = [];
@@ -3961,7 +6832,7 @@
                     reason: outcome.reason || '',
                     verified: outcome.verified === true,
                     durationMs,
-                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name') ? ({
+                    edits: g.edits.map(e => (e.field === 'subtype' || e.field === 'name' || e.field === 'validated') ? ({
                         field: e.field,
                         oldValue: e.oldValue,
                         newValue: e.newValue,
@@ -4580,6 +7451,8 @@
         sortDir: 1,
         x: null, y: null,          // last drag position (px from viewport)
         w: 720, h: null,           // last drag size (null = use default max-height)
+        snap: null,                // 'left' | 'right' | 'bottom' | null — current dock
+        floatRect: null,           // {x,y,w,h} saved before docking, for float/restore
         selectedIds: new Set(),    // multi-select state — keys are rowKey strings (entity.id OR `${entity.id}:${arc.id}` for FP segment rows)
         // v3.47: per-entity visibility state we drive via Percepto's
         // sidebar checkboxes. Map<entityId, boolean>. Missing entries
@@ -4600,9 +7473,78 @@
         showSamples: elevGmGet(CACHE_KEY_SHOW_SAMPLES, false),
     };
 
+    // v4.79: persist the panel's geometry + dock across page reloads (was
+    // session-only). Saved on drag-end / resize-end / dock / float; loaded
+    // once before the first render. Re-fit happens after restore so a docked
+    // panel re-fits the current map size.
+    const SUM_GEOM_KEY = 'aim-ai-sum-panel-geom';
+    let sumGeomLoaded = false;
+    function saveSumPanelGeom() {
+        elevGmSet(SUM_GEOM_KEY, {
+            x: sumPanelState.x, y: sumPanelState.y,
+            w: sumPanelState.w, h: sumPanelState.h,
+            snap: sumPanelState.snap, floatRect: sumPanelState.floatRect,
+        });
+    }
+    function loadSumPanelGeom() {
+        const g = elevGmGet(SUM_GEOM_KEY, null);
+        if (!g || typeof g !== 'object') return;
+        if (typeof g.x === 'number') sumPanelState.x = g.x;
+        if (typeof g.y === 'number') sumPanelState.y = g.y;
+        if (typeof g.w === 'number') sumPanelState.w = g.w;
+        if (g.h === null || typeof g.h === 'number') sumPanelState.h = g.h;
+        if (g.snap === 'left' || g.snap === 'right' || g.snap === 'bottom' || g.snap === null) sumPanelState.snap = g.snap;
+        if (g.floatRect && typeof g.floatRect === 'object') sumPanelState.floatRect = g.floatRect;
+    }
+
+    // v4.72: inject the SUM button's neon-green + pulsing-glow styles into
+    // the target document (the button lives in the map iframe, so the <style>
+    // must go in the SAME doc). Glow technique mirrors AIM Issues' unseen-
+    // activity pulse (a box-shadow that breathes), recolored to the neon
+    // green. No transform/scale — a bouncing toolbar button reads as janky;
+    // the glow alone is the "subtle pulsating" effect. Guarded so it injects
+    // once per doc.
+    function ensureSumButtonStyles(doc) {
+        try {
+            if (!doc || doc.getElementById('aim-sum-btn-styles')) return;
+            const style = doc.createElement('style');
+            style.id = 'aim-sum-btn-styles';
+            style.textContent = `
+                @keyframes aim-sum-pulse-glow {
+                    0%, 100% { box-shadow: 0 0 4px rgba(57,255,20,0.45), 0 0 9px rgba(57,255,20,0.22); }
+                    50%      { box-shadow: 0 0 11px rgba(57,255,20,0.90), 0 0 22px rgba(57,255,20,0.48); }
+                }
+                #${SUM_BTN_ID}.aim-sum-neon-btn {
+                    animation: aim-sum-pulse-glow 1.8s ease-in-out infinite;
+                    background: #39ff14 !important;
+                    border-color: #39ff14 !important;
+                    text-shadow: none !important;
+                }
+                /* Ant/Percepto set -webkit-text-fill-color (white) on the button
+                   text, which beats plain color. Override both, and cover any
+                   child span Ant may wrap the label in. */
+                #${SUM_BTN_ID}.aim-sum-neon-btn,
+                #${SUM_BTN_ID}.aim-sum-neon-btn * {
+                    color: #000 !important;
+                    -webkit-text-fill-color: #000 !important;
+                }
+                #${SUM_BTN_ID}.aim-sum-neon-btn:hover,
+                #${SUM_BTN_ID}.aim-sum-neon-btn:focus {
+                    background: #5cff43 !important;
+                    border-color: #5cff43 !important;
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    #${SUM_BTN_ID}.aim-sum-neon-btn { animation: none; }
+                }
+            `;
+            (doc.head || doc.documentElement).appendChild(style);
+        } catch (e) {}
+    }
+
     function injectSumButton(doc) {
-        // Don't inject in edit mode — Bulk Validator hides the whole
-        // toolbar then, and SUM should follow the same convention.
+        // Don't inject in edit mode — Percepto hides the all-entities
+        // toolbar while an entity editor (.upsert-entity) is open, so SUM
+        // hides too and reappears when the editor closes.
         if (doc.querySelector('.upsert-entity')) {
             const existing = doc.getElementById(SUM_BTN_ID);
             if (existing) existing.style.display = 'none';
@@ -4621,22 +7563,40 @@
             container = doc.createElement('div');
             container.id = 'aim-automation-container';
             Object.assign(container.style, {
-                width: '100%', display: 'flex', justifyContent: 'flex-start',
-                padding: '4px 0 8px 16px', borderBottom: '1px solid #f0f0f0',
+                // v4.75: center the SUM button (was left-aligned with a 16px
+                // left pad back when ALT/VAL sat beside it). Symmetric padding
+                // so center is true center.
+                width: '100%', display: 'flex', justifyContent: 'center',
+                padding: '4px 8px 8px 8px', borderBottom: '1px solid #f0f0f0',
                 marginTop: '-4px', gap: '10px',
             });
             header.after(container);
         }
+        ensureSumButtonStyles(doc);
         const newBtnRef = header.querySelector('.site-setup-header__new_entity-button');
         const btn = doc.createElement('button');
         btn.id = SUM_BTN_ID;
         btn.type = 'button';
-        btn.className = newBtnRef ? newBtnRef.className : 'ant-btn ant-btn-primary ant-btn-sm';
+        // Keep Ant's base shape class for sizing/radius, add our neon class
+        // for the green fill + pulsing glow (the class rules use !important so
+        // Ant's primary-blue + hover styles can't win). v4.72: now that the
+        // old ALT/VAL buttons are gone there's room for the full label.
+        btn.className = (newBtnRef ? newBtnRef.className : 'ant-btn ant-btn-primary ant-btn-sm') + ' aim-sum-neon-btn';
         Object.assign(btn.style, {
-            minWidth: 'unset', padding: '0 12px', height: '24px',
-            fontSize: '10px', fontWeight: 'bold',
+            minWidth: 'unset', padding: '0 16px', height: '26px',
+            fontSize: '11px', fontWeight: '800', letterSpacing: '0.02em',
+            borderRadius: '4px', textShadow: 'none',
         });
-        btn.innerHTML = 'SUM';
+        // Inline !important is the strongest author declaration — it beats even
+        // Percepto's stylesheet !important rules. Plain color / Object.assign
+        // kept losing to their white -webkit-text-fill-color, so set the
+        // color-critical props with explicit `important` priority here.
+        const forceStyle = (prop, val) => { try { btn.style.setProperty(prop, val, 'important'); } catch (e) {} };
+        forceStyle('background', '#39ff14');
+        forceStyle('border', '1px solid #39ff14');
+        forceStyle('color', '#000');
+        forceStyle('-webkit-text-fill-color', '#000');
+        btn.innerHTML = 'Site Setup Summary';
         btn.title = 'Open Site Setup Summary (AIM Site Setup Tools)';
         btn.onclick = (e) => {
             e.preventDefault();
@@ -4645,9 +7605,39 @@
         };
         container.appendChild(btn);
     }
+    // Inject a ⊕ Generate button straight into the map toolbar (next to the gear / flag /
+    // lightning), so the Site Setup Generator is one click away instead of via SUM → Generate.
+    const GEN_MAP_BTN_ID = 'aim-gen-maptools-btn';
+    function injectGenMapButton(doc) {
+        try {
+            const tools = doc.querySelector('.map-tools');
+            if (!tools) return;
+            if (doc.getElementById(GEN_MAP_BTN_ID)) { doc.getElementById(GEN_MAP_BTN_ID).style.display = ''; return; }
+            const ref = tools.querySelector('.map-tools__button, button');
+            const btn = doc.createElement('button');
+            btn.id = GEN_MAP_BTN_ID;
+            btn.type = 'button';
+            btn.className = ref ? ref.className : 'map-tools__button';
+            btn.title = 'Site Setup Generator (AIM) — build FFZs / Advanced Draw';
+            btn.style.setProperty('color', '#39ff14', 'important');
+            btn.innerHTML = '<span style="font-size:16px;font-weight:800;line-height:1">⊕</span>';
+            btn.onclick = async (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const sid = getCurrentSiteID();
+                if (!sid) { showToast('Open a site first', 'rgba(255,179,71,0.6)'); return; }
+                if (!mapObjectsBySite[sid] || !mapObjectsBySite[sid].entities) {
+                    showToast('Loading site data…', 'rgba(122,223,230,0.5)');
+                    try { await fetchMapObjects(sid, true); } catch (err) { console.warn(`${TAG} gen-map-button fetch failed:`, err); }
+                }
+                openSiteGenerator(sid);
+            };
+            tools.appendChild(btn);
+        } catch (e) {}
+    }
     function recursiveSumInject(win) {
         try {
             injectSumButton(win.document);
+            injectGenMapButton(win.document);
             const frames = win.document.querySelectorAll('iframe');
             frames.forEach(f => { if (f.contentWindow) recursiveSumInject(f.contentWindow); });
         } catch (e) {}
@@ -4742,6 +7732,15 @@
                         emergAltM: typeof arc.min_emergency_alt === 'number' ? arc.min_emergency_alt : null,
                         segLenM: typeof arc.distance === 'number' ? arc.distance
                             : (arc.point_a && arc.point_b ? approxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng) : null),
+                        // Per-arc "wait until approved" flag — FP segments only.
+                        waitApproved: arc.wait_until_approved === true,
+                        // Rough center of the segment = midpoint of its arc.
+                        _lat: (arc.point_a && arc.point_b && typeof arc.point_a.lat === 'number' && typeof arc.point_b.lat === 'number')
+                            ? (arc.point_a.lat + arc.point_b.lat) / 2
+                            : (arc.point_a && typeof arc.point_a.lat === 'number' ? arc.point_a.lat : null),
+                        _lng: (arc.point_a && arc.point_b && typeof arc.point_a.lng === 'number' && typeof arc.point_b.lng === 'number')
+                            ? (arc.point_a.lng + arc.point_b.lng) / 2
+                            : (arc.point_a && typeof arc.point_a.lng === 'number' ? arc.point_a.lng : null),
                         notesText: e.description ? String(e.description).trim() : '',
                         entId: e.id, // parent FP id
                     });
@@ -4783,17 +7782,39 @@
                 gmGroup: '',
                 emergAltM: null,
                 segLenM: null,
+                waitApproved: null, // FP-segment-only flag → N/A here
+                areaM2: null,       // polygon area (FFZ/NFZ); null elsewhere
                 // v3.96: generic entity ID + Base/Safe-Zone fields.
                 entId: e.id,
                 ptAltM: null,       // Base relative_alt / Safe Zone altitude (meters)
                 droneName: '',      // Base allocated drone name
                 droneId: '',        // Base allocated drone id
+                // v4.145: asset-specific custom.* fields (null/blank elsewhere).
+                assetAltM: null,        // custom.altitude (m)
+                assetHeightAglM: null,  // custom.height_agl (m)
+                assetElevAslM: null,    // custom.elevation_asl (m)
+                poiId: null,            // custom.poi_id
+                poleFeeder: '',         // custom.pole_feeder
+                poleUsage: '',          // custom.pole_usage
+                poleIsSimple: null,     // custom.pole_is_simple (bool)
             };
             if (e.type === 3 && e.custom) {
-                row.subtype = e.custom.poi_type_str || '';
-                if (typeof e.custom.elevation_asl === 'number') {
-                    row.elevationM = e.custom.elevation_asl;
+                const c = e.custom;
+                row.subtype = c.poi_type_str || '';
+                if (typeof c.elevation_asl === 'number') {
+                    // Claimed ground elevation. Percepto leaves this 0 (or null)
+                    // for CSV-imported assets until the asset is edited/saved,
+                    // so only treat a NONZERO value as authoritative; otherwise
+                    // fall through to the DEM lookup below like other entities.
+                    row.assetElevAslM = c.elevation_asl;        // shown as-is (may be 0 → not yet computed)
+                    if (c.elevation_asl !== 0) row.elevationM = c.elevation_asl;
                 }
+                if (typeof c.altitude === 'number') row.assetAltM = c.altitude;
+                if (typeof c.height_agl === 'number') row.assetHeightAglM = c.height_agl;
+                if (c.poi_id != null) row.poiId = c.poi_id;
+                row.poleFeeder = (c.pole_feeder != null && c.pole_feeder !== '') ? String(c.pole_feeder) : '';
+                row.poleUsage = (c.pole_usage != null && c.pole_usage !== '') ? String(c.pole_usage) : '';
+                if (typeof c.pole_is_simple === 'boolean') row.poleIsSimple = c.pole_is_simple;
             }
             // NFZ (4) and FFZ (16) both store altitude range in restrictions.
             if ((e.type === 4 || e.type === 16) && e.restrictions && typeof e.restrictions === 'object') {
@@ -4829,17 +7850,31 @@
                 row.ptAltM = e.custom.altitude;
             }
             // Point coordinate — single-point entities (GMs 19, Assets 3, Base
-            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons/lines leave
-            // these null so the Lat/Long/GPS cells render blank.
+            // 8, Safe Zone 98) have a meaningful lat/lng. Polygons (FFZ 16,
+            // NFZ 4) get a ROUGH center = mean of their ring vertices.
             if ((e.type === 19 || e.type === 3 || e.type === 8 || e.type === 98)
                 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number') {
                 row._lat = e.coords[0].lat;
                 row._lng = e.coords[0].lng;
+            } else if (Array.isArray(e.coords) && e.coords.length >= 3) {
+                let sLat = 0, sLng = 0, n = 0;
+                for (const c of e.coords) {
+                    if (c && typeof c.lat === 'number' && typeof c.lng === 'number') { sLat += c.lat; sLng += c.lng; n++; }
+                }
+                if (n > 0) { row._lat = sLat / n; row._lng = sLng / n; }
             }
-            // For non-asset rows, elevation = MAX DEM across sample
-            // points (asset row already populated above from its
-            // claimed elevation_asl — that takes priority).
-            if (e.type !== 3) {
+            // Polygon area (info only) — FFZ (16), NFZ (4), Asset (3).
+            if ((e.type === 16 || e.type === 4 || e.type === 3) && Array.isArray(e.coords) && e.coords.length >= 3) {
+                const am2 = polygonAreaM2(e.coords);
+                if (am2 != null) row.areaM2 = am2;
+            }
+            // Non-asset rows: elevation = MAX DEM across sample points. Asset
+            // rows normally keep their claimed elevation_asl (set above), but
+            // an untouched CSV-imported asset has no computed value yet (0 /
+            // null) → row.elevationM is still null here, so fall back to DEM
+            // like everything else. (If the cache is cold at build time,
+            // __aim_ai_onDemReady re-fills it once the async fetch lands.)
+            if (e.type !== 3 || row.elevationM == null) {
                 const maxDem = maxCachedElevation(samples);
                 if (maxDem != null) row.elevationM = maxDem;
             }
@@ -5801,9 +8836,4258 @@
         }
     }
 
+    // Download arbitrary text as a file via the top frame (same iframe-sandbox
+    // workaround as downloadKMLFile). Returns true on success.
+    function downloadJSONFile(filename, content) {
+        const tryDownload = (win, doc) => {
+            const blob = new win.Blob([content], { type: 'application/json' });
+            const url = win.URL.createObjectURL(blob);
+            const a = doc.createElement('a');
+            a.href = url; a.download = filename; doc.body.appendChild(a); a.click();
+            setTimeout(() => { try { win.URL.revokeObjectURL(url); } catch (e) {} try { a.remove(); } catch (e) {} }, 100);
+        };
+        try { const w = window.top || window; tryDownload(w, w.document); return true; }
+        catch (e) { try { tryDownload(window, document); return true; } catch (e2) { return false; } }
+    }
     // Site Setup Analyzer modal — KML format toggle + folder
     // checkboxes + download/copy buttons. Floating draggable like
     // the Stats popup; closes on Cancel or outside-click.
+    // ============================================================
+    // SITE SETUP GENERATOR (v4.3 · Phase A1) — auto-build the
+    // FOUNDATION of a site setup for a CSM to finetune. Inverse of
+    // the Analyzer (which exports a finished setup). A1 builds ONE
+    // inspection FFZ per qualifying asset: a single OPEN edge box
+    // (never closed/looped) on the asset face nearest the power
+    // lines (the shielded side), inner edge 15 ft off the face,
+    // ≥30 ft deep. If a side would lie parallel over a power line it
+    // is nudged OFF the line / moved to the next-closest clean side.
+    // Skips Unreachable/Unshielded/Empty assets and any farther than
+    // ~400 ft from a power line. Flags (blue) pads that already have
+    // an FFZ. Altitudes are DEM-checked per FFZ (floor = ground +
+    // AGL, ceiling = floor + delta, MSL). PREVIEWS on the map;
+    // Commit (A1.5) + corridor FP routing (A2) follow.
+    // Log tag [AIM GEN]. Design:
+    // ShortKeys/AIM_Site_Setup_Generator_Design.md.
+    // ============================================================
+    const GEN_TAG = `[AIM GEN ${CONTEXT}]`;
+    const GEN_FT_TO_M = 0.3048;
+    const GEN_MODAL_ID = 'aim-ai-generator-modal';
+
+    // ===== MSL vs AGL site altitude mode (SAFETY-CRITICAL) =====
+    // Percepto stores entity altitudes (FFZ minAlt/maxAlt, FP arc min/max_alt)
+    // one of two ways, governed by the site-config `mountain_terrain` flag (admin:
+    // "Mountain terrain", "cannot be disabled once enabled"). Confirmed live
+    // 2026-06-18 on site 1502 (MT on) + site 285 (MT off):
+    //   mountain_terrain === true  → MSL site: values are ABSOLUTE MSL meters.
+    //   mountain_terrain === false → AGL site: values are HEIGHT-ABOVE-GROUND meters.
+    // Writing the wrong reference is catastrophic (an MSL ~950 m floor written to
+    // an AGL site is read as ~950 m / ~3100 ft ABOVE GROUND). The flag is
+    // authoritative; we ALSO cross-check against DEM ground and surface the mode
+    // to the CSM for confirmation before any altitude write. mode is 'msl' | 'agl'
+    // | 'unknown' (flag unreadable → block altitude writes).
+    const siteAltModeCache = {};
+    async function siteAltMode(siteID) {
+        if (siteAltModeCache[siteID]) return siteAltModeCache[siteID];
+        let flag = null;
+        try {
+            const cfg = await fetchSiteConfig(siteID);
+            if (cfg && typeof cfg.mountain_terrain === 'boolean') flag = cfg.mountain_terrain;
+        } catch (e) { console.warn(`${GEN_TAG} site-cfg fetch failed for alt-mode:`, e); }
+        const mode = flag === null ? 'unknown' : (flag ? 'msl' : 'agl');
+        const res = { mode, flag };
+        siteAltModeCache[siteID] = res;
+        console.log(`${GEN_TAG} site ${siteID} altitude mode = ${mode.toUpperCase()} (mountain_terrain=${flag})`);
+        return res;
+    }
+    // The mode the CSM has confirmed/overridden for this session (null = use the
+    // detected flag). Set by the modal's mode banner; used by every alt write.
+    let genAltModeOverride = null;
+    function genActiveAltMode() {
+        if (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') return genAltModeOverride;
+        const c = siteAltModeCache[genState && genState.siteID];
+        return (c && c.mode) || 'unknown';
+    }
+    // Mode-aware conversions. MSL sites store absolute MSL (ground + AGL); AGL
+    // sites store the raw height above ground (no ground term).
+    function aglFtToStoredM(aglFt, groundM, mode) {
+        return mode === 'agl' ? (aglFt * GEN_FT_TO_M) : ((groundM || 0) + aglFt * GEN_FT_TO_M);
+    }
+    function storedMToAglFt(storedM, groundM, mode) {
+        return mode === 'agl' ? (storedM / GEN_FT_TO_M) : ((storedM - (groundM || 0)) / GEN_FT_TO_M);
+    }
+    // DEM cross-check: does a stored altitude make sense under `mode` given the
+    // ground there? Returns null if consistent, else a human warning string.
+    // An MSL value must sit at/above ground (drone can't fly underground); an AGL
+    // value must be a sane height (and the MSL reading would be absurd). Catches a
+    // mis-set flag before we bake a wrong reference into new writes.
+    function altModeSanity(storedM, groundM, mode) {
+        if (typeof storedM !== 'number' || typeof groundM !== 'number') return null;
+        const aglIfMsl = (storedM - groundM) / GEN_FT_TO_M; // ft, if value were MSL
+        const aglIfAgl = storedM / GEN_FT_TO_M;              // ft, if value were AGL
+        const SANE_LO = -20, SANE_HI = 2500;                // plausible AGL band (ft)
+        const mslOk = aglIfMsl >= SANE_LO && aglIfMsl <= SANE_HI;
+        const aglOk = aglIfAgl >= SANE_LO && aglIfAgl <= SANE_HI;
+        if (mode === 'msl' && !mslOk && aglOk) return `flag says MSL but a stored ${storedM.toFixed(0)} m reads as ${aglIfMsl.toFixed(0)} ft AGL over ${groundM.toFixed(0)} m ground (impossible) — looks like an AGL site`;
+        if (mode === 'agl' && !aglOk && mslOk) return `flag says AGL but a stored ${storedM.toFixed(0)} m only makes sense as MSL (${aglIfMsl.toFixed(0)} ft AGL) — looks like an MSL site`;
+        return null;
+    }
+    const GEN_DEFAULTS = {
+        standoffFt: 15,    // inner edge of the box sits this far off the asset face
+        depthFt: 30,       // perpendicular flyable depth of the single edge box (≥30)
+        aglFt: 100,        // FFZ floor above DEM ground (checked per FFZ)
+        deltaFt: 30,       // FFZ ceiling = floor + delta
+        proximityFt: 400,  // asset must be within this of a power line (200 PL + 200 asset)
+        lineClearFt: 10,   // flag FFZ if it runs parallel within this of a power line
+        skipBadStates: true,  // skip Unreachable / Unshielded / Empty
+        skipExisting: false,  // skip assets that already have an FFZ (else just flag)
+    };
+    // Only these asset states are excluded; everything else (Normal, Inactive,
+    // HY, …) gets an FFZ.
+    const GEN_SKIP_STATES = ['unreachable', 'unshielded', 'empty'];
+    // Percepto rejects entity names/descriptions with anything but letters,
+    // numbers, spaces, "_" and "-" (server 400). Strip everything else.
+    function genCleanName(s) {
+        return String(s == null ? '' : s).replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function genDraftName(assetName) {
+        return genCleanName(`DRAFT ${assetName} FFZ`);
+    }
+    let genPreviewLayers = [];
+    let genRouteLayers = [];   // A2 flight-path route preview (polylines + markers)
+    let genRouteResult = null;  // last routeFlightPaths() result
+    // editable corridor: verts[] + segs[{a,b,flag}] (indices into verts). Built from
+    // result.corridor; drag a handle to move a waypoint, flags recompute live.
+    let genRoute = { verts: [], segs: [], assets: [], base: null, ctx: null, handles: [], entryHandles: [], map: null, container: null, wired: false, drag: null, onDown: null, onMove: null, onUp: null, onContext: null };
+    function routePointFlag(p) {
+        const ctx = genRoute.ctx; if (!ctx) return false;
+        const d = a2PointToSegs(p, ctx.segs), minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        return (d < minM || d > maxM) || a2InObstacle(p, ctx.avoidObs);
+    }
+    function reflagSeg(seg) {
+        const a = genRoute.verts[seg.a], b = genRoute.verts[seg.b];
+        const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / (A2.sampleFt * GEN_FT_TO_M)));
+        let flag = false; for (let i = 0; i <= n && !flag; i++) if (routePointFlag(a2Interp(a, b, i / n))) flag = true; seg.flag = flag;
+    }
+    function routeCorridorEdges() { return genRoute.segs.map(s => [genRoute.verts[s.a], genRoute.verts[s.b]]); }
+    // Insert a new waypoint on segment segIdx at pt; returns the new vert index.
+    function insertVertOnSeg(segIdx, pt) {
+        const s = genRoute.segs[segIdx], a = s.a, b = s.b, br = s.branch, ni = genRoute.verts.length;
+        genRoute.verts.push({ lat: pt.lat, lng: pt.lng });
+        genRoute.segs.splice(segIdx, 1, { a, b: ni, flag: false, branch: br }, { a: ni, b, flag: false, branch: br });
+        reflagSeg(genRoute.segs[segIdx]); reflagSeg(genRoute.segs[segIdx + 1]);
+        return ni;
+    }
+    // Project a point onto segment a-b; returns {dist(m), foot{lat,lng}, t}.
+    function segProject(p, a, b) {
+        const proj = genProjector(p.lat, p.lng), A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        const fx = A.x + t * dx, fy = A.y + t * dy;
+        return { dist: Math.hypot(fx, fy), foot: proj.inv({ x: fx, y: fy }), t };
+    }
+    // Split the nearest NON-branch (corridor) segment at the foot of pt; return that
+    // vert index (reuses an endpoint if the foot is ~on it). For baking branch stubs.
+    function splitAtNearest(pt, includeBranch) {
+        let bestSeg = -1, bd = Infinity, bestPr = null;
+        for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; if (s.branch && !includeBranch) continue; const pr = segProject(pt, genRoute.verts[s.a], genRoute.verts[s.b]); if (pr.dist < bd) { bd = pr.dist; bestSeg = si; bestPr = pr; } }
+        if (bestSeg < 0) return -1;
+        const s = genRoute.segs[bestSeg];
+        if (bestPr.t < 0.03) return s.a;
+        if (bestPr.t > 0.97) return s.b;
+        return insertVertOnSeg(bestSeg, bestPr.foot);
+    }
+    // Delete a waypoint; bridge its two neighbours so the path stays connected.
+    function deleteVert(i) {
+        const inc = genRoute.segs.filter(s => s.a === i || s.b === i);
+        const keep = genRoute.segs.filter(s => s.a !== i && s.b !== i);
+        if (inc.length === 2) { const n0 = inc[0].a === i ? inc[0].b : inc[0].a, n1 = inc[1].a === i ? inc[1].b : inc[1].a; if (n0 !== n1) keep.push({ a: n0, b: n1, flag: false }); }
+        genRoute.segs = keep;
+        genRoute.verts.splice(i, 1);
+        for (const s of genRoute.segs) { if (s.a > i) s.a--; if (s.b > i) s.b--; }
+        for (const s of genRoute.segs) reflagSeg(s);
+    }
+    function ptSegPx(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t)); return { dist: Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)), foot: { x: a.x + t * dx, y: a.y + t * dy } }; }
+    function buildRouteEdit(result) {
+        genRoute.ctx = result._ctx || null;
+        genRoute.assets = result.assets || [];
+        genRoute.base = result.base || null;
+        const idx = new Map(); genRoute.verts = []; genRoute.segs = [];
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = genRoute.verts.length; genRoute.verts.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        for (const s of (result.corridor || [])) { const a = vi(s.a), b = vi(s.b); if (a !== b) genRoute.segs.push({ a, b, flag: !!s.flag }); }
+        // BAKE each asset branch into the editable graph so the whole path (corridor
+        // + branches) is uniformly drag/insert/delete-able: a stub from the FOOT on
+        // the corridor (split in) to the FFZ-connection vert (green, soft-snaps to the
+        // FFZ edge). The base launch stays a separate auto leg.
+        for (const r of genRoute.assets) {
+            if (r._noBranch || !r.entry || !genRoute.segs.length) continue;
+            const footIdx = splitAtNearest(r.entry); if (footIdx < 0) continue;
+            const ev = { lat: r.entry.lat, lng: r.entry.lng, _entry: true, _ffzRing: r._ffzRing || null, _asset: r };
+            const entryIdx = genRoute.verts.length; genRoute.verts.push(ev);
+            if (entryIdx !== footIdx) { const seg = { a: footIdx, b: entryIdx, flag: false, branch: true }; reflagSeg(seg); genRoute.segs.push(seg); }
+        }
+    }
+    // push the edited verts/segs back into result.corridor so export + commit + the
+    // flagged-ft stat reflect the edits.
+    function syncRouteToResult() {
+        if (!genRouteResult) return;
+        genRouteResult.corridor = genRoute.segs.map(s => ({ a: { lat: genRoute.verts[s.a].lat, lng: genRoute.verts[s.a].lng }, b: { lat: genRoute.verts[s.b].lat, lng: genRoute.verts[s.b].lng }, flag: !!s.flag }));
+        let f = 0; for (const s of genRoute.segs) if (s.flag) f += approxMeters(genRoute.verts[s.a].lat, genRoute.verts[s.a].lng, genRoute.verts[s.b].lat, genRoute.verts[s.b].lng) / GEN_FT_TO_M;
+        if (genRouteResult.stats) genRouteResult.stats.flaggedFt = Math.round(f);
+    }
+
+    // Local east/north meters projection around an origin, and its
+    // inverse — equirectangular, consistent with approxMeters. Good
+    // over a single pad.
+    function genProjector(lat0, lng0) {
+        const R = 6371000;
+        const cosPhi0 = Math.cos(lat0 * Math.PI / 180);
+        return {
+            fwd(p) {
+                return {
+                    x: (p.lng - lng0) * Math.PI / 180 * cosPhi0 * R, // east
+                    y: (p.lat - lat0) * Math.PI / 180 * R,           // north
+                };
+            },
+            inv(pt) {
+                return {
+                    lat: lat0 + (pt.y / R) * 180 / Math.PI,
+                    lng: lng0 + (pt.x / (R * cosPhi0)) * 180 / Math.PI,
+                };
+            },
+        };
+    }
+
+    // Min-area oriented bounding box of a polygon. Returns
+    // { proj, cx, cy, a, hu, hv } in a local meters frame centered at
+    // the box center: `a` is the box rotation (rad), hu/hv the half-
+    // extents along the rotated u/v axes. A box corner given in
+    // centered (u,v) maps to world via R(a) then proj.inv. We search
+    // rotation 0..90° at 1° (rectangle symmetry) — pads are small, so
+    // this is cheap and robust (no convex-hull/rotating-calipers dep).
+    function orientedBBox(coords) {
+        if (!Array.isArray(coords) || coords.length < 3) return null;
+        let cLat = 0, cLng = 0;
+        for (const p of coords) { cLat += p.lat; cLng += p.lng; }
+        cLat /= coords.length; cLng /= coords.length;
+        const proj = genProjector(cLat, cLng);
+        const pts = coords.map(p => proj.fwd(p));
+        let best = null;
+        const STEP = Math.PI / 180;
+        for (let a = 0; a < Math.PI / 2 + 1e-9; a += STEP) {
+            const ca = Math.cos(a), sa = Math.sin(a);
+            let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+            for (const q of pts) {
+                const u = q.x * ca + q.y * sa;
+                const v = -q.x * sa + q.y * ca;
+                if (u < minU) minU = u;
+                if (u > maxU) maxU = u;
+                if (v < minV) minV = v;
+                if (v > maxV) maxV = v;
+            }
+            const area = (maxU - minU) * (maxV - minV);
+            if (!best || area < best.area) best = { area, a, minU, maxU, minV, maxV };
+        }
+        const { a, minU, maxU, minV, maxV } = best;
+        const hu = (maxU - minU) / 2, hv = (maxV - minV) / 2;
+        // AABB center in the rotated frame → back to world meters
+        const cu = (minU + maxU) / 2, cv = (minV + maxV) / 2;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const cx = cu * ca - cv * sa;
+        const cy = cu * sa + cv * ca;
+        return { proj, cx, cy, a, hu, hv };
+    }
+
+    // Map a rectangle in the OBB's centered (u,v) frame to a closed
+    // ring of {lat,lng} corners (CCW).
+    function genBoxRing(obb, uLo, uHi, vLo, vHi) {
+        const ca = Math.cos(obb.a), sa = Math.sin(obb.a);
+        const toLL = (u, v) => obb.proj.inv({
+            x: obb.cx + u * ca - v * sa,
+            y: obb.cy + u * sa + v * ca,
+        });
+        return [toLL(uLo, vLo), toLL(uHi, vLo), toLL(uHi, vHi), toLL(uLo, vHi)];
+    }
+
+    // Build the 4-box inspection-FFZ frame for one asset. Each box's
+    // inner edge sits `standoff` off the asset face; depth (flyable
+    // thickness) is ≥ minSize; E/W boxes extend in v and N/S in u to
+    // the same outer reach so they OVERLAP at the corners → the union
+    // is a continuous, traversable ring with no diagonal gap. Returns
+    // up to 4 write-shape FFZ (type 16) payloads.
+    // Flatten the site's power-line KML (distro + trans) into [a,b] segments.
+    function powerLineSegments(siteID) {
+        const segs = [];
+        const add = (feats) => (feats || []).forEach(f => {
+            const c = f && f.coords;
+            if (!Array.isArray(c)) return;
+            for (let i = 0; i < c.length - 1; i++) {
+                if (c[i] && c[i + 1] && typeof c[i].lat === 'number' && typeof c[i + 1].lat === 'number') {
+                    segs.push([c[i], c[i + 1]]);
+                }
+            }
+        });
+        if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
+        return segs;
+    }
+
+    // ============================================================
+    // A2 — SHIELDED FLIGHT-PATH ROUTING (base → assets along power lines)
+    // ============================================================
+    // Tunables (feet). The drone travels ALONG power-line corridors; it may hop
+    // between corridors that pass within CONNECT_FT, and breaks shielding only for
+    // the base launch leg and the final asset approach.
+    const A2 = {
+        densifyFt: 40,      // node spacing along a power line (finer = more branch points, bigger graph)
+        connectFt: 130,     // two corridors within this can be hopped between (2×65 ft shield reach)
+        approachMaxFt: 220, // asset/base further than this from any line = out-of-shield (flag)
+        bufferFt: 15,       // never enter a pad+this buffer
+        mergeFt: 60,        // parallel PL segments within this = one corridor (distro+trans on same poles)
+        offsetFt: 50,       // A2.2: offset the corridor this far toward the asset side (mid of 40–65)
+        shieldMinFt: 40,    // shielded band: closer than this to a line = flag
+        shieldMaxFt: 65,    // shielded band: farther than this from a line = flag
+        sampleFt: 12,       // corridor resample spacing for offset/push/shield check
+        simplifyFt: 14,     // collapse corridor vertices within this of a straight run (kill scribble)
+    };
+    function a2Interp(a, b, t) { return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t }; }
+    // Distance (m) from a point to the nearest power-line segment.
+    function a2PointToSegs(p, segs) { let best = Infinity; for (const s of segs) { const d = pointToSegMeters(p.lat, p.lng, s[0], s[1]); if (d < best) best = d; } return best; }
+    function a2InObstacle(p, obstacles) { for (const ob of obstacles) if (pointInPolygon(p.lat, p.lng, ob)) return true; return false; }
+    // Offset each power-line FEATURE (an ordered polyline) a flat ~50 ft to the
+    // asset side, as an ORDERED walk so the perpendicular orientation is stable
+    // along the whole line (the node-graph version flipped sign between equidistant
+    // neighbours → sawtooth). One majority asset-side per feature. NO obstacle
+    // dodging (that produced the zigzags) — clean lanes, FLAG where a point leaves
+    // the 40–65 ft band or crosses a pad/FFZ for the CSM to drag-fix. Returns offset
+    // polylines [{lat,lng,flag}…].
+    function a2BuildCorridor(features, segs, padObs, ffzObs, assetCens) {
+        const sampleM = A2.sampleFt * GEN_FT_TO_M, offM = A2.offsetFt * GEN_FT_TO_M;
+        const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        const avoidObs = padObs.concat(ffzObs);
+        // CLEAN OFFSET + FLAG (user's chosen approach): no obstacle dodging — that
+        // produced the zigzags. Just a flat ~50 ft offset to one consistent side per
+        // line. A point is FLAGGED (orange, for the CSM to drag-fix) where it leaves
+        // the 40–65 ft shield band OR crosses a pad/FFZ.
+        const flagOf = (p) => { const d = a2PointToSegs(p, segs); return (d < minM || d > maxM) || a2InObstacle(p, avoidObs); };
+        const out = [];
+        for (const coords of features) {
+            if (!coords || coords.length < 2) continue;
+            // densify the feature into one ordered point list
+            const dense = [];
+            for (let i = 0; i < coords.length - 1; i++) {
+                const a = coords[i], b = coords[i + 1];
+                const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / sampleM));
+                for (let k = (i === 0 ? 0 : 1); k <= n; k++) dense.push(a2Interp(a, b, k / n));
+            }
+            if (dense.length < 2) continue;
+            // per-point projector + perpendicular (prev→next, consistent along the
+            // ordered walk) + the asset-side sign; then ONE majority side per feature.
+            const info = dense.map((p, j) => {
+                const q0 = dense[Math.max(0, j - 1)], q1 = dense[Math.min(dense.length - 1, j + 1)];
+                const proj = genProjector(p.lat, p.lng); const A = proj.fwd(q0), B = proj.fwd(q1);
+                const dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1, px = -dy / L, py = dx / L;
+                let best = Infinity, s = 1;
+                for (const c of assetCens) { const cf = proj.fwd(c); const dd = Math.hypot(cf.x, cf.y); if (dd < best) { best = dd; s = (cf.x * px + cf.y * py) >= 0 ? 1 : -1; } }
+                return { proj, px, py, s };
+            });
+            const smaj = info.reduce((a, i) => a + i.s, 0) >= 0 ? 1 : -1;
+            const pts = info.map(i => { const p = i.proj.inv({ x: i.px * offM * smaj, y: i.py * offM * smaj }); return { lat: p.lat, lng: p.lng, flag: flagOf(p) }; });
+            out.push(pts);
+        }
+        return out;
+    }
+    // Collapse the dense pushed corridor into FEW clean vertices (the real FP uses
+    // ~19 for a whole site). Build one connected graph from all sample segments,
+    // then iteratively delete every degree-2 vertex that sits within tolM of the
+    // straight line between its two neighbours — keeping only corners, branch
+    // points, and ends. Returns connected segments [{a,b,flag}], flag recomputed
+    // per segment by sampling the shield distance.
+    function a2SimplifyCorridor(corridor, tolM, segs, ffzObs) {
+        const minM = A2.shieldMinFt * GEN_FT_TO_M, maxM = A2.shieldMaxFt * GEN_FT_TO_M;
+        ffzObs = ffzObs || [];
+        const kf = (p) => `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`;
+        const nodes = new Map(), adj = new Map();
+        const add = (p) => { const k = kf(p); if (!nodes.has(k)) { nodes.set(k, { lat: p.lat, lng: p.lng }); adj.set(k, new Set()); } return k; };
+        for (const pts of corridor) for (let i = 0; i < pts.length - 1; i++) { const ka = add(pts[i]), kb = add(pts[i + 1]); if (ka !== kb) { adj.get(ka).add(kb); adj.get(kb).add(ka); } }
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const k of [...nodes.keys()]) {
+                const ns = adj.get(k); if (!ns || ns.size !== 2) continue;
+                const it = ns.values(); const a = it.next().value, b = it.next().value;
+                if (a === b) continue;
+                if (segDistM(nodes.get(k), nodes.get(a), nodes.get(b)) < tolM) {
+                    adj.get(a).delete(k); adj.get(b).delete(k); adj.get(a).add(b); adj.get(b).add(a);
+                    nodes.delete(k); adj.delete(k); changed = true;
+                }
+            }
+        }
+        const out = [], seen = new Set();
+        const sampleM = A2.sampleFt * GEN_FT_TO_M;
+        for (const [k, ns] of adj) for (const nk of ns) {
+            const e = k < nk ? k + '|' + nk : nk + '|' + k; if (seen.has(e)) continue; seen.add(e);
+            const a = nodes.get(k), b = nodes.get(nk);
+            const len = approxMeters(a.lat, a.lng, b.lat, b.lng), n = Math.max(1, Math.round(len / sampleM));
+            let flag = false;
+            for (let i = 0; i <= n && !flag; i++) { const p = a2Interp(a, b, i / n); const dL = a2PointToSegs(p, segs); if (dL < minM || dL > maxM || a2InObstacle(p, ffzObs)) flag = true; }
+            out.push({ a, b, flag });
+        }
+        return out;
+    }
+    // Midpoint of the ring edge whose midpoint is nearest `pt` — the FP connects
+    // to the MIDDLE of the FFZ edge facing the corridor. Returns {pt, d(m)}.
+    function a2NearestEdgeMidpoint(ring, pt) {
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const a = ring[i], b = ring[(i + 1) % ring.length];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const d = approxMeters(pt.lat, pt.lng, mid.lat, mid.lng);
+            if (!best || d < best.d) best = { d, pt: mid };
+        }
+        return best;
+    }
+    // Nearest point on a set of [a,b] edges to a lat/lng point. Returns {pt, d(m)}.
+    function a2NearestOnEdges(pt, edges) {
+        const proj = genProjector(pt.lat, pt.lng);
+        let best = null;
+        for (const [a, b] of edges) {
+            const A = proj.fwd(a), B = proj.fwd(b);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const fx = A.x + t * dx, fy = A.y + t * dy, d = Math.hypot(fx, fy);
+            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }) };
+        }
+        return best;
+    }
+    // Build a routing graph from the site's power lines: densified vertices along
+    // each segment (shielded travel edges) + connector edges between any two
+    // vertices within connectFt (lets the drone cross between nearby corridors).
+    // Returns { adj, verts } — same shape as buildFlightPathGraph, so dijkstra*/
+    // nearestGraphVertex work unchanged. Every edge carries { shielded:true }.
+    // Power lines as whole POLYLINES (one per KML feature), not flat segments —
+    // we need line membership so the graph follows each line EXACTLY and never
+    // chords across its own bends.
+    function powerLineFeatures(siteID) {
+        const feats = [];
+        const add = (arr) => (arr || []).forEach(f => { if (f && Array.isArray(f.coords) && f.coords.length >= 2) feats.push(f.coords); });
+        if (powerLinesKml.siteID === siteID) { add(powerLinesKml.distro); add(powerLinesKml.trans); }
+        return feats;
+    }
+    // Drop a whole feature when EVERY vertex is within mergeM of an already-kept
+    // feature (parallel duplicate, e.g. distro+trans on the same poles).
+    function dedupeParallelFeatures(feats, mergeM) {
+        const kept = [];
+        for (const c of feats) {
+            let dup = false;
+            for (const k of kept) {
+                let allNear = true;
+                for (const p of c) { let dmin = Infinity; for (let i = 0; i < k.length - 1; i++) { const d = pointToSegMeters(p.lat, p.lng, k[i], k[i + 1]); if (d < dmin) dmin = d; } if (dmin > mergeM) { allNear = false; break; } }
+                if (allNear) { dup = true; break; }
+            }
+            if (!dup) kept.push(c);
+        }
+        return kept;
+    }
+    function buildPowerLineGraph(siteID) {
+        const feats = dedupeParallelFeatures(powerLineFeatures(siteID), A2.mergeFt * GEN_FT_TO_M);
+        const adj = new Map(), verts = new Map(), nodeLine = new Map();
+        const addVert = (p, lineId) => { const k = vkey(p); if (!verts.has(k)) { verts.set(k, { lat: p.lat, lng: p.lng }); nodeLine.set(k, lineId); } if (!adj.has(k)) adj.set(k, []); return k; };
+        const addEdge = (ka, kb, shielded) => { if (ka === kb) return; const w = approxMeters(verts.get(ka).lat, verts.get(ka).lng, verts.get(kb).lat, verts.get(kb).lng); adj.get(ka).push({ to: kb, w, shielded }); adj.get(kb).push({ to: ka, w, shielded }); };
+        const stepM = A2.densifyFt * GEN_FT_TO_M;
+        // 1) densify each LINE (feature) into a node chain tagged with its lineId —
+        //    chain edges follow the line EXACTLY (no corner-cutting).
+        feats.forEach((coords, lineId) => {
+            let prevK = addVert(coords[0], lineId);
+            for (let s = 0; s < coords.length - 1; s++) {
+                const a = coords[s], b = coords[s + 1];
+                const len = approxMeters(a.lat, a.lng, b.lat, b.lng);
+                const n = Math.max(1, Math.round(len / stepM));
+                for (let i = 1; i <= n; i++) { const k = addVert(a2Interp(a, b, i / n), lineId); addEdge(prevK, k, true); prevK = k; }
+            }
+        });
+        // 2) connectors ONLY between DIFFERENT lines within connectFt (a genuine
+        //    corridor hop) — never within one line (that was chording across bends,
+        //    cutting corners off the line + over pads). For each ordered line pair
+        //    add only the SINGLE closest bridge so the tree can't zigzag.
+        const connM = A2.connectFt * GEN_FT_TO_M;
+        const keys = [...verts.keys()];
+        const bestBridge = new Map(); // "li-lj" -> {ka,kb,d}
+        for (let i = 0; i < keys.length; i++) {
+            const vi = verts.get(keys[i]), li = nodeLine.get(keys[i]);
+            for (let j = i + 1; j < keys.length; j++) {
+                const lj = nodeLine.get(keys[j]);
+                if (li === lj) continue; // same line → chain only, no chord
+                const vj = verts.get(keys[j]);
+                const d = approxMeters(vi.lat, vi.lng, vj.lat, vj.lng);
+                if (d <= 0 || d > connM) continue;
+                const pk = li < lj ? li + '-' + lj : lj + '-' + li;
+                const cur = bestBridge.get(pk);
+                if (!cur || d < cur.d) bestBridge.set(pk, { ka: keys[i], kb: keys[j], d });
+            }
+        }
+        bestBridge.forEach(b => addEdge(b.ka, b.kb, true));
+        return { adj, verts };
+    }
+    // Route a branching tree from the base to every eligible asset, snaking along
+    // power lines. Returns { ok, reason?, edges:[[p,p]…] (the union tree), assets:
+    // [{asset, reachable, path:[{lat,lng}…], approachFt, baseLaunchFt}], stats }.
+    // PREVIEW-ONLY (no offset, no altitude, no commit yet — that's A2.2/A2.3).
+    function routeFlightPaths(siteID, params) {
+        const bucket = mapObjectsBySite[siteID];
+        const entities = bucket ? (bucket.entities || []) : [];
+        const segs = powerLineSegments(siteID);
+        if (!segs.length) return { ok: false, reason: 'no-powerlines' };
+        const resolved = resolveBases(siteID, entities);
+        if (!resolved.bases.length) return { ok: false, reason: 'no-base' };
+        const basePt = gmPoint(resolved.bases[0]);
+        if (!basePt) return { ok: false, reason: 'base-no-coord' };
+        const graph = buildPowerLineGraph(siteID);
+        if (graph.verts.size === 0) return { ok: false, reason: 'no-graph' };
+        // connect the base to the nearest corridor node (unshielded launch leg)
+        const baseV = nearestGraphVertex(graph, basePt.lat, basePt.lng);
+        const baseKey = vkey(basePt);
+        graph.verts.set(baseKey, { lat: basePt.lat, lng: basePt.lng });
+        if (!graph.adj.has(baseKey)) graph.adj.set(baseKey, []);
+        graph.adj.get(baseKey).push({ to: baseV.key, w: baseV.dist, shielded: false });
+        graph.adj.get(baseV.key).push({ to: baseKey, w: baseV.dist, shielded: false });
+        const { dist, prev } = dijkstraPath(graph, baseKey);
+        // FFZ targets — the FP connects to the asset's FFZ, NOT the pad center (a
+        // big pad's center sits 100+ ft inside, wrongly reading as out-of-shield).
+        // Gather committed type-16 FFZs + any in the current generator preview
+        // (drafts), so routing snaps to FFZs you've placed even before commit.
+        const ffzRings = [];
+        for (const e of entities) { if (e.type !== 16) continue; const r = entityCoords(e); if (r && r.length >= 3) ffzRings.push({ ring: simplifyPolygon(r), cen: ringCentroid(r) }); }
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) {
+            for (const f of genState.lastResult.ffzs) { if (f.points && f.points.length >= 3) ffzRings.push({ ring: f.points, cen: f._centroid || ringCentroid(f.points) }); }
+        }
+        const reachM = REACH_FFZ_FT * GEN_FT_TO_M; // FFZ counts as the asset's if within this of the pad EDGE
+        // candidate assets: same skip rules + proximity gate as the FFZ generator
+        const proxM = params.proximityFt * GEN_FT_TO_M;
+        const baseLaunchFt = baseV.dist / GEN_FT_TO_M;
+        const out = [];
+        let reachable = 0, unreachable = 0, usedFfz = 0;
+        for (const a of entities) {
+            if (a.type !== 3) continue;
+            if (params.skipBadStates && assetSkipReason(a)) continue;
+            const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            if (minRingToSegsM(ring, segs) > proxM) continue; // not near any power line
+            // target = the asset's FFZ centroid if one is within reach of the pad
+            // edge, else the pad EDGE vertex nearest a corridor (never the center).
+            let ffz = null, ffzD = Infinity;
+            for (const f of ffzRings) { let d = Infinity; for (const c of ring) { const dd = pointToPolygonMeters(c.lat, c.lng, f.ring); if (dd < d) d = dd; } if (d < ffzD) { ffzD = d; ffz = f; } }
+            let target, hasFfz = false;
+            if (ffz && ffzD <= reachM) { target = ffz.cen; hasFfz = true; }
+            else { let bv = null; for (const c of ring) { const gv = nearestGraphVertex(graph, c.lat, c.lng); if (!bv || gv.dist < bv.dist) bv = { pt: c, gv }; } target = bv.pt; }
+            const av = nearestGraphVertex(graph, target.lat, target.lng);
+            const approachFt = av.dist / GEN_FT_TO_M;
+            const net = dist.has(av.key) ? dist.get(av.key) : null;
+            if (net == null) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt, hasFfz }); unreachable++; continue; }
+            const keyPath = reconstructPath(prev, baseKey, av.key);
+            if (!keyPath) { out.push({ asset: a, reachable: false, path: null, approachFt, baseLaunchFt, hasFfz }); unreachable++; continue; }
+            const path = keyPath.map(k => { const v = graph.verts.get(k); return { lat: v.lat, lng: v.lng }; });
+            path.push({ lat: target.lat, lng: target.lng }); // branch tip = FFZ (or pad edge); A2.2 refines entry
+            // EVERY asset with a path connects (the drone must reach all of them).
+            // A long approach (> approachMaxFt) isn't excluded — it's just flagged.
+            const longApproach = approachFt > A2.approachMaxFt;
+            out.push({ asset: a, reachable: true, longApproach, path, approachFt, baseLaunchFt, _avKey: av.key, hasFfz, _ffzRing: hasFfz ? ffz.ring : null });
+            reachable++; if (hasFfz) usedFfz++; if (longApproach) unreachable++;
+        }
+        // union the per-asset key-paths into ONE connected branching tree (dedupe
+        // edges). Include EVERY asset with a path — out-of-shield ones still must
+        // connect to the base (they just fly a longer unshielded approach).
+        const edgeSet = new Set(), edges = [];
+        for (const r of out) {
+            if (!r.path || !r._avKey) continue;
+            const kp = reconstructPath(prev, baseKey, r._avKey);
+            if (!kp) continue;
+            for (let i = 0; i < kp.length - 1; i++) {
+                const e = kp[i] < kp[i + 1] ? kp[i] + '|' + kp[i + 1] : kp[i + 1] + '|' + kp[i];
+                if (edgeSet.has(e)) continue; edgeSet.add(e);
+                const va = graph.verts.get(kp[i]), vb = graph.verts.get(kp[i + 1]);
+                edges.push([{ lat: va.lat, lng: va.lng }, { lat: vb.lat, lng: vb.lng }]);
+            }
+        }
+        // A2.2: obstacle-aware corridor. The trunk avoids PAD buffers (15 ft) + FFZ
+        // interiors; it only connects into an FFZ at a branch tip. Validated offline
+        // against the real 1502 FP: median ~50 ft, ~76% in 40–65 ft band.
+        // NB: type-3 pad rings are stored in a BOWTIE order — simplifyPolygon FIRST,
+        // else the offset buffer is malformed and blocks the whole band.
+        const padObstacles = [];
+        for (const a of entities) { if (a.type !== 3) continue; const r = entityCoords(a); if (r && r.length >= 3) { const buf = assetOffsetRing(simplifyPolygon(r), A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObstacles.push(buf); } }
+        const ffzObstacles = ffzRings.map(f => f.ring);
+        const assetCens = ffzRings.map(f => f.cen);
+        if (!assetCens.length) for (const a of entities) { if (a.type === 3) { const r = entityCoords(a); if (r) assetCens.push(ringCentroid(r)); } }
+        // corridor geometry = offset of the power-line FEATURES (ordered, stable),
+        // not the routed tree (the tree had connector hops that sawtoothed). The
+        // tree still drives reachability + per-asset branches below.
+        const corridorFeatures = dedupeParallelFeatures(powerLineFeatures(siteID), A2.mergeFt * GEN_FT_TO_M);
+        const corridorRaw = a2BuildCorridor(corridorFeatures, segs, padObstacles, ffzObstacles, assetCens);
+        const corridor = a2SimplifyCorridor(corridorRaw, A2.simplifyFt * GEN_FT_TO_M, segs, ffzObstacles); // few clean verts → [{a,b,flag}]
+        const corridorEdges = corridor.map(s => [s.a, s.b]); // for the branch foot
+        let flaggedFt = 0;
+        for (const s of corridor) if (s.flag) flaggedFt += approxMeters(s.a.lat, s.a.lng, s.b.lat, s.b.lng) / GEN_FT_TO_M;
+        // Branch from the PUSHED corridor to the MIDDLE of the FFZ near edge — for
+        // EVERY asset that has a path (reachable AND out-of-shield), so nothing ever
+        // draws a line to the FFZ centre.
+        const footEdges = corridorEdges.length ? corridorEdges : edges;
+        for (const r of out) {
+            if (!r.path || r.path.length < 2) continue;
+            const ref = r._ffzRing ? ringCentroid(r._ffzRing) : r.path[r.path.length - 1];
+            const foot = a2NearestOnEdges(ref, footEdges);
+            if (!foot) continue;
+            r.foot = foot.pt;
+            if (r._ffzRing) { const e = a2NearestEdgeMidpoint(r._ffzRing, foot.pt); if (e) r.entry = e.pt; }
+        }
+        // base launch leg: base → nearest point on the offset corridor (unshielded)
+        let baseLaunch = null;
+        const bl = corridorEdges.length ? a2NearestOnEdges(basePt, corridorEdges) : null;
+        if (bl) baseLaunch = { from: { lat: basePt.lat, lng: basePt.lng }, to: bl.pt };
+        const corrVerts = new Set(); for (const s of corridor) { corrVerts.add(`${s.a.lat.toFixed(7)},${s.a.lng.toFixed(7)}`); corrVerts.add(`${s.b.lat.toFixed(7)},${s.b.lng.toFixed(7)}`); }
+        // context kept so the live editor can RE-FLAG a segment as you drag it
+        const _ctx = { segs, avoidObs: padObstacles.concat(ffzObstacles) };
+        return { ok: true, base: basePt, baseEntity: resolved.bases[0], baseAuto: resolved.auto, edges, corridor, baseLaunch, assets: out, _ctx, stats: { reachable, unreachable, total: reachable + unreachable, graphVerts: graph.verts.size, plSegs: segs.length, baseLaunchFt, usedFfz, ffzCount: ffzRings.length, flaggedFt: Math.round(flaggedFt), corridorVerts: corrVerts.size } };
+    }
+    // Returns the skip-state name (unreachable/unshielded/empty) for an asset
+    // if it should be skipped, else null. Reads the poi_type_str suffix +
+    // is_unshielded; every other state (Normal/Inactive/HY/…) qualifies.
+    function assetSkipReason(asset) {
+        if (asset.is_unshielded) return 'unshielded';
+        const p = (asset.custom && asset.custom.poi_type_str) || '';
+        const i = p.indexOf(' - ');
+        const suffix = i >= 0 ? p.slice(i + 3).trim().toLowerCase() : '';
+        return GEN_SKIP_STATES.indexOf(suffix) >= 0 ? suffix : null;
+    }
+    // Min distance (m) from a ring of {lat,lng} points to any PL segment.
+    function minRingToSegsM(ring, segs) {
+        let best = Infinity;
+        for (const v of ring) {
+            for (const sg of segs) {
+                const d = pointToSegMeters(v.lat, v.lng, sg[0], sg[1]);
+                if (d < best) best = d;
+            }
+        }
+        return best;
+    }
+    function ringCentroid(ring) {
+        let lat = 0, lng = 0;
+        for (const p of ring) { lat += p.lat; lng += p.lng; }
+        return { lat: lat / ring.length, lng: lng / ring.length };
+    }
+    // Bearing (rad) of a segment in a locally-isotropic frame (lng scaled by
+    // cos lat) so angle comparisons are meaningful.
+    function segAngleRad(a, b) {
+        return Math.atan2(b.lat - a.lat, (b.lng - a.lng) * Math.cos(a.lat * Math.PI / 180));
+    }
+    // True if the FFZ box runs PARALLEL over/along a power line (a SOP no-no).
+    // Crossing a line is fine; lying parallel within `clearFt` is not. We flag
+    // when a line interacts with the box (endpoint inside / box edge crosses it
+    // / within clearFt) AND is near-parallel to the box's long axis (<25°).
+    function ffzOverPowerLine(ring, segs, clearFt) {
+        if (!segs || !segs.length || ring.length < 3) return false;
+        const clearM = clearFt * GEN_FT_TO_M;
+        const e0 = approxMeters(ring[0].lat, ring[0].lng, ring[1].lat, ring[1].lng);
+        const e1 = approxMeters(ring[1].lat, ring[1].lng, ring[2].lat, ring[2].lng);
+        const la = e0 >= e1 ? [ring[0], ring[1]] : [ring[1], ring[2]];
+        const boxAng = segAngleRad(la[0], la[1]);
+        for (const sg of segs) {
+            let touches = pointInPolygon(sg[0].lat, sg[0].lng, ring) || pointInPolygon(sg[1].lat, sg[1].lng, ring);
+            if (!touches) {
+                for (let i = 0; i < ring.length && !touches; i++) {
+                    if (segmentsCross(ring[i], ring[(i + 1) % ring.length], sg[0], sg[1])) touches = true;
+                }
+            }
+            if (!touches && minRingToSegsM(ring, [sg]) < clearM) touches = true;
+            if (!touches) continue;
+            let da = Math.abs(boxAng - segAngleRad(sg[0], sg[1])) % Math.PI;
+            if (da > Math.PI / 2) da = Math.PI - da;
+            if (da < (25 * Math.PI / 180)) return true; // near-parallel & interacting
+        }
+        return false;
+    }
+    // True if the asset already has an FFZ near it (overlaps, or any asset
+    // vertex within 60 ft of an existing FFZ). Lets us flag duplicates.
+    function assetHasExistingFfz(assetRing, ffzRings) {
+        const nearM = 60 * GEN_FT_TO_M;
+        for (const fr of ffzRings) {
+            if (polygonsIntersect(assetRing, fr)) return true;
+            for (const v of assetRing) {
+                if (pointToPolygonMeters(v.lat, v.lng, fr) < nearM) return true;
+            }
+        }
+        return false;
+    }
+
+    // Subset of segments with any vertex of `ring` within `ft` of them — keeps
+    // the per-asset placement search fast (vs scanning the whole site's lines).
+    function segsNearRing(ring, segs, ft) {
+        const m = ft * GEN_FT_TO_M;
+        return segs.filter(sg => {
+            for (const v of ring) if (pointToSegMeters(v.lat, v.lng, sg[0], sg[1]) < m) return true;
+            return false;
+        });
+    }
+    // Choose where to put the single edge box. For each of the 4 faces we take
+    // the SMALLEST standoff (≥ base, stepping outward up to a cap) at which the
+    // box does NOT run parallel-over a power line — i.e. we either keep the
+    // face and nudge it OFF the line, or, via scoring, fall back to the next
+    // closest side. Score favors boxes closest to a line (best shielding) and
+    // penalizes extra offset; an unresolved face (can't clear) is deprioritized
+    // and marked dirty. Returns the winning {ring, side, standoff, offsetFt,
+    // dist(m), dirty}.
+    function bestEdgePlacement(obb, params, segs, clearFt) {
+        const s0 = params.standoffFt * GEN_FT_TO_M;
+        const d = Math.max(params.depthFt, 30) * GEN_FT_TO_M;
+        const { hu, hv } = obb;
+        const hL = Math.max(hv, 15 * GEN_FT_TO_M); // along-face half-length ≥15 ft (span ≥30)
+        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
+        const faces = [
+            { side: 'E', build: s => [hu + s, hu + s + d, -hL, hL] },
+            { side: 'W', build: s => [-(hu + s + d), -(hu + s), -hL, hL] },
+            { side: 'N', build: s => [-vL, vL, hv + s, hv + s + d] },
+            { side: 'S', build: s => [-vL, vL, -(hv + s + d), -(hv + s)] },
+        ];
+        const capM = 80 * GEN_FT_TO_M;   // don't push standoff past ~80 ft to clear a line
+        const stepM = 5 * GEN_FT_TO_M;
+        let best = null;
+        faces.forEach(f => {
+            let pick = null;
+            for (let s = s0; s <= s0 + capM + 1e-9; s += stepM) {
+                const [uLo, uHi, vLo, vHi] = f.build(s);
+                const ring = genBoxRing(obb, uLo, uHi, vLo, vHi);
+                if (!ffzOverPowerLine(ring, segs, clearFt)) {
+                    pick = { ring, standoff: s, dist: minRingToSegsM(ring, segs), offsetFt: (s - s0) / GEN_FT_TO_M, dirty: false };
+                    break;
+                }
+            }
+            if (!pick) {
+                const [uLo, uHi, vLo, vHi] = f.build(s0);
+                const ring = genBoxRing(obb, uLo, uHi, vLo, vHi);
+                pick = { ring, standoff: s0, dist: minRingToSegsM(ring, segs), offsetFt: 0, dirty: true };
+            }
+            const distFt = isFinite(pick.dist) ? pick.dist / GEN_FT_TO_M : 1e5;
+            pick.score = distFt + pick.offsetFt * 0.5 + (pick.dirty ? 1e6 : 0);
+            pick.side = f.side;
+            if (!best || pick.score < best.score) best = pick;
+        });
+        return best;
+    }
+
+    // Build ONE inspection FFZ for an asset: a single OPEN edge box placed on
+    // the best shielded side (closest to a power line, nudged off it / moved to
+    // the next side if it would lie parallel over one). Points are 4 distinct
+    // corners — never closed or looped. Restrictions (altitudes) are filled in
+    // by the DEM pass in generateAllFfzs. Returns null on bad geometry.
+    function generateEdgeFfz(asset, params, segs) {
+        const coords = entityCoords(asset);
+        if (!coords || coords.length < 3) return null;
+        const obb = orientedBBox(coords);
+        if (!obb) return null;
+        const p = bestEdgePlacement(obb, params, segs, params.lineClearFt);
+        if (!p) return null;
+        const nm = asset.name || (asset.id != null ? `#${asset.id}` : 'asset');
+        return {
+            type: 16,
+            name: genDraftName(nm),
+            site_id: asset.site != null ? asset.site : genState.siteID,
+            points: p.ring,                               // OPEN — 4 distinct corners
+            restrictions: { minAlt: null, maxAlt: null }, // set by the DEM pass
+            _gen: true, _assetId: asset.id, _assetName: nm, _side: p.side,
+            _centroid: ringCentroid(p.ring), _plDistFt: p.dist / GEN_FT_TO_M,
+            _standoffFt: p.standoff / GEN_FT_TO_M, _offsetFt: p.offsetFt,
+            _overPowerLine: p.dirty,   // true only if no side could clear a line
+        };
+    }
+
+    // Generate the inspection-FFZ set for a site: filter to Normal assets
+    // within `proximityFt` of a power line, build one shielded-edge FFZ each,
+    // then DEM-check each centroid to set the MSL altitude band (floor =
+    // ground + AGL, ceiling = floor + delta). Async (DEM fetch).
+    async function generateAllFfzs(siteID, params, onProgress) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        if (!hasPowerLinesFor(siteID)) return { error: 'no-powerlines' };
+        const segs = powerLineSegments(siteID);
+        const assets = ents.filter(e => e.type === 3 && entityCoords(e));
+        const ffzRings = ents.filter(e => e.type === 16 && entityCoords(e)).map(e => entityCoords(e));
+        let skippedState = 0, skippedFar = 0, skippedExisting = 0, overLine = 0, hasExisting = 0;
+        const ffzs = [];
+        assets.forEach(a => {
+            try {
+                if (params.skipBadStates && assetSkipReason(a)) { skippedState++; return; }
+                const assetRing = entityCoords(a);
+                const dFt = (segs.length ? minRingToSegsM(assetRing, segs) : Infinity) / GEN_FT_TO_M;
+                if (dFt > params.proximityFt) { skippedFar++; return; }
+                const existing = assetHasExistingFfz(assetRing, ffzRings);
+                if (existing && params.skipExisting) { skippedExisting++; return; }
+                // Only consider lines near this asset (placement search + flag).
+                const localSegs = segsNearRing(assetRing, segs, params.proximityFt + 150);
+                const f = generateEdgeFfz(a, params, localSegs);
+                if (!f) return;
+                f._assetDistFt = dFt;
+                f._hasExistingFfz = existing;
+                if (existing) hasExisting++;
+                if (f._overPowerLine) overLine++; // set by placement (no side could clear)
+                ffzs.push(f);
+            } catch (e) {
+                console.warn(`${GEN_TAG} FFZ gen failed for asset ${a && a.id}:`, e);
+            }
+        });
+        // DEM altitude pass — fetch ground at each FFZ centroid, set MSL band.
+        const centroids = ffzs.map(f => f._centroid);
+        let demOk = 0, demMiss = 0;
+        if (centroids.length) {
+            try { await bulkFetchElevations(centroids, onProgress); }
+            catch (e) { console.warn(`${GEN_TAG} DEM fetch failed:`, e); }
+        }
+        // Resolve the site's altitude reference. AGL sites store the raw height
+        // (no ground term); MSL sites store ground + AGL; unknown blocks the write.
+        const am = await siteAltMode(siteID);
+        const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
+        ffzs.forEach(f => {
+            const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
+            f._groundM = (typeof g === 'number') ? g : null;
+            f._altMode = mode;
+            if (mode === 'agl') {
+                // Height above ground — DEM not needed for the stored value.
+                f.restrictions = { minAlt: aglFtToStoredM(params.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(params.aglFt + params.deltaFt, 0, 'agl') };
+                demOk++;
+            } else if (mode === 'msl' && typeof g === 'number') {
+                f.restrictions = { minAlt: aglFtToStoredM(params.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(params.aglFt + params.deltaFt, g, 'msl') };
+                demOk++;
+            } else {
+                // MSL with no DEM, or mode unknown → leave altitude unset.
+                f.restrictions = { minAlt: null, maxAlt: null }; demMiss++;
+            }
+        });
+        return { total: assets.length, generated: ffzs.length, skippedState, skippedFar, skippedExisting, overLine, hasExisting, demOk, demMiss, mode, ffzs };
+    }
+
+    function clearGenPreview() {
+        unwireGenEditing();
+        clearResizeHandles();
+        const map = getLeafletMap();
+        genPreviewLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        genPreviewLayers = [];
+    }
+    // ---- A2 route preview (polylines + base/branch markers) ----
+    function clearRoutePreview() {
+        const map = getLeafletMap();
+        genRouteLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        genRouteLayers = []; genRoute.handles = [];
+        unwireRouteEdit();
+        genRoute.verts = []; genRoute.segs = [];
+    }
+    // Redraw the editable corridor from genRoute state (lines + branches + base +
+    // draggable vertex handles). Called on first render and after each drag.
+    function drawGenRoute() {
+        const L = getLeafletL(), map = getLeafletMap(); if (!L || !map) return 0;
+        genRouteLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} }); genRouteLayers = []; genRoute.handles = [];
+        const edges = routeCorridorEdges();
+        // 1) all segments (corridor + baked branch stubs) — cyan shielded, ORANGE
+        //    where it leaves the band / hits a pad/FFZ
+        for (const s of genRoute.segs) {
+            const a = genRoute.verts[s.a], b = genRoute.verts[s.b];
+            try { const pl = L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: s.flag ? '#ff9a3d' : '#00e5ff', weight: s.flag ? 4 : 3, opacity: 0.95, interactive: false }); pl.addTo(map); genRouteLayers.push(pl); } catch (e) {}
+        }
+        // 2) base launch (base → nearest corridor pt) + base marker (base is fixed)
+        if (genRoute.base && edges.length) { const bl = a2NearestOnEdges(genRoute.base, edges); if (bl) { try { const l = L.polyline([[genRoute.base.lat, genRoute.base.lng], [bl.pt.lat, bl.pt.lng]], { color: '#ffd54f', weight: 3, opacity: 0.9, interactive: false }); l.addTo(map); genRouteLayers.push(l); } catch (e) {} } }
+        if (genRoute.base) { try { const b = L.circleMarker([genRoute.base.lat, genRoute.base.lng], { radius: 8, color: '#ffd54f', weight: 3, fillColor: '#3a3400', fillOpacity: 0.9, interactive: false }); b.addTo(map); genRouteLayers.push(b); } catch (e) {} }
+        // 3) draggable handles — GREEN at FFZ connections, white elsewhere
+        for (let i = 0; i < genRoute.verts.length; i++) {
+            const v = genRoute.verts[i], en = !!v._entry;
+            try { const h = L.circleMarker([v.lat, v.lng], { radius: en ? 6 : 5, color: en ? '#5fff5f' : '#ffffff', weight: 2, fillColor: en ? '#0a3d0a' : '#0a2730', fillOpacity: 0.95, interactive: false }); h.addTo(map); genRouteLayers.push(h); genRoute.handles.push(i); } catch (e) {}
+        }
+        return genRouteLayers.length;
+    }
+    function wireRouteEdit(map) {
+        if (genRoute.wired || !map) return;
+        genRoute.map = map; genRoute.container = map.getContainer();
+        const startDrag = (desc) => {
+            genRoute.drag = desc; try { map.dragging.disable(); } catch (e) {}
+            document.addEventListener('mousemove', genRoute.onMove, true);
+            document.addEventListener('mouseup', genRoute.onUp, true);
+        };
+        const hitVert = (cp) => { let best = -1, bd = 14; for (let i = 0; i < genRoute.verts.length; i++) { const v = genRoute.verts[i]; const p = map.latLngToContainerPoint([v.lat, v.lng]); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bd) { bd = d; best = i; } } return best; };
+        genRoute.onDown = (ev) => {
+            if (ev.button !== 0 || genDraw.active || !genRoute.verts.length) return; // not during FFZ draw
+            let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            // 1) drag an existing waypoint (white path dot OR green FFZ-connection, within 14 px)
+            const best = hitVert(cp);
+            if (best >= 0) { ev.preventDefault(); ev.stopPropagation(); startDrag(best); return; }
+            // 2) click ON any line (within 8 px) → INSERT a waypoint there + drag it
+            let bestSeg = -1, bsd = 8, bsp = null;
+            for (let si = 0; si < genRoute.segs.length; si++) { const s = genRoute.segs[si]; const A = map.latLngToContainerPoint([genRoute.verts[s.a].lat, genRoute.verts[s.a].lng]), B = map.latLngToContainerPoint([genRoute.verts[s.b].lat, genRoute.verts[s.b].lng]); const r = ptSegPx(cp, A, B); if (r.dist < bsd) { bsd = r.dist; bestSeg = si; bsp = r.foot; } }
+            if (bestSeg >= 0) { ev.preventDefault(); ev.stopPropagation(); const ll = map.containerPointToLatLng(bsp); const ni = insertVertOnSeg(bestSeg, ll); drawGenRoute(); startDrag(ni); }
+        };
+        // right-click a waypoint → delete it (bridges the gap; an FFZ tip drops the branch)
+        genRoute.onContext = (ev) => {
+            if (genDraw.active || !genRoute.verts.length) return;
+            let cp; try { cp = map.mouseEventToContainerPoint(ev); } catch (e) { return; }
+            const best = hitVert(cp);
+            if (best < 0) return;
+            ev.preventDefault(); ev.stopPropagation();
+            deleteVert(best); drawGenRoute(); syncRouteToResult();
+        };
+        genRoute.onMove = (ev) => {
+            if (genRoute.drag == null) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const v = genRoute.verts[genRoute.drag];
+            // FFZ-connection vert SOFT-snaps to the FFZ edge only when within ~25 ft —
+            // otherwise it drags free (no more hard lock).
+            if (v._entry && v._ffzRing) { const np = nearestPointOnRing(ll, v._ffzRing); const dft = np && np.pt ? approxMeters(ll.lat, ll.lng, np.pt.lat, np.pt.lng) / GEN_FT_TO_M : 1e9; if (np && np.pt && dft < 25) { v.lat = np.pt.lat; v.lng = np.pt.lng; } else { v.lat = ll.lat; v.lng = ll.lng; } }
+            else { v.lat = ll.lat; v.lng = ll.lng; }
+            for (const s of genRoute.segs) if (s.a === genRoute.drag || s.b === genRoute.drag) reflagSeg(s);
+            drawGenRoute();
+        };
+        genRoute.onUp = () => {
+            if (genRoute.drag == null) return;
+            genRoute.drag = null; try { map.dragging.enable(); } catch (e) {}
+            document.removeEventListener('mousemove', genRoute.onMove, true);
+            document.removeEventListener('mouseup', genRoute.onUp, true);
+            syncRouteToResult();
+        };
+        genRoute.container.addEventListener('mousedown', genRoute.onDown, true);
+        genRoute.container.addEventListener('contextmenu', genRoute.onContext, true);
+        genRoute.wired = true;
+    }
+    function unwireRouteEdit() {
+        if (genRoute.container) {
+            if (genRoute.onDown) { try { genRoute.container.removeEventListener('mousedown', genRoute.onDown, true); } catch (e) {} }
+            if (genRoute.onContext) { try { genRoute.container.removeEventListener('contextmenu', genRoute.onContext, true); } catch (e) {} }
+        }
+        if (genRoute.onMove) { try { document.removeEventListener('mousemove', genRoute.onMove, true); } catch (e) {} }
+        if (genRoute.onUp) { try { document.removeEventListener('mouseup', genRoute.onUp, true); } catch (e) {} }
+        const map = genRoute.map; if (map && genRoute.drag != null) { try { map.dragging.enable(); } catch (e) {} }
+        genRoute.wired = false; genRoute.drag = null;
+    }
+    function renderRoutePreview(result) {
+        clearRoutePreview();
+        const map = getLeafletMap();
+        if (!getLeafletL() || !map || !result || !result.ok) return 0;
+        buildRouteEdit(result);
+        const n = drawGenRoute();
+        wireRouteEdit(map);
+        return n;
+    }
+
+    // ============================================================
+    // A2 — DRAW-FP MODE: you sketch rough waypoints; each snaps to ~50 ft parallel
+    // off the NEAREST power line (on the side you drew toward) when within range,
+    // else stays free (a crossing / connector). Double-click finishes → the path
+    // becomes the editable corridor (drag/insert/delete). Altitudes come next.
+    // ============================================================
+    // Snap a point to `offM` perpendicular off the nearest power line, on the side
+    // the point is on. Returns { pt, snapped } — unchanged if no line within rangeM.
+    function a2SnapToLineOffset(ll, segs, offM, rangeM) {
+        let best = null;
+        for (const s of segs) { const d = pointToSegMeters(ll.lat, ll.lng, s[0], s[1]); if (!best || d < best.d) best = { d, s }; }
+        if (!best || best.d > rangeM) return { pt: { lat: ll.lat, lng: ll.lng }, snapped: false };
+        const proj = genProjector(ll.lat, ll.lng);                 // origin = ll
+        const A = proj.fwd(best.s[0]), B = proj.fwd(best.s[1]);
+        const dx = B.x - A.x, dy = B.y - A.y, L2 = dx * dx + dy * dy;
+        let t = L2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+        const fx = A.x + t * dx, fy = A.y + t * dy;                // foot on the line
+        let nx = -fx, ny = -fy; const NL = Math.hypot(nx, ny) || 1; nx /= NL; ny /= NL; // foot→ll (the drawn side)
+        return { pt: proj.inv({ x: fx + nx * offM, y: fy + ny * offM }), snapped: true };
+    }
+    // Gather the re-flag context for a site (power-line segs + pad/FFZ obstacles).
+    function routeCtxForSite(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const segs = powerLineSegments(siteID);
+        const padObs = [], ffzObs = [];
+        for (const a of ents) { if (a.type === 3) { const r = entityCoords(a); if (r && r.length >= 3) { const buf = assetOffsetRing(simplifyPolygon(r), A2.bufferFt * GEN_FT_TO_M); if (buf && buf.length >= 3) padObs.push(buf); } } }
+        for (const e of ents) { if (e.type === 16) { const r = entityCoords(e); if (r && r.length >= 3) ffzObs.push(simplifyPolygon(r)); } }
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) for (const f of genState.lastResult.ffzs) if (f.points && f.points.length >= 3) ffzObs.push(f.points);
+        return { segs, avoidObs: padObs.concat(ffzObs) };
+    }
+    // 📥 Load existing flight paths into the editable graph for CLEANUP. The workflow
+    // is: draw FPs natively in Percepto → save them → load them here → ✨ Snap & Clean →
+    // (elevation) → save back. Each type-15 FP arc carries full {lat,lng} endpoints
+    // (not indices), and each FP entity is one connected component. We dedup endpoints
+    // by coordinate into shared verts (junctions collapse) and tag every seg with its
+    // source entity id/name so a later save can group segs back per FP and rebuild
+    // that entity's arcs in place (preserving id/name/other fields).
+    function loadExistingFpsToRoute(siteID) {
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        const fps = ents.filter(e => e.type === 15 && Array.isArray(e.arcs) && e.arcs.length);
+        if (!fps.length) return { ok: false, msg: 'No flight paths on this site — draw them natively in Percepto and save first, then Load.' };
+        genRoute.ctx = routeCtxForSite(siteID);
+        genRoute.assets = []; genRoute.base = null;
+        genRoute.verts = []; genRoute.segs = [];
+        const idx = new Map();
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = genRoute.verts.length; genRoute.verts.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        let arcCount = 0;
+        for (const fp of fps) {
+            for (const arc of fp.arcs) {
+                if (!arc.point_a || !arc.point_b) continue;
+                if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') continue;
+                const a = vi(arc.point_a), b = vi(arc.point_b);
+                if (a === b) continue; // degenerate zero-length arc
+                const seg = { a, b, flag: false, _fpId: fp.id, _fpName: fp.name };
+                reflagSeg(seg); genRoute.segs.push(seg);
+                arcCount++;
+            }
+        }
+        // synthetic result so export/sync work; stash sources for the save-back step.
+        genRouteResult = { ok: true, corridor: [], assets: [], _ctx: genRoute.ctx, _sourceFps: fps, _loadedFromEntities: true, stats: {} };
+        syncRouteToResult();
+        drawGenRoute();
+        const map = getLeafletMap(); if (map) wireRouteEdit(map);
+        return { ok: true, fps: fps.length, arcs: arcCount, verts: genRoute.verts.length };
+    }
+    // ✨ Snap & Clean — batch pass over the WHOLE loaded network: densify each segment,
+    // snap every sample ~50 ft parallel off the nearest power line (within approachMax),
+    // then Douglas-Peucker simplify so the path follows line bends with few clean
+    // verts. Shared junction/branch verts are snapped ONCE (deterministic) so
+    // connectivity survives the rebuild. Each sub-seg inherits its source seg's _fpId/
+    // _fpName so a save-back can regroup per FP. Points farther than approachMax from
+    // any line stay where drawn (open-ground / base connectors). Re-flags + redraws +
+    // re-wires editing so you can still drag/insert/delete after cleaning.
+    function snapCleanRoute() {
+        if (!genRoute.segs.length) return { ok: false, msg: 'Nothing loaded yet — Load site FPs first.' };
+        const ctx = genRoute.ctx || (genState.siteID ? routeCtxForSite(genState.siteID) : null);
+        const segsPL = (ctx && ctx.segs) || [];
+        if (!segsPL.length) return { ok: false, msg: 'No power lines loaded for this site.' };
+        const offM = A2.offsetFt * GEN_FT_TO_M, rangeM = A2.approachMaxFt * GEN_FT_TO_M;
+        const sampleM = A2.sampleFt * GEN_FT_TO_M, tolM = A2.simplifyFt * GEN_FT_TO_M;
+        // 1. snap each existing vert ONCE — shared junctions snap identically → stay shared.
+        const snapV = genRoute.verts.map(v => { const r = a2SnapToLineOffset(v, segsPL, offM, rangeM); return { lat: r.pt.lat, lng: r.pt.lng }; });
+        // 2. rebuild the graph. Endpoints reuse the snapped junction verts (vi dedup);
+        //    interior densified+snapped samples become fresh per-segment verts.
+        const nv = [], nseg = [], idx = new Map();
+        const vi = (p) => { const k = `${p.lat.toFixed(7)},${p.lng.toFixed(7)}`; if (idx.has(k)) return idx.get(k); const i = nv.length; nv.push({ lat: p.lat, lng: p.lng }); idx.set(k, i); return i; };
+        let snappedCount = 0;
+        for (const s of genRoute.segs) {
+            const oa = genRoute.verts[s.a], ob = genRoute.verts[s.b];
+            const sa = snapV[s.a], sb = snapV[s.b];
+            const len = approxMeters(oa.lat, oa.lng, ob.lat, ob.lng);
+            const n = Math.max(1, Math.round(len / sampleM));
+            const chain = [sa];
+            for (let i = 1; i < n; i++) { const p = a2Interp(oa, ob, i / n); const r = a2SnapToLineOffset(p, segsPL, offM, rangeM); if (r.snapped) snappedCount++; chain.push({ lat: r.pt.lat, lng: r.pt.lng }); }
+            chain.push(sb);
+            const simp = simplifyPath(chain, tolM);
+            for (let i = 0; i < simp.length - 1; i++) { const ai = vi(simp[i]), bi = vi(simp[i + 1]); if (ai !== bi) nseg.push({ a: ai, b: bi, flag: false, branch: !!s.branch, _fpId: s._fpId, _fpName: s._fpName }); }
+        }
+        genRoute.verts = nv; genRoute.segs = nseg;
+        for (const seg of genRoute.segs) reflagSeg(seg);
+        drawGenRoute();
+        syncRouteToResult();
+        const map = getLeafletMap(); if (map) wireRouteEdit(map);
+        return { ok: true, snapped: snappedCount, verts: nv.length, segs: nseg.length };
+    }
+
+    // ===== Native-draw CTRL-snap =====
+    // Hold CTRL while drawing a flight path in Percepto's OWN draw tool → the placed
+    // waypoint snaps ~50 ft parallel off the nearest power line. Release CTRL → free.
+    // HOW: Leaflet fires its map 'click' (which the native draw tool listens to, to add
+    // a vertex) from the DOM 'click' event, computing latlng via mouseEventToLatLng. We
+    // listen for the DOM 'click' in CAPTURE on the map container (runs before Leaflet's
+    // bubble-phase handler — same trick genDraw uses). When armed + CTRL + a power line
+    // is in range, we cancel the real click and re-dispatch a synthetic click at the
+    // SNAPPED pixel, so Leaflet computes the snapped latlng and the native tool records
+    // the snapped vertex. FRAGILE by nature (leans on Leaflet's DOM-click→map-click
+    // path) — every step is guarded so a miss just falls back to a normal un-snapped
+    // click rather than eating the click.
+    let fpSnap = { armed: false, container: null, map: null, segs: [], onClick: null, onMove: null, onKey: null, reentrant: false, indicator: null };
+    function fpSnapClearIndicator() {
+        if (fpSnap.indicator && fpSnap.map) { try { fpSnap.map.removeLayer(fpSnap.indicator); } catch (e) {} }
+        fpSnap.indicator = null;
+    }
+    function fpSnapShowIndicator(ll) {
+        const L = getLeafletL(), map = fpSnap.map; if (!L || !map) return;
+        if (!fpSnap.indicator) {
+            try { fpSnap.indicator = L.circleMarker([ll.lat, ll.lng], { radius: 6, color: '#ba8cff', weight: 2, fillColor: '#2a1a4d', fillOpacity: 0.9, interactive: false }); fpSnap.indicator.addTo(map); } catch (e) {}
+        } else { try { fpSnap.indicator.setLatLng([ll.lat, ll.lng]); } catch (e) {} }
+    }
+    function fpSnapCompute(ll) {
+        return a2SnapToLineOffset(ll, fpSnap.segs, A2.offsetFt * GEN_FT_TO_M, A2.approachMaxFt * GEN_FT_TO_M);
+    }
+    function setFpSnap(on, siteID) {
+        const map = getLeafletMap();
+        if (on) {
+            if (!map) return { ok: false, msg: 'Map not ready.' };
+            try { requestPowerLinesKml(siteID); } catch (e) {}
+            const segs = powerLineSegments(siteID);
+            if (!segs.length) return { ok: false, msg: 'No power lines loaded — open Map Styler, then ↻ Refresh.' };
+            fpSnap.armed = true; fpSnap.map = map; fpSnap.segs = segs;
+            wireFpSnap(map);
+            try { console.log(`${GEN_TAG} CTRL-snap ARMED`, { segs: segs.length, container: map.getContainer().className, hasL: !!getLeafletL() }); } catch (e) {}
+            return { ok: true, segs: segs.length };
+        }
+        fpSnap.armed = false;
+        fpSnapClearIndicator();
+        unwireFpSnap();
+        return { ok: true };
+    }
+    function wireFpSnap(map) {
+        if (fpSnap.onClick) return;
+        fpSnap.container = map.getContainer();
+        fpSnap.onClick = (ev) => {
+            if (!fpSnap.armed || fpSnap.reentrant) return;       // let our own synthetic click through
+            if (!ev.ctrlKey || ev.button !== 0) return;          // only CTRL + left button
+            if (ev.detail >= 2) return;                          // don't touch the finishing double-click
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { console.warn(`${GEN_TAG} CTRL-snap: mouseEventToLatLng threw`, e); return; }
+            const r = fpSnapCompute(ll);
+            try { console.log(`${GEN_TAG} CTRL-snap CLICK`, { snapped: r.snapped, raw: ll, snap: r.pt, target: ev.target && ev.target.tagName, cls: ev.target && ev.target.getAttribute && ev.target.getAttribute('class') }); } catch (e) {}
+            if (!r.snapped) return;                              // no line in range → normal click
+            let cpt; try { cpt = map.latLngToContainerPoint([r.pt.lat, r.pt.lng]); } catch (e) { return; }
+            const rect = fpSnap.container.getBoundingClientRect();
+            const clientX = rect.left + cpt.x, clientY = rect.top + cpt.y;
+            ev.preventDefault(); ev.stopImmediatePropagation();
+            try {
+                const synth = new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, ctrlKey: true, detail: 1 });
+                fpSnap.reentrant = true;
+                (ev.target || fpSnap.container).dispatchEvent(synth);
+                console.log(`${GEN_TAG} CTRL-snap re-dispatched click at px`, { clientX: Math.round(clientX), clientY: Math.round(clientY) });
+            } catch (e) { console.error(`${GEN_TAG} CTRL-snap re-dispatch failed:`, e); }
+            finally { fpSnap.reentrant = false; }
+        };
+        fpSnap.onMove = (ev) => {
+            if (!fpSnap.armed) return;
+            if (!ev.ctrlKey) { if (fpSnap.indicator) fpSnapClearIndicator(); return; }
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const r = fpSnapCompute(ll);
+            if (r.snapped) fpSnapShowIndicator(r.pt); else fpSnapClearIndicator();
+            fpSnap._mN = (fpSnap._mN || 0) + 1;
+            if (fpSnap._mN % 15 === 0) { try { console.log(`${GEN_TAG} CTRL-snap move`, { snapped: r.snapped, dot: !!fpSnap.indicator }); } catch (e) {} }
+        };
+        fpSnap.onKey = (ev) => { if (fpSnap.armed && !ev.ctrlKey) fpSnapClearIndicator(); }; // CTRL released → hide dot
+        // DIAGNOSTIC PROBE: log the native event sequence when CTRL is held, so we can
+        // see which event Percepto's draw tool actually uses to place a vertex. Passive
+        // (never cancels). Remove once the snap path is confirmed.
+        fpSnap.onProbe = (ev) => {
+            if (!fpSnap.armed || !ev.ctrlKey || fpSnap.reentrant) return;
+            try { console.log(`${GEN_TAG} CTRL-snap PROBE ${ev.type}`, { button: ev.button, detail: ev.detail, target: ev.target && ev.target.tagName, cls: (ev.target && ev.target.getAttribute && ev.target.getAttribute('class')) || '' }); } catch (e) {}
+        };
+        fpSnap.container.addEventListener('click', fpSnap.onClick, true);
+        fpSnap.container.addEventListener('mousemove', fpSnap.onMove, true);
+        ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick'].forEach(t => { try { fpSnap.container.addEventListener(t, fpSnap.onProbe, true); } catch (e) {} });
+        window.addEventListener('keyup', fpSnap.onKey, true);
+    }
+    function unwireFpSnap() {
+        const c = fpSnap.container;
+        if (c) {
+            if (fpSnap.onClick) try { c.removeEventListener('click', fpSnap.onClick, true); } catch (e) {}
+            if (fpSnap.onMove) try { c.removeEventListener('mousemove', fpSnap.onMove, true); } catch (e) {}
+            if (fpSnap.onProbe) try { ['pointerdown', 'mousedown', 'mouseup', 'pointerup', 'dblclick'].forEach(t => c.removeEventListener(t, fpSnap.onProbe, true)); } catch (e) {}
+        }
+        if (fpSnap.onKey) try { window.removeEventListener('keyup', fpSnap.onKey, true); } catch (e) {}
+        fpSnap.onClick = fpSnap.onMove = fpSnap.onKey = fpSnap.onProbe = null;
+    }
+
+    // ---- shared FFZ preview styling ----
+    function ffzColor(f) {
+        // Existing FFZs loaded for editing are amber (so they read apart from
+        // green generated drafts); they brighten once moved/resized (_dirty).
+        if (f._existing) return f._dirty ? '#ffe14d' : '#ffb347';
+        return f._overPowerLine ? '#ff5555' : (f._hasExistingFfz ? '#8ab4ff' : '#5fff5f');
+    }
+    function ffzTooltipHtml(f) {
+        const r = f.restrictions || {};
+        // Stored values are meters; the displayed feet are the same conversion
+        // either way — only the reference label differs (AGL height vs MSL).
+        const fMode = f._altMode || genActiveAltMode();
+        const altUnit = fMode === 'agl' ? 'ft AGL' : (fMode === 'msl' ? 'ft MSL' : 'ft');
+        const altTip = (typeof r.minAlt === 'number')
+            ? `${Math.round(r.minAlt / GEN_FT_TO_M)}–${Math.round(r.maxAlt / GEN_FT_TO_M)} ${altUnit}`
+            : '<span style="color:#ffb347">alt: DEM unavailable</span>';
+        if (f._existing) {
+            const moved = f._dirty ? '<span style="color:#ffe14d">● edited (unsaved)</span>' : '<span style="color:#9ad">unchanged</span>';
+            const valTip = f._origValidated ? '<br><span style="color:#ff8a80">⚠ was pilot-validated — saving an edit will ask whether to reset it</span>' : '';
+            return `${xmlEscape(f.name || 'FFZ')} <span style="color:#888">#${f._origId}</span><br><b>EXISTING FFZ</b> · ${moved}<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = re-snap to a pad edge (auto-size) · drag yellow ends = resize · altitude kept unless "Recompute alt" is on</span>${valTip}`;
+        }
+        const flagTip = f._overPowerLine ? '<br><span style="color:#ff8a80">⚠ couldn\'t clear a power line — reposition</span>'
+            : (f._hasExistingFfz ? '<br><span style="color:#8ab4ff">ℹ pad already has an FFZ</span>' : '');
+        const offTip = (f._offsetFt && f._offsetFt > 1) ? ` · +${Math.round(f._offsetFt)} ft off line` : '';
+        return `${f.name}<br><b>DRAFT FFZ</b> · ${f._side} side${offTip} · ${Math.round(f._plDistFt)} ft to power line<br>${altTip}<br><span style="color:#9ad">drag = move · Q/E = rotate 10° · Alt+drag = snap an edge · Ctrl+drag = snake corners (across adjacent pads) · drag yellow ends = resize · Del = delete</span>${flagTip}`;
+    }
+    function restyleFfzPoly(f) {
+        const poly = f && f._poly;
+        if (!poly) return;
+        try {
+            const col = ffzColor(f);
+            poly.setStyle({ color: col, fillColor: col });
+            poly.setLatLngs((f.points || []).map(p => [p.lat, p.lng]));
+        } catch (e) {}
+    }
+    function setActivePolyStyle(poly, on) {
+        try { poly.setStyle({ weight: on ? 3 : 1.5, dashArray: on ? '4 3' : '', fillOpacity: on ? 0.30 : 0.18 }); } catch (e) {}
+    }
+
+    // ---- FFZ geometry edits (in-place mutate f.points + f._centroid) ----
+    function translateFfz(f, dLat, dLng) {
+        f.points = f.points.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng }));
+        f._centroid = { lat: f._centroid.lat + dLat, lng: f._centroid.lng + dLng };
+        if (Array.isArray(f._advVerts)) f._advVerts = f._advVerts.map(p => ({ lat: p.lat + dLat, lng: p.lng + dLng })); // keep corridor re-edit in sync
+    }
+    function rotateFfz(f, deg) {
+        const proj = genProjector(f._centroid.lat, f._centroid.lng);
+        const a = deg * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+        const rot = (p) => { const m = proj.fwd(p); return proj.inv({ x: m.x * ca - m.y * sa, y: m.x * sa + m.y * ca }); };
+        f.points = f.points.map(rot);
+        if (Array.isArray(f._advVerts)) f._advVerts = f._advVerts.map(rot);
+        // centroid is the rotation pivot → unchanged
+    }
+    function buildFaceBox(obb, side, s, d) {
+        const { hu, hv } = obb;
+        const hL = Math.max(hv, 15 * GEN_FT_TO_M);
+        const vL = Math.max(hu, 15 * GEN_FT_TO_M);
+        let r;
+        if (side === 'E') r = [hu + s, hu + s + d, -hL, hL];
+        else if (side === 'W') r = [-(hu + s + d), -(hu + s), -hL, hL];
+        else if (side === 'N') r = [-vL, vL, hv + s, hv + s + d];
+        else r = [-vL, vL, -(hv + s + d), -(hv + s)];
+        return genBoxRing(obb, r[0], r[1], r[2], r[3]);
+    }
+    // Outward unit normal of edge A→B (pointing away from the polygon
+    // centroid), in a local meters frame, plus the projector + endpoints.
+    function edgeOutwardNormal(A, B, polyCen) {
+        const proj = genProjector(A.lat, A.lng);
+        const a = proj.fwd(A), b = proj.fwd(B), c = proj.fwd(polyCen);
+        let ex = b.x - a.x, ey = b.y - a.y;
+        const len = Math.hypot(ex, ey) || 1;
+        let nx = -ey / len, ny = ex / len;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        if (nx * (c.x - mx) + ny * (c.y - my) > 0) { nx = -nx; ny = -ny; }
+        return { proj, a, b, nx, ny };
+    }
+    // Box offset off ONE polygon edge A→B: length = the edge, depth `d`,
+    // sitting `s` outward. 4 open corners (matches a single real edge, not
+    // the whole bounding side).
+    function edgeOffsetBox(A, B, polyCen, s, d) {
+        const e = edgeOutwardNormal(A, B, polyCen);
+        const P = (px, py) => e.proj.inv({ x: px, y: py });
+        return [
+            P(e.a.x + e.nx * s, e.a.y + e.ny * s),
+            P(e.b.x + e.nx * s, e.b.y + e.ny * s),
+            P(e.b.x + e.nx * (s + d), e.b.y + e.ny * (s + d)),
+            P(e.a.x + e.nx * (s + d), e.a.y + e.ny * (s + d)),
+        ];
+    }
+    function compassFromNormal(nx, ny) {
+        let deg = Math.atan2(nx, ny) * 180 / Math.PI; // bearing from north, CW
+        if (deg < 0) deg += 360;
+        return ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(deg / 45) % 8];
+    }
+    // Snap the FFZ to the single polygon EDGE nearest `at` (the cursor), across
+    // all pads — re-homes _assetId, matches one real edge. Returns true if it
+    // snapped.
+    function snapFfzToNearestEdge(f, at) {
+        if (!at) at = f._centroid;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 2) continue;
+            const cen = ringCentroid(ring);
+            for (let i = 0; i < ring.length; i++) {
+                const A = ring[i], B = ring[(i + 1) % ring.length];
+                const d = pointToSegMeters(at.lat, at.lng, A, B);
+                if (!best || d < best.d) best = { d, A, B, asset: a, cen, i };
+            }
+        }
+        if (!best) return false;
+        const p = genState.lastParams || GEN_DEFAULTS;
+        const s = p.standoffFt * GEN_FT_TO_M, d = Math.max(p.depthFt, 30) * GEN_FT_TO_M;
+        f.points = edgeOffsetBox(best.A, best.B, best.cen, s, d);
+        f._centroid = ringCentroid(f.points);
+        f._assetId = best.asset.id; f._assetName = best.asset.name || `#${best.asset.id}`;
+        f.name = genDraftName(f._assetName);
+        const e = edgeOutwardNormal(best.A, best.B, best.cen);
+        f._side = compassFromNormal(e.nx, e.ny); f._offsetFt = 0;
+        const ring = entityCoords(best.asset);
+        f._param = { ring, assetId: best.asset.id, startPer: ringPerimeterOfM(ring, { i: best.i, t: 0 }), endPer: ringPerimeterOfM(ring, { i: best.i, t: 1 }) };
+        return true;
+    }
+
+    // ===== A1.7 — ribbon FFZs that snake around pad corners (L/C/U) =====
+    // Project `at` onto a specific ring → { i (edge), t (0..1) } or null.
+    function projectOntoRing(at, ring) {
+        const proj = genProjector(at.lat, at.lng);
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0;
+            t = Math.max(0, Math.min(1, t));
+            const dist = Math.hypot(A.x + t * dx, A.y + t * dy);
+            if (!best || dist < best.dist) best = { dist, i, t };
+        }
+        return best ? { i: best.i, t: best.t } : null;
+    }
+    // Find the pad whose boundary is nearest `at`, and the projection of `at`
+    // onto it as {i (edge), t (0..1)}. Returns { asset, ring, pos } or null.
+    function nearestPadProjection(at) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a);
+            if (!ring || ring.length < 3) continue;
+            const proj = genProjector(at.lat, at.lng);
+            const P = { x: 0, y: 0 }; // 'at' is the projection origin
+            for (let i = 0; i < ring.length; i++) {
+                const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2 : 0;
+                t = Math.max(0, Math.min(1, t));
+                const fx = A.x + t * dx, fy = A.y + t * dy;
+                const dist = Math.hypot(P.x - fx, P.y - fy);
+                if (!best || dist < best.dist) best = { dist, asset: a, ring, pos: { i, t } };
+            }
+        }
+        return best;
+    }
+    function ringMeters(ring, proj) { return ring.map(p => proj.fwd(p)); }
+    function dM(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+    function outwardEdgeNormals(m) {
+        // m centered on its own centroid → centroid ≈ origin
+        const n = m.length, out = [];
+        for (let i = 0; i < n; i++) {
+            const A = m[i], B = m[(i + 1) % n];
+            let ex = B.x - A.x, ey = B.y - A.y; const L = Math.hypot(ex, ey) || 1;
+            let nx = -ey / L, ny = ex / L;
+            const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2;
+            if (nx * (0 - mx) + ny * (0 - my) > 0) { nx = -nx; ny = -ny; }
+            out.push({ nx, ny });
+        }
+        return out;
+    }
+    function lineX(p1, d1, p2, d2) {
+        const den = d1.x * d2.y - d1.y * d2.x;
+        if (Math.abs(den) < 1e-9) return null;
+        const s = ((p2.x - p1.x) * d2.y - (p2.y - p1.y) * d2.x) / den;
+        return { x: p1.x + s * d1.x, y: p1.y + s * d1.y };
+    }
+    // Offset a meters polyline `path` (with per-segment outward normals `segN`,
+    // length path.length-1) by `off`, mitering at interior vertices (single
+    // corner vertex per turn; bevels only on extreme spikes).
+    function offsetPolylineMiter(path, segN, off) {
+        const N = path.length, out = [];
+        for (let i = 0; i < N; i++) {
+            if (i === 0) { out.push({ x: path[0].x + segN[0].nx * off, y: path[0].y + segN[0].ny * off }); continue; }
+            if (i === N - 1) { const k = segN.length - 1; out.push({ x: path[i].x + segN[k].nx * off, y: path[i].y + segN[k].ny * off }); continue; }
+            const n0 = segN[i - 1], n1 = segN[i];
+            const a0 = { x: path[i].x + n0.nx * off, y: path[i].y + n0.ny * off };
+            const a1 = { x: path[i].x + n1.nx * off, y: path[i].y + n1.ny * off };
+            const d0 = { x: path[i].x - path[i - 1].x, y: path[i].y - path[i - 1].y };
+            const d1 = { x: path[i + 1].x - path[i].x, y: path[i + 1].y - path[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            // miter-limit must use |off| — for the right-hand (negative off) side
+            // `off*4` is negative and the check always failed → every corner on
+            // that side beveled into 2 verts. abs() makes both sides miter to 1.
+            if (X && Math.hypot(X.x - path[i].x, X.y - path[i].y) <= Math.abs(off) * 4) out.push(X);
+            else { out.push(a0); out.push(a1); } // spike → bevel
+        }
+        return out;
+    }
+    // Build a ribbon FFZ outline along the pad boundary from `startPos` to
+    // `endPos` (shorter perimeter arc), offset [s, s+d] outward, mitered.
+    // Returns {lat,lng}[] (open) or null.
+    // Inner + outer offset point lists (both lat/lng, forward start→end) of a
+    // pad's boundary sub-path. The building block for single- and multi-pad
+    // ribbons. Returns { inner, outer } or null (span too short / full loop).
+    function buildRibbonHalves(ring, startPos, endPos, s, d) {
+        const cen = ringCentroid(ring);
+        const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj);
+        const n = m.length;
+        const segN = outwardEdgeNormals(m);
+        const foot = (pos) => { const A = m[pos.i], B = m[(pos.i + 1) % n]; return { x: A.x + (B.x - A.x) * pos.t, y: A.y + (B.y - A.y) * pos.t }; };
+        const segLen = []; let per = 0; const cum = [0];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
+        const ps = perOf(startPos), pe = perOf(endPos);
+        // Always walk FORWARD start→end; the caller orders start/end to pick the
+        // drag direction (so it doesn't flip to the shorter arc mid-snake).
+        const fwdLen = (pe - ps + per) % per;
+        if (fwdLen < 1.5 || fwdLen > per - 0.5) return null;
+        const path = [foot(startPos)];
+        const usedSeg = [startPos.i];
+        let i = startPos.i, guard = 0;
+        while (guard++ < n + 2) {
+            const nextV = (i + 1) % n;
+            const vPer = (cum[i + 1] - ps + per) % per;
+            if (vPer >= fwdLen - 1e-6) break;
+            path.push(m[nextV]); i = nextV; usedSeg.push(i);
+        }
+        path.push(foot(endPos));
+        const pathSegN = usedSeg.map(si => segN[si]);
+        const innerM = offsetPolylineMiter(path, pathSegN, s);
+        const outerM = offsetPolylineMiter(path, pathSegN, s + d);
+        return { inner: innerM.map(q => proj.inv(q)), outer: outerM.map(q => proj.inv(q)) };
+    }
+    function buildRibbon(ring, startPos, endPos, s, d) {
+        const h = buildRibbonHalves(ring, startPos, endPos, s, d);
+        if (!h) return null;
+        const ll = h.inner.concat(h.outer.slice().reverse());
+        if (ringSelfIntersects(ll)) return null; // twist (concave notch / far cursor)
+        return ll;
+    }
+    // Multi-pad ribbon: each segment {ring,startPos,endPos} offset on its own
+    // pad's outward side, joined by straight bridges across the gaps. The
+    // "other than connecting two pads" exception — each pad portion still keeps
+    // the 15 ft standoff; only the bridge crosses open ground.
+    // Ordered boundary points (foot start → vertices → foot end) of a pad
+    // sub-path, in lat/lng. Returns null if the span is too short / a full loop.
+    function segBoundaryPoints(seg) {
+        const ring = seg.ring;
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        const foot = (pos) => { const A = m[pos.i], B = m[(pos.i + 1) % n]; return { x: A.x + (B.x - A.x) * pos.t, y: A.y + (B.y - A.y) * pos.t }; };
+        const segLen = []; let per = 0; const cum = [0];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        const perOf = (pos) => cum[pos.i] + pos.t * segLen[pos.i];
+        const ps = perOf(seg.startPos), pe = perOf(seg.endPos);
+        const fwd = (pe - ps + per) % per;
+        if (fwd < 1.5 || fwd > per - 0.5) return null;
+        const path = [foot(seg.startPos)]; let i = seg.startPos.i, g = 0;
+        while (g++ < n + 2) { const nv = (i + 1) % n; const vP = (cum[i + 1] - ps + per) % per; if (vP >= fwd - 1e-6) break; path.push(m[nv]); i = nv; }
+        path.push(foot(seg.endPos));
+        return path.map(q => proj.inv(q));
+    }
+    // Multi-pad ribbon: build ONE combined boundary path across all pads
+    // (the gaps become straight bridge segments), then offset it on a SINGLE
+    // consistent side. This avoids the bowtie that per-pad-outward offsets make
+    // where two pads' edges meet at an L corner. The side is the first pad's
+    // outward side (so the multi-ribbon's start matches the single-pad ribbon).
+    function buildMultiRibbon(segs, s, d) {
+        const pathLL = []; let first = null;
+        for (const sg of segs) {
+            const pts = segBoundaryPoints(sg);
+            if (!pts || pts.length < 2) continue;
+            if (!first) first = { seg: sg, p0: pts[0], p1: pts[1] };
+            for (const q of pts) {
+                const last = pathLL[pathLL.length - 1];
+                if (last && approxMeters(last.lat, last.lng, q.lat, q.lng) < 0.5) continue;
+                pathLL.push(q);
+            }
+        }
+        if (pathLL.length < 2 || !first) return null;
+        const cen = ringCentroid(pathLL); const proj = genProjector(cen.lat, cen.lng);
+        const m = pathLL.map(p => proj.fwd(p));
+        // consistent hand = perpendicular side of the first edge that points away
+        // from the first pad's centroid (matches single-pad outward at the start)
+        const a0 = proj.fwd(first.p0), b0 = proj.fwd(first.p1), rc = proj.fwd(ringCentroid(first.seg.ring));
+        const dx0 = b0.x - a0.x, dy0 = b0.y - a0.y, mx0 = (a0.x + b0.x) / 2, my0 = (a0.y + b0.y) / 2;
+        const hand = ((-dy0) * (mx0 - rc.x) + (dx0) * (my0 - rc.y)) >= 0 ? 1 : -1;
+        const segNorm = [];
+        for (let i = 0; i < m.length - 1; i++) {
+            const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1;
+            segNorm.push({ nx: hand * (-dy / L), ny: hand * (dx / L) });
+        }
+        const inner = offsetPolylineMiter(m, segNorm, s);
+        const outer = offsetPolylineMiter(m, segNorm, s + d);
+        const ll = inner.map(q => proj.inv(q)).concat(outer.map(q => proj.inv(q)).reverse());
+        if (ringSelfIntersects(ll)) return null;
+        return ll;
+    }
+    // --- multi-pad snake bookkeeping ---
+    function mkActiveSeg(asset, ring, pos) {
+        const per = ringTotalPerimeterM(ring), ps = ringPerimeterOfM(ring, pos);
+        return { asset, ring, per, anchorPer: ps, lastPer: ps, offset: 0 };
+    }
+    function activeSegSpan(a) {
+        const startPer = a.offset >= 0 ? a.anchorPer : ((a.anchorPer + a.offset) % a.per + a.per) % a.per;
+        const endPer = a.offset >= 0 ? ((a.anchorPer + a.offset) % a.per + a.per) % a.per : a.anchorPer;
+        return { ring: a.ring, asset: a.asset, startPer, endPer, startPos: perToPos(a.ring, startPer), endPos: perToPos(a.ring, endPer) };
+    }
+    function ringFootLatLng(ring, pos) {
+        const A = ring[pos.i], B = ring[(pos.i + 1) % ring.length];
+        return { lat: A.lat + (B.lat - A.lat) * pos.t, lng: A.lng + (B.lng - A.lng) * pos.t };
+    }
+    function activeTipLatLng(a) {
+        const endPer = ((a.anchorPer + a.offset) % a.per + a.per) % a.per;
+        return ringFootLatLng(a.ring, perToPos(a.ring, endPer));
+    }
+    function reviveActiveSeg(seg) {
+        const per = ringTotalPerimeterM(seg.ring);
+        const sp = seg.startPer != null ? seg.startPer : ringPerimeterOfM(seg.ring, seg.startPos);
+        const ep = seg.endPer != null ? seg.endPer : ringPerimeterOfM(seg.ring, seg.endPos);
+        return { asset: seg.asset, ring: seg.ring, per, anchorPer: sp, lastPer: ep, offset: ((ep - sp) % per + per) % per };
+    }
+    function ringSelfIntersects(pts) {
+        const n = pts.length;
+        for (let i = 0; i < n; i++) {
+            const a1 = pts[i], a2 = pts[(i + 1) % n];
+            for (let j = i + 2; j < n; j++) {
+                if (i === 0 && j === n - 1) continue; // wrap-adjacent
+                if (segmentsCross(a1, a2, pts[j], pts[(j + 1) % n])) return true;
+            }
+        }
+        return false;
+    }
+    function ringTotalPerimeterM(ring) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); let per = 0;
+        for (let i = 0; i < m.length; i++) per += dM(m[i], m[(i + 1) % m.length]);
+        return per;
+    }
+    function ringPerimeterOfM(ring, pos) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); let cum = 0;
+        for (let i = 0; i < pos.i; i++) cum += dM(m[i], m[(i + 1) % m.length]);
+        return cum + pos.t * dM(m[pos.i], m[(pos.i + 1) % m.length]);
+    }
+    function ringNearestDistM(at, ring) {
+        let best = Infinity;
+        for (let i = 0; i < ring.length; i++) {
+            const d = pointToSegMeters(at.lat, at.lng, ring[i], ring[(i + 1) % ring.length]);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+    // Min distance (m) between two polygon rings (for pad adjacency).
+    function ringsNearestDistM(ringA, ringB) {
+        let best = Infinity;
+        for (const v of ringA) { const d = ringNearestDistM(v, ringB); if (d < best) best = d; }
+        for (const v of ringB) { const d = ringNearestDistM(v, ringA); if (d < best) best = d; }
+        return best;
+    }
+    // Perimeter distance → boundary position {i, t}.
+    function perToPos(ring, targetPer) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        let per = 0; const cum = [0], segLen = [];
+        for (let i = 0; i < n; i++) { const l = dM(m[i], m[(i + 1) % n]); segLen.push(l); per += l; cum.push(per); }
+        let tp = ((targetPer % per) + per) % per;
+        for (let i = 0; i < n; i++) {
+            if (tp <= cum[i + 1] + 1e-9) { const t = segLen[i] ? (tp - cum[i]) / segLen[i] : 0; return { i, t: Math.max(0, Math.min(1, t)) }; }
+        }
+        return { i: n - 1, t: 1 };
+    }
+    // Shortest signed step from fromPer to toPer (in (-per/2, per/2]).
+    function signedPerDelta(fromPer, toPer, per) {
+        let d = (toPer - fromPer) % per;
+        if (d > per / 2) d -= per;
+        if (d < -per / 2) d += per;
+        return d;
+    }
+    // Cheap recompute (no DEM) — after a rotate (centroid unchanged).
+    function refreshFfzLineFlag(f) {
+        const p = genState.lastParams || GEN_DEFAULTS;
+        const local = segsNearRing(f.points, powerLineSegments(genState.siteID), (p.proximityFt || 400) + 150);
+        f._overPowerLine = ffzOverPowerLine(f.points, local, p.lineClearFt || 10);
+        f._plDistFt = (local.length ? minRingToSegsM(f.points, local) : Infinity) / GEN_FT_TO_M;
+    }
+    // Full recompute incl. DEM — on drop (centroid moved).
+    async function finalizeFfzEdit(f) {
+        // Loaded existing FFZs: any interactive drop (drag / Q-E rotate / Alt-snap
+        // / end-resize) routes through here → mark dirty so Save knows to UPSERT it.
+        if (f._existing) f._dirty = true;
+        refreshFfzLineFlag(f);
+        // Existing FFZs PRESERVE their saved altitude band by default — moving a
+        // zone must NOT silently rewrite its altitude (some sites run a non-standard
+        // AGL, and AGL-datum sites would get a wrong MSL recompute). Only recompute
+        // from the modal's AGL/Δ numbers when the CSM armed "Recompute alt on edit".
+        // Generated drafts (no saved band) always DEM-recompute on drop.
+        const recompute = f._existing ? genEditRecomputeAlt : true;
+        if (!recompute) { restyleFfzPoly(f); try { advSaveFfzs(); } catch (e) {} return; }
+        const p = (genReadParamsLive && genReadParamsLive()) || genState.lastParams || GEN_DEFAULTS;
+        const am = await siteAltMode(genState.siteID);
+        const mode = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') ? genAltModeOverride : am.mode;
+        f._altMode = mode;
+        if (mode === 'agl') {
+            // AGL site: stored = raw height above ground; no DEM lookup needed.
+            f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') };
+        } else if (mode === 'msl') {
+            try { await bulkFetchElevations([f._centroid]); } catch (e) {}
+            const g = getElevationFromCache(f._centroid.lat, f._centroid.lng);
+            if (typeof g === 'number') {
+                f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') };
+                f._groundM = g;
+            }
+        }
+        // mode 'unknown' → leave the band untouched (never guess).
+        restyleFfzPoly(f);
+        try { advSaveFfzs(); } catch (e) {}
+    }
+
+    // Clicking a committed (locked) FFZ explains why it isn't editable yet and
+    // offers a one-click reload (Percepto needs it to make the write native).
+    function showCommittedPopup(latlng) {
+        try {
+            const L = getLeafletL(), map = getLeafletMap();
+            if (!L || !map) return;
+            const div = document.createElement('div');
+            div.style.cssText = 'font:inherit;font-size:12px;color:#222;max-width:230px;line-height:1.45';
+            div.innerHTML = "<b>Committed FFZ</b><br>It's saved. Percepto needs a page reload before you can select / edit it natively on the map.";
+            const b = document.createElement('button');
+            b.textContent = '🔄 Reload page';
+            b.style.cssText = 'display:block;margin-top:8px;background:#1f8f4d;color:#fff;border:none;border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:12px;font-weight:600';
+            b.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
+            div.appendChild(b);
+            L.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(latlng).setContent(div).openOn(map);
+        } catch (e) {}
+    }
+    // Mark a committed FFZ: keep it drawn (visible without a page reload) but
+    // stop editing it; distinct solid-green style.
+    function markFfzCommitted(f) {
+        f._committed = true;
+        const poly = f && f._poly;
+        if (!poly) return;
+        try {
+            poly.setStyle({ color: '#22e36b', fillColor: '#22e36b', weight: 2, dashArray: '', fillOpacity: 0.12, opacity: 1 });
+            if (poly._path) poly._path.style.cursor = 'default';
+        } catch (e) {}
+    }
+
+    // ---- end-resize handles (shorten/lengthen an FFZ's ends) ----
+    // Midpoints of the two end caps (points = inner half ++ reversed outer half).
+    function ffzEndCaps(pts) {
+        const n = pts.length; if (n < 4 || n % 2 !== 0) return null;
+        const h = n / 2;
+        const mid = (a, b) => ({ lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
+        return { start: mid(pts[0], pts[n - 1]), end: mid(pts[h - 1], pts[h]) };
+    }
+    let genHandles = { f: null, markers: [], hideTimer: null };
+    function clearResizeHandles() {
+        const map = getLeafletMap();
+        genHandles.markers.forEach(mk => { try { if (map) map.removeLayer(mk); } catch (e) {} });
+        genHandles.markers = []; genHandles.f = null;
+        if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; }
+    }
+    function scheduleHideHandles() {
+        if (genHandles.hideTimer) clearTimeout(genHandles.hideTimer);
+        genHandles.hideTimer = setTimeout(clearResizeHandles, 400);
+    }
+    // Show two draggable end-handles on a snapped/snaked FFZ (those carry
+    // _param = the pad ring + the two perimeter endpoints). Dragging a handle
+    // moves that end along the pad and rebuilds the ribbon, keeping the rest.
+    function showResizeHandles(f) {
+        if (!f || !f._param || f._committed || genEdit.dragging) return; // not mid-drag/snake
+        if (genHandles.f === f) { if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; } return; }
+        clearResizeHandles();
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        const caps = ffzEndCaps(f.points);
+        if (!caps) return;
+        genHandles.f = f;
+        ['start', 'end'].forEach(which => {
+            const c = caps[which];
+            const mk = L.circleMarker([c.lat, c.lng], { radius: 6, color: '#000000', weight: 1.5, fillColor: '#ffe14d', fillOpacity: 1, interactive: true, bubblingMouseEvents: false });
+            mk._which = which;
+            mk.addTo(map);
+            mk.on('mouseover', () => { if (genHandles.hideTimer) { clearTimeout(genHandles.hideTimer); genHandles.hideTimer = null; } try { if (mk._path) mk._path.style.cursor = 'pointer'; } catch (e) {} });
+            mk.on('mouseout', scheduleHideHandles);
+            mk.on('mousedown', (e) => startHandleDrag(e, f, which, map));
+            genHandles.markers.push(mk);
+        });
+    }
+    function startHandleDrag(e, f, which, map) {
+        if (f._committed || !f._param) return;
+        try { map.dragging.disable(); } catch (err) {}
+        try { map.scrollWheelZoom.disable(); } catch (err) {}
+        try { uwin().__AIM_FFZ_DRAG = true; } catch (err) {}
+        const onMove = (ev) => {
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (er) { return; }
+            const pos = projectOntoRing(ll, f._param.ring);
+            if (!pos) return;
+            const newPer = ringPerimeterOfM(f._param.ring, pos);
+            const startPer = which === 'start' ? newPer : f._param.startPer;
+            const endPer = which === 'end' ? newPer : f._param.endPer;
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const pts = buildRibbon(f._param.ring, perToPos(f._param.ring, startPer), perToPos(f._param.ring, endPer), p.standoffFt * GEN_FT_TO_M, Math.max(p.depthFt, 30) * GEN_FT_TO_M);
+            if (pts && pts.length >= 4) {
+                f._param.startPer = startPer; f._param.endPer = endPer;
+                f.points = pts; f._centroid = ringCentroid(pts);
+                try { f._poly.setLatLngs(pts.map(q => [q.lat, q.lng])); } catch (er) {}
+                const caps = ffzEndCaps(pts);
+                if (caps) genHandles.markers.forEach(mk => { try { mk.setLatLng([caps[mk._which].lat, caps[mk._which].lng]); } catch (er) {} });
+            }
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove, true);
+            document.removeEventListener('mouseup', onUp, true);
+            try { map.dragging.enable(); } catch (err) {}
+            try { map.scrollWheelZoom.enable(); } catch (err) {}
+            try { uwin().__AIM_FFZ_DRAG = false; } catch (err) {}
+            finalizeFfzEdit(f);
+        };
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+        try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (err) {}
+    }
+
+    // ===== freehand "draw a corridor" FFZ (press + drag) =====
+    // Outward offset of a closed pad ring by offM, mitered → sharp corners.
+    function assetOffsetRing(ring, offM) {
+        const cen = ringCentroid(ring); const proj = genProjector(cen.lat, cen.lng);
+        const m = ringMeters(ring, proj); const n = m.length;
+        const segN = outwardEdgeNormals(m);
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const nPrev = segN[(i - 1 + n) % n], nCur = segN[i];
+            const a0 = { x: m[i].x + nPrev.nx * offM, y: m[i].y + nPrev.ny * offM };
+            const a1 = { x: m[i].x + nCur.nx * offM, y: m[i].y + nCur.ny * offM };
+            const d0 = { x: m[i].x - m[(i - 1 + n) % n].x, y: m[i].y - m[(i - 1 + n) % n].y };
+            const d1 = { x: m[(i + 1) % n].x - m[i].x, y: m[(i + 1) % n].y - m[i].y };
+            const X = lineX(a0, d0, a1, d1);
+            out.push((X && Math.hypot(X.x - m[i].x, X.y - m[i].y) <= offM * 4) ? X : a1);
+        }
+        return out.map(q => proj.inv(q));
+    }
+    function getAssetOffsetRing(asset, offM) {
+        if (!genDraw._offCache) genDraw._offCache = {};
+        if (genDraw._offCache[asset.id]) return genDraw._offCache[asset.id];
+        const ring = entityCoords(asset);
+        if (!ring || ring.length < 3) return null;
+        const r = assetOffsetRing(ring, offM);
+        genDraw._offCache[asset.id] = r;
+        return r;
+    }
+    // Intersection point of lines through p1-p2 and p3-p4 (lng=x, lat=y).
+    function segIntersectPoint(p1, p2, p3, p4) {
+        const x1 = p1.lng, y1 = p1.lat, x2 = p2.lng, y2 = p2.lat, x3 = p3.lng, y3 = p3.lat, x4 = p4.lng, y4 = p4.lat;
+        const den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+        if (Math.abs(den) < 1e-15) return { lat: p2.lat, lng: p2.lng };
+        const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den;
+        return { lng: x1 + t * (x2 - x1), lat: y1 + t * (y2 - y1) };
+    }
+    // Snip out self-intersection loops → a simple polygon (kills the inner-corner twist).
+    function cleanSelfIntersections(pts) {
+        let ring = pts.slice();
+        for (let pass = 0; pass < 30; pass++) {
+            let found = false;
+            for (let i = 0; i < ring.length && !found; i++) {
+                const a1 = ring[i], a2 = ring[(i + 1) % ring.length];
+                for (let j = i + 2; j < ring.length; j++) {
+                    if (i === 0 && j === ring.length - 1) continue;
+                    const b1 = ring[j], b2 = ring[(j + 1) % ring.length];
+                    if (segmentsCross(a1, a2, b1, b2)) {
+                        const X = segIntersectPoint(a1, a2, b1, b2);
+                        ring = ring.slice(0, i + 1).concat([X], ring.slice(j + 1)); // drop the loop i+1..j
+                        found = true; break;
+                    }
+                }
+            }
+            if (!found) break;
+        }
+        return ring;
+    }
+    // Nearest point on a ring to `at` (lat/lng) + its distance (m).
+    function nearestPointOnRing(at, ring) {
+        const proj = genProjector(at.lat, at.lng);
+        let best = null;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((0 - A.x) * dx + (0 - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const fx = A.x + t * dx, fy = A.y + t * dy, d = Math.hypot(fx, fy);
+            if (!best || d < best.d) best = { d, pt: proj.inv({ x: fx, y: fy }), i };
+        }
+        return best;
+    }
+    // Offset-ring vertices the path crossed going from edge iPrev to edge iCur
+    // (shorter arc, capped) — inserting these makes the centerline turn the
+    // actual right-angle corners instead of cutting across them.
+    function ringVerticesBetween(ring, iPrev, iCur) {
+        const n = ring.length, fwd = (iCur - iPrev + n) % n, back = n - fwd, out = [];
+        if (fwd === 0) return out;
+        if (fwd <= back) { if (fwd > 6) return out; for (let k = 1; k <= fwd; k++) out.push(ring[(iPrev + k) % n]); }
+        else { if (back > 6) return out; for (let k = 0; k < back; k++) out.push(ring[(iPrev - k + n) % n]); }
+        return out;
+    }
+    // Snap a cursor point to the asset's mitered OFFSET outline if near one, else
+    // the cursor unchanged (free-place). For click-to-place we PREFER snapping to
+    // a corner VERTEX (a sharp right angle) when the cursor is close to one, so a
+    // click near a pad corner lands exactly on it. Returns { pt, assetId, off, i,
+    // vertex } so the caller can insert corner vertices when crossing edges.
+    function snapDrawPoint(cursorLL, params, freehand) {
+        // Shift = fully free placement (no snap, no ortho) — escape hatch.
+        if (freehand) return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1, vertex: false };
+        const SNAP_M = 70 * GEN_FT_TO_M;
+        const VSNAP_M = 22 * GEN_FT_TO_M; // corner-magnet radius (generous — aim at the dot)
+        const offM = (params.standoffFt + Math.max(params.depthFt, 30) / 2) * GEN_FT_TO_M;
+        // junction lock points (between back-to-back pads) take priority — they are
+        // the 15-ft-from-both corner where no pad has its own vertex.
+        if (genDraw.junctions && genDraw.junctions.length) {
+            let jb = null, jd = Infinity;
+            for (const q of genDraw.junctions) { const d = approxMeters(cursorLL.lat, cursorLL.lng, q.lat, q.lng); if (d < jd) { jd = d; jb = q; } }
+            if (jb && jd < VSNAP_M) return { pt: { lat: jb.lat, lng: jb.lng }, assetId: null, off: null, i: -1, vertex: true, junction: true };
+        }
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let best = null;
+        for (const a of ents) {
+            if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            const np = nearestPointOnRing(cursorLL, ring);
+            if (np && (!best || np.d < best.d)) best = { d: np.d, asset: a };
+        }
+        if (best && best.d < SNAP_M) {
+            const off = getAssetOffsetRing(best.asset, offM);
+            if (off && off.length >= 3) {
+                // corner magnet: nearest offset-ring vertex within VSNAP_M wins
+                let vi = -1, vd = Infinity;
+                for (let i = 0; i < off.length; i++) { const d = approxMeters(cursorLL.lat, cursorLL.lng, off[i].lat, off[i].lng); if (d < vd) { vd = d; vi = i; } }
+                if (vi >= 0 && vd < VSNAP_M) return { pt: { lat: off[vi].lat, lng: off[vi].lng }, assetId: best.asset.id, off, i: vi, vertex: true };
+                const np = nearestPointOnRing(cursorLL, off);
+                if (np) return { pt: np.pt, assetId: best.asset.id, off, i: np.i, vertex: false };
+            }
+        }
+        // ortho fallback: in open space (no pad/junction nearby), square the next
+        // leg to the previous one — continue straight or turn exactly 90°. Gives
+        // clean right-angle corners even where no dot exists (far-apart pads). The
+        // dominant axis of the cursor relative to the last leg decides straight vs 90°.
+        const pts = genDraw.pts;
+        if (pts && pts.length >= 2) {
+            const P = pts[pts.length - 1], Q = pts[pts.length - 2];
+            const proj = genProjector(P.lat, P.lng);
+            const q = proj.fwd(Q);                       // Q relative to P
+            const L = Math.hypot(q.x, q.y) || 1;
+            const ux = -q.x / L, uy = -q.y / L;          // last-leg direction (Q→P)
+            const px = -uy, py = ux;                     // perpendicular
+            const c = proj.fwd(cursorLL);                // cursor relative to P
+            const along = c.x * ux + c.y * uy, perp = c.x * px + c.y * py;
+            const np = (Math.abs(along) >= Math.abs(perp)) ? { x: along * ux, y: along * uy } : { x: perp * px, y: perp * py };
+            return { pt: proj.inv(np), assetId: null, off: null, i: -1, vertex: false, ortho: true };
+        }
+        return { pt: { lat: cursorLL.lat, lng: cursorLL.lng }, assetId: null, off: null, i: -1, vertex: false };
+    }
+    // Douglas-Peucker — drop near-collinear samples, keep the corners. Far
+    // fewer vertices → cleaner strip, easier to hand-edit.
+    function simplifyPath(pts, tolM) {
+        if (!pts || pts.length < 3) return pts || [];
+        const proj = genProjector(pts[0].lat, pts[0].lng);
+        const m = pts.map(p => proj.fwd(p));
+        const keep = new Array(m.length).fill(false);
+        keep[0] = keep[m.length - 1] = true;
+        const stack = [[0, m.length - 1]];
+        const pd = (p, a, b) => { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; if (!l2) return Math.hypot(p.x - a.x, p.y - a.y); let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2; t = Math.max(0, Math.min(1, t)); return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)); };
+        while (stack.length) {
+            const [a, b] = stack.pop(); let maxD = 0, idx = -1;
+            for (let i = a + 1; i < b; i++) { const d = pd(m[i], m[a], m[b]); if (d > maxD) { maxD = d; idx = i; } }
+            if (maxD > tolM && idx > 0) { keep[idx] = true; stack.push([a, idx], [idx, b]); }
+        }
+        return pts.filter((_, i) => keep[i]);
+    }
+    // CLAMPED point-to-SEGMENT distance (m) — distance to the segment a-b, not the
+    // infinite line. Safe for collinear-cleanup: a real 90° corner is far from the
+    // segment between its neighbors (kept); a redundant near-flat facet is near it
+    // (dropped). The unclamped line version was the v4.25 blob bug — do not use it.
+    function segDistM(p, a, b) {
+        const proj = genProjector(p.lat, p.lng);
+        const A = proj.fwd(a), B = proj.fwd(b), P = proj.fwd(p);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        if (!l2) return Math.hypot(P.x - A.x, P.y - A.y);
+        let t = ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2; t = Math.max(0, Math.min(1, t));
+        return Math.hypot(P.x - (A.x + t * dx), P.y - (A.y + t * dy));
+    }
+    // Clean an OPEN polyline (centerline): drop a midpoint when it sits within tolM
+    // of the segment between its neighbors — collapses the 1–2 facet points the pad
+    // tracing leaves at a corner down to a single clean corner. Endpoints kept.
+    function cleanCenterline(pts, tolM) {
+        if (!pts || pts.length < 3) return (pts || []).slice();
+        let ring = pts.slice(), changed = true;
+        while (changed && ring.length > 2) {
+            changed = false;
+            for (let i = 1; i < ring.length - 1; i++) {
+                if (segDistM(ring[i], ring[i - 1], ring[i + 1]) < tolM) { ring.splice(i, 1); changed = true; break; }
+            }
+        }
+        return ring;
+    }
+    // Perpendicular distance (m) of p from the LINE through a-b (for collinearity).
+    function perpDistLL(p, a, b) {
+        const proj = genProjector(p.lat, p.lng);
+        const A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+        if (!l2) return Math.hypot(A.x, A.y);
+        const t = ((0 - A.x) * dx + (0 - A.y) * dy) / l2;
+        return Math.hypot(0 - (A.x + t * dx), 0 - (A.y + t * dy));
+    }
+    // Clean a closed ring: drop near-duplicate + near-collinear vertices so each
+    // corner is a single clean point (no tiny facets at outer bends).
+    function cleanRing(pts, tolM, minM) {
+        let ring = [];
+        for (const p of pts) { const last = ring[ring.length - 1]; if (!last || approxMeters(last.lat, last.lng, p.lat, p.lng) >= minM) ring.push(p); }
+        if (ring.length > 3 && approxMeters(ring[0].lat, ring[0].lng, ring[ring.length - 1].lat, ring[ring.length - 1].lng) < minM) ring.pop();
+        let changed = true;
+        while (changed && ring.length > 4) {
+            changed = false;
+            for (let i = 0; i < ring.length; i++) {
+                const a = ring[(i - 1 + ring.length) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
+                if (perpDistLL(b, a, c) < tolM) { ring.splice(i, 1); changed = true; break; }
+            }
+        }
+        return ring;
+    }
+    // Stroke a centerline polyline into a strip outline (lat/lng), width 2*halfW.
+    function strokePolyline(pts, halfW) {
+        if (!pts || pts.length < 2) return null;
+        const cen = ringCentroid(pts); const proj = genProjector(cen.lat, cen.lng);
+        const m0 = pts.map(p => proj.fwd(p));
+        const m = [m0[0]];
+        for (let i = 1; i < m0.length; i++) { if (Math.hypot(m0[i].x - m[m.length - 1].x, m0[i].y - m[m.length - 1].y) > 1) m.push(m0[i]); }
+        if (m.length < 2) return null;
+        const leftN = [];
+        for (let i = 0; i < m.length - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; leftN.push({ nx: -dy / L, ny: dx / L }); }
+        const left = offsetPolylineMiter(m, leftN, halfW);
+        const right = offsetPolylineMiter(m, leftN, -halfW);
+        const ll = left.map(q => proj.inv(q)).concat(right.map(q => proj.inv(q)).reverse());
+        return cleanSelfIntersections(ll); // snip the inner-corner twist (v4.24 behavior)
+    }
+    // Click-to-place draw: pts[] are the user's clicked (snapped) corners; tentative
+    // is the live rubber-band point at the cursor; dots[] are the on-map corner
+    // markers so the user can see what they're building.
+    let genDraw = { active: false, drawing: false, pts: [], tentative: null, tentVertex: false, tentOrtho: false, lastSnap: null, poly: null, dots: [], targets: [], junctions: [], ghost: null, onDown: null, onMove: null, onDbl: null, onMapMove: null };
+    function clearDrawDots(map) {
+        for (const d of genDraw.dots) { try { map.removeLayer(d); } catch (e) {} }
+        genDraw.dots = [];
+    }
+    function clearGhost(map) { if (genDraw.ghost) { try { map.removeLayer(genDraw.ghost); } catch (e) {} genDraw.ghost = null; } }
+    function clearSnapTargets(map) {
+        for (const d of genDraw.targets) { try { map.removeLayer(d); } catch (e) {} }
+        genDraw.targets = [];
+    }
+    // Persistent snap-target dots at every nearby pad's offset-ring CORNERS — the
+    // exact points a click locks the centerline to. Aim at a dot instead of hunting
+    // pixels. Filtered to the current view so big sites don't flood with markers.
+    // Also computes JUNCTION dots (magenta) where two close pads' offset rings
+    // cross — the 15-ft-from-both corner for a corridor between back-to-back pads
+    // (no pad has a corner there, so without this you'd lock to nothing).
+    function buildSnapTargets(map, p) {
+        clearSnapTargets(map);
+        genDraw.junctions = [];
+        const L = getLeafletL(); if (!L) return;
+        const offM = (p.standoffFt + Math.max(p.depthFt, 30) / 2) * GEN_FT_TO_M;
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let bounds = null; try { bounds = map.getBounds().pad(0.15); } catch (e) {}
+        // Collect ALL pads (NOT centroid-in-view) — when zoomed into a corner both
+        // pad centroids are off-screen, and dropping them killed the A↔B junction
+        // and that pad's corner dots. Bounds only gate which DOTS we draw.
+        const pads = [];
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+            const off = getAssetOffsetRing(a, offM); if (!off) continue;
+            pads.push({ ring, off, cen: ringCentroid(ring) });
+            for (const v of off) {
+                if (bounds && !bounds.contains([v.lat, v.lng])) continue;
+                try { const d = L.circleMarker([v.lat, v.lng], { radius: 3.5, color: '#00e5ff', weight: 1.5, opacity: 0.65, fillColor: '#08323b', fillOpacity: 0.55, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
+            }
+        }
+        // junctions: where a near-perpendicular offset edge of one pad meets one of
+        // another pad — the 15-ft-from-both corner for a corridor turning around a
+        // corner made of TWO assets. We accept not just strict crossings but
+        // near-misses (the intersection within JT of BOTH edges) so a corner where
+        // the offset rings only touch still locks. Near-parallel pairs are skipped.
+        const cornerDots = genDraw.targets.length;
+        const NEAR = 260 * GEN_FT_TO_M, JT = 12 * GEN_FT_TO_M;
+        for (let i = 0; i < pads.length; i++) {
+            for (let j = i + 1; j < pads.length; j++) {
+                if (approxMeters(pads[i].cen.lat, pads[i].cen.lng, pads[j].cen.lat, pads[j].cen.lng) > NEAR) continue;
+                const A = pads[i].off, B = pads[j].off;
+                for (let x = 0; x < A.length; x++) {
+                    const a1 = A[x], a2 = A[(x + 1) % A.length];
+                    for (let y = 0; y < B.length; y++) {
+                        const b1 = B[y], b2 = B[(y + 1) % B.length];
+                        let dang = Math.abs(segAngleRad(a1, a2) - segAngleRad(b1, b2)) % Math.PI;
+                        if (dang > Math.PI / 2) dang = Math.PI - dang;
+                        if (dang < 20 * Math.PI / 180) continue; // near-parallel → no real corner
+                        const X = segIntersectPoint(a1, a2, b1, b2);
+                        if (segDistM(X, a1, a2) > JT || segDistM(X, b1, b2) > JT) continue; // must be on both edges
+                        if (pointInPolygon(X.lat, X.lng, pads[i].ring) || pointInPolygon(X.lat, X.lng, pads[j].ring)) continue;
+                        if (genDraw.junctions.some(q => approxMeters(q.lat, q.lng, X.lat, X.lng) < 8 * GEN_FT_TO_M)) continue;
+                        genDraw.junctions.push({ lat: X.lat, lng: X.lng });
+                    }
+                }
+            }
+        }
+        for (const q of genDraw.junctions) {
+            try { const d = L.circleMarker([q.lat, q.lng], { radius: 4.5, color: '#ff5fff', weight: 2, opacity: 0.85, fillColor: '#3a0a3a', fillOpacity: 0.7, interactive: false }); d.addTo(map); genDraw.targets.push(d); } catch (e) {}
+        }
+        try { unsafeWindow.console.log(`${GEN_TAG} snap targets: ${cornerDots} corner + ${genDraw.junctions.length} junction`); } catch (e) {}
+    }
+    function renderDrawPreview(p) {
+        const L = getLeafletL(), map = getLeafletMap();
+        if (!L || !map) return;
+        if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
+        clearDrawDots(map);
+        // collapse pad-traced facets to one point per real corner (same as finalize)
+        const base = cleanCenterline(genDraw.pts, 3 * GEN_FT_TO_M);
+        // dot markers at each (cleaned) corner so dots match the strip's corners
+        for (const q of base) {
+            try { const d = L.circleMarker([q.lat, q.lng], { radius: 4, color: '#00e5ff', weight: 2, fillColor: '#003844', fillOpacity: 0.9, interactive: false }); d.addTo(map); genDraw.dots.push(d); } catch (e) {}
+        }
+        // live "ghost" marker at where the cursor would lock — green+big when it's
+        // magnetised to a corner, small yellow when on an edge.
+        clearGhost(map);
+        if (genDraw.tentative) {
+            try {
+                let style;
+                if (genDraw.tentVertex) style = { radius: 7, color: '#5fff5f', weight: 3, fillColor: '#0a3d0a', fillOpacity: 0.85, interactive: false };       // locked to a corner
+                else if (genDraw.tentOrtho) style = { radius: 5, color: '#00e5ff', weight: 2.5, fillColor: '#08323b', fillOpacity: 0.85, interactive: false };   // ortho right-angle
+                else style = { radius: 4, color: '#ffe14d', weight: 2, fillColor: '#3a3400', fillOpacity: 0.8, interactive: false };                              // edge / free
+                genDraw.ghost = L.circleMarker([genDraw.tentative.lat, genDraw.tentative.lng], style);
+                genDraw.ghost.addTo(map);
+            } catch (e) {}
+        }
+        const pts = base.concat(genDraw.tentative ? [genDraw.tentative] : []);
+        if (pts.length < 2) return;
+        const outline = strokePolyline(pts, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M);
+        if (!outline || outline.length < 4) return;
+        try {
+            genDraw.poly = L.polygon(outline.map(q => [q.lat, q.lng]), { color: '#ffe14d', weight: 1.5, opacity: 0.95, fillColor: '#ffe14d', fillOpacity: 0.18, interactive: false, dashArray: genDraw.tentative ? '4,4' : null });
+            genDraw.poly.addTo(map);
+        } catch (e) {}
+    }
+    async function finalizeDraw() {
+        const map = getLeafletMap();
+        if (genDraw.poly) { try { if (map) map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; }
+        if (map) { clearDrawDots(map); clearGhost(map); }
+        genDraw.drawing = false; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
+        const p = genState.lastParams || GEN_DEFAULTS;
+        // dedupe near-duplicate corners (a finishing double-click drops 2 near-same pts)
+        const dedup = [];
+        for (const q of genDraw.pts) { const last = dedup[dedup.length - 1]; if (!last || approxMeters(last.lat, last.lng, q.lat, q.lng) >= 4 * GEN_FT_TO_M) dedup.push(q); }
+        // collapse pad-traced facets to one clean point per real corner
+        const center = cleanCenterline(dedup, 3 * GEN_FT_TO_M);
+        const outline = (center.length >= 2) ? strokePolyline(center, Math.max(p.depthFt, 30) / 2 * GEN_FT_TO_M) : null;
+        genDraw.pts = [];
+        if (!outline || outline.length < 4) return;
+        const cen = ringCentroid(outline);
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let nm = 'corridor', bestD = Infinity;
+        for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _side: 'drawn', _offsetFt: 0, _centroid: cen };
+        try { await bulkFetchElevations([cen]); } catch (e) {}
+        const g = getElevationFromCache(cen.lat, cen.lng);
+        if (typeof g === 'number') f.restrictions = { minAlt: g + p.aglFt * GEN_FT_TO_M, maxAlt: g + (p.aglFt + p.deltaFt) * GEN_FT_TO_M };
+        if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+        genState.lastResult.ffzs.push(f);
+        renderGenPreview(genState.lastResult.ffzs);
+        showToast('Drew FFZ corridor', 'rgba(255,225,77,0.55)');
+    }
+
+    // ============================================================
+    // ✦ ADVANCED DRAW — interactive zigzag corridor FFZ builder.
+    // You draw the INNER (asset-facing) edge click-by-click; each segment is a
+    // box of `widthFt` extending to one side (F flips). A live shielding BAND of
+    // `offsetFt` rides the inner side so you keep critical infrastructure clear
+    // by eye. Shift = angle-snap 15° off the previous segment; Ctrl = magnet-snap
+    // the inner edge to `offsetFt` off the nearest asset. The whole zigzag commits
+    // as ONE FFZ via the normal preview→Commit rails. In-progress draw autosaves
+    // to localStorage (survives crash/reload). DEM/altitude only at finish.
+    // ============================================================
+    const ADV_LS_KEY = 'aim_adv_draw';
+    const ADV_DEFAULTS = { widthFt: 30, offsetFt: 25, bufColor: '#ff2d2d', bufColor2: '#ffd400', bufOpacity: 0.3 };
+    const ADV_SNAP_OVERLAP_FT = 5; // when an end snaps onto existing geometry, extend it this far PAST the snap so it overlaps (no edge-kiss slivers)
+    let advDraw = {
+        active: false, drawing: false,
+        verts: [],       // inner-edge polyline [{lat,lng}]
+        side: 1,         // +1 / -1 — which side the box width extends (F flips)
+        tentative: null, // snapped cursor for live preview
+        widthFt: ADV_DEFAULTS.widthFt, offsetFt: ADV_DEFAULTS.offsetFt,
+        anchor: 'ffz-inner', // what the drawn LINE represents: 'ffz-inner' (FFZ inner edge) | 'shielding' (inner-shielding edge, around assets → standoff+FFZ+outer build outward)
+        bufColor: ADV_DEFAULTS.bufColor, bufColor2: ADV_DEFAULTS.bufColor2, bufOpacity: ADV_DEFAULTS.bufOpacity,
+        segWidth: [],    // per-segment width (ft); edge-drag overrides, Width field resets all
+        dragVert: null,  // index of the vertex being dragged (grab to fix mid-draw), else null
+        dragEdge: null,  // index of the segment whose outer edge is being dragged (widen)
+        ctrlHeld: false, // for the live Ctrl-snap guides
+        ffzSnap: null,   // {lat,lng,src} when the cursor is snapped onto an existing FFZ edge (branch-from-edge), else null
+        branchSrc: null, // src of the FFZ whose edge the FIRST vertex landed on → merge corridor into it on finish (else null)
+        snapSrcs: [],    // every placed vertex's FFZ-edge snap src → a corridor bridging 2 FFZs unifies BOTH groups at finish
+        vertSnapped: [], // per-vertex: did it snap onto existing geometry? → extend that END past the snap so it OVERLAPS (no edge-kiss slivers)
+        reGroup: null,   // when re-editing a grouped corridor, its {_group,_anchorId,_branchPoint} so re-finish keeps it grouped
+        layers: [], _container: null, _onDown: null, _onMove: null, _onDbl: null, _onKey: null, _onUp: null,
+    };
+    // Hit-test the cursor against existing vertices (screen px) → index or -1.
+    function advHitVert(ll) {
+        const map = getLeafletMap(); if (!map) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = 14;
+        advDraw.verts.forEach((v, i) => { try { const p = map.latLngToContainerPoint(v); const d = Math.hypot(p.x - cp.x, p.y - cp.y); if (d < bestD) { bestD = d; best = i; } } catch (e) {} });
+        return best;
+    }
+    // Per-segment widths (ft) — one entry per segment, default to the global width.
+    // Edge-drag overrides individual segments; the Width field resets them all.
+    function advSegWidthsFt(nSeg) {
+        while (advDraw.segWidth.length < nSeg) advDraw.segWidth.push(advDraw.widthFt);
+        if (advDraw.segWidth.length > nSeg) advDraw.segWidth.length = nSeg;
+        return advDraw.segWidth.map(w => (w && w > 0) ? w : advDraw.widthFt);
+    }
+    // Offset a meters polyline by per-segment offsets (array, meters) OR a scalar,
+    // mitering at corners (so different-width segments meet cleanly). side = ±1.
+    function advOffsetMiter(m, side, off) {
+        const N = m.length, segN = [], ud = [];
+        for (let i = 0; i < N - 1; i++) { const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1; segN.push({ nx: side * (-dy / L), ny: side * (dx / L) }); ud.push({ x: dx / L, y: dy / L }); }
+        if (!segN.length) return m.slice();
+        const w = (i) => Array.isArray(off) ? (off[Math.min(i, off.length - 1)]) : off;
+        const out = [];
+        for (let i = 0; i < N; i++) {
+            if (i === 0) { const o = w(0); out.push({ x: m[0].x + segN[0].nx * o, y: m[0].y + segN[0].ny * o }); continue; }
+            if (i === N - 1) { const k = N - 2, o = w(k); out.push({ x: m[i].x + segN[k].nx * o, y: m[i].y + segN[k].ny * o }); continue; }
+            const o0 = w(i - 1), o1 = w(i);
+            const a0 = { x: m[i].x + segN[i - 1].nx * o0, y: m[i].y + segN[i - 1].ny * o0 };
+            const a1 = { x: m[i].x + segN[i].nx * o1, y: m[i].y + segN[i].ny * o1 };
+            const X = lineX(a0, ud[i - 1], a1, ud[i]);
+            const maxo = Math.max(Math.abs(o0), Math.abs(o1));
+            const miterLen = X ? Math.hypot(X.x - m[i].x, X.y - m[i].y) : Infinity;
+            // A clean ~right-angle (or concave) miter is already a flush square corner — use it.
+            if (X && miterLen <= maxo * 1.8) { out.push(X); continue; }
+            // Sharp/gentle CONVEX turn would pinch/bevel — auto-OVERSHOOT past the pivot by the
+            // width so the corner wraps square (the "go out another 30 ft" the user asked for).
+            out.push({ x: a0.x + ud[i - 1].x * maxo, y: a0.y + ud[i - 1].y * maxo });
+            out.push({ x: a1.x - ud[i].x * maxo, y: a1.y - ud[i].y * maxo });
+        }
+        return out;
+    }
+    // Corridor FFZ outline = inner rail + outer (per-segment widths) reversed. startFt insets the
+    // WHOLE box outward from the drawn line by startFt (so the line can be the inner-shielding edge,
+    // with the standoff between the line and the FFZ).
+    function advOutline(verts, widthsFt, side, startFt) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const s = (startFt || 0) * GEN_FT_TO_M;
+        const inner = s ? advOffsetMiter(m, side, s) : m;
+        const outer = advOffsetMiter(m, side, widthsFt.map(w => s + w * GEN_FT_TO_M));
+        return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
+    }
+    // A parallel ribbon between two scalar offsets (ft) off the drawn line (box side = +).
+    function advRibbon(verts, side, d1Ft, d2Ft) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const a = advOffsetMiter(m, side, d1Ft * GEN_FT_TO_M);
+        const b = advOffsetMiter(m, side, d2Ft * GEN_FT_TO_M);
+        return a.concat(b.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Shielding band of uniform offsetFt on ONE side of the drawn line. dir = -1 = front
+    // (opposite the width/box side), +1 = back (same side as the FFZ box).
+    function advBandSigned(verts, offsetFt, side, dir) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const band = advOffsetMiter(m, side, dir * offsetFt * GEN_FT_TO_M);
+        return m.concat(band.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Shielding band beyond the FAR (outer) edge of the corridor box — sits on the OPPOSITE
+    // side of the FFZ from the front band. startFt = the box's inset off the line (see advOutline).
+    function advBandOuter(verts, widthsFt, offsetFt, side, startFt) {
+        if (!verts || verts.length < 2) return null;
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const om = offsetFt * GEN_FT_TO_M, s = (startFt || 0) * GEN_FT_TO_M;
+        const widthsM = widthsFt.map(w => s + w * GEN_FT_TO_M);          // box outer rail (far edge of the FFZ)
+        const inner = advOffsetMiter(m, side, widthsM);
+        const outer = advOffsetMiter(m, side, widthsM.map(w => w + om)); // + shielding offset
+        return inner.concat(outer.slice().reverse()).map(p => proj.inv(p));
+    }
+    // Draw a shielding band polygon (no label — labels are placed in the lane center separately).
+    function advDrawBand(map, L, band, color, fillOpacity) {
+        if (!band || !band.length) return;
+        try {
+            const pb = L.polygon(band.map(p => [p.lat, p.lng]), { color: color, weight: 1, opacity: 0.6, fillColor: color, fillOpacity: fillOpacity, interactive: false });
+            pb.addTo(map); advDraw.layers.push(pb);
+        } catch (e) {}
+    }
+    // Point at the MIDDLE of a lane: midpoint of the first drawn segment, offset perpendicular
+    // (box side) by depthFt. Used to drop measure labels in the middle of each band/lane.
+    function advLanePt(verts, side, depthFt) {
+        if (!verts || verts.length < 2) return null;
+        const a = verts[0], b = verts[1], proj = genProjector(a.lat, a.lng);
+        const A = proj.fwd(a), B = proj.fwd(b);
+        const dx = B.x - A.x, dy = B.y - A.y, Llen = Math.hypot(dx, dy) || 1;
+        const nx = side * (-dy / Llen), ny = side * (dx / Llen), d = depthFt * GEN_FT_TO_M;
+        return proj.inv({ x: (A.x + B.x) / 2 + nx * d, y: (A.y + B.y) / 2 + ny * d });
+    }
+    function advMeasLabel(map, L, pt, text, color) {
+        if (!pt) return;
+        try {
+            const lab = L.marker([pt.lat, pt.lng], { interactive: false, icon: L.divIcon({ className: 'aim-adv-meas', html: '<span style="background:rgba(17,21,26,0.82);color:' + color + ';border:1px solid ' + color + ';border-radius:3px;padding:0 4px;font:600 10px/14px system-ui;white-space:nowrap;">' + text + '</span>', iconSize: [0, 0] }) });
+            lab.addTo(map); advDraw.layers.push(lab);
+        } catch (e) {}
+    }
+    // Outer edges (lat/lng) per PLACED segment, for grab-to-widen hit-testing.
+    function advOuterEdges() {
+        const verts = advDraw.verts;
+        if (verts.length < 2) return [];
+        const cen = ringCentroid(verts), proj = genProjector(cen.lat, cen.lng);
+        const m = verts.map(v => proj.fwd(v));
+        const widthsM = advSegWidthsFt(verts.length - 1).map(w => w * GEN_FT_TO_M);
+        const edges = [];
+        for (let i = 0; i < m.length - 1; i++) {
+            const dx = m[i + 1].x - m[i].x, dy = m[i + 1].y - m[i].y, L = Math.hypot(dx, dy) || 1;
+            const nx = advDraw.side * (-dy / L), ny = advDraw.side * (dx / L), wm = widthsM[i];
+            edges.push({ a: proj.inv({ x: m[i].x + nx * wm, y: m[i].y + ny * wm }), b: proj.inv({ x: m[i + 1].x + nx * wm, y: m[i + 1].y + ny * wm }), seg: i });
+        }
+        return edges;
+    }
+    function ptSegPx(p, A, B) {
+        const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - A.x) * dx + (p.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (A.x + t * dx), p.y - (A.y + t * dy));
+    }
+    function advHitEdge(ll) {
+        const map = getLeafletMap(); if (!map || advDraw.verts.length < 2) return -1;
+        let cp; try { cp = map.latLngToContainerPoint(ll); } catch (e) { return -1; }
+        let best = -1, bestD = 11;
+        for (const e of advOuterEdges()) { try { const A = map.latLngToContainerPoint(e.a), B = map.latLngToContainerPoint(e.b); const d = ptSegPx(cp, A, B); if (d < bestD) { bestD = d; best = e.seg; } } catch (er) {} }
+        return best;
+    }
+    // New width (ft) for segment i from the cursor's perpendicular distance off its inner edge.
+    function advWidthFromCursor(i, ll) {
+        const A = advDraw.verts[i], B = advDraw.verts[i + 1];
+        const proj = genProjector(A.lat, A.lng);
+        const a = proj.fwd(A), b = proj.fwd(B), c = proj.fwd(ll);
+        const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
+        const nx = advDraw.side * (-dy / L), ny = advDraw.side * (dx / L);
+        const wm = (c.x - a.x) * nx + (c.y - a.y) * ny; // signed perpendicular on the width side
+        return Math.max(5, Math.round(wm / GEN_FT_TO_M));
+    }
+    // Ctrl-snap: PREFER the nearest asset standoff CORNER (offset-ring vertex) so corner
+    // wraps land precisely; else the nearest point on the offset ring (an edge).
+    function advSnapToAsset(cursor) {
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        const offM = advDraw.offsetFt * GEN_FT_TO_M;
+        let bestCorner = null, bestCornerD = Infinity, bestEdge = null, bestEdgeD = Infinity;
+        for (const a of ents) {
+            if (a.type !== 3) continue;
+            const ring = getAssetOffsetRing(a, offM);
+            if (!ring) continue;
+            for (const v of ring) { const d = approxMeters(cursor.lat, cursor.lng, v.lat, v.lng); if (d < bestCornerD) { bestCornerD = d; bestCorner = v; } }
+            const np = nearestPointOnRing(cursor, ring);
+            if (np && np.d < bestEdgeD) { bestEdgeD = np.d; bestEdge = np.pt; }
+        }
+        if (bestCorner && bestCornerD < 40 * GEN_FT_TO_M) return bestCorner; // standoff corner = clean wrap
+        if (bestEdge && bestEdgeD < 120 * GEN_FT_TO_M) return bestEdge;      // standoff edge
+        return cursor;
+    }
+    // Shift-snap: snap (last→cursor) bearing to 15° steps relative to the previous segment.
+    function advSnapAngle(cursor) {
+        const n = advDraw.verts.length;
+        if (n < 1) return cursor;
+        const last = advDraw.verts[n - 1];
+        const proj = genProjector(last.lat, last.lng);
+        const c = proj.fwd(cursor);
+        const dist = Math.hypot(c.x, c.y); if (dist < 0.5) return cursor;
+        let ref = 0;
+        if (n >= 2) { const prev = proj.fwd(advDraw.verts[n - 2]); ref = Math.atan2(0 - prev.y, 0 - prev.x); } // dir prev→last
+        const step = 15 * Math.PI / 180;
+        const snapped = ref + Math.round((Math.atan2(c.y, c.x) - ref) / step) * step;
+        return proj.inv({ x: dist * Math.cos(snapped), y: dist * Math.sin(snapped) });
+    }
+    function advClearLayers() { const map = getLeafletMap(); advDraw.layers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); advDraw.layers = []; }
+    function advRender() {
+        const map = getLeafletMap(), L = getLeafletL();
+        if (!map || !L) return;
+        advClearLayers();
+        // Rubber-band the live segment to the cursor only while drawing AND not editing a vertex/edge.
+        const editing = (advDraw.dragVert != null || advDraw.dragEdge != null);
+        const path = (advDraw.drawing && advDraw.tentative && !editing) ? advDraw.verts.concat([advDraw.tentative]) : advDraw.verts.slice();
+        if (path.length >= 2) {
+            // per-segment widths: placed segments from segWidth, a live tentative segment = global width
+            const placed = advSegWidthsFt(advDraw.verts.length - 1);
+            const widthsFt = [];
+            for (let i = 0; i < path.length - 1; i++) widthsFt.push(i < placed.length ? placed[i] : advDraw.widthFt);
+            // anchor: 'ffz-inner' → line is the FFZ inner edge (box starts at the line; red shielding
+            // sits on the asset side of the line). 'shielding' → line is the inner-shielding edge (around
+            // the assets): standoff (red) → FFZ (green, inset by offset) → outer shielding (yellow) all
+            // build OUTWARD, so you trace the asset boundary and everything stacks behind it.
+            const startFt = (advDraw.anchor === 'shielding') ? advDraw.offsetFt : 0;
+            // FFZ corridor box (green) first, then the shielding bands ON TOP.
+            const outline = advOutline(path, widthsFt, advDraw.side, startFt);
+            if (outline) { try { const po = L.polygon(outline.map(p => [p.lat, p.lng]), { color: '#5fff5f', weight: 2, opacity: 0.95, fillColor: '#5fff5f', fillOpacity: 0.18, interactive: false }); po.addTo(map); advDraw.layers.push(po); } catch (e) {} }
+            const innerBand = (advDraw.anchor === 'shielding')
+                ? advRibbon(path, advDraw.side, 0, advDraw.offsetFt)         // standoff: between the line and the FFZ
+                : advBandSigned(path, advDraw.offsetFt, advDraw.side, -1);   // just outside the inner (drawn) edge
+            advDrawBand(map, L, innerBand, advDraw.bufColor, advDraw.bufOpacity);                                                  // red — inner shielding
+            advDrawBand(map, L, advBandOuter(path, widthsFt, advDraw.offsetFt, advDraw.side, startFt), advDraw.bufColor2, advDraw.bufOpacity); // yellow — beyond the FAR edge of the FFZ
+            // Measure labels in the MIDDLE of each lane (red=standoff, green=FFZ width, yellow=outer shielding).
+            const off = advDraw.offsetFt, w0 = widthsFt[0] || advDraw.widthFt;
+            const redDepth = (advDraw.anchor === 'shielding') ? off / 2 : -off / 2;
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, redDepth), `${off} ft`, advDraw.bufColor);
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, startFt + w0 / 2), `${w0} ft`, '#5fff5f');
+            advMeasLabel(map, L, advLanePt(path, advDraw.side, startFt + w0 + off / 2), `${off} ft`, advDraw.bufColor2);
+            try { const pil = L.polyline(path.map(p => [p.lat, p.lng]), { color: '#5fb8ff', weight: 2, opacity: 0.9, dashArray: '4 3', interactive: false }); pil.addTo(map); advDraw.layers.push(pil); } catch (e) {}
+            // grabbed outer edge highlight (white, neutral against the green FFZ)
+            if (advDraw.dragEdge != null) { const e = advOuterEdges().find(x => x.seg === advDraw.dragEdge); if (e) { try { const pe = L.polyline([[e.a.lat, e.a.lng], [e.b.lat, e.b.lng]], { color: '#ffffff', weight: 5, opacity: 1, interactive: false }); pe.addTo(map); advDraw.layers.push(pe); } catch (er) {} } }
+        }
+        // Ctrl-snap guides — show the nearest asset's offset ring (magenta) + a marker at
+        // the snap point, so Ctrl visibly does something. Only while Ctrl is held.
+        if (advDraw.ctrlHeld) {
+            const at = (advDraw.dragVert != null) ? advDraw.verts[advDraw.dragVert] : advDraw.tentative;
+            if (at) {
+                const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                let bestRing = null, bestD = Infinity;
+                for (const a of ents) { if (a.type !== 3) continue; const ring = getAssetOffsetRing(a, advDraw.offsetFt * GEN_FT_TO_M); if (!ring) continue; const np = nearestPointOnRing(at, ring); if (np && np.d < bestD) { bestD = np.d; bestRing = ring; } }
+                if (bestRing) { try { const pr = L.polyline(bestRing.concat([bestRing[0]]).map(p => [p.lat, p.lng]), { color: '#ff5fff', weight: 1.5, opacity: 0.85, dashArray: '5 4', interactive: false }); pr.addTo(map); advDraw.layers.push(pr); } catch (e) {} }
+                try { const sm = L.circleMarker([at.lat, at.lng], { radius: 7, color: '#ff5fff', weight: 2, fillColor: '#ff5fff', fillOpacity: 0.35, interactive: false }); sm.addTo(map); advDraw.layers.push(sm); } catch (e) {} // snap marker
+            }
+        }
+        // Flush-snap targets (magenta dots): preview corridor CENTERLINE vertices + real committed FFZ
+        // CORNERS — but ONLY the ones NEAR the cursor (else the whole site fills with dots / they linger).
+        try {
+            let curCp = null; try { if (advDraw.tentative) curCp = map.latLngToContainerPoint(advDraw.tentative); } catch (e) {}
+            if (curCp) {
+                const R = 90; // px radius around the cursor
+                const dot = (v, op) => { try { const cp = map.latLngToContainerPoint(v); if (Math.hypot(cp.x - curCp.x, cp.y - curCp.y) > R) return; const dm = L.circleMarker([v.lat, v.lng], { radius: 3, color: '#ff5fff', weight: 1, fillColor: '#ff5fff', fillOpacity: op, interactive: false }); dm.addTo(map); advDraw.layers.push(dm); } catch (e) {} };
+                const ffzsCL = (genState.lastResult && genState.lastResult.ffzs) || [];
+                for (const f of ffzsCL) { if (!f || f._committed || !Array.isArray(f._advVerts)) continue; for (const v of f._advVerts) dot(v, 0.85); }
+                const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                for (const a of ents) { if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue; for (const v of ring) dot(v, 0.7); }
+            }
+        } catch (e) {}
+        // Live snap marker: magenta = flush centerline snap, cyan = FFZ-edge snap.
+        if (advDraw.ffzSnap && !editing) { const sc = advDraw.ffzSnap.centerline ? '#ff5fff' : '#00e5ff'; try { const fm = L.circleMarker([advDraw.ffzSnap.lat, advDraw.ffzSnap.lng], { radius: 8, color: sc, weight: 2.5, fillColor: sc, fillOpacity: 0.4, interactive: false }); fm.addTo(map); advDraw.layers.push(fm); } catch (e) {} }
+        advDraw.verts.forEach((v, i) => { try { const drag = (i === advDraw.dragVert); const m = L.circleMarker([v.lat, v.lng], { radius: drag ? 7 : 5, color: '#11151a', weight: 1.5, fillColor: drag ? '#ffffff' : '#5fb8ff', fillOpacity: 1, interactive: false }); m.addTo(map); advDraw.layers.push(m); } catch (e) {} });
+    }
+    // Remember the Advanced Draw PARAMS (width/offset/anchor/band) across reloads (GM, cross-site)
+    // so a commit→reload→re-draw cycle doesn't make you re-type them.
+    const ADV_PARAMS_KEY = 'aim_adv_params';
+    function advSaveParams() { try { GM_setValue(ADV_PARAMS_KEY, JSON.stringify({ widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt, anchor: advDraw.anchor, bufColor: advDraw.bufColor, bufColor2: advDraw.bufColor2, bufOpacity: advDraw.bufOpacity })); } catch (e) {} }
+    function advLoadParams() {
+        try {
+            const raw = GM_getValue(ADV_PARAMS_KEY, ''); if (!raw) return;
+            const o = JSON.parse(raw); if (!o) return;
+            if (o.widthFt > 0) advDraw.widthFt = o.widthFt;
+            if (typeof o.offsetFt === 'number') advDraw.offsetFt = o.offsetFt;
+            if (o.anchor) advDraw.anchor = o.anchor;
+            if (o.bufColor) advDraw.bufColor = o.bufColor;
+            if (o.bufColor2) advDraw.bufColor2 = o.bufColor2;
+            if (typeof o.bufOpacity === 'number') advDraw.bufOpacity = o.bufOpacity;
+        } catch (e) {}
+    }
+    function advStoreKey() { return ADV_LS_KEY + ':' + (genState.siteID || '?'); }
+    function advPersist() { try { localStorage.setItem(advStoreKey(), JSON.stringify({ verts: advDraw.verts, segWidth: advDraw.segWidth, side: advDraw.side, widthFt: advDraw.widthFt, offsetFt: advDraw.offsetFt, anchor: advDraw.anchor })); } catch (e) {} }
+    function advClearPersist() { try { localStorage.removeItem(advStoreKey()); } catch (e) {} }
+    function advRestore() {
+        try {
+            const raw = localStorage.getItem(advStoreKey()); if (!raw) return false;
+            const o = JSON.parse(raw);
+            if (o && Array.isArray(o.verts) && o.verts.length) {
+                advDraw.verts = o.verts.filter(v => v && typeof v.lat === 'number');
+                advDraw.segWidth = Array.isArray(o.segWidth) ? o.segWidth.slice() : [];
+                advDraw.side = o.side || 1;
+                if (o.widthFt) advDraw.widthFt = o.widthFt;
+                if (o.offsetFt) advDraw.offsetFt = o.offsetFt;
+                if (o.anchor) advDraw.anchor = o.anchor;
+                advDraw.drawing = advDraw.verts.length > 0;
+                return advDraw.verts.length > 0;
+            }
+        } catch (e) {}
+        return false;
+    }
+    // Branch-from-edge: snap the cursor onto the nearest EXISTING FFZ edge (entity type-16
+    // rings + other uncommitted _adv preview corridors), within ~12 px. Returns {lat,lng} or null.
+    // Lets a corridor START on / CONNECT to an existing FFZ's edge — the "M1 on any FFZ edge" ask.
+    function advSnapToFfzEdge(cursor) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
+        const sources = [], skipIds = new Set();
+        // Editable existing-FFZ layers FIRST — their (possibly merged/edited) geometry wins over
+        // the stale committed entity ring, so you can branch off a just-merged FFZ before saving.
+        genPreviewLayers.forEach(pl => { const f = pl && pl._ffz; if (f && f._existing && Array.isArray(f.points) && f.points.length >= 2 && !f._committed) { sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); if (f._origId != null) skipIds.add(f._origId); } });
+        // Any uncommitted preview FFZ (drawn corridor, merged-in-place, etc.) — not just _adv ones.
+        try { const ffzs = (genState.lastResult && genState.lastResult.ffzs) || []; for (const f of ffzs) { if (f && !f._committed && Array.isArray(f.points) && f.points.length >= 2) sources.push({ ring: f.points, kind: 'preview', id: null, ref: f }); } } catch (e) {}
+        // Committed entities — skip any we already have a fresher editable copy of.
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) { if (a.type !== 16 || skipIds.has(a.id)) continue; const r = entityCoords(a); if (r && r.length >= 2) sources.push({ ring: r, kind: 'entity', id: a.id, ref: null }); }
+        let best = null, bestD = 12, bestSrc = null;
+        for (const s of sources) {
+            const ring = s.ring, n = ring.length;
+            for (let i = 0; i < n; i++) {
+                const a = ring[i], b = ring[(i + 1) % n];
+                let A, B; try { A = map.latLngToContainerPoint(a); B = map.latLngToContainerPoint(b); } catch (e) { continue; }
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+                const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestSrc = { kind: s.kind, id: s.id, ref: s.ref, edge: i }; }
+            }
+        }
+        if (!best) return null;
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc }; } catch (e) { return null; }
+    }
+    // FLUSH branching: snap onto a preview corridor's CENTERLINE (its _advVerts, vertex OR projected
+    // along a segment) OR a real committed FFZ's CORNER (vertex), within ~12 px. Returns
+    // {lat,lng, src}. src = {kind:'preview',ref} for a corridor (centerline-flush + width-match) or
+    // {kind:'entity',id} for a real FFZ corner (so the new corridor anchors → fuses into it).
+    function advSnapToCenterline(cursor) {
+        const map = getLeafletMap(); if (!map) return null;
+        let cp; try { cp = map.latLngToContainerPoint(cursor); } catch (e) { return null; }
+        const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+        let best = null, bestD = 12, bestSrc = null;
+        for (const f of ffzs) {
+            if (!f || f._committed || !Array.isArray(f._advVerts) || f._advVerts.length < 1) continue;
+            const cl = f._advVerts;
+            for (const v of cl) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestSrc = { kind: 'preview', ref: f }; } }
+            for (let i = 0; i < cl.length - 1; i++) {
+                let A, B; try { A = map.latLngToContainerPoint(cl[i]); B = map.latLngToContainerPoint(cl[i + 1]); } catch (e) { continue; }
+                const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+                let t = l2 ? ((cp.x - A.x) * dx + (cp.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+                const px = A.x + t * dx, py = A.y + t * dy, d = Math.hypot(cp.x - px, cp.y - py);
+                if (d < bestD) { bestD = d; best = { x: px, y: py }; bestSrc = { kind: 'preview', ref: f }; }
+            }
+        }
+        // Real committed FFZ corners (vertex-only snap).
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        for (const a of ents) {
+            if (a.type !== 16) continue; const ring = entityCoords(a); if (!ring) continue;
+            for (const v of ring) { let P; try { P = map.latLngToContainerPoint(v); } catch (e) { continue; } const d = Math.hypot(P.x - cp.x, P.y - cp.y); if (d < bestD) { bestD = d; best = { x: P.x, y: P.y }; bestSrc = { kind: 'entity', id: a.id }; } }
+        }
+        if (!best) return null;
+        try { const ll = map.containerPointToLatLng(best); return { lat: ll.lat, lng: ll.lng, src: bestSrc, ref: (bestSrc && bestSrc.kind === 'preview') ? bestSrc.ref : null }; } catch (e) { return null; }
+    }
+    function advSnapCursor(ll, ev) {
+        let s = ll;
+        // Centerline / real-FFZ-corner snap wins (flush) > FFZ-edge snap > angle/asset snap.
+        const ce = advSnapToCenterline(s);
+        if (ce) { advDraw.ffzSnap = { lat: ce.lat, lng: ce.lng, centerline: true, ref: ce.ref, src: ce.src }; return { lat: ce.lat, lng: ce.lng }; }
+        const fe = advSnapToFfzEdge(s);
+        if (fe) { advDraw.ffzSnap = fe; return fe; }
+        advDraw.ffzSnap = null;
+        if (ev && ev.shiftKey) s = advSnapAngle(s);
+        if (ev && ev.ctrlKey) s = advSnapToAsset(s);
+        return s;
+    }
+    function advWire() {
+        const map = getLeafletMap(); if (!map) return;
+        advUnwire();
+        advDraw._container = map.getContainer();
+        advDraw._onMove = (ev) => {
+            if (!advDraw.active) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            advDraw.ctrlHeld = !!ev.ctrlKey;
+            if (advDraw.dragEdge != null) {
+                // Widen/narrow just this segment by the cursor's perpendicular distance off its inner edge.
+                advDraw.segWidth[advDraw.dragEdge] = advWidthFromCursor(advDraw.dragEdge, ll);
+                advRender();
+                return;
+            }
+            if (advDraw.dragVert != null) {
+                // Move the grabbed vertex live (Ctrl still snaps it to an asset offset; angle-snap N/A for interior).
+                advDraw.verts[advDraw.dragVert] = ev.ctrlKey ? advSnapToAsset(ll) : ll;
+                advRender();
+                return;
+            }
+            advDraw.tentative = advSnapCursor(ll, ev);
+            advRender();
+        };
+        advDraw._onDown = (ev) => {
+            if (!advDraw.active || ev.button !== 0) return;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const drawingNow = advDraw.drawing && advDraw.verts.length > 0;
+            // While a corridor is in progress, m1 grabs a VERTEX (fix the shape) or an outer EDGE (widen).
+            if (drawingNow) {
+                const hitV = advHitVert(ll);
+                if (hitV >= 0) { ev.preventDefault(); ev.stopPropagation(); advDraw.dragVert = hitV; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+                const hitE = advHitEdge(ll);
+                if (hitE >= 0) { ev.preventDefault(); ev.stopPropagation(); advDraw.dragEdge = hitE; try { map.dragging.disable(); } catch (e) {} advRender(); return; }
+            }
+            // STARTING a new corridor requires Alt — so a plain m1 stays free to edit existing shapes
+            // (drag/move) instead of constantly dropping a new corridor. In-progress draws keep plain m1.
+            if (!drawingNow && !ev.altKey) return;        // let the click through (edit existing / pan)
+            ev.preventDefault(); ev.stopPropagation();
+            advDraw.drawing = true;
+            const snapped = advSnapCursor(ll, ev);
+            // First point landing on an existing FFZ edge → remember it so finish joins that FFZ's group.
+            if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.branchSrc = advDraw.ffzSnap.src;
+            // First point snapped onto a corridor's CENTERLINE → match its width so the lanes are flush.
+            if (advDraw.verts.length === 0 && advDraw.ffzSnap && advDraw.ffzSnap.centerline && advDraw.ffzSnap.ref) {
+                const rw = advDraw.ffzSnap.ref._advSegWidth; const w = Array.isArray(rw) && rw.length ? rw[0] : null;
+                if (w && w > 0) { advDraw.widthFt = w; advDraw.segWidth = []; try { const wi = document.getElementById('aim-adv-width'); if (wi) wi.value = w; } catch (e) {} }
+            }
+            // Record EVERY vertex's snap (src + where) so a corridor bridging two FFZs fuses BOTH at finish.
+            if (advDraw.ffzSnap && advDraw.ffzSnap.src) advDraw.snapSrcs.push({ src: advDraw.ffzSnap.src, pt: { lat: advDraw.ffzSnap.lat, lng: advDraw.ffzSnap.lng } });
+            advDraw.vertSnapped.push(!!(advDraw.ffzSnap && advDraw.ffzSnap.src)); // for end-overlap extension
+            advDraw.verts.push(snapped);
+            advDraw.tentative = null;
+            advPersist(); advRender();
+        };
+        advDraw._onUp = (ev) => {
+            if (advDraw.dragVert != null || advDraw.dragEdge != null) { advDraw.dragVert = null; advDraw.dragEdge = null; try { map.dragging.enable(); } catch (e) {} advPersist(); advRender(); }
+        };
+        advDraw._onDbl = (ev) => { if (!advDraw.active || !advDraw.drawing || advDraw.dragVert != null) return; ev.preventDefault(); ev.stopPropagation(); finalizeAdvDraw(); };
+        advDraw._onKey = (ev) => {
+            if (!advDraw.active) return;
+            const k = (ev.key || '').toLowerCase();
+            const t = ev.target;
+            const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+            // Escape ALWAYS undoes the last point / exits — even if a control (Line/Width/Offset) has
+            // focus, since Esc isn't typing. (This was the "Esc doesn't cancel the vert" bug.)
+            if (k === 'escape') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                if (t && t.blur) { try { t.blur(); } catch (e) {} }
+                if (advDraw.verts.length) {
+                    advDraw.verts.pop(); if (advDraw.snapSrcs.length) advDraw.snapSrcs.pop();
+                    advDraw.drawing = advDraw.verts.length > 0;
+                    if (!advDraw.verts.length) { advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = []; }
+                    else advDraw.vertSnapped.pop();
+                    advPersist(); advRender();
+                } else setAdvDraw(false);
+                return;
+            }
+            if (inField) return;   // letter hotkeys suppressed only while typing in a field
+            if (k === 'f') { ev.preventDefault(); ev.stopImmediatePropagation(); advDraw.side = -advDraw.side; advRender(); }
+            else if (k === 'enter') { ev.preventDefault(); ev.stopImmediatePropagation(); finalizeAdvDraw(); }
+        };
+        advDraw._container.addEventListener('mousedown', advDraw._onDown, true);
+        advDraw._container.addEventListener('mousemove', advDraw._onMove, true);
+        advDraw._container.addEventListener('mouseup', advDraw._onUp, true);
+        advDraw._container.addEventListener('dblclick', advDraw._onDbl, true);
+        try { uwin().addEventListener('keydown', advDraw._onKey, true); } catch (e) {}
+        try { map.doubleClickZoom.disable(); } catch (e) {}
+        try { map.getContainer().style.cursor = 'crosshair'; } catch (e) {}
+    }
+    function advUnwire() {
+        const c = advDraw._container;
+        if (c) {
+            try { c.removeEventListener('mousedown', advDraw._onDown, true); } catch (e) {}
+            try { c.removeEventListener('mousemove', advDraw._onMove, true); } catch (e) {}
+            try { c.removeEventListener('mouseup', advDraw._onUp, true); } catch (e) {}
+            try { c.removeEventListener('dblclick', advDraw._onDbl, true); } catch (e) {}
+        }
+        try { uwin().removeEventListener('keydown', advDraw._onKey, true); } catch (e) {}
+        const map = getLeafletMap();
+        if (map) { try { map.doubleClickZoom.enable(); } catch (e) {} try { map.getContainer().style.cursor = ''; } catch (e) {} }
+        advDraw._container = null;
+    }
+    function setAdvDraw(on) {
+        advDraw.active = !!on;
+        if (advDraw.active) {
+            try { genDraw.active = false; } catch (e) {} // mutually exclusive with the simple Draw
+            if (!advDraw.verts.length) advRestore();      // resume a crash/reload in-progress draw
+            try { const w = document.getElementById('aim-adv-width'); if (w) w.value = advDraw.widthFt; const o = document.getElementById('aim-adv-offset'); if (o) o.value = advDraw.offsetFt; const an = document.getElementById('aim-adv-anchor'); if (an) an.value = advDraw.anchor; } catch (e) {}
+            advWire(); advRender();
+        } else {
+            advUnwire(); advClearLayers(); advDraw.branchSrc = null; advDraw.reGroup = null; advDraw.snapSrcs = []; advDraw.vertSnapped = [];
+        }
+        try { const b = document.getElementById('aim-gen-advdraw'); if (b) { b.style.background = advDraw.active ? 'rgba(95,184,255,0.32)' : 'rgba(95,184,255,0.12)'; b.textContent = advDraw.active ? '✦ Adv Draw ON — ALT+click to START a corridor (plain click edits existing) · Shift=angle · Ctrl=asset · F=flip · dbl-click=finish · Esc=undo/off' : '✦ Advanced Draw'; } } catch (e) {}
+        try { const c = document.getElementById('aim-adv-controls'); if (c) c.style.display = advDraw.active ? 'block' : 'none'; } catch (e) {}
+    }
+    // Open a slot in an FFZ ring at edge `edgeIdx` and route the corridor's open chain
+    // out and back through it → one simple polygon (no boolean union, no holes on an open branch).
+    function spliceCorridor(ring, chain, edgeIdx) {
+        if (!Array.isArray(ring) || ring.length < 3 || !Array.isArray(chain) || chain.length < 2) return null;
+        const i = Math.max(0, Math.min(edgeIdx, ring.length - 1));
+        const rI = ring[i];
+        const head = chain[0], tail = chain[chain.length - 1];
+        // Orient the chain so its endpoint nearer ring[i] connects first (keeps the ring simple).
+        const dHead = approxMeters(head.lat, head.lng, rI.lat, rI.lng);
+        const dTail = approxMeters(tail.lat, tail.lng, rI.lat, rI.lng);
+        const oriented = (dHead <= dTail) ? chain.slice() : chain.slice().reverse();
+        return ring.slice(0, i + 1).concat(oriented.map(p => ({ lat: p.lat, lng: p.lng })), ring.slice(i + 1));
+    }
+    // ===== Phase 1 — NON-DESTRUCTIVE merge. A branched corridor stays its OWN editable
+    // corridor (keeps _adv/_advVerts), tagged into a GROUP that fuses into one FFZ only at
+    // Commit. _group = shared id ('ent:<id>' if the lineage roots on a committed FFZ, else
+    // 'g:<n>'); _anchorId = that entity id (upsert target) or null; _branchPoint = where it
+    // snapped onto its parent (used to find the join edge at commit). =====
+    let advGroupCounter = 0;
+    function applyBranchGroup(f, branch, branchPoint) {
+        try {
+            let group = null, anchorId = null, parentRest = null, parentMode = null;
+            if (branch.kind === 'entity') {
+                anchorId = branch.id; group = 'ent:' + branch.id;
+                const bucket = mapObjectsBySite[genState.siteID];
+                const ent = bucket && bucket.entities && bucket.entities.find(e => e.id === branch.id && e.type === 16);
+                if (ent && ent.restrictions) parentRest = { minAlt: ent.restrictions.minAlt, maxAlt: ent.restrictions.maxAlt };
+            } else if (branch.kind === 'preview') {
+                const pf = branch.ref;
+                if (!pf) return false;
+                if (pf._existing) { anchorId = pf._origId; group = 'ent:' + pf._origId; parentRest = pf.restrictions; parentMode = pf._altMode; }
+                else if (pf._anchorId != null) { anchorId = pf._anchorId; group = pf._group || ('ent:' + pf._anchorId); pf._group = group; pf._anchorId = anchorId; parentRest = pf.restrictions; parentMode = pf._altMode; }
+                else { pf._group = pf._group || ('g:' + (++advGroupCounter)); group = pf._group; parentRest = pf.restrictions; parentMode = pf._altMode; }
+            }
+            if (!group) return false;
+            f._group = group; f._anchorId = anchorId;
+            f._branchPoint = { lat: branchPoint.lat, lng: branchPoint.lng };
+            if (parentRest && typeof parentRest.minAlt === 'number') f.restrictions = { minAlt: parentRest.minAlt, maxAlt: parentRest.maxAlt };
+            if (parentMode) f._altMode = parentMode;
+            return true;
+        } catch (e) { console.warn(`${GEN_TAG} branch group failed:`, e); return false; }
+    }
+    // Resolve a snap src → the {group, anchor} of the FFZ it points at (assigning a group id to a
+    // bare drawn parent if needed). For unifying the OTHER end of a bridge corridor.
+    function srcGroup(src) {
+        if (!src) return null;
+        if (src.kind === 'entity') return { group: 'ent:' + src.id, anchor: src.id };
+        if (src.kind === 'preview') {
+            const pf = src.ref; if (!pf) return null;
+            if (pf._existing) return { group: 'ent:' + pf._origId, anchor: pf._origId };
+            if (pf._anchorId != null) { pf._group = pf._group || ('ent:' + pf._anchorId); return { group: pf._group, anchor: pf._anchorId }; }
+            pf._group = pf._group || ('g:' + (++advGroupCounter)); return { group: pf._group, anchor: null };
+        }
+        return null;
+    }
+    // A corridor whose OTHER end snapped onto a different FFZ → fuse the two groups into one
+    // (prefer an anchored group so the result upserts the real FFZ). Reassigns all members.
+    function unifyCorridorWithSrc(f, src) {
+        try {
+            const g = srcGroup(src); if (!g) return false;
+            if (!f._group) { f._group = g.group; f._anchorId = g.anchor; return true; }
+            if (g.group === f._group) return true;
+            const Gs = f._group, As = f._anchorId, Ge = g.group, Ae = g.anchor;
+            const canon = (typeof Gs === 'string' && Gs.indexOf('ent:') === 0) ? Gs : ((typeof Ge === 'string' && Ge.indexOf('ent:') === 0) ? Ge : Gs);
+            const canonAnchor = (canon === Gs) ? As : Ae;
+            const list = (genState.lastResult && genState.lastResult.ffzs) || [];
+            for (const ff of list) { if (ff && (ff._group === Gs || ff._group === Ge)) { ff._group = canon; ff._anchorId = canonAnchor; } }
+            f._group = canon; f._anchorId = canonAnchor;
+            return true;
+        } catch (e) { console.warn(`${GEN_TAG} unify failed:`, e); return false; }
+    }
+    // Nearest ring-EDGE index to a point (meters). For proximity splicing at commit.
+    function nearestRingEdgeIdx(ring, pt) {
+        const proj = genProjector(pt.lat, pt.lng), P = proj.fwd(pt);
+        let best = 0, bestD = Infinity;
+        for (let i = 0; i < ring.length; i++) {
+            const A = proj.fwd(ring[i]), B = proj.fwd(ring[(i + 1) % ring.length]);
+            const dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            let t = l2 ? ((P.x - A.x) * dx + (P.y - A.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+            const d = Math.hypot(P.x - (A.x + t * dx), P.y - (A.y + t * dy));
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+    // Fuse grouped corridors into single entities at commit. Ungrouped FFZs pass through as
+    // their own 'create'. Each group → ONE 'create' (new entity, drawn-rooted) or 'upsert'
+    // (anchored to a committed FFZ id). Members processed in creation order so each child's
+    // branch edge already exists in the accumulating ring; join edge found by proximity.
+    // A member's connection point = where it joins the rest (its own branch, or where another
+    // corridor bridged INTO it). Roots have neither.
+    function memberConnPoint(m) { return m._branchPoint || m._joinHint || null; }
+    // Splice one member into the accumulating ring at the edge nearest its connection point.
+    // We splice the member's NATURAL outline (do NOT re-roll) — a corridor's two open ends are
+    // its width-separated base, which gives a clean slot; re-rolling collapses that to a sliver
+    // and flips spliceCorridor's orientation (→ bowtie).
+    function spliceMemberInto(combined, m) {
+        const cp = memberConnPoint(m) || m._centroid || ringCentroid(m.points);
+        const idx = nearestRingEdgeIdx(combined, cp);
+        const c = spliceCorridor(combined, m.points, idx);
+        return c || combined;
+    }
+    // Greedily splice members: each step picks the not-yet-placed member whose connection point
+    // is nearest the current ring (so a bridge chain assembles in connectivity order, not draw
+    // order). Returns the fused ring.
+    // True polygon UNION (boolean OR) of N rings via polygon-clipping (@require). Handles bridges,
+    // overlaps, any topology — and never returns a self-intersecting ring. Returns
+    // { rings:[[{lat,lng}],...] (largest first), holes:bool } or null (lib missing / failed).
+    function ringAreaAbs(ring) { let a = 0; for (let i = 0, n = ring.length; i < n; i++) { const p = ring[i], q = ring[(i + 1) % n]; a += (p.lng * q.lat - q.lng * p.lat); } return Math.abs(a) / 2; }
+    // Drop near-coincident + COLLINEAR vertices so straight runs become a single 2-vertex segment
+    // (the union output stacks redundant points where pieces meet — the "extra vertices" issue).
+    function simplifyRing(ring) {
+        if (!Array.isArray(ring) || ring.length < 4) return ring;
+        const proj = genProjector(ring[0].lat, ring[0].lng), pts = ring.map(p => proj.fwd(p)), tol = 0.3; // 0.3 m dedupe
+        const dd = [];
+        for (let i = 0; i < pts.length; i++) { const p = pts[i], q = dd[dd.length - 1]; if (!q || Math.hypot(p.x - q.x, p.y - q.y) > tol) dd.push(p); }
+        if (dd.length > 1) { const a = dd[0], b = dd[dd.length - 1]; if (Math.hypot(a.x - b.x, a.y - b.y) <= tol) dd.pop(); }
+        const n = dd.length; if (n < 4) return dd.map(p => proj.inv(p));
+        const res = [];
+        for (let i = 0; i < n; i++) {
+            const a = dd[(i - 1 + n) % n], b = dd[i], c = dd[(i + 1) % n];
+            const v1x = b.x - a.x, v1y = b.y - a.y, v2x = c.x - b.x, v2y = c.y - b.y;
+            const l1 = Math.hypot(v1x, v1y), l2 = Math.hypot(v2x, v2y);
+            if (l1 < 1e-6 || l2 < 1e-6) continue;
+            if (Math.abs(v1x * v2y - v1y * v2x) / (l1 * l2) < 0.02) continue; // ~1.1° → collinear, drop b
+            res.push(b);
+        }
+        return (res.length >= 3 ? res : dd).map(p => proj.inv(p));
+    }
+    function unionRings(rings) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function') return null;
+        try {
+            const polys = rings.filter(r => Array.isArray(r) && r.length >= 3).map(r => { const ring = r.map(p => [p.lng, p.lat]); ring.push([r[0].lng, r[0].lat]); return [ring]; });
+            if (!polys.length) return null;
+            const result = PC.union(polys[0], ...polys.slice(1)); // MultiPolygon
+            if (!result || !result.length) return null;
+            let holes = false; const out = [];
+            for (const poly of result) {
+                if (poly.length > 1) holes = true;
+                let outer = poly[0].map(c => ({ lat: c[1], lng: c[0] }));
+                if (outer.length > 1) { const a = outer[0], b = outer[outer.length - 1]; if (a.lat === b.lat && a.lng === b.lng) outer.pop(); }
+                outer = simplifyRing(outer);
+                if (outer.length >= 3) out.push(outer);
+            }
+            if (!out.length) return null;
+            out.sort((a, b) => ringAreaAbs(b) - ringAreaAbs(a)); // largest first
+            return { rings: out, holes };
+        } catch (e) { console.warn(`${GEN_TAG} union failed:`, e); return null; }
+    }
+    // DE-NOTCH: drop tiny steps/jogs (a vertex deviating < tolFt from its neighbours) via Douglas-
+    // Peucker on a closed ring (split at the two farthest anchors so the loop isn't degenerate). Removes
+    // the little misalignment notches at junctions WITHOUT adding vertices or cutting real corners.
+    function denotchRing(ringLL, tolFt) {
+        if (!Array.isArray(ringLL) || ringLL.length < 4) return ringLL;
+        try {
+            const proj = genProjector(ringLL[0].lat, ringLL[0].lng), eps = tolFt * GEN_FT_TO_M;
+            const ring = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const perp = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; return Math.abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / L; };
+            const rdp = (pts) => { if (pts.length < 3) return pts.slice(); let dmax = 0, idx = 0; const a = pts[0], b = pts[pts.length - 1]; for (let i = 1; i < pts.length - 1; i++) { const d = perp(pts[i], a, b); if (d > dmax) { dmax = d; idx = i; } } if (dmax > eps) { return rdp(pts.slice(0, idx + 1)).slice(0, -1).concat(rdp(pts.slice(idx))); } return [a, b]; };
+            let cx = 0, cy = 0; for (const p of ring) { cx += p[0]; cy += p[1]; } cx /= ring.length; cy /= ring.length;
+            let a1 = 0, bd = -1; for (let i = 0; i < ring.length; i++) { const d = Math.hypot(ring[i][0] - cx, ring[i][1] - cy); if (d > bd) { bd = d; a1 = i; } }
+            let a2 = 0; bd = -1; for (let i = 0; i < ring.length; i++) { const d = Math.hypot(ring[i][0] - ring[a1][0], ring[i][1] - ring[a1][1]); if (d > bd) { bd = d; a2 = i; } }
+            const n = ring.length, arc1 = [], arc2 = [];
+            for (let i = a1; ; i = (i + 1) % n) { arc1.push(ring[i]); if (i === a2) break; }
+            for (let i = a2; ; i = (i + 1) % n) { arc2.push(ring[i]); if (i === a1) break; }
+            const out = rdp(arc1).slice(0, -1).concat(rdp(arc2).slice(0, -1));
+            if (out.length < 3) return ringLL;
+            return out.map(p => proj.inv({ x: p[0], y: p[1] }));
+        } catch (e) { console.warn(`${GEN_TAG} denotch failed:`, e); return ringLL; }
+    }
+    // Morphological CLOSE: fill any gap/notch/sliver narrower than 2*dFt so the fused shape comes out
+    // clean (no "little bits"). dilate by d then erode by d (erode via the complement trick so holes
+    // are preserved). Falls back to the input ring on any failure — never makes the shape worse.
+    function morphCloseRing(ringLL, dFt) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.union !== 'function' || !Array.isArray(ringLL) || ringLL.length < 4) return ringLL;
+        try {
+            const d = dFt * GEN_FT_TO_M, proj = genProjector(ringLL[0].lat, ringLL[0].lng);
+            const ringXY = ringLL.map(p => { const m = proj.fwd(p); return [m.x, m.y]; });
+            const ringToMP = r => { const c = r.slice(); c.push(r[0]); return [[c]]; };
+            const dilateMP = (mp) => {
+                const parts = [mp];
+                for (const poly of mp) for (const ring of poly) { const n = ring.length; for (let i = 0; i < n - 1; i++) { const a = ring[i], b = ring[i + 1]; const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = -dy / L * d, ny = dx / L * d; const q = [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]]; q.push(q[0]); parts.push([q]); const s = [[a[0] + d, a[1] + d], [a[0] + d, a[1] - d], [a[0] - d, a[1] - d], [a[0] - d, a[1] + d]]; s.push(s[0]); parts.push([s]); } }
+                return PC.union(parts[0], ...parts.slice(1));
+            };
+            const outers = m => m.map(p => p[0].map(c => [c[0], c[1]]));
+            const areaXY = r => { let a = 0; for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length]; a += p[0] * q[1] - q[0] * p[1]; } return Math.abs(a) / 2; };
+            const D = dilateMP(ringToMP(ringXY));
+            let mnx = 1e18, mny = 1e18, mxx = -1e18, mxy = -1e18;
+            for (const r of outers(D)) for (const p of r) { mnx = Math.min(mnx, p[0]); mny = Math.min(mny, p[1]); mxx = Math.max(mxx, p[0]); mxy = Math.max(mxy, p[1]); }
+            const mg = d * 4, Bc = [[mnx - mg, mny - mg], [mxx + mg, mny - mg], [mxx + mg, mxy + mg], [mnx - mg, mxy + mg]]; Bc.push(Bc[0]);
+            const eroded = PC.difference([Bc], dilateMP(PC.difference([Bc], D)));
+            const er = outers(eroded); if (!er.length) return ringLL;
+            er.sort((a, b) => areaXY(b) - areaXY(a));
+            let out = er[0].map(c => proj.inv({ x: c[0], y: c[1] }));
+            if (out.length > 1) { const a = out[0], b = out[out.length - 1]; if (Math.abs(a.lat - b.lat) < 1e-12 && Math.abs(a.lng - b.lng) < 1e-12) out.pop(); }
+            return out.length >= 3 ? out : ringLL;
+        } catch (e) { console.warn(`${GEN_TAG} morph-close failed:`, e); return ringLL; }
+    }
+    // Per SOP, two FFZs can't sit within 30 ft of each other — so pieces this close are meant to be
+    // ONE zone. If a union leaves disjoint pieces within GAP_MERGE_FT, weld the nearest pair with a
+    // small connector and re-union until they're all one (or genuinely far apart).
+    const GAP_MERGE_FT = 15;
+    function ptSegMxy(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy; let t = l2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t)); const x = a.x + t * dx, y = a.y + t * dy; return { d: Math.hypot(p.x - x, p.y - y), x, y }; }
+    function nearestBetweenRings(A, B) {
+        const proj = genProjector(A[0].lat, A[0].lng);
+        const Am = A.map(p => proj.fwd(p)), Bm = B.map(p => proj.fwd(p));
+        let best = { d: Infinity };
+        for (const va of Am) for (let j = 0; j < Bm.length; j++) { const r = ptSegMxy(va, Bm[j], Bm[(j + 1) % Bm.length]); if (r.d < best.d) best = { d: r.d, p: va, q: { x: r.x, y: r.y } }; }
+        for (const vb of Bm) for (let j = 0; j < Am.length; j++) { const r = ptSegMxy(vb, Am[j], Am[(j + 1) % Am.length]); if (r.d < best.d) best = { d: r.d, p: { x: r.x, y: r.y }, q: vb }; }
+        if (!best.p) return null;
+        return { d: best.d, p: proj.inv(best.p), q: proj.inv(best.q) };
+    }
+    // Do two rings actually OVERLAP (cross / contain)? nearestBetweenRings only sees vertex-to-edge
+    // distance, which misses two long shapes that CROSS in the middle (an X). Real intersection test.
+    function ringsOverlap(A, B) {
+        const PC = (typeof polygonClipping !== 'undefined') ? polygonClipping : (typeof unsafeWindow !== 'undefined' && unsafeWindow.polygonClipping);
+        if (!PC || typeof PC.intersection !== 'function') return false;
+        try {
+            const toPoly = r => { const rr = r.map(p => [p.lng, p.lat]); rr.push([r[0].lng, r[0].lat]); return [rr]; };
+            const inter = PC.intersection(toPoly(A), toPoly(B));
+            return !!(inter && inter.length);
+        } catch (e) { return false; }
+    }
+    function makeWeld(p, q) {
+        const proj = genProjector(p.lat, p.lng), P = proj.fwd(p), Q = proj.fwd(q);
+        const dx = Q.x - P.x, dy = Q.y - P.y, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
+        const half = 6 * GEN_FT_TO_M, ext = 2 * GEN_FT_TO_M;     // 12 ft neck, pushed 2 ft into each piece to overlap
+        const A = { x: P.x - ux * ext, y: P.y - uy * ext }, B = { x: Q.x + ux * ext, y: Q.y + uy * ext };
+        return [{ x: A.x + nx * half, y: A.y + ny * half }, { x: B.x + nx * half, y: B.y + ny * half }, { x: B.x - nx * half, y: B.y - ny * half }, { x: A.x - nx * half, y: A.y - ny * half }].map(pt => proj.inv(pt));
+    }
+    function unionWithGapClose(rings, maxGapFt) {
+        let u = unionRings(rings);
+        if (!u || u.rings.length <= 1) return u;
+        const maxGapM = (maxGapFt || GAP_MERGE_FT) * GEN_FT_TO_M;
+        let guard = 0;
+        while (u.rings.length > 1 && guard++ < 30) {
+            let bd = maxGapM, bseg = null;
+            for (let i = 0; i < u.rings.length; i++) for (let j = i + 1; j < u.rings.length; j++) { const np = nearestBetweenRings(u.rings[i], u.rings[j]); if (np && np.d < bd) { bd = np.d; bseg = np; } }
+            if (!bseg) break;                                   // remaining pieces genuinely far apart
+            const re = unionRings(u.rings.concat([makeWeld(bseg.p, bseg.q)]));
+            if (!re || re.rings.length >= u.rings.length) break; // weld didn't merge anything → stop
+            re.holes = re.holes || u.holes; u = re;
+        }
+        return u;
+    }
+    function fuseMembers(baseRing, members) {
+        let combined = baseRing.map(p => ({ lat: p.lat, lng: p.lng }));
+        const remaining = members.slice();
+        const nearestVertM = (cp) => { let d = Infinity; for (const v of combined) { const dd = approxMeters(v.lat, v.lng, cp.lat, cp.lng); if (dd < d) d = dd; } return d; };
+        let guard = 0;
+        while (remaining.length && guard++ < 200) {
+            let bi = 0, bd = Infinity;
+            for (let i = 0; i < remaining.length; i++) { const cp = memberConnPoint(remaining[i]) || remaining[i]._centroid || ringCentroid(remaining[i].points); const d = nearestVertM(cp); if (d < bd) { bd = d; bi = i; } }
+            combined = spliceMemberInto(combined, remaining[bi]);
+            remaining.splice(bi, 1);
+        }
+        return combined;
+    }
+    // Build commit writes. The server FORBIDS overlapping FFZs, so we CLUSTER drawn pieces by actual
+    // geometry (overlap or within GAP_MERGE_FT) — NOT by snap-lineage — and union each cluster into one
+    // zone. A cluster that overlaps a real FFZ absorbs it (upsert). Auto-generated per-asset FFZs and
+    // non-drawn shapes commit individually, unchanged.
+    function fuseCorridorGroups(ffzs) {
+        const writes = [];
+        const all = (ffzs || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3);
+        const drawn = all.filter(f => f._drawn || f._adv), other = all.filter(f => !(f._drawn || f._adv));
+        for (const f of other) writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] });
+        if (!drawn.length) return writes;
+        const maxGapM = GAP_MERGE_FT * GEN_FT_TO_M;
+        // Union-find: two pieces share a cluster if they overlap or are within GAP_MERGE_FT.
+        const parent = drawn.map((_, i) => i);
+        const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+        for (let i = 0; i < drawn.length; i++) for (let j = i + 1; j < drawn.length; j++) { const np = nearestBetweenRings(drawn[i].points, drawn[j].points); if ((np && np.d < maxGapM) || ringsOverlap(drawn[i].points, drawn[j].points)) parent[find(i)] = find(j); }
+        const clusters = new Map();
+        drawn.forEach((p, i) => { const r = find(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(p); });
+        const bucket = mapObjectsBySite[genState.siteID];
+        const realFfzs = ((bucket && bucket.entities) || []).filter(e => e.type === 16);
+        for (const members of clusters.values()) {
+            try {
+                // CREATE-ONLY: union the drawn pieces in this cluster into one (or more) NEW zones.
+                // We NEVER read/upsert/overwrite an existing real FFZ — commit is strictly non-destructive.
+                const u = unionWithGapClose(members.map(m => m.points), GAP_MERGE_FT);
+                if (u && Array.isArray(u.rings)) u.rings = u.rings.map(r => denotchRing(simplifyRing(r), 4)); // dedup/collinear + drop <4ft notches (flush junctions)
+                const root = members[0];
+                // Flag (for a warning only) if this new zone overlaps an existing FFZ — never act on it.
+                let overlapsExisting = null;
+                try { for (const a of realFfzs) { const r = entityCoords(a); if (!r || r.length < 3) continue; const np = nearestBetweenRings(members[0].points, r); if ((np && np.d < 1.5 * GEN_FT_TO_M) || members[0].points.some(pt => pointInPolygon(pt.lat, pt.lng, r))) { overlapsExisting = a.id; break; } } } catch (e) {}
+                if (u && u.rings.length) {
+                    u.rings.forEach((rg, i) => writes.push({ kind: 'create', name: i === 0 ? root.name : `${root.name} pt${i + 1}`, points: rg, restrictions: root.restrictions, members: i === 0 ? members : [], _holes: u.holes, _disjoint: u.rings.length > 1, _overlapsExisting: i === 0 ? overlapsExisting : null }));
+                } else {
+                    let rootIdx = members.findIndex(m => !memberConnPoint(m)); if (rootIdx < 0) rootIdx = 0;
+                    writes.push({ kind: 'create', name: root.name, points: fuseMembers(members[rootIdx].points, members.filter((_, i) => i !== rootIdx)), restrictions: root.restrictions, members, _overlapsExisting: overlapsExisting });
+                }
+            } catch (e) { console.warn(`${GEN_TAG} cluster fuse failed:`, e); members.forEach(f => writes.push({ kind: 'create', name: f.name, points: f.points, restrictions: f.restrictions, members: [f] })); }
+        }
+        return writes;
+    }
+    async function finalizeAdvDraw() {
+        advDraw.drawing = false;
+        const verts = advDraw.verts.slice();
+        const vSnap = advDraw.vertSnapped.slice(); advDraw.vertSnapped = [];
+        // Auto-overlap: where an END vertex snapped onto existing geometry, push it PAST the snap point
+        // (extend the end segment outward) by ADV_SNAP_OVERLAP_FT so the union overlaps instead of
+        // kissing the edge → no thin tab/sliver. You never have to think about overlap.
+        if (verts.length >= 2) {
+            const extend = (endIdx, neighborIdx) => {
+                const a = verts[endIdx], b = verts[neighborIdx];
+                const proj = genProjector(a.lat, a.lng), A = proj.fwd(a), B = proj.fwd(b);
+                const dx = A.x - B.x, dy = A.y - B.y, L = Math.hypot(dx, dy) || 1, d = ADV_SNAP_OVERLAP_FT * GEN_FT_TO_M;
+                verts[endIdx] = proj.inv({ x: A.x + dx / L * d, y: A.y + dy / L * d });
+            };
+            if (vSnap[0]) extend(0, 1);
+            if (vSnap[verts.length - 1]) extend(verts.length - 1, verts.length - 2);
+        }
+        const segW = advSegWidthsFt(Math.max(0, verts.length - 1)).slice();
+        const finSide = advDraw.side;
+        const finAnchor = advDraw.anchor, finStartFt = (finAnchor === 'shielding') ? advDraw.offsetFt : 0;
+        const outline = advOutline(verts, segW, finSide, finStartFt);
+        const branch = advDraw.branchSrc; advDraw.branchSrc = null;
+        const snaps = advDraw.snapSrcs.slice(); advDraw.snapSrcs = [];
+        advDraw.verts = []; advDraw.segWidth = []; advDraw.tentative = null;
+        advDraw.dragVert = null; advDraw.dragEdge = null; advDraw.ffzSnap = null;  // clear transient edit state so the mode stays usable
+        advClearLayers(); advClearPersist();
+        try { const mp0 = getLeafletMap(); if (mp0) mp0.dragging.enable(); } catch (e) {}
+        if (!outline || outline.length < 4) { showToast('Draw at least 2 points first', 'rgba(255,82,82,0.6)'); return; }
+        const cen = ringCentroid(outline);
+        const ents = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+        let nm = 'corridor', bestD = Infinity;
+        for (const a of ents) { if (a.type !== 3) continue; const ring = entityCoords(a); if (!ring) continue; const np = nearestPointOnRing(cen, ring); if (np && np.d < bestD) { bestD = np.d; nm = a.name || nm; } }
+        const f = { type: 16, name: genDraftName(nm), site_id: genState.siteID, points: outline, restrictions: { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _adv: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _advVerts: verts, _advSegWidth: segW, _advSide: finSide, _advAnchor: finAnchor, _advAnchorOffsetFt: finStartFt, _advOffsetFt: advDraw.offsetFt };
+        // NON-DESTRUCTIVE merge: if the first point branched off an FFZ, join that FFZ's group
+        // (stays its own editable corridor; fuses into one entity at Commit) + inherit its band.
+        // reGroup = re-finishing a corridor that was already in a group → keep it in that group.
+        const reGroup = advDraw.reGroup; advDraw.reGroup = null;
+        let grouped = branch ? applyBranchGroup(f, branch, verts[0]) : false;
+        if (!grouped && reGroup && reGroup._group) {
+            f._group = reGroup._group; f._anchorId = reGroup._anchorId; f._branchPoint = reGroup._branchPoint || { lat: verts[0].lat, lng: verts[0].lng };
+            if (reGroup._restrictions && typeof reGroup._restrictions.minAlt === 'number') f.restrictions = { minAlt: reGroup._restrictions.minAlt, maxAlt: reGroup._restrictions.maxAlt };
+            if (reGroup._altMode) f._altMode = reGroup._altMode;
+            if (typeof reGroup._groundM === 'number') f._groundM = reGroup._groundM;
+            grouped = true;
+        }
+        // Bridge: any OTHER vertex that snapped onto a different FFZ → fuse those groups into one,
+        // and tell that FFZ where this corridor joins it (_joinHint) so the fused ring splices cleanly.
+        for (const s of snaps) {
+            if (!s || s.src === branch) continue;
+            if (unifyCorridorWithSrc(f, s.src)) grouped = true;
+            if (s.src.kind === 'preview' && s.src.ref && !s.src.ref._branchPoint && !s.src.ref._joinHint) s.src.ref._joinHint = { lat: s.pt.lat, lng: s.pt.lng };
+        }
+        if (!grouped) {
+            // DEM/altitude at FINISH only (not live) — mode-aware (v4.84 AGL/MSL). Grouped corridors
+            // inherit the parent's band instead (one fused FFZ = one altitude).
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const mode = genActiveAltMode();
+            f._altMode = mode;
+            try {
+                if (mode === 'agl') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, 0, 'agl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, 0, 'agl') }; }
+                else if (mode === 'msl') { await bulkFetchElevations([cen]); const g = getElevationFromCache(cen.lat, cen.lng); if (typeof g === 'number') { f.restrictions = { minAlt: aglFtToStoredM(p.aglFt, g, 'msl'), maxAlt: aglFtToStoredM(p.aglFt + p.deltaFt, g, 'msl') }; f._groundM = g; } }
+            } catch (e) { console.warn(`${GEN_TAG} adv-draw DEM failed:`, e); }
+        }
+        if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+        genState.lastResult.ffzs.push(f);
+        renderGenPreview(genState.lastResult.ffzs);
+        if (advDraw.active) { advWire(); advRender(); }  // re-arm — renderGenPreview re-wires map editing
+        advSaveFfzs(); // persist the finished (uncommitted) corridor so a reload doesn't lose it
+        showToast(grouped ? 'Linked corridor — fuses into one FFZ on Commit · m2 either piece to edit' : 'Drew corridor FFZ — right-click it to re-edit · Commit to save', grouped ? 'rgba(95,255,95,0.5)' : 'rgba(255,225,77,0.55)');
+    }
+    // Persist FINISHED-but-uncommitted FFZs (drawn corridors) so a reload doesn't lose them.
+    // Restored when the ⊕ Generate modal is reopened. Committed ones drop out (server-side).
+    // Slim a draft FFZ for storage / restore one back (shared by autosave + the Merge/Unmerge stash).
+    function advFfzSlim(f) { return { name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _merged: !!f._merged, _altMode: f._altMode, _centroid: f._centroid, _side: f._side, _offsetFt: f._offsetFt, _assetId: f._assetId, _assetName: f._assetName, _plDistFt: f._plDistFt, _standoffFt: f._standoffFt, _overPowerLine: f._overPowerLine, _holes: f._holes, _overlapsExisting: f._overlapsExisting, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt, _group: f._group, _anchorId: f._anchorId, _branchPoint: f._branchPoint, _joinHint: f._joinHint }; }
+    function advFfzFromSlim(s, siteID) { return { type: 16, name: s.name, site_id: siteID, points: s.points, restrictions: s.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: !!s._drawn, _adv: !!s._adv, _merged: !!s._merged, _side: (s._side != null ? s._side : 'drawn'), _offsetFt: (s._offsetFt != null ? s._offsetFt : 0), _assetId: s._assetId, _assetName: s._assetName, _plDistFt: s._plDistFt, _standoffFt: s._standoffFt, _overPowerLine: s._overPowerLine, _holes: s._holes, _overlapsExisting: s._overlapsExisting, _altMode: s._altMode, _centroid: s._centroid || ringCentroid(s.points), _advVerts: s._advVerts, _advSegWidth: s._advSegWidth, _advSide: s._advSide, _advAnchor: s._advAnchor, _advAnchorOffsetFt: s._advAnchorOffsetFt, _advOffsetFt: s._advOffsetFt, _group: s._group, _anchorId: s._anchorId, _branchPoint: s._branchPoint, _joinHint: s._joinHint }; }
+    let genMergeStash = null; // pre-merge pieces (slim) so the Merge button can UNMERGE back to editable pieces
+    function advFfzKey() { return 'aim_adv_ffzs:' + (genState.siteID || '?'); }
+    function advSaveFfzs() {
+        try {
+            // Persist EVERY uncommitted preview FFZ — hand-drawn corridors AND per-asset generated
+            // drafts (both carry _gen). Without _gen, generated previews vanished on reload/crash.
+            const list = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3 && (f._gen || f._drawn || f._adv));
+            const slim = list.map(advFfzSlim);
+            if (slim.length) {
+                const json = JSON.stringify(slim);
+                localStorage.setItem(advFfzKey(), json);
+                // ALSO mirror to a NEVER-cleared backup on every non-empty save, so a commit/reload can
+                // never lose your work — __aimAdvRestoreBackup() always has the last drawn state.
+                try { localStorage.setItem('aim_adv_ffzs_backup:' + (genState.siteID || '?'), json); } catch (e) {}
+            } else {
+                localStorage.removeItem(advFfzKey()); // live key only — the backup is left intact on purpose
+            }
+        } catch (e) {}
+    }
+    // Recovery: copy the pre-commit backup back into the live autosave, then reopen the ⊕ modal.
+    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const b = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); if (!b) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } localStorage.setItem('aim_adv_ffzs:' + siteID, b); const n = (JSON.parse(b) || []).length; (uwin().console || console).log('[AIM] restored ' + n + ' draft(s) — reopen the ⊕ Generate modal to see them'); return n; }; } catch (e) {}
+    function advLoadFfzs(siteID) {
+        try {
+            // Live key first; if it was wiped, AUTO-FALL-BACK to the never-cleared backup so reopening
+            // the modal always brings your drafts back (no console command needed).
+            let raw = localStorage.getItem('aim_adv_ffzs:' + siteID);
+            let fromBackup = false;
+            if (!raw) { raw = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); fromBackup = !!raw; }
+            if (!raw) return;
+            const slim = JSON.parse(raw); if (!Array.isArray(slim) || !slim.length) return;
+            if (fromBackup) { try { localStorage.setItem('aim_adv_ffzs:' + siteID, raw); } catch (e) {} } // re-seat the live key
+            if (!genState.lastResult || !Array.isArray(genState.lastResult.ffzs)) genState.lastResult = { ffzs: [] };
+            const have = new Set(((genState.lastResult.ffzs) || []).map(f => f && f.points && JSON.stringify(f.points)));
+            let added = 0;
+            for (const s of slim) {
+                if (!s || !Array.isArray(s.points) || s.points.length < 3) continue;
+                if (have.has(JSON.stringify(s.points))) continue; // don't double-load
+                genState.lastResult.ffzs.push(advFfzFromSlim(s, siteID));
+                added++;
+            }
+            if (genState.lastResult.ffzs.length) renderGenPreview(genState.lastResult.ffzs);
+            if (added) showToast(`Restored ${added} unsaved draft FFZ${added === 1 ? '' : 's'}`, 'rgba(95,184,255,0.5)');
+        } catch (e) {}
+    }
+    // Re-open a finished corridor for editing: pull its verts/widths/side back into
+    // Advanced Draw and drop the preview FFZ (re-finish to rebuild it).
+    function advReEdit(f) {
+        if (!f || !Array.isArray(f._advVerts) || f._advVerts.length < 2) { showToast('This FFZ wasn\'t drawn with Advanced Draw', 'rgba(255,179,71,0.6)'); return false; }
+        if (advDraw.verts.length) { showToast('Finish the current draw first (dbl-click)', 'rgba(255,179,71,0.6)'); return false; }
+        const map = getLeafletMap();
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) { const j = genState.lastResult.ffzs.indexOf(f); if (j >= 0) genState.lastResult.ffzs.splice(j, 1); }
+        if (f._poly) { try { if (map) map.removeLayer(f._poly); } catch (e) {} const k = genPreviewLayers.indexOf(f._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+        renderGenPreview((genState.lastResult && genState.lastResult.ffzs) || []);
+        advDraw.verts = f._advVerts.map(v => ({ lat: v.lat, lng: v.lng }));
+        advDraw.segWidth = Array.isArray(f._advSegWidth) ? f._advSegWidth.slice() : [];
+        advDraw.side = f._advSide || 1;
+        if (f._advAnchor) advDraw.anchor = f._advAnchor;
+        if (typeof f._advAnchorOffsetFt === 'number' && f._advAnchorOffsetFt > 0) advDraw.offsetFt = f._advAnchorOffsetFt;
+        advDraw.drawing = true;
+        advDraw.branchSrc = null;   // re-editing a corridor isn't a fresh branch
+        // Preserve its group/anchor so re-finishing keeps it fused with its siblings (else it'd
+        // drop out of the group and commit as a separate FFZ).
+        advDraw.reGroup = f._group ? { _group: f._group, _anchorId: (f._anchorId != null ? f._anchorId : null), _branchPoint: f._branchPoint, _restrictions: f.restrictions, _altMode: f._altMode, _groundM: f._groundM } : null;
+        setAdvDraw(true);
+        advPersist(); advSaveFfzs();
+        showToast('Editing corridor — drag verts/edges · dbl-click to re-finish', 'rgba(95,184,255,0.55)');
+        return true;
+    }
+
+    // ===== Generic per-vertex editor — works on ANY uncommitted preview FFZ (old corridor,
+    // merged shape, simple draw, or an existing FFZ loaded for edit). Edits f.points directly,
+    // so it doesn't need corridor structure. Drag a dot to move · m2 a dot to delete · click a
+    // faint mid-dot to insert · Esc / m2 the body to finish. =====
+    let genVertEdit = { active: false, f: null, markers: [], mids: [], resumeAdv: false, _onKey: null };
+    function clearGenVertMarkers() {
+        const map = getLeafletMap();
+        genVertEdit.markers.forEach(m => { try { if (map) map.removeLayer(m); } catch (e) {} });
+        genVertEdit.mids.forEach(m => { try { if (map) map.removeLayer(m); } catch (e) {} });
+        genVertEdit.markers = []; genVertEdit.mids = [];
+    }
+    function genVertEditPersist() {
+        const f = genVertEdit.f; if (!f || !Array.isArray(f.points)) return;
+        f._centroid = ringCentroid(f.points);
+        if (f._poly) { try { f._poly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {} }
+        if (f._existing) f._dirty = true;                 // Save FFZ edits will upsert it
+        else { try { advSaveFfzs(); } catch (e) {} }       // drawn/merged preview → autosave
+    }
+    function renderGenMidMarkers() {
+        const map = getLeafletMap(), L = getLeafletL();
+        const f = genVertEdit.f; if (!map || !L || !f || !Array.isArray(f.points)) return;
+        const pts = f.points, n = pts.length;
+        for (let i = 0; i < n; i++) {
+            const a = pts[i], b = pts[(i + 1) % n];
+            const mid = { lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 };
+            const icon = L.divIcon({ className: 'aim-vert-mid', html: '<div style="width:9px;height:9px;border-radius:50%;background:rgba(0,229,255,0.30);border:1px dashed #00e5ff;"></div>', iconSize: [9, 9], iconAnchor: [5, 5] });
+            const mk = L.marker([mid.lat, mid.lng], { icon, interactive: true, keyboard: false, zIndexOffset: 900 });
+            const insertAt = i + 1;
+            mk.addTo(map);
+            mk.on('click', (e) => { try { if (e.originalEvent) e.originalEvent.stopPropagation(); } catch (er) {} genPushUndo(f, 'vertex add'); f.points.splice(insertAt, 0, { lat: mid.lat, lng: mid.lng }); genVertEditPersist(); renderGenVertMarkers(); });
+            genVertEdit.mids.push(mk);
+        }
+    }
+    function renderGenVertMarkers() {
+        const map = getLeafletMap(), L = getLeafletL();
+        if (!map || !L) return;
+        clearGenVertMarkers();
+        const f = genVertEdit.f; if (!f || !Array.isArray(f.points)) return;
+        f.points.forEach((p, i) => {
+            const icon = L.divIcon({ className: 'aim-vert-dot', html: '<div style="width:12px;height:12px;border-radius:50%;background:#00e5ff;border:2px solid #08121a;box-shadow:0 0 0 1px #00e5ff;"></div>', iconSize: [12, 12], iconAnchor: [6, 6] });
+            const mk = L.marker([p.lat, p.lng], { icon, draggable: true, autoPan: false, keyboard: false, zIndexOffset: 1000 });
+            mk.addTo(map);
+            mk.on('dragstart', () => { genPushUndo(f, 'vertex move'); });
+            mk.on('drag', (e) => { const ll = e.target.getLatLng(); f.points[i] = { lat: ll.lat, lng: ll.lng }; if (f._poly) { try { f._poly.setLatLngs(f.points.map(q => [q.lat, q.lng])); } catch (er) {} } });
+            mk.on('dragend', () => { genVertEditPersist(); renderGenVertMarkers(); });
+            mk.on('contextmenu', (e) => {
+                try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (er) {}
+                if (f.points.length <= 3) { showToast('A zone needs at least 3 points', 'rgba(255,179,71,0.6)'); return; }
+                genPushUndo(f, 'vertex delete'); f.points.splice(i, 1); genVertEditPersist(); renderGenVertMarkers();
+            });
+            genVertEdit.markers.push(mk);
+        });
+        renderGenMidMarkers();
+    }
+    function startGenVertEdit(f) {
+        if (!f || f._committed || !Array.isArray(f.points) || f.points.length < 3) return false;
+        if (genVertEdit.active) exitGenVertEdit(false);
+        genVertEdit.resumeAdv = !!advDraw.active;
+        if (advDraw.active) setAdvDraw(false);           // Adv Draw captures clicks — pause it while editing verts
+        genVertEdit.active = true; genVertEdit.f = f;
+        renderGenVertMarkers();
+        genVertEdit._onKey = (ev) => { if ((ev.key || '') === 'Escape') { ev.preventDefault(); ev.stopImmediatePropagation(); exitGenVertEdit(true); } };
+        try { uwin().addEventListener('keydown', genVertEdit._onKey, true); } catch (e) {}
+        showToast('Editing vertices — drag a dot · m2 a dot to delete · click a faint dot to add · Esc / m2 body to finish', 'rgba(0,229,255,0.5)');
+        return true;
+    }
+    function exitGenVertEdit(resume) {
+        clearGenVertMarkers();
+        try { uwin().removeEventListener('keydown', genVertEdit._onKey, true); } catch (e) {}
+        const wasAdv = genVertEdit.resumeAdv;
+        genVertEdit.active = false; genVertEdit.f = null; genVertEdit._onKey = null; genVertEdit.resumeAdv = false;
+        if (resume && wasAdv) { try { setAdvDraw(true); } catch (e) {} }
+    }
+
+    // ---- map-level wiring for drag/rotate/snap (A1.6) ----
+    function uwin() { try { return unsafeWindow; } catch (e) { return window; } }
+    function deleteFfzPoly(poly) {
+        if (!poly) return;
+        const map = getLeafletMap();
+        try { if (map) map.removeLayer(poly); } catch (e) {}
+        const i = genPreviewLayers.indexOf(poly);
+        if (i >= 0) genPreviewLayers.splice(i, 1);
+        if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) {
+            const j = genState.lastResult.ffzs.indexOf(poly._ffz);
+            if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+        }
+        if (genEdit.hovered === poly) genEdit.hovered = null;
+        if (genEdit.activePoly === poly) { genEdit.activePoly = null; genEdit.dragging = false; }
+        try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
+        try { if (map) { map.dragging.enable(); map.scrollWheelZoom.enable(); } } catch (e) {}
+        try { advSaveFfzs(); } catch (e) {} // keep the autosave in sync after a delete
+        try { if (advDraw.active) advRender(); } catch (e) {} // refresh the snap dots (don't leave stale ones)
+        showToast('FFZ deleted from preview', 'rgba(255,90,90,0.5)');
+    }
+    let genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
+    // ===== Undo (Ctrl+Z) — snapshot a preview FFZ's geometry before each move/rotate/vertex edit,
+    // restore the most recent on Ctrl+Z (e.g. an accidental drag). =====
+    let genUndoStack = [];
+    function genPushUndo(f, label) {
+        if (!f || !Array.isArray(f.points)) return;
+        try {
+            genUndoStack.push({ f, points: f.points.map(p => ({ lat: p.lat, lng: p.lng })), advVerts: Array.isArray(f._advVerts) ? f._advVerts.map(v => ({ lat: v.lat, lng: v.lng })) : null, dirty: !!f._dirty, label: label || 'edit' });
+            if (genUndoStack.length > 40) genUndoStack.shift();
+        } catch (e) {}
+    }
+    function genUndo() {
+        const u = genUndoStack.pop();
+        if (!u) { showToast('Nothing to undo', 'rgba(255,179,71,0.5)'); return; }
+        const f = u.f;
+        f.points = u.points; f._centroid = ringCentroid(u.points);
+        if (u.advVerts) f._advVerts = u.advVerts;
+        if (f._existing) f._dirty = u.dirty;
+        if (f._poly) { try { f._poly.setLatLngs(u.points.map(p => [p.lat, p.lng])); } catch (e) {} }
+        try { refreshFfzLineFlag(f); } catch (e) {}
+        try { restyleFfzPoly(f); } catch (e) {}
+        try { clearResizeHandles(); } catch (e) {}
+        try { advSaveFfzs(); } catch (e) {}
+        showToast(`Undid ${u.label}`, 'rgba(95,184,255,0.5)');
+    }
+    function wireGenEditing(map) {
+        if (genEdit.wired) return;
+        genEdit.map = map;
+        genEdit.container = map.getContainer();
+        genEdit.domMove = (ev) => {
+            if (!genEdit.dragging || !genEdit.activePoly) return;
+            const f = genEdit.activePoly._ffz;
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            if (ev.ctrlKey || ev.metaKey) {
+                // CTRL = snake: anchor on first Ctrl move, then grow the ribbon
+                // along the pad. We track a SIGNED offset (accumulated shortest
+                // perimeter steps) from the anchor, so you can grow either way
+                // and well past halfway without flipping to the short arc.
+                const p = genState.lastParams || GEN_DEFAULTS;
+                const sM = p.standoffFt * GEN_FT_TO_M, dM2 = Math.max(p.depthFt, 30) * GEN_FT_TO_M;
+                const EXTEND_M = 90 * GEN_FT_TO_M;   // active pad keeps extending only this close to the cursor
+                const ADJ_M = 320 * GEN_FT_TO_M;     // bridge only between pads at most this far apart
+                if (!genEdit.ribbon) {
+                    const np0 = nearestPadProjection(ll);
+                    if (np0) genEdit.ribbon = { segs: [], active: mkActiveSeg(np0.asset, np0.ring, np0.pos) };
+                }
+                const rb = genEdit.ribbon;
+                if (rb && rb.active) {
+                    // Bridge when the cursor comes near ANY other adjacent pad
+                    // (proximity, not "strictly nearest" — a big active pad can
+                    // stay nearest even when the cursor is over the neighbor).
+                    const ents2 = (mapObjectsBySite[genState.siteID] && mapObjectsBySite[genState.siteID].entities) || [];
+                    let other = null, otherD = Infinity, otherRing = null;
+                    for (const a of ents2) {
+                        if (a.type !== 3 || a.id === rb.active.asset.id) continue;
+                        const ring = entityCoords(a); if (!ring || ring.length < 3) continue;
+                        const d = ringNearestDistM(ll, ring);
+                        if (d < otherD) { otherD = d; other = a; otherRing = ring; }
+                    }
+                    // hysteresis: only switch pads when the cursor is genuinely
+                    // closer to the other pad than the active one (no flicker on
+                    // close pads where it's within range of both at once).
+                    const dActive = ringNearestDistM(ll, rb.active.ring);
+                    if (other && otherD < EXTEND_M && otherD < dActive) {
+                        const prev = rb.segs[rb.segs.length - 1];
+                        if (prev && prev.asset.id === other.id) {
+                            rb.segs.pop(); rb.active = reviveActiveSeg(prev); // reversed back onto the previous pad
+                            console.log(`${GEN_TAG} snake un-bridged back to pad ${other.id}`);
+                        } else {
+                            const gap = ringsNearestDistM(rb.active.ring, otherRing);
+                            if (gap < ADJ_M) {
+                                rb.segs.push(activeSegSpan(rb.active));
+                                const tip = activeTipLatLng(rb.active);
+                                rb.active = mkActiveSeg(other, otherRing, (tip && projectOntoRing(tip, otherRing)) || projectOntoRing(ll, otherRing));
+                                console.log(`${GEN_TAG} snake BRIDGED to pad ${other.id} (cursor ${Math.round(otherD / GEN_FT_TO_M)} ft from it, pads ${Math.round(gap / GEN_FT_TO_M)} ft apart, ${rb.segs.length} seg(s))`);
+                            } else if (genEdit._noBridgeWarn !== other.id) {
+                                genEdit._noBridgeWarn = other.id;
+                                console.log(`${GEN_TAG} snake: at pad ${other.id} but pads ${Math.round(gap / GEN_FT_TO_M)} ft apart > ${Math.round(ADJ_M / GEN_FT_TO_M)} ft limit — no bridge`);
+                            }
+                        }
+                    }
+                    // extend the active pad toward the cursor (only while close to it)
+                    const act = rb.active;
+                    if (ringNearestDistM(ll, act.ring) < EXTEND_M) {
+                        const end = projectOntoRing(ll, act.ring);
+                        if (end) {
+                            const pc = ringPerimeterOfM(act.ring, end);
+                            act.offset += signedPerDelta(act.lastPer, pc, act.per);
+                            act.lastPer = pc;
+                            if (Math.abs(act.offset) > act.per - 1) act.offset = Math.sign(act.offset) * (act.per - 1);
+                        }
+                    }
+                    // build from finalized segments + the active one
+                    const allSegs = rb.segs.concat(Math.abs(act.offset) >= 1.5 ? [activeSegSpan(act)] : []);
+                    let pts = null, multiOK = false;
+                    if (allSegs.length === 1) pts = buildRibbon(allSegs[0].ring, allSegs[0].startPos, allSegs[0].endPos, sM, dM2);
+                    else if (allSegs.length >= 2) {
+                        pts = buildMultiRibbon(allSegs, sM, dM2);
+                        if (pts) multiOK = true;
+                        else {
+                            // The join is concave (e.g. an L between perpendicular
+                            // edges) — a hand-rolled offset can't do that cleanly.
+                            // Fall back to just the active pad so the shape stays valid.
+                            const a = activeSegSpan(act);
+                            pts = buildRibbon(a.ring, a.startPos, a.endPos, sM, dM2);
+                            if (genEdit._multiFailLogged !== allSegs.length) { genEdit._multiFailLogged = allSegs.length; console.log(`${GEN_TAG} multi-pad ribbon needs a concave join — showing the active pad only (see chat)`); }
+                        }
+                    }
+                    if (pts && pts.length >= 4) {
+                        const aspan = activeSegSpan(act);
+                        f.points = pts; f._centroid = ringCentroid(pts);
+                        f._assetId = act.asset.id; f._assetName = act.asset.name || `#${act.asset.id}`;
+                        f.name = genDraftName(f._assetName);
+                        f._side = (multiOK && allSegs.length > 1) ? `${allSegs.length}-pad` : 'ribbon'; f._offsetFt = 0;
+                        // showing a single pad → resize handles; clean multi → no handles
+                        f._param = (!multiOK || allSegs.length === 1) ? { ring: act.ring, assetId: act.asset.id, startPer: aspan.startPer, endPer: aspan.endPer } : null;
+                    }
+                }
+                // not updated (cursor off-pad / too short / would twist) → keep last good.
+            } else if (ev.altKey) {
+                genEdit.ribbon = null;
+                snapFfzToNearestEdge(f, ll); // snap to the single edge under the cursor
+            } else {
+                genEdit.ribbon = null;
+                if (genEdit.lastLatLng) translateFfz(f, ll.lat - genEdit.lastLatLng.lat, ll.lng - genEdit.lastLatLng.lng);
+            }
+            genEdit.lastLatLng = ll;
+            try { genEdit.activePoly.setLatLngs(f.points.map(p => [p.lat, p.lng])); } catch (e) {}
+        };
+        genEdit.domUp = () => {
+            if (!genEdit.dragging) return;
+            genEdit.dragging = false;
+            genEdit.ribbon = null;
+            try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
+            document.removeEventListener('mousemove', genEdit.domMove, true);
+            document.removeEventListener('mouseup', genEdit.domUp, true);
+            const poly = genEdit.activePoly;
+            try { map.dragging.enable(); } catch (e) {}
+            if (poly) { setActivePolyStyle(poly, false); finalizeFfzEdit(poly._ffz); }
+            genEdit.activePoly = null;
+            try { map.scrollWheelZoom.enable(); } catch (e) {}
+            try { renderAllDraftShielding(); } catch (e) {}   // shielding follows the moved/rotated draft
+        };
+        // Keyboard: Q/E rotate the FFZ while dragging it (easier than scrolling
+        // with the mouse button held); Delete removes the hovered/active FFZ.
+        // The __AIM_FFZ_DRAG flag tells Map Nav to release Q/E during a drag.
+        genEdit.onKey = (ev) => {
+            const k0 = (ev.key || '').toLowerCase();
+            // Ctrl/Cmd+Z = undo the last move/rotate/vertex edit (e.g. an accidental drag).
+            if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && k0 === 'z') {
+                const t = ev.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return; // let fields handle their own undo
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                genUndo();
+                return;
+            }
+            // Esc cancels the in-progress drawn corridor (drops placed corners).
+            if (k0 === 'escape' && genDraw.active && genDraw.drawing) {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                const map = getLeafletMap();
+                if (map) { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); clearGhost(map); }
+                genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null; genDraw.drawing = false;
+                return;
+            }
+            const poly = genEdit.activePoly || genEdit.hovered;
+            if (!poly || !poly._ffz || poly._ffz._committed) return;
+            const k = (ev.key || '').toLowerCase();
+            if (k === 'delete') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                deleteFfzPoly(poly);
+                return;
+            }
+            if (!genEdit.dragging || poly !== genEdit.activePoly) return; // Q/E only mid-drag
+            if (k === 'q' || k === 'e') {
+                ev.preventDefault(); ev.stopImmediatePropagation();
+                genPushUndo(poly._ffz, 'rotate');
+                rotateFfz(poly._ffz, k === 'q' ? 10 : -10);
+                try { poly.setLatLngs(poly._ffz.points.map(p => [p.lat, p.lng])); } catch (err) {}
+                refreshFfzLineFlag(poly._ffz);
+                restyleFfzPoly(poly._ffz);
+            }
+        };
+        genEdit.keyWin = uwin();
+        try { genEdit.keyWin.addEventListener('keydown', genEdit.onKey, true); } catch (e) {}
+        // Click-to-place draw: each capture-phase mousedown drops one corner
+        // (snapped to a pad's offset outline / its corners). Move shows a dashed
+        // rubber-band to the cursor. Double-click finishes. Works over empty map
+        // AND over existing FFZs.
+        genDraw.onDown = (ev) => {
+            if (!genDraw.active) return;
+            if (ev.button !== 0) return; // left-click only
+            ev.preventDefault(); ev.stopPropagation();
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const snap = snapDrawPoint(ll, p, ev.shiftKey);
+            const prev = genDraw.lastSnap;
+            genDraw.drawing = true;
+            // Follow the pad: if this click and the previous one are on the SAME
+            // pad's offset ring, trace the ring's corner vertices between them so
+            // the centerline hugs the pad at a constant 15 ft (square corners +
+            // correct standoff). The collinear-clean pass in render/finalize then
+            // collapses any near-flat facets to a single point per real corner.
+            if (snap.assetId != null && prev && prev.assetId === snap.assetId && snap.off && prev.i !== snap.i) {
+                const verts = ringVerticesBetween(snap.off, prev.i, snap.i);
+                for (const v of verts) genDraw.pts.push(v);
+            }
+            genDraw.pts.push(snap.pt); genDraw.lastSnap = snap; genDraw.tentative = null;
+            renderDrawPreview(p);
+        };
+        genDraw.onMove = (ev) => {
+            if (!genDraw.active) return; // show the lock-target ghost even before the first click
+            let ll; try { ll = map.mouseEventToLatLng(ev); } catch (e) { return; }
+            const p = genState.lastParams || GEN_DEFAULTS;
+            const snap = snapDrawPoint(ll, p, ev.shiftKey);
+            genDraw.tentative = snap.pt; genDraw.tentVertex = !!snap.vertex; genDraw.tentOrtho = !!snap.ortho;
+            renderDrawPreview(p);
+        };
+        genDraw.onDbl = (ev) => {
+            if (!genDraw.active || !genDraw.drawing) return;
+            ev.preventDefault(); ev.stopPropagation();
+            finalizeDraw();
+        };
+        genEdit.container.addEventListener('mousedown', genDraw.onDown, true);
+        genEdit.container.addEventListener('mousemove', genDraw.onMove, true);
+        genEdit.container.addEventListener('dblclick', genDraw.onDbl, true);
+        genEdit.wired = true;
+    }
+    function unwireGenEditing() {
+        if (genEdit.container) {
+            if (genDraw.onDown) { try { genEdit.container.removeEventListener('mousedown', genDraw.onDown, true); } catch (e) {} }
+            if (genDraw.onMove) { try { genEdit.container.removeEventListener('mousemove', genDraw.onMove, true); } catch (e) {} }
+            if (genDraw.onDbl) { try { genEdit.container.removeEventListener('dblclick', genDraw.onDbl, true); } catch (e) {} }
+        }
+        if (genEdit.domMove) { try { document.removeEventListener('mousemove', genEdit.domMove, true); } catch (e) {} }
+        if (genEdit.domUp) { try { document.removeEventListener('mouseup', genEdit.domUp, true); } catch (e) {} }
+        if (genEdit.container && genEdit.onWheel) { try { genEdit.container.removeEventListener('wheel', genEdit.onWheel, { capture: true }); } catch (e) {} }
+        if (genEdit.keyWin && genEdit.onKey) { try { genEdit.keyWin.removeEventListener('keydown', genEdit.onKey, true); } catch (e) {} }
+        try { uwin().__AIM_FFZ_DRAG = false; } catch (e) {}
+        const map = genEdit.map;
+        if (map) { try { map.dragging.enable(); map.scrollWheelZoom.enable(); } catch (e) {} }
+        genEdit = { wired: false, map: null, container: null, dragging: false, activePoly: null, hovered: null, lastLatLng: null, domMove: null, domUp: null, onWheel: null, onKey: null, keyWin: null, ribbon: null };
+    }
+    function attachFfzEditHandlers(poly, map) {
+        poly.on('mouseover', () => {
+            genEdit.hovered = poly;
+            try { if (poly._path) poly._path.style.cursor = (poly._ffz && poly._ffz._committed) ? 'default' : 'move'; } catch (e) {}
+            if (poly._ffz && poly._ffz._param && !poly._ffz._committed) showResizeHandles(poly._ffz);
+        });
+        poly.on('mouseout', () => {
+            if (genEdit.hovered === poly) genEdit.hovered = null;
+            scheduleHideHandles();
+        });
+        // Right-click (M2) → show the FFZ info popup (built fresh, current state).
+        poly.on('contextmenu', (e) => {
+            try { if (e.originalEvent) { e.originalEvent.preventDefault(); e.originalEvent.stopPropagation(); } } catch (err) {}
+            // Already vertex-editing THIS poly → m2 on the body finishes.
+            if (genVertEdit.active && genVertEdit.f === poly._ffz) { exitGenVertEdit(true); return; }
+            // A fresh Advanced-Draw corridor (has its centerline) → reopen as a corridor (the FAST edit).
+            if (poly._ffz && poly._ffz._adv && Array.isArray(poly._ffz._advVerts) && poly._ffz._advVerts.length >= 2 && !poly._ffz._committed) { try { advReEdit(poly._ffz); } catch (err) {} return; }
+            // Everything else → info popup (familiar). Uncommitted previews ALSO get an opt-in
+            // "✎ Edit points" button — the per-vertex editor is on demand only, never auto (it's slow).
+            try {
+                const L2 = getLeafletL();
+                if (!L2 || !map) return;
+                const pop = L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
+                if (poly._ffz && !poly._ffz._committed) {
+                    const el = pop.getElement && pop.getElement();
+                    const host = el && el.querySelector('.leaflet-popup-content');
+                    if (host) {
+                        const btn = document.createElement('button');
+                        btn.textContent = '✎ Edit points';
+                        btn.style.cssText = 'margin-top:6px;background:rgba(0,229,255,0.15);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:3px 8px;cursor:pointer;font:inherit;font-size:11px';
+                        btn.onclick = () => { try { map.closePopup(pop); } catch (er) {} try { startGenVertEdit(poly._ffz); } catch (er) {} };
+                        host.appendChild(document.createElement('br'));
+                        host.appendChild(btn);
+                    }
+                }
+            } catch (err) {}
+        });
+        poly.on('mousedown', (e) => {
+            if (genDraw.active) return; // Draw mode owns the mouse
+            if (genVertEdit.active && genVertEdit.f === poly._ffz) return; // vertex editor owns this poly's verts
+            if (poly._ffz && poly._ffz._committed) { try { showCommittedPopup(e.latlng); } catch (er) {} return; }
+            genPushUndo(poly._ffz, 'move');   // snapshot before a drag so Ctrl+Z can revert it
+            clearResizeHandles(); // hide handles while moving/snaking (stops flicker)
+            genEdit.dragging = true;
+            genEdit.activePoly = poly;
+            try { genEdit.lastLatLng = e.latlng; } catch (err) { genEdit.lastLatLng = null; }
+            try { map.dragging.disable(); } catch (err) {}
+            try { map.scrollWheelZoom.disable(); } catch (err) {}
+            try { uwin().__AIM_FFZ_DRAG = true; } catch (err) {} // tell Map Nav to release Q/E
+            setActivePolyStyle(poly, true);
+            document.addEventListener('mousemove', genEdit.domMove, true);
+            document.addEventListener('mouseup', genEdit.domUp, true);
+            try { if (e.originalEvent) e.originalEvent.preventDefault(); } catch (err) {}
+        });
+    }
+
+    // ===== Show shielding bands on DRAFT corridors (red inner / yellow outer), from their stored
+    // params — toggleable so you can see clearance on all drafts, not just while drawing. =====
+    let genShowShielding = false, genShieldLayers = [];
+    function clearDraftShielding() { const map = getLeafletMap(); genShieldLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} }); genShieldLayers = []; }
+    function drawShieldBand(map, L, band, color) { if (!band || !band.length) return; try { const p = L.polygon(band.map(q => [q.lat, q.lng]), { color, weight: 1, opacity: 0.45, fillColor: color, fillOpacity: 0.16, interactive: false }); p.addTo(map); genShieldLayers.push(p); } catch (e) {} }
+    function renderOneDraftShielding(map, L, f) {
+        const verts = f._advVerts; if (!Array.isArray(verts) || verts.length < 2) return;
+        const nseg = verts.length - 1, segW = Array.isArray(f._advSegWidth) ? f._advSegWidth : [];
+        const w = []; for (let i = 0; i < nseg; i++) w.push(segW[i] || segW[0] || 30);
+        const side = f._advSide || 1, off = f._advOffsetFt || 25;
+        const startFt = (f._advAnchor === 'shielding') ? off : 0;
+        const inner = (f._advAnchor === 'shielding') ? advRibbon(verts, side, 0, off) : advBandSigned(verts, off, side, -1);
+        drawShieldBand(map, L, inner, '#ff2d2d');
+        drawShieldBand(map, L, advBandOuter(verts, w, off, side, startFt), '#ffd400');
+    }
+    function renderAllDraftShielding() {
+        clearDraftShielding();
+        if (!genShowShielding) return;
+        const map = getLeafletMap(), L = getLeafletL(); if (!map || !L) return;
+        const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+        for (const f of ffzs) { if (f && !f._committed && Array.isArray(f._advVerts)) renderOneDraftShielding(map, L, f); }
+    }
+    // Draw proposed FFZs as polygons on the Leaflet map (SVG so each is a
+    // hit-testable path) — PREVIEW ONLY, nothing is written. The polygons are
+    // hand-editable: drag to move, scroll to rotate 10°, hold Alt to snap to a
+    // pad face; DEM + flags recompute on drop. Returns the number drawn.
+    function renderGenPreview(ffzs, append) {
+        if (!append) clearGenPreview();
+        const L = getLeafletL();
+        const map = getLeafletMap();
+        if (!L || !map) {
+            console.warn(`${GEN_TAG} cannot preview — Leaflet or map not reachable`);
+            showToast('Map not reachable — open the map tab to preview', 'rgba(255,82,82,0.6)');
+            return 0;
+        }
+        wireGenEditing(map);
+        let renderer = null;
+        try { renderer = L.svg({ padding: 0.5 }); } catch (e) { renderer = null; }
+        ffzs.forEach(f => {
+            try {
+                const latlngs = (f.points || []).map(p => [p.lat, p.lng]);
+                if (latlngs.length < 3) return;
+                const col = ffzColor(f);
+                const opts = {
+                    color: col, weight: 1.5, opacity: 0.95,
+                    fillColor: col, fillOpacity: 0.18,
+                    interactive: true, bubblingMouseEvents: false,
+                };
+                if (renderer) opts.renderer = renderer;
+                const poly = L.polygon(latlngs, opts);
+                poly._ffz = f; f._poly = poly;
+                // Info shows on RIGHT-click only (a hover tooltip blocks the view
+                // while snaking) — see the contextmenu handler in attachFfzEditHandlers.
+                poly.addTo(map);
+                attachFfzEditHandlers(poly, map);
+                genPreviewLayers.push(poly);
+            } catch (e) { /* one bad polygon shouldn't kill the rest */ }
+        });
+        console.log(`${GEN_TAG} preview rendered ${genPreviewLayers.length} editable FFZ polygons`);
+        try { renderAllDraftShielding(); } catch (e) {}
+        return genPreviewLayers.length;
+    }
+
+    // ===== Geometry-validity gate — a self-intersecting (bowtie) FFZ ring is a broken geofence
+    // (ambiguous "inside") and must NEVER be POSTed to a live site. Checked at commit/save. =====
+    function segProperCross(p1, p2, p3, p4) {
+        const o = (a, b, c) => (b.lng - a.lng) * (c.lat - a.lat) - (b.lat - a.lat) * (c.lng - a.lng);
+        const d1 = o(p3, p4, p1), d2 = o(p3, p4, p2), d3 = o(p1, p2, p3), d4 = o(p1, p2, p4);
+        return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+    }
+    // True if any two NON-adjacent edges of the closed ring cross (a bowtie / figure-8).
+    function ringSelfIntersects(ring) {
+        if (!Array.isArray(ring)) return false;
+        const n = ring.length; if (n < 4) return false;
+        for (let i = 0; i < n; i++) {
+            const a1 = ring[i], a2 = ring[(i + 1) % n];
+            for (let j = i + 1; j < n; j++) {
+                if ((i + 1) % n === j || (j + 1) % n === i) continue; // adjacent edges share a vertex — allowed
+                const b1 = ring[j], b2 = ring[(j + 1) % n];
+                if (segProperCross(a1, a2, b1, b2)) return true;
+            }
+        }
+        return false;
+    }
+
+    // ===== A1.5 — commit the draft FFZs as new entities =====
+    // Build the create body for one generated FFZ. Prefer cloning an existing
+    // FFZ's write-body as a template (guarantees every field the server wants);
+    // fall back to a minimal body. No id ⇒ the upsert creates a new entity.
+    function genCreateBody(f, siteID, siteCfg, tmplBody) {
+        let b;
+        if (tmplBody) b = JSON.parse(JSON.stringify(tmplBody));
+        else b = { type: 16, description: '', custom: {}, params: {}, asset_waypoints: null, constantly_present_asset_name: false, general_marker_type: '', marker_height: 0, is_unshielded: false };
+        delete b.id;
+        b.type = 16;
+        b.name = genCleanName(f.name);   // server: letters/numbers/space/_/- only
+        b.description = '';
+        b.site_id = siteID;
+        b.points = f.points;
+        b.restrictions = { minAlt: f.restrictions.minAlt, maxAlt: f.restrictions.maxAlt, minEmergencyAlt: null };
+        b.validated = false;
+        b.arcs = [];
+        b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        return b;
+    }
+    // POST each draft FFZ to /map_objects/ (cookie + CSRF). dryRun builds +
+    // counts without writing. Returns { created, failed, skipped, ids, errors }.
+    async function commitGeneratedFfzs(ffzs, opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], merged: [], dryRun };
+        if (!ffzs || !ffzs.length) return res;
+        const csrf = getCsrfToken();
+        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
+        const bucket = mapObjectsBySite[siteID];
+        const tmplEnt = bucket && bucket.entities && bucket.entities.find(e => e.type === 16 && entityCoords(e));
+        let tmplBody = null;
+        if (tmplEnt) { try { tmplBody = buildWriteBody(tmplEnt, siteCfg); } catch (e) {} }
+        // Phase 1: fuse grouped corridors into single entities (one create/upsert each).
+        const writes = fuseCorridorGroups(ffzs);
+        // Names must be UNIQUE on the site (Percepto 400s on a duplicate). Seed with existing FFZ
+        // names, then suffix _2/_3/… so two zones off the same asset don't collide.
+        const usedNames = new Set(((bucket && bucket.entities) || []).filter(e => e.type === 16 && e.name).map(e => e.name));
+        const uniqueName = (base) => { if (!base) base = 'FFZ'; if (!usedNames.has(base)) { usedNames.add(base); return base; } let i = 2, n; do { n = base + '_' + (i++); } while (usedNames.has(n)); usedNames.add(n); return n; };
+        for (const w of writes) {
+            const label = w.name || (w.anchorId != null ? `#${w.anchorId}` : 'FFZ');
+            if (ringSelfIntersects(w.points)) { res.invalid++; res.errors.push(`${label}: self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
+            if (w._holes) res.errors.push(`${label}: fused shape enclosed a hole — Percepto can't store holes, so the hole was filled in`);
+            if (w._disjoint) res.errors.push(`${label}: a piece didn't overlap the rest → kept as a SEPARATE zone. Snap it onto the others (cyan/magenta) so they actually touch, to fuse into one.`);
+            if (w._overlapsExisting != null) res.errors.push(`${label}: overlaps existing FFZ #${w._overlapsExisting} — the server may reject it. Delete that old FFZ first (this tool never touches existing FFZs).`);
+            if (!w.restrictions || typeof w.restrictions.minAlt !== 'number') { res.skipped++; res.errors.push(`${label}: no DEM altitude — skipped`); continue; }
+            let body;
+            if (w.kind === 'upsert') {
+                if (!w.ent) { res.failed++; res.errors.push(`${label}: anchor entity not found — skipped`); continue; }
+                try { body = buildWriteBody(w.ent, siteCfg); } catch (e) { res.failed++; res.errors.push(`${label}: build body threw ${e && e.message || e}`); continue; }
+                body.points = w.points;
+                if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+                if (typeof w.restrictions.minAlt === 'number') body.restrictions.minAlt = w.restrictions.minAlt;
+                if (typeof w.restrictions.maxAlt === 'number') body.restrictions.maxAlt = w.restrictions.maxAlt;
+                body.validated = false;   // geometry changed → re-enters review
+            } else {
+                body = genCreateBody({ name: w.name, points: w.points, restrictions: w.restrictions }, siteID, siteCfg, tmplBody);
+                body.name = uniqueName(body.name); // de-dup so same-pad zones don't collide on the server
+            }
+            if (dryRun) { if (w.kind === 'upsert') res.updated++; else res.created++; continue; }
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    if (w.kind === 'upsert') res.updated++; else res.created++;
+                    const sid = (saved.id != null) ? saved.id : w.anchorId;
+                    if (sid != null) { res.ids.push({ id: sid, name: label }); (w.members || []).forEach(m => { m._committedId = sid; }); }
+                    if (w.existing) { w.existing._dirty = false; w.existing._committedId = sid; try { markFfzCommitted(w.existing); } catch (e) {} }
+                    // Keep the actual MERGED shape + its source pieces so the UI can draw the fused
+                    // result on the map immediately (no reload) for visual confirmation.
+                    res.merged.push({ id: sid, name: label, points: w.points, restrictions: w.restrictions, members: (w.members || []).slice() });
+                } else { res.failed++; res.errors.push(`${label}: server ${r.status} ${(txt || '').slice(0, 140)}`); }
+            } catch (e) { res.failed++; res.errors.push(`${label}: POST threw ${e && e.message || e}`); }
+        }
+        return res;
+    }
+    // Bulk-undo: delete every FFZ on the site still named "DRAFT …" (the
+    // prefix is stripped when a CSM accepts a zone, so accepted ones are safe).
+    async function removeGeneratedFfzs(opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { deleted: 0, failed: 0, found: 0, errors: [], dryRun };
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        const bucket = mapObjectsBySite[siteID];
+        const drafts = ((bucket && bucket.entities) || []).filter(e => e.type === 16 && typeof e.name === 'string' && e.name.indexOf('DRAFT ') === 0);
+        res.found = drafts.length;
+        if (!drafts.length) return res;
+        const csrf = getCsrfToken();
+        if (!csrf && !dryRun) { res.errors.push('no csrftoken cookie'); return res; }
+        for (const e of drafts) {
+            if (dryRun) { res.deleted++; continue; }
+            try {
+                const r = await fetch(`https://percepto.app/map_objects/${e.id}/`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json, text/plain, */*' } });
+                if (r.status === 200 || r.status === 204) res.deleted++;
+                else { res.failed++; res.errors.push(`${e.name} (#${e.id}): server ${r.status}`); }
+            } catch (err) { res.failed++; res.errors.push(`${e.name}: ${err && err.message || err}`); }
+        }
+        return res;
+    }
+
+    // ===== Edit EXISTING FFZs — load committed type-16 entities into the SAME
+    // editable preview layer (drag / Q-E rotate / Alt-snap auto-size / resize),
+    // then save back as an UPSERT (id preserved) instead of a new DRAFT create.
+    // Reuses every geometry edit fn; the only differences are the _existing tag,
+    // a distinct amber color, and the save path below. =====
+    async function loadExistingFfzsToPreview(siteID) {
+        try { await fetchMapObjects(siteID, true); } catch (e) {}
+        let loadMode = 'unknown';
+        try { loadMode = (await siteAltMode(siteID)).mode; } catch (e) {}
+        const bucket = mapObjectsBySite[siteID];
+        const ents = (bucket && bucket.entities) || [];
+        // ids already drawn (committed drafts this session OR previously loaded) —
+        // don't stack a second editable overlay on the same entity.
+        const drawn = new Set();
+        genPreviewLayers.forEach(pl => {
+            const f = pl && pl._ffz; if (!f) return;
+            if (f._origId != null) drawn.add(f._origId);
+            if (f._committedId != null) drawn.add(f._committedId);
+        });
+        const all = ents.filter(e => e.type === 16);
+        const ffzs = [];
+        let skippedNoGeom = 0, skippedDup = 0;
+        all.forEach(e => {
+            const coords = entityCoords(e);
+            if (!coords || coords.length < 3) { skippedNoGeom++; return; }
+            if (drawn.has(e.id)) { skippedDup++; return; }
+            const r = e.restrictions || {};
+            const points = coords.map(p => ({ lat: p.lat, lng: p.lng }));   // own copy
+            ffzs.push({
+                type: 16,
+                name: e.name || (e.id != null ? `#${e.id}` : 'FFZ'),
+                site_id: e.site != null ? e.site : siteID,
+                points,
+                restrictions: { minAlt: (typeof r.minAlt === 'number' ? r.minAlt : null), maxAlt: (typeof r.maxAlt === 'number' ? r.maxAlt : null) },
+                _existing: true,
+                _origId: e.id,
+                _origEntity: e,
+                _origValidated: !!e.validated,
+                _altMode: loadMode,
+                _centroid: ringCentroid(points),
+                _dirty: false,
+            });
+        });
+        const drawnN = renderGenPreview(ffzs, true); // append — keep any generated drafts
+        console.log(`${GEN_TAG} loaded ${ffzs.length} existing FFZ${ffzs.length === 1 ? '' : 's'} for editing (${skippedDup} dup, ${skippedNoGeom} no-geom)`);
+        return { loaded: ffzs.length, drawn: drawnN, skippedDup, skippedNoGeom, total: all.length };
+    }
+
+    // Save edited existing FFZs as in-place UPDATES. Clones the full live write
+    // body (id + every field preserved), overwrites only points + the DEM-
+    // recomputed altitude band; per-edit validated prompt; rollback file first.
+    async function commitExistingFfzEdits(opts) {
+        const dryRun = !!(opts && opts.dryRun);
+        const siteID = genState.siteID;
+        const res = { updated: 0, failed: 0, errors: [], dryRun, validatedCount: 0, validatedReset: 0, validatedKept: 0 };
+        const pending = genPreviewLayers.map(pl => pl && pl._ffz).filter(f => f && f._existing && f._dirty && !f._committed);
+        if (!pending.length) return res;
+        res.validatedCount = pending.filter(f => f._origValidated).length;
+        if (dryRun) { res.updated = pending.length; return res; }
+        const csrf = getCsrfToken();
+        if (!csrf) { res.errors.push('no csrftoken cookie — cannot authenticate'); return res; }
+        let siteCfg = null;
+        try { siteCfg = await fetchSiteConfig(siteID); } catch (e) { console.warn(`${GEN_TAG} site cfg fetch failed:`, e); }
+        // Per-edit validated decision (ask BEFORE writing, grouped at the start).
+        pending.forEach(f => {
+            if (!f._origValidated) return;
+            const reset = confirm(`"${f.name}" (#${f._origId}) was pilot-validated and you changed its geometry.\n\nReset it to UNVALIDATED so it re-enters review?\n\nOK = reset to unvalidated (recommended)\nCancel = keep it validated`);
+            f._resetValidated = reset;
+        });
+        // Rollback file = each edited FFZ's PRIOR server write-body. Download
+        // before the first POST so a bad batch can always be re-POSTed.
+        try {
+            const snap = pending.map(f => { try { return buildWriteBody(f._origEntity, siteCfg); } catch (e) { return null; } }).filter(Boolean);
+            downloadKMLFile(`aim-ffz-edit-rollback-${siteID}.json`, JSON.stringify({ site: siteID, savedAt: 'pre-edit', entities: snap }, null, 2));
+        } catch (e) { console.warn(`${GEN_TAG} rollback snapshot failed:`, e); }
+        for (const f of pending) {
+            if (ringSelfIntersects(f.points)) { res.failed++; res.errors.push(`${f.name} (#${f._origId}): self-intersecting shape (bowtie) — NOT sent, fix the geometry`); continue; }
+            let body;
+            try { body = buildWriteBody(f._origEntity, siteCfg); }
+            catch (e) { res.failed++; res.errors.push(`${f.name}: build body threw ${e && e.message || e}`); continue; }
+            body.points = f.points;
+            if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
+            if (typeof f.restrictions.minAlt === 'number') body.restrictions.minAlt = f.restrictions.minAlt;
+            if (typeof f.restrictions.maxAlt === 'number') body.restrictions.maxAlt = f.restrictions.maxAlt;
+            if (f._origValidated) {
+                if (f._resetValidated === false) { body.validated = true; res.validatedKept++; }
+                else { body.validated = false; res.validatedReset++; }
+            }
+            try {
+                const r = await fetch('https://percepto.app/map_objects/', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': csrf }, body: JSON.stringify(body) });
+                const txt = await r.text(); let json = null; try { json = JSON.parse(txt); } catch (e) {}
+                const saved = json && json.map_objects;
+                if (r.status === 200 && saved) {
+                    res.updated++;
+                    f._dirty = false; f._committedId = (saved.id != null ? saved.id : f._origId);
+                    markFfzCommitted(f);
+                } else { res.failed++; res.errors.push(`${f.name} (#${f._origId}): server ${r.status} ${(txt || '').slice(0, 140)}`); }
+            } catch (e) { res.failed++; res.errors.push(`${f.name}: POST threw ${e && e.message || e}`); }
+        }
+        return res;
+    }
+
+    // Direct-API writes don't refresh Percepto's live map (it renders from its
+    // own React state) — a reload pulls them in. Offer a one-click reload.
+    function appendReloadBtn(el) {
+        try {
+            const b = document.createElement('button');
+            b.textContent = '🔄 Reload page';
+            b.style.cssText = 'margin-top:6px;background:rgba(122,223,230,0.15);color:#7adfe6;border:1px solid rgba(122,223,230,0.5);border-radius:3px;padding:4px 10px;cursor:pointer;font:inherit;font-size:11px';
+            b.onclick = () => { try { (window.top || window).location.reload(); } catch (e) { location.reload(); } };
+            el.appendChild(document.createElement('br'));
+            el.appendChild(b);
+        } catch (e) {}
+    }
+
+    const GEN_MODAL_PARAM_IDS = {
+        standoffFt: 'aim-gen-standoff', depthFt: 'aim-gen-depth',
+        aglFt: 'aim-gen-agl', deltaFt: 'aim-gen-delta', proximityFt: 'aim-gen-prox',
+    };
+    let genState = { siteID: null, lastResult: null, lastParams: null };
+    // When ON, editing an EXISTING FFZ recomputes its altitude band from the
+    // modal's AGL/Δ fields on drop; OFF (default) preserves the saved band so a
+    // move never silently rewrites altitude. genReadParamsLive = the open modal's
+    // readParams closure (so the recompute uses the CURRENTLY typed numbers).
+    let genEditRecomputeAlt = false;
+    let genReadParamsLive = null;
+
+    function closeSiteGenerator() {
+        const m = document.getElementById(GEN_MODAL_ID);
+        if (m) m.remove();
+        try { clearRoutePreview(); } catch (e) {} genRouteResult = null;
+        genReadParamsLive = null;
+        genAltModeOverride = null;
+        try { setFpSnap(false); } catch (e) {}
+        try { if (genVertEdit.active) exitGenVertEdit(false); } catch (e) {}
+        try { clearDraftShielding(); } catch (e) {}
+        genUndoStack = [];
+        // Tear down Advanced Draw but DON'T clear its localStorage (so an in-progress
+        // corridor survives close/reload — restored when the mode is re-armed).
+        try { if (advDraw.active) { advDraw.active = false; advUnwire(); advClearLayers(); } } catch (e) {}
+        genDraw.active = false; genDraw.drawing = false; genDraw.pts = []; genDraw.tentative = null; genDraw.tentVertex = false; genDraw.tentOrtho = false; genDraw.lastSnap = null;
+        try { const mp = getLeafletMap(); if (mp) { if (genDraw.poly) { try { mp.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(mp); clearGhost(mp); clearSnapTargets(mp); if (genDraw.onMapMove) { try { mp.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; } mp.getContainer().style.cursor = ''; try { mp.doubleClickZoom.enable(); } catch (e) {} } } catch (e) {}
+    }
+
+    function openSiteGenerator(siteID) {
+        closeSiteGenerator();
+        genAltModeOverride = null; // never carry an alt-mode override across sites
+        const bucket = mapObjectsBySite[siteID];
+        if (!bucket || !bucket.entities) {
+            showToast('No site data loaded', 'rgba(255,82,82,0.6)');
+            return;
+        }
+        genState.siteID = siteID;
+        const assets = bucket.entities.filter(e => e.type === 3 && entityCoords(e));
+        const eligibleCount = assets.filter(a => !assetSkipReason(a)).length;
+        const siteName = getCurrentSiteName() || `Site ${siteID}`;
+        const d = GEN_DEFAULTS;
+        // Floating panel (no dimming backdrop) so the map stays visible +
+        // editable while it's open. m is a zero-size, click-through holder.
+        const m = document.createElement('div');
+        m.id = GEN_MODAL_ID;
+        m.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:100000;pointer-events:none;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+        const box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:16px;top:64px;width:430px;min-width:320px;min-height:160px;max-height:86vh;overflow:auto;resize:both;pointer-events:auto;background:#1f2228;border:1px solid rgba(122,223,230,0.5);border-radius:8px;padding:12px 16px;color:#e6e6e6;box-shadow:0 8px 32px rgba(0,0,0,0.7)';
+        const numField = (key, label, hint, step) => `
+            <label style="display:flex;align-items:center;gap:8px;justify-content:space-between">
+                <span style="color:#cfd6dc;font-size:12px">${label}<span style="color:#888;font-size:10px"> ${hint}</span></span>
+                <span style="display:inline-flex;align-items:center;gap:5px"><input type="number" id="${GEN_MODAL_PARAM_IDS[key]}" value="${d[key]}" min="0" step="${step || 1}" style="width:64px;background:#1a1d23;border:1px solid rgba(122,223,230,0.45);color:#fff;padding:3px 6px;border-radius:3px;font:inherit;font-size:11px;text-align:right"><span style="color:#888;font-size:10px">ft</span></span>
+            </label>`;
+        box.innerHTML = `
+            <button id="aim-gen-x" title="Close" style="position:absolute;top:8px;right:10px;width:24px;height:24px;line-height:22px;text-align:center;background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:4px;cursor:pointer;font:inherit;font-size:14px;font-weight:700;padding:0">✕</button>
+            <div id="aim-gen-title" style="color:#7adfe6;font-weight:700;font-size:15px;margin-bottom:4px;cursor:move;user-select:none;padding-right:28px">⊕ Site Setup Generator <span style="color:#666;font-size:10px;font-weight:400">— drag · resize ↘</span></div>
+            <div style="color:#888;font-size:11px;margin-bottom:12px">${xmlEscape(siteName)} · ${assets.length} asset${assets.length === 1 ? '' : 's'} (${eligibleCount} eligible) · Phase A1 — inspection FFZs</div>
+            <div style="margin-bottom:12px;padding:8px 10px;background:rgba(95,255,95,0.06);border:1px dashed rgba(95,255,95,0.3);border-radius:3px;font-size:11px;color:#9ad;line-height:1.5">
+                Builds <b>one open inspection FFZ</b> per qualifying asset — a single edge box on the <b>side nearest a power line</b> (the shield), inner edge the standoff off the asset, ≥30 ft deep. Only <b>Normal</b> assets within the proximity of a line qualify. Altitudes are <b>DEM-checked per FFZ</b>. Output is a <b>DRAFT</b> — <b>preview first, nothing is written</b> until Commit (coming next).
+            </div>
+            <div id="aim-gen-pl-row" style="margin-bottom:14px;padding:6px 10px;background:rgba(255,213,79,0.06);border:1px dashed rgba(255,213,79,0.3);border-radius:3px;font-size:11px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <span><b style="color:#ffd54f">Power lines:</b> <span id="aim-gen-pl-status">checking…</span></span>
+                <button id="aim-gen-pl-refresh" style="background:transparent;color:#ffd54f;border:1px solid rgba(255,213,79,0.45);border-radius:3px;padding:2px 8px;cursor:pointer;font:inherit;font-size:10px">↻ Refresh</button>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Filters</div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipbad" ${d.skipBadStates ? 'checked' : ''} style="accent-color:#7adfe6"> Skip unreachable / unshielded / empty <span style="color:#888;font-size:10px">(keeps Normal/Inactive/HY)</span></label>
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc"><input type="checkbox" id="aim-gen-skipexisting" ${d.skipExisting ? 'checked' : ''} style="accent-color:#7adfe6"> Skip pads that already have an FFZ <span style="color:#888;font-size:10px">(else flagged blue)</span></label>
+                    ${numField('proximityFt', 'Max distance to power line', '(200 PL + 200 asset)', 25)}
+                </div>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">FFZ geometry</div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    ${numField('standoffFt', 'Standoff from asset', '(inner edge off the border)', 1)}
+                    ${numField('depthFt', 'Edge depth', '(flyable thickness, ≥30)', 1)}
+                </div>
+            </div>
+            <div style="margin-bottom:14px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Altitude <span style="color:#888;text-transform:none;letter-spacing:0;font-weight:400">— floor = DEM ground + AGL, per FFZ</span></div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    ${numField('aglFt', 'AGL floor', '(above ground)', 5)}
+                    ${numField('deltaFt', 'Min/Max delta', '(ceiling = floor + delta)', 5)}
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-top:2px"><input type="checkbox" id="aim-gen-edit-recalc" style="accent-color:#ffe14d"> <span><b style="color:#ffe14d">Recompute alt when I edit an existing FFZ</b><br><span style="color:#888;font-size:10px">off = keep the zone's saved band (move never changes altitude); on = re-apply the AGL floor + delta above on drop</span></span></label>
+                    <div id="aim-gen-altmode" style="margin-top:4px;padding:6px 8px;border-radius:3px;font-size:11px;background:rgba(122,223,230,0.06);border:1px dashed rgba(122,223,230,0.3);color:#9ad">Altitude reference: <span id="aim-gen-altmode-status">detecting…</span></div>
+                </div>
+            </div>
+            <div id="aim-gen-stats" style="color:#9ad;font-size:11px;margin-bottom:12px;padding:6px 8px;background:rgba(122,223,230,0.08);border-radius:3px">Adjust parameters, then Preview.</div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+                <button id="aim-gen-close" style="background:transparent;color:#888;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Close</button>
+                <button id="aim-gen-clear" style="background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">Clear preview</button>
+                <button id="aim-gen-draw" style="background:rgba(255,225,77,0.12);color:#ffe14d;border:1px solid rgba(255,225,77,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✏️ Draw</button>
+                <button id="aim-gen-advdraw" title="Advanced Draw — click the inner (asset-facing) edge point-to-point to build a zigzag corridor FFZ. Live full-box preview + shielding band on the line. Shift=angle-snap 15° off the last segment · Ctrl=magnet-snap to the offset off the nearest asset · F=flip width side · double-click/Enter=finish · Esc=undo last point. Autosaves; commits as ONE FFZ via Commit." style="background:rgba(95,184,255,0.12);color:#5fb8ff;border:1px solid rgba(95,184,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✦ Advanced Draw</button>
+                <button id="aim-gen-fpsnap" title="Arm CTRL-snap for Percepto's native flight-path draw tool: hold CTRL while clicking to place a waypoint and it snaps ~50ft parallel to the nearest power line (purple dot shows where). Release CTRL = free point." style="background:rgba(186,140,255,0.12);color:#ba8cff;border:1px solid rgba(186,140,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🧲 CTRL-snap: off</button>
+                <button id="aim-gen-loadfp" title="Load the site's existing flight paths (drawn natively in Percepto) into the editable preview so they can be cleaned up." style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FPs</button>
+                <button id="aim-gen-loadffz" title="Load the site's existing FFZs (amber) into the editable preview — move / rotate / Alt-snap (auto-size) / resize them, then 💾 Save FFZ edits to write them back in place." style="background:rgba(255,179,71,0.12);color:#ffb347;border:1px solid rgba(255,179,71,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">📥 Load site FFZs</button>
+                <button id="aim-gen-snapclean" title="Snap the whole loaded network ~50ft parallel to the power lines + clean up the vertices." style="background:rgba(186,140,255,0.14);color:#ba8cff;border:1px solid rgba(186,140,255,0.55);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">✨ Snap &amp; Clean</button>
+                <button id="aim-gen-routes" style="background:rgba(0,229,255,0.12);color:#00e5ff;border:1px solid rgba(0,229,255,0.5);border-radius:3px;padding:8px 14px;cursor:pointer;font:inherit;font-size:12px">🛩 Routes</button>
+                <button id="aim-gen-routes-json" title="Copy the last route result as JSON to the clipboard (to share for debugging)" style="background:rgba(0,229,255,0.08);color:#00e5ff;border:1px solid rgba(0,229,255,0.4);border-radius:3px;padding:8px 10px;cursor:pointer;font:inherit;font-size:12px">⧉ Copy JSON</button>
+                <button id="aim-gen-preview" style="background:rgba(95,255,95,0.15);color:#5fff5f;border:1px solid rgba(95,255,95,0.55);border-radius:3px;padding:8px 18px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">👁 Preview on map</button>
+            </div>
+            <div id="aim-adv-controls" style="display:none;margin-bottom:14px;padding:8px 10px;background:rgba(95,184,255,0.06);border:1px dashed rgba(95,184,255,0.35);border-radius:3px">
+                <div style="font-size:11px;color:#5fb8ff;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">✦ Advanced Draw</div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;font-size:11px;color:#cfd6dc">
+                    <label style="display:inline-flex;align-items:center;gap:4px" title="What the line you draw represents. FFZ inner edge = box starts at the line. Inner shielding edge = you trace around the assets and the standoff, FFZ, and outer shielding build outward.">Line <select id="aim-adv-anchor" style="background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 4px;border-radius:3px;font:inherit;font-size:11px"><option value="ffz-inner">= FFZ inner edge</option><option value="shielding">= shielding edge (on assets)</option></select></label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Width <input type="number" id="aim-adv-width" value="30" min="5" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Offset <input type="number" id="aim-adv-offset" value="25" min="0" step="5" style="width:50px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);color:#fff;padding:2px 5px;border-radius:3px;font:inherit;font-size:11px;text-align:right"> ft</label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Band <input type="color" id="aim-adv-color" value="#ff2d2d" style="width:30px;height:22px;background:#1a1d23;border:1px solid rgba(95,184,255,0.45);border-radius:3px;padding:0;cursor:pointer"></label>
+                    <label style="display:inline-flex;align-items:center;gap:4px">Opacity <input type="range" id="aim-adv-opacity" min="0" max="0.7" step="0.05" value="0.28" style="width:70px"></label>
+                </div>
+                <div style="font-size:10px;color:#7a8794;margin-top:6px"><b style="color:#ffd24d">ALT+click</b>=start a NEW corridor (plain click edits existing shapes) · <b style="color:#ff5fff">magenta dots</b>=snap flush to an existing corridor's centerline (matches width) · then <b style="color:#fff">click</b>=add points · <b style="color:#fff">drag a dot</b>=move vertex · <b style="color:#fff">drag an outer edge</b>=widen · <b style="color:#fff">Shift</b>=angle 15° · <b style="color:#fff">Ctrl</b>=snap to asset · <b style="color:#fff">F</b>=flip · <b style="color:#fff">dbl-click</b>=finish · <b style="color:#fff">Esc</b>=undo / turn off</div>
+            </div>
+            <div style="padding:8px 10px;background:rgba(95,255,95,0.05);border:1px solid rgba(95,255,95,0.25);border-radius:3px">
+                <div style="font-size:11px;color:#9ad;margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Commit</div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-dryrun" checked style="accent-color:#7adfe6"> Dry run <span style="color:#888;font-size:10px">(build + count, don't write)</span></label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:#cfd6dc;margin-bottom:8px"><input type="checkbox" id="aim-gen-shield" style="accent-color:#ff2d2d"> Show shielding on drafts <span style="color:#888;font-size:10px">(red inner / yellow outer)</span></label>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button id="aim-gen-merge" title="Merge your drawn pieces into the final fused shapes RIGHT NOW so you can see exactly what will be created. Already-merged shapes stay; build more and merge again any time. Non-destructive." style="background:rgba(95,184,255,0.18);color:#5fb8ff;border:1px solid rgba(95,184,255,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">🔗 Merge</button>
+                    <button id="aim-gen-unmerge" title="Bring back the editable pieces from the most recent merge so you can tweak them." style="background:rgba(95,184,255,0.1);color:#9ad;border:1px solid rgba(95,184,255,0.4);border-radius:3px;padding:6px 12px;cursor:pointer;font:inherit;font-size:12px">↩ Unmerge</button>
+                    <button id="aim-gen-commit" style="background:rgba(95,255,95,0.18);color:#5fff5f;border:1px solid rgba(95,255,95,0.6);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">✓ Commit draft FFZs</button>
+                    <button id="aim-gen-remove" style="background:rgba(255,90,90,0.12);color:#ff8a80;border:1px solid rgba(255,90,90,0.45);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px">🗑 Remove DRAFT FFZs</button>
+                    <button id="aim-gen-saveffz" title="Save geometry changes made to LOADED existing FFZs (📥 Load site FFZs) back IN PLACE — id preserved (update, not a new DRAFT). Validated zones prompt per-edit; a rollback file downloads first." style="background:rgba(255,225,77,0.14);color:#ffe14d;border:1px solid rgba(255,225,77,0.55);border-radius:3px;padding:6px 14px;cursor:pointer;font:inherit;font-size:12px;font-weight:600">💾 Save FFZ edits</button>
+                </div>
+                <div id="aim-gen-commit-result" style="margin-top:8px;font-size:11px;color:#9ad;line-height:1.5">Writes the previewed FFZs (named <b>DRAFT …</b>) via the Site Setup save. Dry-run first.</div>
+            </div>
+        `;
+        m.appendChild(box);
+        document.body.appendChild(m);
+        // Drag by the title (resize via the box's native ↘ handle).
+        const titleEl = box.querySelector('#aim-gen-title');
+        if (titleEl) titleEl.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const r = box.getBoundingClientRect();
+            const ox = r.left, oy = r.top, sx = e.clientX, sy = e.clientY;
+            const mv = (ev) => { box.style.left = (ox + ev.clientX - sx) + 'px'; box.style.top = Math.max(0, oy + ev.clientY - sy) + 'px'; box.style.right = 'auto'; };
+            const up = () => { document.removeEventListener('mousemove', mv, true); document.removeEventListener('mouseup', up, true); };
+            document.addEventListener('mousemove', mv, true);
+            document.addEventListener('mouseup', up, true);
+        });
+
+        // Power-line availability — request from Map Styler + poll for arrival.
+        const plStatusEl = box.querySelector('#aim-gen-pl-status');
+        const refreshPl = () => {
+            if (hasPowerLinesFor(siteID)) {
+                const n = powerLinesKml.distro.length + powerLinesKml.trans.length;
+                plStatusEl.innerHTML = `<span style="color:#5fff5f">✓ ${n} line${n === 1 ? '' : 's'} loaded</span>`;
+            } else {
+                plStatusEl.innerHTML = `<span style="color:#ffb347">⚠ not loaded — open the Map Styler tab once to fetch, then ↻ Refresh</span>`;
+            }
+        };
+        try { requestPowerLinesKml(siteID); } catch (e) {}
+        refreshPl();
+        const plPoll = setInterval(() => {
+            if (document.getElementById(GEN_MODAL_ID)) refreshPl();
+            else clearInterval(plPoll);
+        }, 1500);
+        box.querySelector('#aim-gen-pl-refresh').onclick = () => { try { requestPowerLinesKml(siteID); } catch (e) {} refreshPl(); };
+
+        const readParams = () => {
+            const out = {};
+            Object.keys(GEN_MODAL_PARAM_IDS).forEach(key => {
+                const el = box.querySelector('#' + GEN_MODAL_PARAM_IDS[key]);
+                const v = el ? parseFloat(el.value) : NaN;
+                out[key] = isFinite(v) && v >= 0 ? v : d[key];
+            });
+            out.skipBadStates = !!box.querySelector('#aim-gen-skipbad').checked;
+            out.skipExisting = !!box.querySelector('#aim-gen-skipexisting').checked;
+            return out;
+        };
+        // Expose this modal's live param reader so finalizeFfzEdit recomputes
+        // existing-FFZ altitudes from the CURRENTLY typed AGL/Δ numbers.
+        genReadParamsLive = readParams;
+        const editRecalcEl = box.querySelector('#aim-gen-edit-recalc');
+        if (editRecalcEl) {
+            editRecalcEl.checked = genEditRecomputeAlt;
+            editRecalcEl.onchange = () => { genEditRecomputeAlt = !!editRecalcEl.checked; };
+        }
+        // Altitude-reference banner — detect MSL/AGL from the site flag, show it,
+        // and let the CSM confirm/override before any altitude is written.
+        const altModeBox = box.querySelector('#aim-gen-altmode');
+        const altModeStatus = box.querySelector('#aim-gen-altmode-status');
+        if (altModeBox && altModeStatus) {
+            const renderAltMode = (det) => {
+                const active = genActiveAltMode();
+                const overridden = (genAltModeOverride === 'msl' || genAltModeOverride === 'agl') && genAltModeOverride !== det;
+                const desc = { msl: 'MSL — values are absolute (DEM ground + AGL)', agl: 'AGL — values are height above ground', unknown: '⚠ UNKNOWN — site flag unreadable; altitude writes blocked' }[active] || active;
+                const col = active === 'unknown' ? '#ff8a80' : '#5fff5f';
+                const btn = (m, lbl) => `<button data-altmode="${m}" style="background:${active === m ? 'rgba(95,255,95,0.22)' : 'transparent'};color:${active === m ? '#5fff5f' : '#9ad'};border:1px solid rgba(122,223,230,0.4);border-radius:3px;padding:1px 8px;cursor:pointer;font:inherit;font-size:10px;margin-left:4px">${lbl}</button>`;
+                const detNote = det !== 'unknown' ? ` <span style="color:#666">· detected ${det.toUpperCase()} from Mountain-terrain flag${overridden ? ', overridden' : ''}</span>` : '';
+                altModeStatus.innerHTML = `<b style="color:${col}">${desc}</b>${detNote}<br><span style="color:#888">set:</span>${btn('msl', 'MSL')}${btn('agl', 'AGL')}${overridden ? btn('', 'use detected') : ''}`;
+            };
+            (async () => {
+                let det = 'unknown';
+                try { det = (await siteAltMode(siteID)).mode; } catch (e) {}
+                renderAltMode(det);
+                altModeBox.addEventListener('click', (e) => {
+                    const b = e.target.closest('[data-altmode]'); if (!b) return;
+                    const m = b.getAttribute('data-altmode');
+                    genAltModeOverride = (m === 'msl' || m === 'agl') ? m : null;
+                    renderAltMode(det);
+                });
+            })();
+        }
+        const statsEl = box.querySelector('#aim-gen-stats');
+        box.querySelector('#aim-gen-close').onclick = () => closeSiteGenerator();
+        box.querySelector('#aim-gen-x').onclick = () => closeSiteGenerator();
+        box.querySelector('#aim-gen-clear').onclick = () => {
+            clearGenPreview();
+            clearRoutePreview(); genRouteResult = null;
+            statsEl.textContent = 'Preview cleared.';
+        };
+        const fpSnapBtn = box.querySelector('#aim-gen-fpsnap');
+        fpSnapBtn.onclick = () => {
+            const turningOn = !fpSnap.armed;
+            const r = setFpSnap(turningOn, siteID);
+            if (turningOn && !r.ok) { statsEl.innerHTML = `<span style="color:#ffb347">${r.msg}</span>`; return; }
+            fpSnapBtn.style.background = fpSnap.armed ? 'rgba(186,140,255,0.32)' : 'rgba(186,140,255,0.12)';
+            fpSnapBtn.textContent = fpSnap.armed ? '🧲 CTRL-snap: ON' : '🧲 CTRL-snap: off';
+            if (fpSnap.armed) statsEl.innerHTML = `<b style="color:#ba8cff">CTRL-snap armed</b> (${r.segs} power-line segs). Use Percepto's <b>native flight-path draw</b> tool: <b>hold CTRL</b> as you click a waypoint → it snaps ~50 ft off the nearest power line (purple dot = where it lands). <b>Release CTRL</b> for a free point. Finish the path with CTRL <b>released</b> (double-click).`;
+            else statsEl.innerHTML = `CTRL-snap off.`;
+        };
+        const loadFpBtn = box.querySelector('#aim-gen-loadfp');
+        loadFpBtn.onclick = () => {
+            if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
+            loadFpBtn.disabled = true; const restore = loadFpBtn.textContent; loadFpBtn.textContent = 'Loading…';
+            try {
+                const r = loadExistingFpsToRoute(siteID);
+                if (!r.ok) { statsEl.innerHTML = `<span style="color:#ffb347">${r.msg}</span>`; return; }
+                const flagged = genRoute.segs.filter(s => s.flag).length;
+                statsEl.innerHTML = `Loaded <b style="color:#00e5ff">${r.fps}</b> flight path${r.fps === 1 ? '' : 's'} (${r.arcs} arcs → ${r.verts} verts). <span style="color:#ff9a3d">${flagged}</span> seg${flagged === 1 ? '' : 's'} out of the 40–65 ft band (<span style="color:#ff9a3d">orange</span>).<br><span style="color:#888">Hit <b style="color:#ba8cff">✨ Snap &amp; Clean</b> to pull them onto the power lines, or <b style="color:#fff">drag</b> a dot / <b style="color:#fff">right-click</b> to fix by hand.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} load FPs failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Load error: ${String(e.message || e)}</span>`;
+            } finally {
+                loadFpBtn.disabled = false; loadFpBtn.textContent = restore;
+            }
+        };
+        const loadFfzBtn = box.querySelector('#aim-gen-loadffz');
+        loadFfzBtn.onclick = async () => {
+            loadFfzBtn.disabled = true; const restore = loadFfzBtn.textContent; loadFfzBtn.textContent = 'Loading…';
+            try {
+                const r = await loadExistingFfzsToPreview(siteID);
+                if (!r.total) { statsEl.innerHTML = `<span style="color:#ffb347">No existing FFZs on this site.</span>`; return; }
+                if (!r.drawn && r.skippedDup) { statsEl.innerHTML = `<span style="color:#9ad">All ${r.skippedDup} existing FFZ${r.skippedDup === 1 ? '' : 's'} already loaded.</span>`; return; }
+                const dupNote = r.skippedDup ? ` · ${r.skippedDup} already shown` : '';
+                statsEl.innerHTML = `Loaded <b style="color:#ffb347">${r.drawn}</b> existing FFZ${r.drawn === 1 ? '' : 's'} for editing (<span style="color:#ffb347">amber</span>)${dupNote}.<br><span style="color:#888"><b style="color:#fff">Drag</b> to move · <b style="color:#fff">Q/E</b> rotate · <b style="color:#fff">Alt+drag</b> re-snap to a pad edge (auto-size) · <b style="color:#fff">drag yellow ends</b> resize. Altitude is <b>kept as saved</b> (tick <b style="color:#ffe14d">Recompute alt</b> above to re-apply AGL) → then <b style="color:#ffe14d">💾 Save FFZ edits</b>.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} load existing FFZs failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Load error: ${String(e.message || e)}</span>`;
+            } finally { loadFfzBtn.disabled = false; loadFfzBtn.textContent = restore; }
+        };
+        const snapCleanBtn = box.querySelector('#aim-gen-snapclean');
+        snapCleanBtn.onclick = () => {
+            if (!genRoute.segs.length) { statsEl.innerHTML = `<span style="color:#ffb347">Nothing loaded — hit <b>📥 Load site FPs</b> first.</span>`; return; }
+            if (!hasPowerLinesFor(siteID)) { statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`; return; }
+            snapCleanBtn.disabled = true; const restore = snapCleanBtn.textContent; snapCleanBtn.textContent = 'Snapping…';
+            try {
+                const r = snapCleanRoute();
+                if (!r.ok) { statsEl.innerHTML = `<span style="color:#ff8a80">${r.msg}</span>`; return; }
+                statsEl.innerHTML = `<b style="color:#ba8cff">Snapped & cleaned.</b> ${r.snapped} samples snapped to power lines → <b>${r.verts}</b> verts / <b>${r.segs}</b> segs.<br><span style="color:#888"><b style="color:#fff">Drag</b> a white dot to nudge · <b style="color:#fff">click a line</b> to add a point · <b style="color:#fff">right-click</b> a dot to delete. <span style="color:#ff9a3d">Orange</span> = out of 40–65 ft band or over a pad/FFZ. Next: elevation points (coming).</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} snap & clean failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Snap & Clean error: ${String(e.message || e)}</span>`;
+            } finally {
+                snapCleanBtn.disabled = false; snapCleanBtn.textContent = restore;
+            }
+        };
+        const routesBtn = box.querySelector('#aim-gen-routes');
+        routesBtn.onclick = () => {
+            if (!hasPowerLinesFor(siteID)) {
+                statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`;
+                return;
+            }
+            routesBtn.disabled = true; const restore = routesBtn.textContent; routesBtn.textContent = 'Routing…';
+            try {
+                const params = readParams(); genState.lastParams = params;
+                const res = routeFlightPaths(siteID, params);
+                genRouteResult = res;
+                if (!res.ok) {
+                    const why = { 'no-powerlines': 'no power lines loaded', 'no-base': 'no base station found (set one in the SUM 📍 Base picker)', 'base-no-coord': 'base has no coordinate', 'no-graph': 'power-line graph empty' }[res.reason] || res.reason;
+                    statsEl.innerHTML = `<span style="color:#ff8a80">Routing failed — ${why}.</span>`;
+                    return;
+                }
+                const drawn = renderRoutePreview(res);
+                const s = res.stats;
+                const baseNm = res.baseEntity && res.baseEntity.name ? genCleanName(res.baseEntity.name) : 'base';
+                const ffzNote = s.ffzCount ? `${s.usedFfz}/${s.reachable} via FFZ` : `no FFZs yet — using pad edges (place FFZs for accurate ends)`;
+                const flagNote = s.flaggedFt ? ` · <span style="color:#ff9a3d">⚠ ${s.flaggedFt} ft flagged (out-of-band / FFZ overlap)</span>` : '';
+                const vertNote = s.corridorVerts != null ? ` · ${s.corridorVerts} corridor verts` : '';
+                statsEl.innerHTML = `<b style="color:#00e5ff">${s.reachable}</b> connected${s.unreachable ? ` · <b style="color:#ff8a80">${s.unreachable}</b> long approach` : ''}, from <b>${s.total}</b> near-line assets.<br><span style="color:#888">base <b>${baseNm}</b>${res.baseAuto ? ' (auto)' : ''} · launch ${Math.round(s.baseLaunchFt)} ft · ${ffzNote} · ${s.plSegs} PL segs → ${s.graphVerts} nodes${vertNote}${flagNote}.<br><b style="color:#fff">Drag</b> a white dot to move · <b style="color:#fff">click a line</b> to add a point · <b style="color:#fff">right-click</b> a dot to delete. <span style="color:#ff9a3d">Orange</span> = out of 40–65 ft band or over a pad/FFZ (drag it clear → cyan). Green = FFZ connection. A2.2 editable preview.</span>`;
+            } catch (e) {
+                console.error(`${GEN_TAG} routing failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Routing error: ${String(e.message || e)}</span>`;
+            } finally {
+                routesBtn.disabled = false; routesBtn.textContent = restore;
+            }
+        };
+        box.querySelector('#aim-gen-routes-json').onclick = async () => {
+            if (!genRouteResult || !genRouteResult.ok) { statsEl.innerHTML = `<span style="color:#ffb347">Run 🛩 Routes first, then export.</span>`; return; }
+            const r = genRouteResult;
+            const round = (p) => p ? { lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7) } : null;
+            const dump = {
+                site: siteID,
+                base: round(r.base),
+                baseName: r.baseEntity && r.baseEntity.name ? r.baseEntity.name : null,
+                baseLaunch: r.baseLaunch ? { from: round(r.baseLaunch.from), to: round(r.baseLaunch.to) } : null,
+                stats: r.stats,
+                tunables: A2,
+                corridor: r.corridor.map(s => ({ a: round(s.a), b: round(s.b), flag: !!s.flag })),
+                assets: r.assets.map(a => ({
+                    name: a.asset && a.asset.name, id: a.asset && a.asset.id,
+                    reachable: a.reachable, hasFfz: a.hasFfz, approachFt: a.approachFt != null ? Math.round(a.approachFt) : null,
+                    foot: round(a.foot), entry: round(a.entry),
+                    path: a.path ? a.path.map(round) : null,
+                })),
+            };
+            const json = JSON.stringify(dump, null, 2);
+            try { uwin().__aimRoute = dump; } catch (e) {}
+            // copy to clipboard (preferred — easier to paste); fall back to a textarea exec, then download
+            let copied = false;
+            try { await (uwin().navigator.clipboard || navigator.clipboard).writeText(json); copied = true; } catch (e) {}
+            if (!copied) { try { const ta = document.createElement('textarea'); ta.value = json; ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px'; document.body.appendChild(ta); ta.select(); copied = document.execCommand('copy'); ta.remove(); } catch (e) {} }
+            statsEl.innerHTML = copied
+                ? `<span style="color:#5fff5f">✓ Route JSON copied to clipboard</span> <span style="color:#888">(${r.corridor.length} segs · paste it to me · also window.__aimRoute)</span>`
+                : (downloadJSONFile(`aim-route-site${siteID}.json`, json)
+                    ? `<span style="color:#5fff5f">Downloaded aim-route-site${siteID}.json</span> <span style="color:#888">(clipboard blocked)</span>`
+                    : `<span style="color:#ffb347">Copy from console: window.__aimRoute</span>`);
+        };
+        const previewBtn = box.querySelector('#aim-gen-preview');
+        previewBtn.onclick = async () => {
+            if (!hasPowerLinesFor(siteID)) {
+                statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded yet — they're needed to pick the shielded edge and filter by proximity. Open the Map Styler tab once, then ↻ Refresh.</span>`;
+                return;
+            }
+            previewBtn.disabled = true;
+            const restore = previewBtn.textContent;
+            previewBtn.textContent = 'Working…';
+            try {
+                const params = readParams();
+                genState.lastParams = params;
+                statsEl.textContent = 'Generating + checking elevations…';
+                const res = await generateAllFfzs(siteID, params, (done, total) => {
+                    statsEl.textContent = `Checking DEM elevations ${done}/${total}…`;
+                });
+                if (res.error === 'no-powerlines') {
+                    statsEl.innerHTML = `<span style="color:#ffb347">Power lines not loaded — open Map Styler, then ↻ Refresh.</span>`;
+                    return;
+                }
+                // Preserve any uncommitted hand-drawn / merged corridors so a fresh Preview run
+                // doesn't wipe them out (generated drafts are regenerated each run, so we drop those).
+                const keep = ((genState.lastResult && genState.lastResult.ffzs) || []).filter(f => f && !f._committed && (f._drawn || f._adv || f._merged) && Array.isArray(f.points) && f.points.length >= 3);
+                genState.lastResult = res;
+                if (keep.length) res.ffzs = keep.concat(res.ffzs);
+                const drawn = renderGenPreview(res.ffzs);
+                try { advSaveFfzs(); } catch (e) {}   // persist generated drafts immediately — survives reload/crash
+                const demNote = res.demMiss ? ` · <span style="color:#ffb347">${res.demMiss} missing DEM</span>` : '';
+                const skipExNote = res.skippedExisting ? ` + ${res.skippedExisting} already-FFZ` : '';
+                const flagParts = [];
+                if (res.overLine) flagParts.push(`<span style="color:#ff8a80">⚠ ${res.overLine} couldn't clear a power line</span>`);
+                if (res.hasExisting) flagParts.push(`<span style="color:#8ab4ff">ℹ ${res.hasExisting} on a pad with an existing FFZ</span>`);
+                const flagLine = flagParts.length ? `<br>${flagParts.join(' · ')}` : '';
+                const modeNote = res.mode === 'unknown'
+                    ? `<br><span style="color:#ff8a80">⚠ altitude reference UNKNOWN — bands left empty; set MSL/AGL above before committing</span>`
+                    : `<br><span style="color:#888">altitudes written as <b>${res.mode.toUpperCase()}</b> (${res.mode === 'agl' ? 'height above ground' : 'absolute MSL'})</span>`;
+                statsEl.innerHTML = `<b style="color:#5fff5f">${res.generated}</b> draft FFZ${res.generated === 1 ? '' : 's'} from <b>${res.total}</b> assets · drew <b>${drawn}</b>${demNote}.<br><span style="color:#888">skipped ${res.skippedState} (unreachable/unshielded/empty) + ${res.skippedFar} farther than ${params.proximityFt} ft${skipExNote}. Red/blue = flagged; green = clean. DRAFT — not saved.</span>${modeNote}${flagLine}`;
+            } catch (e) {
+                console.error(`${GEN_TAG} preview failed:`, e);
+                statsEl.innerHTML = `<span style="color:#ff8a80">Preview failed: ${String(e.message || e)}</span>`;
+            } finally {
+                previewBtn.disabled = false;
+                previewBtn.textContent = restore;
+            }
+        };
+
+        const drawBtn = box.querySelector('#aim-gen-draw');
+        drawBtn.onclick = () => {
+            const map = getLeafletMap();
+            genDraw.active = !genDraw.active;
+            drawBtn.style.background = genDraw.active ? 'rgba(255,225,77,0.32)' : 'rgba(255,225,77,0.12)';
+            drawBtn.textContent = genDraw.active ? '✏️ Drawing — click corners · dbl-click finish · Shift=free' : '✏️ Draw';
+            try {
+                if (map) {
+                    if (genDraw.active) {
+                        wireGenEditing(map);
+                        try { map.doubleClickZoom.disable(); } catch (e) {}
+                        map.getContainer().style.cursor = 'crosshair';
+                        const p = genState.lastParams || GEN_DEFAULTS;
+                        buildSnapTargets(map, p);
+                        // keep target dots in sync as the user pans/zooms while drawing
+                        genDraw.onMapMove = () => { if (genDraw.active) buildSnapTargets(map, genState.lastParams || GEN_DEFAULTS); };
+                        try { map.on('moveend', genDraw.onMapMove); } catch (e) {}
+                    } else {
+                        // turning off mid-draw finishes the current corridor
+                        if (genDraw.drawing && genDraw.pts.length >= 2) finalizeDraw();
+                        else { if (genDraw.poly) { try { map.removeLayer(genDraw.poly); } catch (e) {} genDraw.poly = null; } clearDrawDots(map); genDraw.pts = []; genDraw.tentative = null; genDraw.drawing = false; }
+                        if (genDraw.onMapMove) { try { map.off('moveend', genDraw.onMapMove); } catch (e) {} genDraw.onMapMove = null; }
+                        clearSnapTargets(map); clearGhost(map);
+                        try { map.doubleClickZoom.enable(); } catch (e) {}
+                        map.getContainer().style.cursor = '';
+                    }
+                }
+            } catch (e) {}
+        };
+
+        const advDrawBtn = box.querySelector('#aim-gen-advdraw');
+        if (advDrawBtn) advDrawBtn.onclick = () => {
+            if (advDraw.active) {
+                // turning off mid-draw finishes the corridor
+                if (advDraw.drawing && advDraw.verts.length >= 2) finalizeAdvDraw();
+                setAdvDraw(false);
+            } else {
+                // turn off the simple Draw first (mutually exclusive)
+                try { if (genDraw.active) { document.getElementById('aim-gen-draw').click(); } } catch (e) {}
+                setAdvDraw(true);
+            }
+        };
+        // Advanced Draw live controls — load remembered params first so the fields show them.
+        advLoadParams();
+        const advAnchor = box.querySelector('#aim-adv-anchor');
+        if (advAnchor) { advAnchor.value = advDraw.anchor; advAnchor.onchange = () => { advDraw.anchor = advAnchor.value; advPersist(); advSaveParams(); advRender(); }; }
+        const advW = box.querySelector('#aim-adv-width'), advO = box.querySelector('#aim-adv-offset'), advC = box.querySelector('#aim-adv-color'), advOp = box.querySelector('#aim-adv-opacity');
+        if (advW) { advW.value = advDraw.widthFt; advW.oninput = () => { const v = parseFloat(advW.value); if (isFinite(v) && v > 0) { advDraw.widthFt = v; advDraw.segWidth = advDraw.segWidth.map(() => v); advPersist(); advSaveParams(); advRender(); } }; }
+        if (advO) { advO.value = advDraw.offsetFt; advO.oninput = () => { const v = parseFloat(advO.value); if (isFinite(v) && v >= 0) { advDraw.offsetFt = v; advPersist(); advSaveParams(); advRender(); } }; }
+        if (advC) { advC.value = advDraw.bufColor; advC.oninput = () => { advDraw.bufColor = advC.value; advSaveParams(); advRender(); }; }
+        if (advOp) { advOp.value = advDraw.bufOpacity; advOp.oninput = () => { const v = parseFloat(advOp.value); if (isFinite(v)) { advDraw.bufOpacity = v; advSaveParams(); advRender(); } }; }
+
+        const dryEl = box.querySelector('#aim-gen-dryrun');
+        const shieldEl = box.querySelector('#aim-gen-shield');
+        if (shieldEl) { shieldEl.checked = genShowShielding; shieldEl.onchange = () => { genShowShielding = shieldEl.checked; renderAllDraftShielding(); }; }
+        const commitResult = box.querySelector('#aim-gen-commit-result');
+        // 🔗 Merge (preview): replace the drawn pieces with their final fused shapes ON THE MAP so you
+        // SEE exactly what Commit will create — non-destructive, never touches existing FFZs.
+        const mergeBtn = box.querySelector('#aim-gen-merge'), unmergeBtn = box.querySelector('#aim-gen-unmerge');
+        // Carry a prior merge's stash (e.g. after reload) so Unmerge still works.
+        try { const pm = localStorage.getItem('aim_adv_premerge:' + genState.siteID); if (pm) { const arr = JSON.parse(pm); if (Array.isArray(arr) && arr.length) genMergeStash = arr; } } catch (e) {}
+        // 🔗 Merge ALWAYS merges: already-merged shapes pass through unchanged (idempotent), new/overlapping
+        // pieces fuse — so you can merge, build more, and merge again without unmerging first.
+        if (mergeBtn) mergeBtn.onclick = async () => {
+            try {
+                const map = getLeafletMap();
+                try { await fetchMapObjects(genState.siteID, true); } catch (e) {}
+                const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+                const pieces = ffzs.filter(f => f && !f._committed && (f._drawn || f._adv) && Array.isArray(f.points) && f.points.length >= 3);
+                if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
+                const writes = fuseCorridorGroups(ffzs).filter(w => w.kind === 'create' && Array.isArray(w.points) && w.points.length >= 3);
+                if (!writes.length) { showToast('Merge produced nothing', 'rgba(255,82,82,0.6)'); return; }
+                // Stash the editable (non-merged) pieces so Unmerge restores them.
+                genMergeStash = pieces.filter(p => !p._merged).map(advFfzSlim);
+                try { if (genMergeStash.length) localStorage.setItem('aim_adv_premerge:' + genState.siteID, JSON.stringify(genMergeStash)); } catch (e) {}
+                pieces.forEach(m => {
+                    if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                    const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+                });
+                writes.forEach(w => {
+                    const cen = ringCentroid(w.points);
+                    genState.lastResult.ffzs.push({ type: 16, name: w.name, site_id: genState.siteID, points: w.points, restrictions: w.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _drawn: true, _merged: true, _side: 'drawn', _offsetFt: 0, _centroid: cen, _altMode: (w.members && w.members[0] && w.members[0]._altMode), _holes: w._holes, _overlapsExisting: w._overlapsExisting });
+                });
+                renderGenPreview(genState.lastResult.ffzs);
+                try { advSaveFfzs(); } catch (e) {}
+                const holes = writes.filter(w => w._holes).length, over = writes.filter(w => w._overlapsExisting != null).length;
+                let msg = `Merged → ${writes.length} shape${writes.length === 1 ? '' : 's'} (build more + Merge again any time · ↩ Unmerge to edit)`;
+                if (holes) msg += ` · ${holes} filled a hole`;
+                if (over) msg += ` · ⚠ ${over} overlap an existing FFZ`;
+                showToast(msg, over ? 'rgba(255,179,71,0.6)' : 'rgba(95,255,95,0.5)');
+            } catch (e) { console.warn(`${GEN_TAG} merge failed:`, e); showToast('Merge failed: ' + (e && e.message || e), 'rgba(255,82,82,0.6)'); }
+        };
+        // ↩ Unmerge: drop the merged shapes + bring the last batch's editable pieces back.
+        if (unmergeBtn) unmergeBtn.onclick = () => {
+            try {
+                if (!genMergeStash || !genMergeStash.length) { showToast('Nothing to unmerge', 'rgba(255,179,71,0.6)'); return; }
+                const map = getLeafletMap();
+                (genState.lastResult.ffzs || []).filter(f => f && f._merged && !f._committed).forEach(m => {
+                    if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                    const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1);
+                });
+                genMergeStash.forEach(s => genState.lastResult.ffzs.push(advFfzFromSlim(s, genState.siteID)));
+                genMergeStash = null;
+                try { localStorage.removeItem('aim_adv_premerge:' + genState.siteID); } catch (e) {}
+                renderGenPreview(genState.lastResult.ffzs);
+                try { advSaveFfzs(); } catch (e) {}
+                showToast('Unmerged — editable pieces restored', 'rgba(95,184,255,0.5)');
+            } catch (e) { console.warn(`${GEN_TAG} unmerge failed:`, e); showToast('Unmerge failed: ' + (e && e.message || e), 'rgba(255,82,82,0.6)'); }
+        };
+        const commitBtn = box.querySelector('#aim-gen-commit');
+        commitBtn.onclick = async () => {
+            const ffzs = (genState.lastResult && genState.lastResult.ffzs) || [];
+            if (!ffzs.length) { commitResult.innerHTML = '<span style="color:#ffb347">Nothing to commit — run Preview first.</span>'; return; }
+            const dry = !!dryEl.checked;
+            if (!dry && !confirm(`Commit these drawn FFZs on this site? Connected corridors fuse into ONE zone each; new zones are DRAFT-prefixed (removable via "Remove DRAFT FFZs").`)) return;
+            // SAFETY: back up every current draft to a key that is NEVER auto-cleared, BEFORE writing —
+            // so a partial/failed commit can't lose your work. Recover via __aimAdvRestoreBackup().
+            if (!dry) { try { const slim = ffzs.filter(f => f && !f._committed && Array.isArray(f.points) && f.points.length >= 3).map(f => ({ name: f.name, points: f.points, restrictions: f.restrictions, _drawn: !!f._drawn, _adv: !!f._adv, _altMode: f._altMode, _centroid: f._centroid, _advVerts: f._advVerts, _advSegWidth: f._advSegWidth, _advSide: f._advSide, _advAnchor: f._advAnchor, _advAnchorOffsetFt: f._advAnchorOffsetFt, _advOffsetFt: f._advOffsetFt })); if (slim.length) localStorage.setItem('aim_adv_ffzs_backup:' + genState.siteID, JSON.stringify(slim)); } catch (e) {} }
+            commitBtn.disabled = true; const t0 = commitBtn.textContent; commitBtn.textContent = dry ? 'Dry run…' : 'Committing…';
+            try {
+                try { await fetchMapObjects(genState.siteID, true); } catch (e) {} // fresh entities → overlap warning won't flag deleted FFZs
+                const r = await commitGeneratedFfzs(ffzs, { dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
+                const updTxt = r.updated ? ` · <b style="color:#ffe14d">${r.updated}</b> fused into existing` : '';
+                const invTxt = r.invalid ? ` · <b style="color:#ff5a5a">${r.invalid}</b> BLOCKED (self-intersecting)` : '';
+                if (dry) {
+                    commitResult.innerHTML = `<b style="color:#5fff5f">${r.created}</b> would be created${updTxt}${invTxt} · ${r.skipped} skipped (no DEM).${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                } else {
+                    if (r.ids.length) { try { downloadKMLFile(`aim-generated-ffzs-${genState.siteID}.json`, JSON.stringify({ site: genState.siteID, created: r.ids }, null, 2)); } catch (e) {} }
+                    commitResult.innerHTML = `Created <b style="color:#5fff5f">${r.created}</b>${updTxt}${invTxt} · failed ${r.failed} · skipped ${r.skipped}.${errHtml}${(r.created || r.updated) ? '<br><span style="color:#888">Manifest downloaded · <b style="color:#5fff5f">merged shape drawn on the map (solid green)</b>. Reload to edit it natively in Percepto.</span>' : ''}`;
+                    if (r.created || r.updated) {
+                        // Draw the actual MERGED shape on the map (locked green) + drop the individual
+                        // pieces, so you SEE the fused result immediately without reloading.
+                        clearResizeHandles();
+                        try {
+                            const mapL = getLeafletMap(), L2 = getLeafletL();
+                            (r.merged || []).forEach(mg => {
+                                // remove the source piece polys (they're now one merged shape)
+                                (mg.members || []).forEach(m => {
+                                    if (m && m._poly) { try { if (mapL) mapL.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
+                                    if (genState.lastResult && Array.isArray(genState.lastResult.ffzs)) { const j = genState.lastResult.ffzs.indexOf(m); if (j >= 0) genState.lastResult.ffzs.splice(j, 1); }
+                                });
+                                // draw the fused ring as a committed (locked green) FFZ
+                                if (mapL && L2 && Array.isArray(mg.points) && mg.points.length >= 3) {
+                                    const mf = { type: 16, name: mg.name, site_id: genState.siteID, points: mg.points, restrictions: mg.restrictions || { minAlt: null, maxAlt: null }, _gen: true, _committed: true, _committedId: mg.id, _centroid: ringCentroid(mg.points) };
+                                    genState.lastResult.ffzs.push(mf);
+                                    renderGenPreview([mf], true);
+                                    try { markFfzCommitted(mf); } catch (e) {}
+                                }
+                            });
+                        } catch (e) { console.warn(`${GEN_TAG} draw merged shapes failed:`, e); }
+                        (genState.lastResult.ffzs || []).forEach(f => { if (f._committedId != null) markFfzCommitted(f); });
+                        try { advSaveFfzs(); } catch (e) {} // committed ones drop out of the autosave (they're server-side now)
+                        // Clear the safety backup ONLY on a fully clean commit (nothing failed/blocked) —
+                        // a partial/failed commit keeps the backup so nothing is ever lost.
+                        if (r.failed === 0 && r.invalid === 0) { try { localStorage.removeItem('aim_adv_ffzs_backup:' + genState.siteID); } catch (e) {} try { localStorage.removeItem('aim_adv_premerge:' + genState.siteID); } catch (e) {} genMergeStash = null; try { const mb = box.querySelector('#aim-gen-merge'); if (mb) mb.textContent = '🔗 Merge (preview)'; } catch (e) {} }
+                        try { await fetchMapObjects(genState.siteID, true); renderSummaryPanel(genState.siteID); } catch (e) {}
+                        showToast(`Committed ${r.created} new${r.updated ? ` · ${r.updated} fused` : ''} FFZ`, 'rgba(95,255,95,0.5)');
+                    }
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Commit failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { commitBtn.disabled = false; commitBtn.textContent = t0; }
+        };
+        const removeBtn = box.querySelector('#aim-gen-remove');
+        removeBtn.onclick = async () => {
+            const dry = !!dryEl.checked;
+            if (!dry && !confirm('Delete ALL DRAFT-named FFZs on this site? (Zones a CSM accepted — prefix stripped — are left alone.)')) return;
+            removeBtn.disabled = true; const t0 = removeBtn.textContent; removeBtn.textContent = 'Working…';
+            try {
+                const r = await removeGeneratedFfzs({ dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}</span>` : '';
+                if (dry) commitResult.innerHTML = `Found <b>${r.found}</b> DRAFT FFZ${r.found === 1 ? '' : 's'} — would delete ${r.deleted}.${errHtml}<br><span style="color:#888">Uncheck Dry run to delete.</span>`;
+                else {
+                    // Drop our committed overlays (session-created); any FFZs Percepto
+                    // already rendered (earlier sessions) still need a reload to vanish.
+                    const map = getLeafletMap();
+                    genPreviewLayers.filter(pl => pl._ffz && pl._ffz._committed).forEach(pl => { try { if (map) map.removeLayer(pl); } catch (e) {} });
+                    genPreviewLayers = genPreviewLayers.filter(pl => !(pl._ffz && pl._ffz._committed));
+                    commitResult.innerHTML = `Deleted <b>${r.deleted}</b> of ${r.found}.${errHtml}<br><span style="color:#888">If any linger on the map, reload to clear them.</span>`;
+                    try { renderSummaryPanel(genState.siteID); } catch (e) {}
+                    if (r.deleted) appendReloadBtn(commitResult);
+                    showToast(`Removed ${r.deleted} draft FFZ${r.deleted === 1 ? '' : 's'}`, 'rgba(255,90,90,0.5)');
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Remove failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { removeBtn.disabled = false; removeBtn.textContent = t0; }
+        };
+        const saveFfzBtn = box.querySelector('#aim-gen-saveffz');
+        saveFfzBtn.onclick = async () => {
+            const dry = !!dryEl.checked;
+            const pending = genPreviewLayers.map(pl => pl && pl._ffz).filter(f => f && f._existing && f._dirty && !f._committed);
+            if (!pending.length) { commitResult.innerHTML = '<span style="color:#ffb347">No edited existing FFZs — load some with <b>📥 Load site FFZs</b>, then move / rotate / resize.</span>'; return; }
+            const valN = pending.filter(f => f._origValidated).length;
+            if (!dry && !confirm(`Save geometry changes to ${pending.length} existing FFZ${pending.length === 1 ? '' : 's'} in place?${valN ? `\n\n${valN} ${valN === 1 ? 'is' : 'are'} pilot-validated — you'll be asked per-zone whether to reset.` : ''}\n\nA rollback file downloads before the first write.`)) return;
+            saveFfzBtn.disabled = true; const t0 = saveFfzBtn.textContent; saveFfzBtn.textContent = dry ? 'Dry run…' : 'Saving…';
+            try {
+                const r = await commitExistingFfzEdits({ dryRun: dry });
+                const errHtml = r.errors.length ? `<br><span style="color:#ff8a80">${r.errors.slice(0, 6).map(s => xmlEscape(String(s))).join('<br>')}${r.errors.length > 6 ? '<br>…' : ''}</span>` : '';
+                if (dry) {
+                    commitResult.innerHTML = `<b style="color:#ffe14d">${r.updated}</b> existing FFZ${r.updated === 1 ? '' : 's'} would be updated in place${r.validatedCount ? ` (${r.validatedCount} validated — prompts per-zone)` : ''}.${errHtml}<br><span style="color:#888">Uncheck Dry run to write.</span>`;
+                } else {
+                    const valNote = (r.validatedReset || r.validatedKept) ? `<br><span style="color:#888">validated: ${r.validatedReset} reset · ${r.validatedKept} kept</span>` : '';
+                    commitResult.innerHTML = `Updated <b style="color:#ffe14d">${r.updated}</b> · failed ${r.failed}.${errHtml}${valNote}${r.updated ? '<br><span style="color:#888">Rollback file downloaded · saved zones locked (green). Reload to edit them natively in Percepto.</span>' : ''}`;
+                    if (r.updated) {
+                        clearResizeHandles();
+                        try { await fetchMapObjects(siteID, true); renderSummaryPanel(siteID); } catch (e) {}
+                        showToast(`Saved ${r.updated} FFZ edit${r.updated === 1 ? '' : 's'}`, 'rgba(255,225,77,0.5)');
+                    }
+                }
+            } catch (e) {
+                commitResult.innerHTML = `<span style="color:#ff8a80">Save failed: ${xmlEscape(String(e && e.message || e))}</span>`;
+            } finally { saveFfzBtn.disabled = false; saveFfzBtn.textContent = t0; }
+        };
+        try { advLoadFfzs(siteID); } catch (e) {} // restore any unsaved (finished, uncommitted) corridors after a reload
+        console.log(`${GEN_TAG} generator modal open · site ${siteID} · ${assets.length} assets (${eligibleCount} eligible)`);
+    }
+
     const ANALYZER_MODAL_ID = 'aim-ai-analyzer-modal';
     function openSiteAnalyzer(siteID) {
         closeSiteAnalyzer();
@@ -6051,9 +13335,22 @@
         ensurePendingForSite(siteID);
         ensurePanelVisibility(siteID);
         const allRows = buildSummaryRows(siteID);
-        // v3.88: annotate asset rows with route-from-base distance (one graph
-        // build + one Dijkstra). routeSummary feeds the 📍 Base picker below.
-        const routeSummary = annotateRoutes(siteID, allRows);
+        // v4.92 PERF: routing is EXPENSIVE on large sites (graph build + FFZ
+        // connector pairwise loops + per-base Dijkstra + per-asset FFZ match) —
+        // enough to freeze the tab for 60s+ and trip the browser's "page
+        // unresponsive" dialog. The route/battery columns are OFF by default, so
+        // computing this on EVERY open was pure waste. Only annotate routes when
+        // the user is actually showing the Route or Battery column (or whenever
+        // they enable it / pick the routing preset, which re-renders). When
+        // skipped, the 📍 Base picker shows a "routing off" state.
+        const needRoutes = sumPanelState.columnOrder.includes('route')
+                        || sumPanelState.columnOrder.includes('battery');
+        const routeSummary = needRoutes ? annotateRoutes(siteID, allRows) : null;
+        // Tracks whether annotateRoutes has run for this panel instance, so
+        // redrawTable() can lazily compute routes when the user enables the
+        // Route/Battery column mid-session (Columns menu → redrawTable, no
+        // full re-render) instead of leaving the cells blank until refresh.
+        let routesAnnotated = !!routeSummary;
         // Hook for the async DEM fetch to refresh elevationM/aglM values on
         // existing rows + redraw once the bulk load completes. Captured
         // by closure here, called by kickOffDemFetch (defined outside
@@ -6062,9 +13359,13 @@
         window.__aim_ai_onDemReady = () => {
             allRows.forEach(r => {
                 if (!Array.isArray(r._samplePoints) || r._samplePoints.length === 0) return;
-                // Asset rows: keep their CLAIMED elevation_asl, ignore DEM.
+                // Asset rows: keep their CLAIMED elevation_asl, ignore DEM —
+                // but only when it's actually computed (nonzero). Untouched
+                // CSV imports have elevation_asl 0/null, so let those fall
+                // through to the DEM fill below.
                 if (r.type === 3 && r.entity && r.entity.custom
-                    && typeof r.entity.custom.elevation_asl === 'number') return;
+                    && typeof r.entity.custom.elevation_asl === 'number'
+                    && r.entity.custom.elevation_asl !== 0) return;
                 const maxE = maxCachedElevation(r._samplePoints);
                 if (maxE != null) {
                     r.elevationM = maxE;
@@ -6078,12 +13379,19 @@
         };
         kickOffDemFetch(siteID, allRows);
 
+        // Restore persisted geometry/dock on the first render of the session.
+        if (!sumGeomLoaded) { loadSumPanelGeom(); sumGeomLoaded = true; }
+
         const panel = document.createElement('div');
         panel.id = SUM_PANEL_ID;
         const startW = sumPanelState.w || 720;
         const startH = sumPanelState.h; // null = use max-height: 80vh
-        const startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - startW - 40);
-        const startY = sumPanelState.y != null ? sumPanelState.y : 80;
+        let startX = sumPanelState.x != null ? sumPanelState.x : Math.max(60, window.innerWidth - startW - 40);
+        let startY = sumPanelState.y != null ? sumPanelState.y : 80;
+        // Keep a restored position on-screen (the window may have shrunk since
+        // it was saved). A docked panel gets re-fit after append anyway.
+        startX = Math.max(0, Math.min(window.innerWidth - 80, startX));
+        startY = Math.max(0, Math.min(window.innerHeight - 40, startY));
         panel.style.cssText = `
             position:fixed;left:${startX}px;top:${startY}px;z-index:99998;
             width:${startW}px;${startH ? `height:${startH}px;` : 'max-height:80vh;'}
@@ -6093,11 +13401,12 @@
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;
             color:#e6e6e6;
         `;
-        // Row hover is CSS-driven (was per-row JS mouseenter/leave, which got
-        // stranded when the table redrew mid-hover during DEM loads — leaving
-        // several rows stuck-highlighted). CSS :hover is browser-managed and
-        // can't get stuck. Frozen (sticky) cells need the OPAQUE hover bg so
-        // scrolled content doesn't show through; targeted by data-frozen-key.
+        // v4.80: row hover is CSS-driven (was per-row JS mouseenter/leave,
+        // which got stranded when the table redrew mid-hover during DEM loads
+        // — leaving several rows stuck-highlighted). CSS :hover is managed by
+        // the browser and can't get stuck. Frozen (sticky) cells need the
+        // OPAQUE hover bg so scrolled content doesn't show through; they're
+        // targeted by their data-frozen-key attribute. Scoped to this panel.
         const hoverStyle = document.createElement('style');
         hoverStyle.textContent = `
             #${SUM_PANEL_ID} tbody tr:hover > td { background: rgba(20,210,220,0.10) !important; }
@@ -6119,7 +13428,90 @@
         closeBtn.textContent = '×';
         closeBtn.style.cssText = 'background:transparent;border:none;color:#bbb;font-size:18px;cursor:pointer;padding:0 4px;line-height:1';
         closeBtn.onclick = closeSummaryPanel;
+
+        // --- Snap docking (v4.78) ---
+        // Snap targets come from the MAP region — the .leaflet-container in
+        // this (iframe) document — so "snap left/right" fills the map's edge,
+        // not the sidebar. Coords are viewport-relative, matching the panel's
+        // position:fixed space. Falls back to the full viewport if the map
+        // container isn't found.
+        function getMapRect() {
+            try {
+                const mc = document.querySelector('.leaflet-container');
+                if (mc) {
+                    const r = mc.getBoundingClientRect();
+                    if (r.width > 200 && r.height > 200) {
+                        return { left: r.left, top: r.top, width: r.width, height: r.height };
+                    }
+                }
+            } catch (e) {}
+            return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+        }
+        function applyPanelGeom(L, T, W, H) {
+            panel.style.left = Math.round(L) + 'px';
+            panel.style.top = Math.round(T) + 'px';
+            panel.style.width = Math.round(W) + 'px';
+            panel.style.height = Math.round(H) + 'px';
+            panel.style.maxHeight = 'none';
+            sumPanelState.x = Math.round(L); sumPanelState.y = Math.round(T);
+            sumPanelState.w = Math.round(W); sumPanelState.h = Math.round(H);
+        }
+        function snapPanel(where) {
+            const m = getMapRect();
+            const priorSnap = sumPanelState.snap;
+            // Remember the floating geometry the first time we dock, so the
+            // float/restore button can return to it.
+            if (!priorSnap) {
+                const r = panel.getBoundingClientRect();
+                sumPanelState.floatRect = { x: r.left, y: r.top, w: r.width, h: r.height };
+            }
+            const floatW = (sumPanelState.floatRect && sumPanelState.floatRect.w) || 720;
+            let L, T, W, H;
+            if (where === 'left' || where === 'right') {
+                // Side dock: full map height, width = the floating width (cap
+                // at 70% of the map so a dock never swallows the whole thing).
+                const baseW = priorSnap ? floatW : panel.getBoundingClientRect().width;
+                W = Math.min(Math.max(baseW, 480), Math.round(m.width * 0.7));
+                H = m.height; T = m.top;
+                L = where === 'left' ? m.left : (m.left + m.width - W);
+            } else { // bottom dock: full map width, ~45% height.
+                W = m.width; L = m.left;
+                H = Math.min(Math.max(Math.round(m.height * 0.45), 300), m.height);
+                T = m.top + m.height - H;
+            }
+            applyPanelGeom(L, T, W, H);
+            sumPanelState.snap = where;
+        }
+        function floatPanel() {
+            sumPanelState.snap = null;
+            const f = sumPanelState.floatRect;
+            if (f) applyPanelGeom(f.x, f.y, f.w, f.h);
+        }
+        // Re-fit a docked panel when the window/sidebar size changes.
+        const onWinResize = () => { if (sumPanelState.snap) snapPanel(sumPanelState.snap); };
+        window.addEventListener('resize', onWinResize);
+
+        const snapBtns = document.createElement('div');
+        snapBtns.style.cssText = 'display:flex;align-items:center;gap:1px;margin-right:2px';
+        const mkSnapBtn = (glyph, tip, fn) => {
+            const b = document.createElement('button');
+            b.textContent = glyph;
+            b.title = tip;
+            b.style.cssText = 'background:transparent;border:1px solid transparent;color:#9fb4bb;font-size:13px;line-height:1;cursor:pointer;padding:2px 5px;border-radius:3px';
+            b.onmouseenter = () => { b.style.background = 'rgba(20,210,220,0.18)'; b.style.color = '#cdeff3'; };
+            b.onmouseleave = () => { b.style.background = 'transparent'; b.style.color = '#9fb4bb'; };
+            // Don't let a button press start a header drag.
+            b.onmousedown = (e) => { e.stopPropagation(); };
+            b.onclick = (e) => { e.stopPropagation(); fn(); };
+            return b;
+        };
+        snapBtns.appendChild(mkSnapBtn('◧', 'Dock to left of map', () => { snapPanel('left'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('◨', 'Dock to right of map', () => { snapPanel('right'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('⬓', 'Dock to bottom of map', () => { snapPanel('bottom'); saveSumPanelGeom(); }));
+        snapBtns.appendChild(mkSnapBtn('❐', 'Float / restore', () => { floatPanel(); saveSumPanelGeom(); }));
+
         head.appendChild(title);
+        head.appendChild(snapBtns);
         head.appendChild(closeBtn);
         panel.appendChild(head);
 
@@ -6138,17 +13530,19 @@
         const onMove = (e) => {
             if (!dragging) return;
             let nx = e.clientX - dragOffX, ny = e.clientY - dragOffY;
-            // Clamp by the panel's actual size so the WHOLE panel stays on
-            // screen on every edge (was leaving only an 80/40px sliver off the
-            // right/bottom).
+            // v4.77: clamp by the panel's actual size so the WHOLE panel stays
+            // on screen on every edge (was leaving only an 80/40px sliver off
+            // the right/bottom). If the panel is bigger than the viewport, pin
+            // its top-left at 0 (the max() wins over the negative min()).
             const r = panel.getBoundingClientRect();
             nx = Math.max(0, Math.min(window.innerWidth - r.width, nx));
             ny = Math.max(0, Math.min(window.innerHeight - r.height, ny));
             panel.style.left = nx + 'px';
             panel.style.top = ny + 'px';
             sumPanelState.x = nx; sumPanelState.y = ny;
+            sumPanelState.snap = null; // manual move un-docks
         };
-        const onUp = () => { dragging = false; };
+        const onUp = () => { if (dragging) { dragging = false; saveSumPanelGeom(); } };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
         // Clean up listeners when panel closes
@@ -6337,13 +13731,29 @@
         };
         optsRow.appendChild(analyzerBtn);
 
+        // "Generate" button — opens the Site Setup Generator modal
+        // (auto-build the foundation: A1 = inspection FFZs). Inverse of
+        // the Analyzer; placed right after it for visual grouping.
+        const generateBtn = document.createElement('button');
+        generateBtn.type = 'button';
+        generateBtn.textContent = '⊕ Generate';
+        generateBtn.title = 'Site Setup Generator — auto-build draft FFZs (and later flight paths) for a CSM to finetune';
+        generateBtn.style.cssText = 'background:rgba(95,255,95,0.13);color:#7dffae;border:1px solid rgba(95,255,95,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
+        generateBtn.onclick = (ev) => {
+            ev.stopPropagation();
+            openSiteGenerator(siteID);
+        };
+        optsRow.appendChild(generateBtn);
+
         // v3.88: 📍 Base picker — choose the basestation GM used by the Route
         // column. Auto-detected (name contains "base") unless overridden per site.
         const baseBtn = document.createElement('button');
         baseBtn.type = 'button';
         baseBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px';
         const bases = (routeSummary && routeSummary.bases) || [];
+        const routingOff = routeSummary === null; // v4.92: skipped (route/battery cols hidden)
         const baseLabelText = () => {
+            if (routingOff) return '📍 Base: routing off ▾';
             if (!bases.length) return '📍 Base: (none) ▾';
             if (bases.length === 1) {
                 const raw = bases[0].name || `#${bases[0].id}`;
@@ -6353,7 +13763,9 @@
             return `📍 Base: ${bases.length} bases${routeSummary.baseAuto ? ' (auto)' : ''} ▾`;
         };
         baseBtn.textContent = baseLabelText();
-        baseBtn.title = bases.length
+        baseBtn.title = routingOff
+            ? 'Routing is off (skipped for speed). Add the Route or Battery column to compute basestation→asset routing.'
+            : bases.length
             ? `Routing from ${bases.length === 1 ? `"${bases[0].name}"` : bases.length + ' bases (closest wins)'} — ${routeSummary.reachable} asset(s) reachable, ${routeSummary.unreachable} not. Click to change.`
             : (routeSummary && routeSummary.reason === 'no-flight-paths'
                 ? 'No flight paths on this site — routing unavailable.'
@@ -6642,8 +14054,15 @@
                 segId:     'Segment ID',
                 entId:     'Entity ID',
                 subtype:   'Subtype',
-                equipment: 'Equipment (asset)',
-                state:     'State / Health (asset)',
+                equipment: '(Assets) Equipment',
+                state:     '(Assets) State / Health',
+                assetAlt:  '(Assets) Altitude',
+                assetHeightAgl: '(Assets) Height AGL',
+                assetElevAsl: '(Assets) Elevation ASL',
+                poiId:     '(Assets) POI ID',
+                poleFeeder:'(Assets) Pole Feeder',
+                poleUsage: '(Assets) Pole Usage',
+                poleIsSimple: '(Assets) Pole Is Simple',
                 gmGroup:   'GM Group',
                 altMin:    'Min Alt',
                 altMax:    'Max Alt',
@@ -6652,15 +14071,38 @@
                 elevation: 'Elevation',
                 agl:       'AGL (Min Alt − Elev)',
                 segLen:    'Segment Length (FP seg)',
-                route:     'Route from base (asset)',
-                battery:   'Battery (from route)',
+                area:      'Area (FFZ / NFZ / Asset)',
+                route:     '(Assets) Route from base',
+                battery:   '(Assets) Battery (from route)',
                 ptAlt:     'Altitude (Base / Safe Zone)',
                 validated: 'Valid',
+                waitApproved: 'Wait Until Approved (FP seg)',
                 unshielded:'Unshielded',
                 notes:     'Notes',
                 droneName: 'Drone (base)',
                 droneId:   'Drone ID (base)',
+                lat:       'Lat (center)',
+                long:      'Long (center)',
+                gps:       'GPS / Maps link',
             };
+            // v4.145: section grouping for the "available columns" list, so
+            // assets/FP/FFZ columns are easy to find. Keys not listed fall to
+            // 'General'. Order here = section order in the menu.
+            const COL_SECTION = {
+                typeShort: 'General', name: 'General', entId: 'General', subtype: 'General',
+                notes: 'General', elevation: 'General', area: 'General', validated: 'General',
+                lat: 'General', long: 'General', gps: 'General', visibility: 'General',
+                equipment: 'Assets', state: 'Assets', assetAlt: 'Assets', assetHeightAgl: 'Assets',
+                assetElevAsl: 'Assets', poiId: 'Assets', poleFeeder: 'Assets', poleUsage: 'Assets',
+                poleIsSimple: 'Assets', route: 'Assets', battery: 'Assets',
+                segId: 'Flight Paths', altMin: 'Flight Paths', altMax: 'Flight Paths',
+                emergAlt: 'Flight Paths', altDelta: 'Flight Paths', agl: 'Flight Paths',
+                segLen: 'Flight Paths', waitApproved: 'Flight Paths',
+                unshielded: 'FFZ / NFZ',
+                ptAlt: 'Base / Safe Zone', droneName: 'Base / Safe Zone', droneId: 'Base / Safe Zone',
+                gmGroup: 'General Markers',
+            };
+            const SECTION_ORDER = ['General', 'Assets', 'Flight Paths', 'FFZ / NFZ', 'Base / Safe Zone', 'General Markers', 'Other'];
             // MBT-style menu: visible columns first with ↑/↓ reorder
             // arrows + remove checkbox, then a divider, then hidden
             // columns with an add checkbox. State persists per
@@ -6741,11 +14183,11 @@
                     colsMenuEl.appendChild(hr);
                     const head2 = document.createElement('div');
                     head2.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:2px 12px 4px;font-weight:700';
-                    head2.textContent = 'Hidden';
+                    head2.textContent = 'Add columns';
                     colsMenuEl.appendChild(head2);
-                    hidden.forEach(key => {
+                    const addHiddenRow = (key) => {
                         const row = document.createElement('label');
-                        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                        row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px 3px 18px;cursor:pointer';
                         const cb = document.createElement('input');
                         cb.type = 'checkbox';
                         cb.checked = false;
@@ -6761,6 +14203,21 @@
                         row.appendChild(cb);
                         row.appendChild(document.createTextNode(COL_LABELS[key] || key));
                         colsMenuEl.appendChild(row);
+                    };
+                    // Group the available columns by section for findability.
+                    const sectioned = {};
+                    hidden.forEach(k => {
+                        const sec = COL_SECTION[k] || 'Other';
+                        (sectioned[sec] = sectioned[sec] || []).push(k);
+                    });
+                    SECTION_ORDER.forEach(sec => {
+                        const keys = sectioned[sec];
+                        if (!keys || keys.length === 0) return;
+                        const subHead = document.createElement('div');
+                        subHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.04em;padding:5px 12px 2px;font-weight:700';
+                        subHead.textContent = sec;
+                        colsMenuEl.appendChild(subHead);
+                        keys.forEach(addHiddenRow);
                     });
                 }
                 const hr2 = document.createElement('div');
@@ -6824,26 +14281,162 @@
             if (presetsMenuEl) { closePresetsMenu(); return; }
             presetsMenuEl = document.createElement('div');
             presetsMenuEl.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:6px 0;z-index:99999;font-size:11px;color:#e6e6e6;min-width:260px;max-height:65vh;overflow:auto';
+            // Index of the shared default currently being inline-renamed (-1 = none).
+            let editingBuiltinIdx = -1;
             const rebuildPresetsMenu = () => {
                 presetsMenuEl.innerHTML = '';
                 // --- Built-in views (read-only, apply-only) ---
                 const biHead = document.createElement('div');
                 biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#14d2dc;letter-spacing:0.05em;padding:6px 12px 4px;font-weight:700';
-                biHead.textContent = '★ Built-in views';
+                const adminMode = isPresetAdmin();
+                presetsMenuEl.style.minWidth = adminMode ? '340px' : '260px';
+                biHead.textContent = adminMode ? '★ Built-in views · shared (you can edit)' : '★ Built-in views';
                 presetsMenuEl.appendChild(biHead);
-                BUILTIN_PRESETS.forEach(p => {
+                const biList = getBuiltinPresets();
+                // Helper: commit a mutated copy of the shared-default list and
+                // refresh the menu. Returns nothing; toasts on the result.
+                const commitBuiltins = async (arr, msg, okMsg) => {
+                    const ok = await commitSharedPresets(arr, msg);
+                    if (ok) showToast(okMsg, 'rgba(95,255,95,0.5)');
+                    if (presetsMenuEl) rebuildPresetsMenu();
+                };
+                const mkMiniBtn = (txt, title, color, onClick) => {
+                    const b = document.createElement('button');
+                    b.textContent = txt;
+                    b.title = title;
+                    b.style.cssText = `background:transparent;border:1px solid ${color};color:${color};border-radius:3px;width:20px;height:20px;cursor:pointer;font-size:11px;padding:0;line-height:1;flex:0 0 auto`;
+                    b.onclick = (e2) => { e2.stopPropagation(); onClick(e2, b); };
+                    return b;
+                };
+                biList.forEach((p, i) => {
                     const row = document.createElement('div');
-                    row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer';
+                    row.style.cssText = 'display:flex;align-items:center;gap:4px;padding:3px 12px;cursor:pointer';
                     row.onmouseenter = () => { row.style.background = 'rgba(20,210,220,0.10)'; };
                     row.onmouseleave = () => { row.style.background = 'transparent'; };
                     row.title = p.desc || 'Apply this view';
+
+                    // Inline-rename state for this row.
+                    if (adminMode && editingBuiltinIdx === i) {
+                        const inp = document.createElement('input');
+                        inp.type = 'text';
+                        inp.value = p.name;
+                        inp.style.cssText = 'flex:1;min-width:0;background:#1a1d23;border:1px solid #ffce6b;color:#e6e6e6;border-radius:3px;padding:2px 6px;font:inherit;font-size:11px;outline:none';
+                        const commitRename = async () => {
+                            const nm = (inp.value || '').trim();
+                            if (!nm || nm === p.name) { editingBuiltinIdx = -1; rebuildPresetsMenu(); return; }
+                            if (biList.some((x, j) => j !== i && (x.name || '').toLowerCase() === nm.toLowerCase())) {
+                                showToast(`A default named "${nm}" already exists`, 'rgba(255,96,96,0.55)');
+                                return;
+                            }
+                            const arr = getBuiltinPresets().slice();
+                            arr[i] = Object.assign({}, arr[i], { name: nm });
+                            editingBuiltinIdx = -1;
+                            await commitBuiltins(arr, `[AIM] rename shared default "${p.name}" → "${nm}"`, `Renamed: ${nm}`);
+                        };
+                        inp.onkeydown = (e2) => {
+                            if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); commitRename(); }
+                            else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); editingBuiltinIdx = -1; rebuildPresetsMenu(); }
+                        };
+                        row.appendChild(inp);
+                        row.appendChild(mkMiniBtn('✓', 'Save name', '#5fff5f', () => commitRename()));
+                        row.appendChild(mkMiniBtn('✕', 'Cancel', '#999', () => { editingBuiltinIdx = -1; rebuildPresetsMenu(); }));
+                        presetsMenuEl.appendChild(row);
+                        setTimeout(() => { inp.focus(); inp.select(); }, 0);
+                        return;
+                    }
+
                     const lbl = document.createElement('span');
                     lbl.textContent = p.name;
-                    lbl.style.cssText = 'flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    lbl.style.cssText = 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#cfe8ec';
+                    lbl.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
                     row.appendChild(lbl);
-                    row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+
+                    if (adminMode) {
+                        // Reorder ▲▼ (disabled at the ends).
+                        const up = mkMiniBtn('▲', 'Move up', 'rgba(255,255,255,0.45)', async () => {
+                            if (i <= 0) return;
+                            const arr = getBuiltinPresets().slice();
+                            [arr[i - 1], arr[i]] = [arr[i], arr[i - 1]];
+                            await commitBuiltins(arr, `[AIM] reorder shared default "${p.name}" up`, `Moved up: ${p.name}`);
+                        });
+                        const dn = mkMiniBtn('▼', 'Move down', 'rgba(255,255,255,0.45)', async () => {
+                            if (i >= biList.length - 1) return;
+                            const arr = getBuiltinPresets().slice();
+                            [arr[i + 1], arr[i]] = [arr[i], arr[i + 1]];
+                            await commitBuiltins(arr, `[AIM] reorder shared default "${p.name}" down`, `Moved down: ${p.name}`);
+                        });
+                        if (i <= 0) { up.disabled = true; up.style.opacity = '0.3'; up.style.cursor = 'default'; }
+                        if (i >= biList.length - 1) { dn.disabled = true; dn.style.opacity = '0.3'; dn.style.cursor = 'default'; }
+                        row.appendChild(up);
+                        row.appendChild(dn);
+                        // Rename ✎
+                        row.appendChild(mkMiniBtn('✎', 'Rename this shared default', '#9ad0ff', () => { editingBuiltinIdx = i; rebuildPresetsMenu(); }));
+                        // Overwrite ⟳
+                        row.appendChild(mkMiniBtn('⟳', 'Overwrite this shared default with the current view (applies to ALL coworkers)', '#ffce6b', async (e2, b) => {
+                            if (!confirm(`Overwrite the shared default "${p.name}" with the CURRENT view (columns, order, filters, sort)?\n\nThis changes the default for ALL coworkers.`)) return;
+                            b.disabled = true; b.textContent = '…';
+                            const arr = getBuiltinPresets().slice();
+                            arr[i] = Object.assign({ name: p.name, desc: p.desc || '' }, captureCurrentView());
+                            await commitBuiltins(arr, `[AIM] update shared default view "${p.name}"`, `Shared default updated: ${p.name}`);
+                        }));
+                        // Delete ×
+                        row.appendChild(mkMiniBtn('×', 'Delete this shared default (for ALL coworkers)', '#ff8a80', async (e2, b) => {
+                            if (!confirm(`Delete the shared default "${p.name}" for ALL coworkers?`)) return;
+                            b.disabled = true; b.textContent = '…';
+                            const arr = getBuiltinPresets().slice();
+                            arr.splice(i, 1);
+                            await commitBuiltins(arr, `[AIM] delete shared default view "${p.name}"`, `Deleted: ${p.name}`);
+                        }));
+                    } else {
+                        row.onclick = () => { closePresetsMenu(); applyViewPreset(p, siteID); showToast(`View: ${p.name}`, 'rgba(20,210,220,0.55)'); };
+                    }
                     presetsMenuEl.appendChild(row);
                 });
+                // Admin: save the current view as a NEW shared default.
+                if (adminMode) {
+                    const newRow = document.createElement('div');
+                    newRow.style.cssText = 'display:flex;gap:6px;padding:4px 12px 2px';
+                    const newName = document.createElement('input');
+                    newName.type = 'text';
+                    newName.placeholder = 'New shared default…';
+                    newName.style.cssText = 'flex:1;background:#1a1d23;border:1px solid rgba(255,200,80,0.35);color:#e6e6e6;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;outline:none';
+                    newName.onfocus = () => { newName.style.borderColor = '#ffce6b'; };
+                    newName.onblur = () => { newName.style.borderColor = 'rgba(255,200,80,0.35)'; };
+                    const newBtn = document.createElement('button');
+                    newBtn.type = 'button';
+                    newBtn.textContent = '⭐ Add';
+                    newBtn.title = 'Save the current columns + filters + sort as a NEW shared default for all coworkers';
+                    newBtn.style.cssText = 'background:rgba(255,200,80,0.15);color:#ffce6b;border:1px solid rgba(255,200,80,0.45);border-radius:3px;padding:3px 10px;cursor:pointer;font:inherit;font-size:11px;white-space:nowrap';
+                    const doAddDefault = async () => {
+                        const name = (newName.value || '').trim();
+                        if (!name) { newName.focus(); return; }
+                        const arr = getBuiltinPresets().slice();
+                        const existing = arr.findIndex(x => (x.name || '').toLowerCase() === name.toLowerCase());
+                        const entry = Object.assign({ name, desc: '' }, captureCurrentView());
+                        if (existing >= 0) {
+                            if (!confirm(`A shared default named "${arr[existing].name}" already exists — overwrite it with the current view?`)) return;
+                            arr[existing] = Object.assign({ name: arr[existing].name, desc: arr[existing].desc || '' }, captureCurrentView());
+                        } else {
+                            arr.push(entry);
+                        }
+                        newBtn.disabled = true; newBtn.textContent = '…';
+                        const ok = await commitSharedPresets(arr, `[AIM] ${existing >= 0 ? 'update' : 'add'} shared default view "${name}"`);
+                        if (ok) showToast(`Shared default ${existing >= 0 ? 'updated' : 'added'}: ${name}`, 'rgba(95,255,95,0.5)');
+                        if (presetsMenuEl) rebuildPresetsMenu();
+                    };
+                    newBtn.onclick = (e2) => { e2.stopPropagation(); doAddDefault(); };
+                    newName.onkeydown = (e2) => {
+                        if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); doAddDefault(); }
+                        else if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); closePresetsMenu(); }
+                    };
+                    newRow.appendChild(newName);
+                    newRow.appendChild(newBtn);
+                    presetsMenuEl.appendChild(newRow);
+                    const note = document.createElement('div');
+                    note.style.cssText = 'padding:1px 12px 3px;color:#7a7f88;font-size:9px';
+                    note.textContent = sharedPresets ? 'Editing the shared repo file — changes reach all coworkers.' : 'First edit will create the shared file from these built-ins.';
+                    presetsMenuEl.appendChild(note);
+                }
                 const biHr = document.createElement('div');
                 biHr.style.cssText = 'border-top:1px solid rgba(255,255,255,0.10);margin:6px 0';
                 presetsMenuEl.appendChild(biHr);
@@ -6944,6 +14537,13 @@
                 presetsMenuEl.appendChild(saveRow);
             };
             rebuildPresetsMenu();
+            // Refresh the built-in views + admin status from the repo in the
+            // background. The menu renders instantly from the fallback/cache,
+            // then re-renders (revealing admin controls / repo list) once the
+            // fetches land.
+            Promise.all([fetchSharedPresets(), resolvePresetAdmin()])
+                .then(() => { if (presetsMenuEl) rebuildPresetsMenu(); })
+                .catch(e => console.warn(`${TAG} shared presets refresh failed:`, e));
             const r = presetsBtn.getBoundingClientRect();
             presetsMenuEl.style.left = r.left + 'px';
             presetsMenuEl.style.top = (r.bottom + 4) + 'px';
@@ -7106,6 +14706,152 @@
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
         optsRow.appendChild(subBtn);
+
+        // --- v4.70: Bulk → Valid button ---
+        // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
+        // across FFZs + FPs in scope. This flag = a pilot's post-flight
+        // sign-off (flew it, no airspace obstacles, cleared for autonomous
+        // flight), so it's a plain manual flip — NOT derived from the SOP
+        // Validators. Rides the same direct-API upsert + rollback/verify
+        // rails as the altitude bulk tools (verify confirms the server
+        // actually persisted the flag). Uses the shared attachBulkPopover.
+        const validBtn = document.createElement('button');
+        validBtn.type = 'button';
+        validBtn.textContent = 'Bulk → Valid';
+        validBtn.title = 'Set the pilot Validation flag ✓/✗ across FFZs + FPs (selected, or all)';
+        validBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
+        optsRow.appendChild(validBtn);
+
+        // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
+        // type filter, preview the count, then queue one validated edit per
+        // entity. FP rows are per-segment in the table, so we DEDUPE by
+        // entity id and queue once per flight path.
+        function buildBulkValidatePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;min-width:320px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '🛩  Bulk Set Validation';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = "Flips the pilot Validation flag on every FFZ + FP in scope. This is the pilot's post-flight sign-off — independent of the SOP Validators. Skips entities already at the target.";
+            pop.appendChild(help);
+
+            // Target radio — ✓ Valid / ✗ Invalid.
+            const row1 = document.createElement('div');
+            row1.style.cssText = 'display:flex;align-items:center;gap:14px;margin-bottom:10px';
+            const mkTarget = (val, label, col) => {
+                const l = document.createElement('label');
+                l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + col + ';font-weight:600';
+                const r = document.createElement('input');
+                r.type = 'radio'; r.name = 'aim-ai-bulk-val-target'; r.value = val;
+                r.style.cssText = 'accent-color:' + col + ';cursor:pointer';
+                l.appendChild(r); l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const tValid = mkTarget('yes', '✓ Valid', '#5fff5f');
+            const tInvalid = mkTarget('no', '✗ Invalid', '#ff5555');
+            tValid.r.checked = true;
+            row1.appendChild(tValid.l); row1.appendChild(tInvalid.l);
+            pop.appendChild(row1);
+
+            // Scope radio (same convention as the other bulk popovers).
+            const selCount = sumPanelState.selectedIds.size;
+            const row2 = document.createElement('div');
+            row2.style.cssText = 'display:flex;flex-direction:column;gap:5px;margin-bottom:8px';
+            const mkScope = (val, label, dis) => {
+                const l = document.createElement('label');
+                l.style.cssText = `display:flex;align-items:center;gap:6px;cursor:${dis ? 'not-allowed' : 'pointer'};color:${dis ? '#666' : '#cfd6dc'}`;
+                const r = document.createElement('input');
+                r.type = 'radio'; r.name = 'aim-ai-bulk-val-scope'; r.value = val;
+                if (dis) r.disabled = true;
+                r.style.cssText = 'accent-color:rgb(255,213,79);cursor:inherit';
+                l.appendChild(r); l.appendChild(document.createTextNode(label));
+                return { l, r };
+            };
+            const allScope = mkScope('all', 'All FFZs + FPs on this site', false);
+            const selScope = mkScope('sel', `Selected only (${selCount} selected)`, selCount === 0);
+            if (selCount > 0) selScope.r.checked = true; else allScope.r.checked = true;
+            row2.appendChild(allScope.l); row2.appendChild(selScope.l);
+            pop.appendChild(row2);
+
+            // Entity-type filter — FFZs / FPs (both on by default).
+            const row3 = document.createElement('div');
+            row3.style.cssText = 'display:flex;align-items:center;gap:14px;margin-bottom:10px';
+            const mkType = (label, col) => {
+                const l = document.createElement('label');
+                l.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;color:' + col;
+                const c = document.createElement('input');
+                c.type = 'checkbox'; c.checked = true;
+                c.style.cssText = 'accent-color:' + col + ';cursor:pointer';
+                l.appendChild(c); l.appendChild(document.createTextNode(label));
+                return { l, c };
+            };
+            const ffzType = mkType('FFZs', '#5fff5f');
+            const fpType = mkType('FPs', '#1ca0de');
+            row3.appendChild(ffzType.l); row3.appendChild(fpType.l);
+            pop.appendChild(row3);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px';
+            pop.appendChild(preview);
+
+            // Collect the UNIQUE target entities (FFZ + FP) honoring scope +
+            // type filter, returning those not already at the target flag.
+            const computeEligible = () => {
+                const target = tInvalid.r.checked ? false : true;
+                const scope = selScope.r.checked ? 'sel' : 'all';
+                const wantFfz = ffzType.c.checked, wantFp = fpType.c.checked;
+                const seen = new Set();
+                const entities = [];
+                allRows.forEach(r => {
+                    if (!r.entity) return;
+                    if (r.type !== 15 && r.type !== 16) return;
+                    if (r.type === 16 && !wantFfz) return;
+                    if (r.type === 15 && !wantFp) return;
+                    if (scope === 'sel' && !sumPanelState.selectedIds.has(r._rowKey)) return;
+                    if (seen.has(r.entity.id)) return;
+                    seen.add(r.entity.id);
+                    entities.push(r.entity);
+                });
+                const eligible = entities.filter(en => !!en.validated !== target);
+                return { eligible, target, total: entities.length };
+            };
+            const refreshPreview = () => {
+                const { eligible, target, total } = computeEligible();
+                if (total === 0) { preview.textContent = '⚠️ No FFZ/FP entities in scope (check the type filter).'; return; }
+                preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> flip${eligible.length === 1 ? '' : 's'} → ${target ? '<span style="color:#5fff5f">✓ Valid</span>' : '<span style="color:#ff5555">✗ Invalid</span>'} · skipping ${total - eligible.length} already there.`;
+            };
+            refreshPreview();
+            [tValid.r, tInvalid.r, allScope.r, selScope.r, ffzType.c, fpType.c].forEach(el => { el.onchange = refreshPreview; });
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue flips';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const { eligible, target } = computeEligible();
+                if (eligible.length === 0) { showToast('Nothing to queue — all in-scope entities already at target'); return; }
+                let queued = 0;
+                eligible.forEach(en => { if (queueValidatedEdit(en, target)) queued++; });
+                showToast(`Queued ${queued} validation flip${queued === 1 ? '' : 's'} → ${target ? '✓ Valid' : '✗ Invalid'}`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
 
         function buildBulkSubtypePopover(anchor, onClose) {
             const pop = document.createElement('div');
@@ -7772,7 +15518,7 @@
             biHead.style.cssText = 'font-size:9px;text-transform:uppercase;color:#888;letter-spacing:0.05em;padding:4px 12px 2px;font-weight:700';
             biHead.textContent = '★ Built-in';
             exportMenuEl.appendChild(biHead);
-            BUILTIN_PRESETS.forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
+            getBuiltinPresets().forEach(p => exportMenuEl.appendChild(mkRow(p.name, p.desc, () => doExport(p), '#cfe8ec')));
             const userPresets = loadViewPresets();
             if (userPresets.length) {
                 const uHead = document.createElement('div');
@@ -7913,6 +15659,19 @@
                     ].join('\t'));
                     return;
                 }
+                // v4.70: validation flag is boolean — Old/New hold ✓/✗; Δ empty.
+                if (e.field === 'validated') {
+                    lines.push([
+                        e.isFfz ? 'FFZ' : 'FP',
+                        e.entityName || e.fpName || '',
+                        '(entity)',
+                        'Validated',
+                        e.oldValue ? '✓' : '✗',
+                        e.newValue ? '✓' : '✗',
+                        '',
+                    ].join('\t'));
+                    return;
+                }
                 const oldV = conv(e.oldValueM);
                 const newV = conv(e.newValueM);
                 const delta = newV - oldV;
@@ -7998,11 +15757,12 @@
         };
         panel.appendChild(footer);
 
-        // Resize handles — all four edges + four corners. One handler drives
-        // them all; each handle declares which edges it MOVES, and the opposite
-        // edge stays anchored so dragging the left/top edge resizes inward
-        // instead of sliding the panel. Min 480x300, max 96vw x 90vh. Final
-        // geometry persists in sumPanelState. Bottom-right keeps its grip.
+        // Resize handles — all four edges + four corners (v4.76). One handler
+        // drives them all; each handle declares which edges it MOVES, and the
+        // OPPOSITE edge stays anchored so dragging the left/top edge feels
+        // natural (resizes inward instead of sliding the panel). Min 480x300,
+        // max 96vw x 90vh. Final geometry persists in sumPanelState so it
+        // survives close/reopen. The bottom-right keeps its visible grip.
         const MINW = 480, MINH = 300;
         let rz = null; // active drag: { edges, startX, startY, L, T, W, H }
         const onResizeMove = (e) => {
@@ -8017,6 +15777,8 @@
             if (rz.edges.n) H = rz.H - dy;
             W = Math.max(MINW, Math.min(maxW, W));
             H = Math.max(MINH, Math.min(maxH, H));
+            // West/North edges move the left/top corner — keep the opposite
+            // edge anchored, and don't let the panel slide off the top/left.
             if (rz.edges.w) { L = rightX - W; if (L < 0) { L = 0; W = rightX; } }
             if (rz.edges.n) { T = bottomY - H; if (T < 0) { T = 0; H = bottomY; } }
             panel.style.left = L + 'px';
@@ -8025,8 +15787,9 @@
             panel.style.height = H + 'px';
             panel.style.maxHeight = 'none'; // override the default cap once user resizes
             sumPanelState.x = L; sumPanelState.y = T; sumPanelState.w = W; sumPanelState.h = H;
+            sumPanelState.snap = null; // manual resize un-docks
         };
-        const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; } };
+        const onResizeUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; saveSumPanelGeom(); } };
         document.addEventListener('mousemove', onResizeMove);
         document.addEventListener('mouseup', onResizeUp);
         const mkHandle = (css, edges) => {
@@ -8042,23 +15805,31 @@
             return h;
         };
         const EDGE = 6, CRN = 14; // edge strip thickness / corner box size
+        // Four edges (inset by CRN so the corners own their squares).
         mkHandle(`top:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { n: true });
         mkHandle(`bottom:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { s: true });
         mkHandle(`left:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { w: true });
         mkHandle(`right:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { e: true });
+        // Four corners.
         mkHandle(`top:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nwse-resize`, { n: true, w: true });
         mkHandle(`top:0;right:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { n: true, e: true });
         mkHandle(`bottom:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { s: true, w: true });
+        // Bottom-right keeps the original visible diagonal grip.
         mkHandle(`right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 40%,rgba(20,210,220,0.55) 40%,rgba(20,210,220,0.55) 50%,transparent 50%,transparent 65%,rgba(20,210,220,0.45) 65%,rgba(20,210,220,0.45) 75%,transparent 75%);border-bottom-right-radius:8px`, { s: true, e: true });
         // Extend the cleanup remove() to drop the resize listeners too.
         const prevRemove = panel.remove;
         panel.remove = () => {
             document.removeEventListener('mousemove', onResizeMove);
             document.removeEventListener('mouseup', onResizeUp);
+            window.removeEventListener('resize', onWinResize);
             prevRemove();
         };
 
         document.body.appendChild(panel);
+        // If we restored a docked state, re-fit it to the CURRENT map size now
+        // that the panel is in the DOM (the saved px geometry was for whatever
+        // window size it had last session).
+        if (sumPanelState.snap) snapPanel(sumPanelState.snap);
 
         // --- Table draw helper (called on filter/sort changes) ---
         // Also exposed on window so kickOffDemFetch's completion callback
@@ -8067,6 +15838,16 @@
             redrawTable();
         };
         function redrawTable() {
+            // Lazily compute routes if the Route/Battery column is now visible
+            // but routes haven't been annotated yet. Enabling the column from
+            // the Columns menu (or a non-rerender path) calls redrawTable()
+            // without re-running annotateRoutes, which previously left the
+            // Route/Battery cells blank ("—") until a full re-render.
+            if (!routesAnnotated &&
+                (sumPanelState.columnOrder.includes('route') || sumPanelState.columnOrder.includes('battery'))) {
+                try { annotateRoutes(siteID, allRows); } catch (e) { console.warn(`${TAG} lazy annotateRoutes failed:`, e); }
+                routesAnnotated = true;
+            }
             // v3.52: preserve scroll position across redraws. Without
             // this, every inline-edit commit wiped tableWrap.scrollTop
             // and dumped the user at the top of the table — exactly
@@ -8124,6 +15905,13 @@
                 { key: 'subtype',   label: 'Subtype',        w: 100, num: false, dataKey: 'subtype' },
                 { key: 'equipment', label: 'Equipment',      w: 110, num: false, dataKey: 'equipment' },
                 { key: 'state',     label: 'State',          w: 100, num: false, dataKey: 'state' },
+                { key: 'assetAlt',      label: `Altitude (${unitLbl})`,   w: 85,  num: true,  dataKey: 'assetAltM',       fmt: fmtAlt, raw: fmtRaw },
+                { key: 'assetHeightAgl', label: `Height AGL (${unitLbl})`, w: 95, num: true,  dataKey: 'assetHeightAglM', fmt: fmtAlt, raw: fmtRaw },
+                { key: 'assetElevAsl',  label: `Elev ASL (${unitLbl})`,   w: 90,  num: true,  dataKey: 'assetElevAslM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'poiId',     label: 'POI ID',         w: 80,  num: true,  dataKey: 'poiId' },
+                { key: 'poleFeeder', label: 'Pole Feeder',   w: 110, num: false, dataKey: 'poleFeeder' },
+                { key: 'poleUsage', label: 'Pole Usage',     w: 110, num: false, dataKey: 'poleUsage' },
+                { key: 'poleIsSimple', label: 'Pole Simple', w: 85,  num: false, dataKey: 'poleIsSimple' },
                 { key: 'gmGroup',   label: 'GM Group',       w: 120, num: false, dataKey: 'gmGroup' },
                 { key: 'altMin',    label: `Min Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMinM',   fmt: fmtAlt, raw: fmtRaw },
                 { key: 'altMax',    label: `Max Alt (${unitLbl})`,       w: 80,  num: true, dataKey: 'altMaxM',   fmt: fmtAlt, raw: fmtRaw },
@@ -8132,10 +15920,12 @@
                 { key: 'elevation', label: `Elevation (${unitLbl})`,     w: 100, num: true, dataKey: 'elevationM', fmt: fmtAlt, raw: fmtRaw },
                 { key: 'agl',       label: `AGL (${unitLbl})`,           w: 80,  num: true, dataKey: 'aglM',      fmt: fmtAlt, raw: fmtRaw },
                 { key: 'segLen',    label: `Seg Len (${unitLbl})`,       w: 90,  num: true, dataKey: 'segLenM',   fmt: fmtAlt, raw: fmtRaw },
+                { key: 'area',      label: `Area (${unitLbl}²)`,         w: 100, num: true, dataKey: 'areaM2' },
                 { key: 'route',     label: `Route (${unitLbl})`,         w: 95,  num: true, dataKey: 'routeM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'battery',   label: 'Battery',        w: 95,  num: false, dataKey: 'routeM' },
                 { key: 'ptAlt',     label: `Alt (${unitLbl})`,           w: 85,  num: true, dataKey: 'ptAltM',    fmt: fmtAlt, raw: fmtRaw },
                 { key: 'validated', label: 'Valid',          w: 50,  num: false, dataKey: 'validated' },
+                { key: 'waitApproved', label: 'Wait Approved', w: 95, num: false, dataKey: 'waitApproved' },
                 { key: 'unshielded',label: 'Unshielded',     w: 80,  num: false, dataKey: 'unshielded' },
                 { key: 'notes',     label: 'Notes',          w: 220, num: false, dataKey: 'notesText' },
                 { key: 'droneName', label: 'Drone',          w: 95,  num: false, dataKey: 'droneName' },
@@ -8374,8 +16164,8 @@
                 // Frozen (sticky-left) cells need an OPAQUE background or the
                 // scrolling columns show through them. Base bg is set inline by
                 // applyFrozen; the hover bg is handled by the CSS :hover rule
-                // injected at panel build — no JS mouseenter/leave, so it can't
-                // get stranded when the table redraws mid-hover.
+                // injected at panel build (v4.80) — no JS mouseenter/leave, so
+                // it can't get stranded when the table redraws mid-hover.
                 const frozenTds = [];
 
                 // Checkbox cell — clicks here don't trigger row navigation.
@@ -8745,25 +16535,35 @@
                     } else if (col.key === 'validated') {
                         // null → N/A (Assets/Markers — Percepto hides the toggle for these).
                         // true → green ✓, false → red ✗ for FFZ/FP/NFZ.
-                        let txt = '—', color = '#666';
-                        if (r.validated === true) { txt = '✓'; color = '#5fff5f'; }
+                        // v4.70: a queued Bulk → Valid flip shows the TARGET in
+                        // yellow until Apply, mirroring the Min/Max pending style.
+                        let txt = '—', color = '#666', pending = false, title = '';
+                        if (r.validated !== null && r.entity && (r.type === 15 || r.type === 16)) {
+                            const ev = effectiveValidated(r.entity);
+                            if (ev.pending) { pending = true; title = `Queued: ${ev.oldValue ? '✓' : '✗'} → ${ev.value ? '✓' : '✗'}`; }
+                            if (ev.value === true) { txt = '✓'; color = pending ? '#ffd54f' : '#5fff5f'; }
+                            else { txt = '✗'; color = pending ? '#ffd54f' : '#ff5555'; }
+                        } else if (r.validated === true) { txt = '✓'; color = '#5fff5f'; }
                         else if (r.validated === false) { txt = '✗'; color = '#ff5555'; }
                         td.style.cssText = `padding:5px 8px;text-align:center;color:${color};cursor:pointer;font-weight:600`;
                         td.textContent = txt;
+                        if (title) td.title = title;
                     } else if (col.key === 'lat' || col.key === 'long') {
-                        // Point coordinate (GMs + Assets only). Click or
-                        // right-click copies the raw number. M1-edit to move
-                        // the marker is a planned fast-follow.
+                        // Coordinate: exact for point entities (GMs/Assets/Base/
+                        // Safe Zone); ROUGH CENTER for FFZ/NFZ polygons (mean of
+                        // vertices) + FP segments (arc midpoint). Click/right-
+                        // click copies the raw number.
                         const v = col.key === 'lat' ? r._lat : r._lng;
+                        const isPoint = (r.type === 19 || r.type === 3 || r.type === 8 || r.type === 98) && !r._isSegment;
                         td.style.cssText = 'padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer';
                         if (v == null) {
                             td.textContent = '—';
                             td.style.color = '#555';
-                            td.title = 'Only point entities (General Markers, Assets) have a single coordinate';
+                            td.title = 'No coordinate available for this entity';
                         } else {
-                            td.style.color = '#cdd6e0';
+                            td.style.color = isPoint ? '#cdd6e0' : '#9fb0bd'; // dim slightly for "rough center"
                             td.textContent = v.toFixed(6);
-                            td.title = 'Click or right-click to copy. (Editing — moving the marker — coming soon.)';
+                            td.title = isPoint ? 'Click or right-click to copy.' : 'Rough center point. Click or right-click to copy.';
                             const copy = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(v), `Copied ${v.toFixed(6)}`); };
                             td.onclick = copy;
                             td.oncontextmenu = copy;
@@ -8775,7 +16575,7 @@
                         if (r._lat == null) {
                             td.textContent = '—';
                             td.style.color = '#555';
-                            td.title = 'Only point entities (General Markers, Assets) have a coordinate';
+                            td.title = 'No coordinate available for this entity';
                         } else {
                             const url = `https://www.google.com/maps?q=${r._lat},${r._lng}`;
                             const a = document.createElement('span');
@@ -8793,9 +16593,11 @@
                             };
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(url, 'Copied Maps link'); };
                         }
-                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName') {
-                        // Plain text (asset equipment / GM group / base drone).
-                        // Blank for rows it doesn't apply to. Right-click copies.
+                    } else if (col.key === 'equipment' || col.key === 'gmGroup' || col.key === 'droneName'
+                        || col.key === 'poleFeeder' || col.key === 'poleUsage') {
+                        // Plain text (asset equipment / GM group / base drone /
+                        // asset pole feeder + usage). Blank for rows it doesn't
+                        // apply to. Right-click copies.
                         const v = r[col.dataKey] || '';
                         const color = col.key === 'gmGroup' ? '#c4a8f0' : (col.key === 'droneName' ? '#ffd54f' : '#cdd6e0');
                         td.style.cssText = `padding:5px 8px;color:${v ? color : '#555'};font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:${col.w + 20}px`;
@@ -8806,19 +16608,29 @@
                         } else {
                             td.title = col.key === 'gmGroup' ? 'GM Group applies to general markers only'
                                 : col.key === 'droneName' ? 'Drone applies to Base Stations only'
+                                : col.key === 'poleFeeder' ? 'Pole feeder (custom.pole_feeder) — assets only'
+                                : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
                                 : 'Equipment is parsed from asset subtype (before " - ")';
                         }
-                    } else if (col.key === 'entId' || col.key === 'droneId') {
-                        // Entity ID / allocated drone ID — right-aligned, copyable.
+                    } else if (col.key === 'poleIsSimple') {
+                        // Asset boolean custom.pole_is_simple → Yes / No / — (N/A).
+                        const v = r.poleIsSimple;
+                        const txt = v === true ? 'Yes' : (v === false ? 'No' : '—');
+                        td.style.cssText = `padding:5px 8px;text-align:center;font-size:11px;cursor:pointer;color:${v == null ? '#555' : '#cdd6e0'}`;
+                        td.textContent = txt;
+                        td.title = v == null ? 'Pole-is-simple (custom.pole_is_simple) — assets only'
+                            : `Pole is simple = ${v ? 'TRUE' : 'FALSE'}`;
+                    } else if (col.key === 'entId' || col.key === 'droneId' || col.key === 'poiId') {
+                        // Entity ID / allocated drone ID / POI ID — right-aligned, copyable.
                         const v = r[col.dataKey];
                         const show = (v != null && v !== '') ? String(v) : '—';
                         td.style.cssText = `padding:5px 8px;color:${show === '—' ? '#555' : '#9aa7b0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         td.textContent = show;
                         if (show !== '—') {
-                            td.title = (col.key === 'entId' ? 'Entity ID' : 'Allocated drone ID') + ' — Right-click: copy';
+                            td.title = (col.key === 'entId' ? 'Entity ID' : col.key === 'poiId' ? 'POI ID (custom.poi_id)' : 'Allocated drone ID') + ' — Right-click: copy';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(show, `Copied ${show}`); };
                         } else {
-                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : '';
+                            td.title = col.key === 'droneId' ? 'Drone ID — Base Stations only' : col.key === 'poiId' ? 'POI ID — assets only' : '';
                         }
                     } else if (col.key === 'state') {
                         // Asset state, colored by severity (Normal muted, any
@@ -8832,21 +16644,27 @@
                         } else {
                             td.title = 'State applies to assets only';
                         }
-                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt') {
+                    } else if (col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'ptAlt'
+                        || col.key === 'assetAlt' || col.key === 'assetHeightAgl' || col.key === 'assetElevAsl') {
                         // Numerics converted m→ft per the unit toggle. emergAlt/
-                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only.
+                        // segLen are FP-segment-only; ptAlt is Base/Safe-Zone-only;
+                        // assetAlt/assetHeightAgl/assetElevAsl are asset-only.
                         const m = r[col.dataKey];
                         td.style.cssText = `padding:5px 8px;color:${m == null ? '#555' : '#cdd6e0'};text-align:right;font-size:11px;font-variant-numeric:tabular-nums;cursor:pointer`;
                         td.textContent = col.fmt(m);
                         const naLbl = col.key === 'emergAlt' ? 'Emergency altitude — FP segments only'
                             : col.key === 'segLen' ? 'Segment length — FP segments only'
-                            : 'Altitude — Base Stations / Safe Zones only';
+                            : col.key === 'ptAlt' ? 'Altitude — Base Stations / Safe Zones only'
+                            : 'Asset field — assets only';
                         if (m == null) {
                             td.title = naLbl;
                         } else {
                             const desc = col.key === 'emergAlt' ? 'Emergency ceiling (arc.min_emergency_alt). '
                                 : col.key === 'segLen' ? 'Segment length (arc.distance). '
-                                : 'Base relative_alt / Safe Zone altitude. ';
+                                : col.key === 'ptAlt' ? 'Base relative_alt / Safe Zone altitude. '
+                                : col.key === 'assetAlt' ? 'Asset altitude (custom.altitude). '
+                                : col.key === 'assetHeightAgl' ? 'Asset height AGL (custom.height_agl). '
+                                : 'Asset ground elevation ASL (custom.elevation_asl). ';
                             td.title = desc + 'Right-click: copy raw';
                             td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); const raw = col.raw(m); copyToClipboard(raw, `Copied ${raw}`); };
                         }
@@ -8902,6 +16720,34 @@
                         td.title = (r.type === 16 || r.type === 3)
                             ? (r.unshielded ? 'Unshielded (drone-safety concern)' : 'Shielded')
                             : 'Unshielded flag applies to FFZ + Assets';
+                    } else if (col.key === 'area') {
+                        // Polygon area (FFZ/NFZ), info-only. Follows the ft/m
+                        // unit toggle → ft² / m². Tooltip adds acres + the other
+                        // unit. Right-click copies the displayed integer.
+                        const m2 = r.areaM2;
+                        const useFt = sumPanelState.unitsFt;
+                        td.style.cssText = `padding:5px 8px;text-align:right;font-size:11px;font-variant-numeric:tabular-nums;color:${m2 == null ? '#555' : '#cdd6e0'};cursor:pointer`;
+                        if (m2 == null) {
+                            td.textContent = '—';
+                            td.title = 'Area is computed for FFZ / NFZ polygons';
+                        } else {
+                            const ft2 = m2 * 10.7639;
+                            const shown = Math.round(useFt ? ft2 : m2);
+                            td.textContent = shown.toLocaleString();
+                            const acres = ft2 / 43560;
+                            td.title = `≈ ${Math.round(ft2).toLocaleString()} ft² · ${acres.toFixed(acres < 1 ? 3 : 2)} acres · ${Math.round(m2).toLocaleString()} m². Rough planar area. Right-click: copy ${useFt ? 'ft²' : 'm²'}.`;
+                            td.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); copyToClipboard(String(shown), `Copied ${shown.toLocaleString()} ${useFt ? 'ft²' : 'm²'}`); };
+                        }
+                    } else if (col.key === 'waitApproved') {
+                        // RED ✓ when this FP segment requires approval before
+                        // flying (arc.wait_until_approved === true); blank
+                        // otherwise. N/A for non-FP-segment rows.
+                        td.style.cssText = 'padding:5px 8px;text-align:center;color:#ff3b30;cursor:pointer;font-weight:700';
+                        td.textContent = r.waitApproved === true ? '✓' : '';
+                        td.title = !r._isSegment ? 'Wait-until-approved applies to flight-path segments'
+                            : (r.waitApproved === true
+                                ? 'Wait until approved = TRUE (approval required before flying this segment)'
+                                : 'Wait until approved = FALSE');
                     } else if (col.key === 'notes') {
                         // Description text, single-line with full text on hover.
                         const v = r.notesText || '';
@@ -8973,10 +16819,15 @@
                     if (col.key === 'gmGroup') return r.gmGroup || '';
                     if (col.key === 'droneName') return r.droneName || '';
                     if (col.key === 'droneId') return (r.droneId != null && r.droneId !== '') ? String(r.droneId) : '';
+                    if (col.key === 'poiId') return r.poiId != null ? String(r.poiId) : '';
+                    if (col.key === 'poleFeeder') return r.poleFeeder || '';
+                    if (col.key === 'poleUsage') return r.poleUsage || '';
+                    if (col.key === 'poleIsSimple') return r.poleIsSimple == null ? '' : (r.poleIsSimple ? 'TRUE' : 'FALSE');
                     if (col.key === 'altMin' || col.key === 'altMax' || col.key === 'altDelta'
                         || col.key === 'elevation' || col.key === 'agl'
                         || col.key === 'emergAlt' || col.key === 'segLen' || col.key === 'route'
-                        || col.key === 'ptAlt') {
+                        || col.key === 'ptAlt'
+                        || col.key === 'assetAlt' || col.key === 'assetHeightAgl' || col.key === 'assetElevAsl') {
                         return num(r[col.dataKey]);
                     }
                     if (col.key === 'battery') {
@@ -8992,6 +16843,14 @@
                         if (r.unshielded) return 'yes';
                         if (r.type === 16 || r.type === 3) return 'no';
                         return ''; // N/A
+                    }
+                    if (col.key === 'waitApproved') {
+                        // FP segments → TRUE / FALSE; blank for non-FP rows.
+                        return r._isSegment ? (r.waitApproved === true ? 'TRUE' : 'FALSE') : '';
+                    }
+                    if (col.key === 'area') {
+                        if (r.areaM2 == null) return '';
+                        return String(Math.round(sumPanelState.unitsFt ? r.areaM2 * 10.7639 : r.areaM2));
                     }
                     if (col.key === 'notes') return r.notesText || '';
                     if (col.key === 'lat') return r._lat != null ? r._lat.toFixed(6) : '';

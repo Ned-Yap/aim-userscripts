@@ -6,6 +6,16 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — 🚀 PROMOTED TO PROD: Airspace Validator + map overlay suite — Asset Inspector v4.164, Map Styler v34.110, Control Panel v1.34
+
+**Everything from the last two days ships to everyone.** Coworkers jump: Asset Inspector v4.36 → **v4.164**, Map Styler v34.85 → **v34.110**, Control Panel v1.33 → **v1.34** on their next Tampermonkey update check.
+
+**Asset Inspector — the Airspace Validator** (own Control Panel section, Site Setup scope): one click checks the site against live FAA data — controlled airspace, 3 NM manned strip/helipad standoff (measured to the nearest FFZ/FP *segment*), FAA obstacles with per-type standoffs (windmills 500 ft, T-L towers 100 ft, others 500 ft) and a **fly-over clearance exemption** (obstacles your floor clears by 50 ft stay quiet, with the altitude math shown), LAANC grid ceilings, and **live TFRs auto-rechecked every 20 minutes** (issues appear/expire on their own). Violations draw as map issues; 📍 creates GMs at flagged obstacles; every panel row click-jumps the map. Also aboard: the **SOP Validators** (12 geometric checks), the **Site Setup Generator + ✦ Advanced Draw** (corridor FFZ builder — its geometry library is now hosted in this repo, no third-party CDN), and all SUM panel improvements since v4.36.
+
+**Map Styler — the overlay suite**: FAA sectional/TAC chart + vector airspace boundaries with hover floor/ceiling · USDA **crop cover** with per-crop visibility/colors (where the crop dusters are) · **Texas RRC wells** as one-point-per-pad with status colors, operator/lease on hover, orphan-well rings, pipelines, **📋 Pad Recon** report (leases · operators · client-CSV reconciliation), 🔭 scout-view fetch · **🏠 land-parcel owner lookup** (click any pad) · TX districts/counties/city-limits/survey grid with a cursor-following badge · **basemap switcher** (fresher Esri/USGS imagery, 🌙 dark map mode) · HIFLD transmission-line KML seeding. All overlays are off by default — zero cost until enabled.
+
+---
+
 ## 2026-07-03 — "Airspace Validator" section + tighter tower standoff — Asset Inspector v4.163, Control Panel v1.34 (dev/latest)
 
 The airspace card is now **"Airspace Validator"** in its own panel section of the same name (sits right under Site Setup). And the general-obstacle standoff default drops **2,640 → 500 ft** — the half-mile default made every mid-distance tower flag; 500 ft matches the windmill standoff and the team's actual comfort zone (a stored 2,640 auto-migrates once; still editable).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.85
+// @version      34.110
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -15,6 +15,12 @@
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      api.github.com
+// @connect      services1.arcgis.com
+// @connect      services6.arcgis.com
+// @connect      pdi.scinet.usda.gov
+// @connect      gis.rrc.texas.gov
+// @connect      webapps2.rrc.texas.gov
+// @connect      feature.geographic.texas.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -33,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.85';
+    const SCRIPT_VERSION = '34.110';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -47,6 +53,7 @@
         // scriptId → last register wins, so they MUST agree). See
         // applyEquipFromBroadcast.
         else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
+        else if (d.action === "RRC_OPERATORS") applyRrcOperatorsFromBroadcast(d);
     };
 
     // --- AIM Control Panel integration ---
@@ -128,6 +135,27 @@
         return out;
     }
 
+    // Duster-relevant USDA CDL classes: [code, name, official-color hex].
+    // Declared ABOVE the TOGGLES schema — it generates the per-crop
+    // visibility/color rows in the Crops section.
+    const CDL_DUSTED = [
+        [1,  'Corn',         '#ffd300'],
+        [2,  'Cotton',       '#ff2626'],
+        [3,  'Rice',         '#00a8e2'],
+        [4,  'Sorghum',      '#ff9e0b'],
+        [5,  'Soybeans',     '#267000'],
+        [6,  'Sunflower',    '#ffff00'],
+        [10, 'Peanuts',      '#70a600'],
+        [21, 'Barley',       '#e2007c'],
+        [22, 'Durum Wheat',  '#89622d'],
+        [23, 'Spring Wheat', '#d8b56b'],
+        [24, 'Winter Wheat', '#a57000'],
+        [28, 'Oats',         '#a05989'],
+        [36, 'Alfalfa',      '#ffa6e2'],
+        [41, 'Sugarbeets',   '#a800e2'],
+        [42, 'Dry Beans',    '#a60000'],
+        [43, 'Potatoes',     '#702600'],
+    ];
     const TOGGLES = [
         { id: 'master', label: 'Show all overlays', type: 'boolean', default: true, master: true },
         {
@@ -282,6 +310,7 @@
                 { id: 'trans-discard-commits', label: 'Discard pending commits', type: 'button', action: 'discard-commits-trans' },
                 { type: 'header', label: 'KML data tools' },
                 { id: 'trans-split', label: 'Split multi-segment lines (one-time)', type: 'button', action: 'split-trans' },
+                { id: 'trans-seed-hifld', label: 'Seed lines from HIFLD (federal data)', type: 'button', action: 'seed-hifld-trans' },
             ],
         },
         {
@@ -293,6 +322,165 @@
             children: [
                 { id: 'ortho.brightness', label: 'Brightness', type: 'number',
                   min: 0.2, max: 1.0, step: 0.05, default: 1.0, unit: '×' },
+            ],
+        },
+        {
+            // FAA aeronautical chart overlay — renders the FAA AIS's own
+            // ArcGIS-hosted chart tiles (auto-updated on the official 56-day
+            // chart cycle, no maintenance on our side) as a translucent tile
+            // layer above the basemap/orthos but below every vector pane.
+            // Sectional tiles exist z8–12, Terminal (TAC) z10–12 and only
+            // around Class B cities; min/maxNativeZoom scales them outside
+            // that band (blurry at pad zoom — inherent to a 1:500k chart).
+            type: 'category',
+            id: 'faachart-cat',
+            label: 'FAA Airspace Charts',
+            meta: '(VFR sectional overlay)',
+            master: { id: 'faachart.show', default: false },
+            children: [
+                { id: 'faachart.source', label: 'Chart', type: 'select',
+                  options: [
+                      { value: 'sectional', label: 'VFR Sectional' },
+                      { value: 'terminal', label: 'Terminal Area (Class B areas only)' },
+                  ],
+                  default: 'sectional' },
+                { id: 'faachart.opacity', label: 'Opacity', type: 'number',
+                  min: 0.1, max: 1, step: 0.05, default: 0.55, unit: 'fill' },
+                // Vector airspace boundaries (v34.89) — Class B/C/D/E polygons
+                // from the FAA Class_Airspace FeatureServer, drawn sharp at any
+                // zoom (the raster chart blurs past z12). OFF by default: it
+                // costs one FAA query per map area, zero when off.
+                { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // Basemap switcher (v34.108) — swap Percepto's HERE base for
+            // fresher/legal alternatives: Esri World Imagery (usually the
+            // most current satellite in oil country), USGS NAIP aerials
+            // (public domain), OSM streets, CARTO dark/light map modes, or
+            // a custom XYZ template (your key, your terms). Google's
+            // scrape endpoint is deliberately NOT a preset (ToS).
+            type: 'category',
+            id: 'basemap-cat',
+            label: 'Basemap',
+            meta: '(satellite · map · dark mode)',
+            master: { id: 'basemap.enabled', default: true },
+            children: [
+                { id: 'basemap.source', label: 'Base layer', type: 'select',
+                  options: [
+                      { value: 'percepto', label: 'Percepto default (HERE)' },
+                      { value: 'esri', label: 'Esri World Imagery (fresher satellite)' },
+                      { value: 'usgs', label: 'USGS NAIP aerial (public domain)' },
+                      { value: 'carto-dark', label: '🌙 Dark map (CARTO)' },
+                      { value: 'carto-light', label: 'Light map (CARTO)' },
+                      { value: 'osm', label: 'OpenStreetMap' },
+                      { value: 'custom', label: 'Custom tile URL…' },
+                  ],
+                  default: 'percepto' },
+                { id: 'basemap-set-custom', label: 'Set custom tile URL (XYZ template)', type: 'button', action: 'basemap-set-custom' },
+            ],
+        },
+        {
+            // USDA Cropland Data Layer overlay (v34.91) — where the crops
+            // are is where the CROP DUSTERS are. Dusted-crops mode renders
+            // only duster-relevant classes (cotton/sorghum/wheat/corn/…)
+            // via a server-side Remap→Colormap rule, everything else
+            // transparent. 10 m resolution from the 2024 CDL onward.
+            type: 'category',
+            id: 'crops-cat',
+            label: 'Crops',
+            meta: '(USDA CDL · where the crop dusters are)',
+            master: { id: 'crops.show', default: false },
+            children: [
+                { id: 'crops.mode', label: 'Show', type: 'select',
+                  options: [
+                      { value: 'dusted', label: 'Dusted crops only' },
+                      { value: 'all', label: 'All land cover (raw CDL)' },
+                  ],
+                  default: 'dusted' },
+                // Layer-wide opacity: the CDL colormap is per-class RGB only,
+                // so per-crop opacity isn't possible server-side.
+                { id: 'crops.opacity', label: 'Opacity (whole layer)', type: 'number',
+                  min: 0.1, max: 1, step: 0.05, default: 0.7, unit: 'fill' },
+                { type: 'header', label: 'Per-crop visibility & color' },
+                ...CDL_DUSTED.flatMap(([code, name, hex]) => [
+                    { id: `crop.${code}.show`, label: name, type: 'boolean', default: true },
+                    { id: `crop.${code}.color`, label: `${name} color`, type: 'color', default: hex },
+                ]),
+            ],
+        },
+        {
+            // Texas Railroad Commission public GIS (v34.93) — the state's
+            // own well + pipeline records drawn over the pads. Wells are
+            // colored by RRC status (producing / plugged / injection /
+            // permitted…), orphan wells get a purple ring, and hovering a
+            // marker shows API + well number + status (click copies the
+            // API). Fetches the current view only, and only at zoom ≥ 12
+            // (the Permian has too many wells below that).
+            type: 'category',
+            id: 'rrc-cat',
+            label: 'Oil & Gas (Texas RRC)',
+            meta: '(wells · pipelines)',
+            master: { id: 'rrc.show', default: false },
+            children: [
+                { id: 'rrc.bufferFt', label: 'Include wells within (of site bounds)', type: 'number', min: 0, max: 10560, step: 100, default: 500, unit: 'ft' },
+                { id: 'rrc.baseRadiusMi', label: 'No Site Setup yet: fetch around base station', type: 'number', min: 0.5, max: 10, step: 0.5, default: 2, unit: 'mi' },
+                { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
+                { id: 'rrc.padMode', label: 'One point per PAD (grouped wells)', type: 'boolean', default: true },
+                { id: 'rrc.padClusterFt', label: 'Pad grouping distance', type: 'number', min: 50, max: 1000, step: 50, default: 250, unit: 'ft' },
+                { id: 'rrc-scout-view', label: '🔭 Scout current view (fetch this area once)', type: 'button', action: 'rrc-scout-view' },
+                { id: 'rrc-scout-clear', label: 'Back to site area only', type: 'button', action: 'rrc-scout-clear' },
+                { id: 'rrc.orphans', label: '🟣 Mark orphan wells (purple ring)', type: 'boolean', default: true },
+                { id: 'rrc.pipelines', label: 'RRC pipelines (mostly buried — same area)', type: 'boolean', default: false },
+                // Per-status visibility doubles as the COLOR LEGEND. Defaults
+                // = operational wells only (user spec 2026-07-02); plugged /
+                // permitted / dry are one checkbox away.
+                { type: 'header', label: 'Pad recon (assets ↔ wells)' },
+                { id: 'rrc.matchFt', label: 'Asset ↔ well match distance', type: 'number', min: 50, max: 2000, step: 50, default: 300, unit: 'ft' },
+                { id: 'rrc-recon', label: '📋 Pad recon report', type: 'button', action: 'rrc-recon' },
+                { type: 'header', label: 'Well types (color legend)' },
+                { id: 'rrc.st.oil', label: '🟢 Producing oil', type: 'boolean', default: true },
+                { id: 'rrc.st.gas', label: '🟠 Gas', type: 'boolean', default: true },
+                { id: 'rrc.st.inj', label: '🔵 Injection / disposal', type: 'boolean', default: true },
+                { id: 'rrc.st.plugged', label: '⚫ Plugged (gray)', type: 'boolean', default: false },
+                { id: 'rrc.st.permit', label: '🟡 Permitted / not drilled', type: 'boolean', default: false },
+                { id: 'rrc.st.dry', label: '🟤 Dry hole', type: 'boolean', default: false },
+                { id: 'rrc.st.other', label: '⚪ Other / unknown', type: 'boolean', default: true },
+            ],
+        },
+        {
+            // TX land-parcel ownership (v34.104) — statewide county-appraisal
+            // parcels (TxGIO StratMap). Bulk query is disabled on the service;
+            // point-IDENTIFY works, so this is a click tool: arm it, click any
+            // graded pad, get the parcel boundary + owner/legal/acres/value.
+            // Answers "whose land is this?" for pads with no well record.
+            type: 'category',
+            id: 'parcels-cat',
+            label: 'Land Ownership (TX parcels)',
+            meta: '(county appraisal data · click to identify)',
+            master: { id: 'parcels.show', default: true },
+            children: [
+                { id: 'parcels-arm', label: '🏠 Identify land owner (click pads on the map)', type: 'button', action: 'parcels-arm' },
+                { id: 'parcels-clear', label: 'Clear parcel outlines', type: 'button', action: 'parcels-clear' },
+            ],
+        },
+        {
+            // TX boundaries (v34.106) — RRC districts / counties / city
+            // limits / the survey-abstract grid, all from the same RRC
+            // MapServer the wells come from. The survey grid makes legal
+            // descriptions ("SEC 25, BLK 38-T2S") findable land; city
+            // limits matter for drone ordinances; districts frame every
+            // RRC filing. Fetched per view area, OFF by default.
+            type: 'category',
+            id: 'bounds-cat',
+            label: 'TX Boundaries',
+            meta: '(districts · counties · cities · survey grid)',
+            master: { id: 'bounds.show', default: false },
+            children: [
+                { id: 'bounds.districts', label: 'RRC districts (purple)', type: 'boolean', default: true },
+                { id: 'bounds.counties', label: 'Counties (white dashed)', type: 'boolean', default: true },
+                { id: 'bounds.cities', label: 'City limits (orange)', type: 'boolean', default: false },
+                { id: 'bounds.surveys', label: 'Survey / abstract grid (zoom 13+, gray)', type: 'boolean', default: false },
             ],
         },
         {
@@ -958,6 +1146,18 @@
         applyOrthoSettings();
         // 11b. Full ortho hide — remove COG layers to kill their tile storm.
         applyOrthoVisibility();
+        // 11b2. Basemap switcher (replacement base under everything).
+        applyBasemapLayer();
+        // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
+        applyFaaChartLayer();
+        // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
+        applyAirspaceVectors();
+        // 11e. USDA crop-cover overlay.
+        applyCropLayer();
+        // 11f. Texas RRC wells / pipelines overlay.
+        applyRrcLayers();
+        // 11g. TX boundaries (districts / counties / cities / surveys).
+        applyTxBoundaries();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -997,6 +1197,17 @@
     // when a heavy mission opens and zooms in. Driven by Perf Shield's
     // "Hide orthomosaic imagery" toggle (PERF_TOGGLE key 'hide-ortho').
     let perfHideOrtho = false;
+    // Basemap-override flag — declared up here because
+    // applyMapBackgroundVisibility reads it and can run before the
+    // basemap block executes (same TDZ lesson as the FAA chart state).
+    let basemapOverrideActive = false;
+    // FAA chart overlay state — declared up here (not next to its functions
+    // further down) because applyMapBackgroundVisibility references
+    // _aimChartLayer and can run early; see the TDZ lesson in
+    // feedback_perf_shield_tdz_pattern.
+    let _aimChartLayer = null;      // live TileLayer we added
+    let _aimChartLayerKey = '';     // source key it was built for
+    let _aimChartLayerMap = null;   // map instance it was added to
     const _SAT_URL_PATTERNS = [
         /esri/i, /arcgis/i, /world_?imagery/i,
         /mapbox.*satellite/i, /tiles?\.virtualearth/i,
@@ -1013,7 +1224,9 @@
     // spam the console with the same diagnostic line every tick.
     const _seenTileLayerUrls = new Set();
     function applyMapBackgroundVisibility() {
-        const hide = perfHideSatellite === true;
+        // Hide the HERE base when the Perf Shield toggle says so OR when a
+        // replacement basemap is active (both restore through _aimHidden).
+        const hide = perfHideSatellite === true || basemapOverrideActive === true;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -1021,6 +1234,12 @@
             map.eachLayer(layer => {
                 if (!layer || !layer._url || typeof layer._url !== 'string') return;
                 const url = layer._url;
+                // Never treat OUR FAA chart overlay as a satellite base —
+                // its tiles.arcgis.com URL matches /arcgis/i below, so
+                // hide-satellite would hide the chart the moment both are
+                // on (v34.86 bug, caught by the probe). Match on the FAA
+                // AIS org id so the console-probe layer is excluded too.
+                if (layer === _aimChartLayer || layer === _aimBasemapLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
                 // Diagnostic: print every unique tile layer URL once. Helps
                 // identify Percepto's actual satellite provider when our
                 // built-in patterns don't match. Always logs (not just when
@@ -1225,6 +1444,1431 @@
         });
         _aimRemovedOrtho.clear();
         if (restored) console.log(`${TAG} hide-ortho OFF: restored ${restored} ortho layer(s)`);
+    }
+
+    // FAA airspace chart overlay (v34.86). The FAA's Aeronautical
+    // Information Services hosts its rasterized VFR charts as public
+    // ArcGIS tile services updated on the 56-day chart cycle — we add one
+    // as a translucent L.tileLayer. It lives in Leaflet's tilePane (under
+    // every vector pane, so FPs/FFZs/markers/our overlays stay on top);
+    // zIndex 9990 puts it above the basemap + ortho COG layers. Added /
+    // removed via map.addLayer/removeLayer — like hide-ortho, a hidden
+    // tile layer still fetches tiles, so OFF must mean removed. NOTE the
+    // ArcGIS tile path is /tile/{z}/{y}/{x} — y BEFORE x.
+    // Basemap switcher (v34.108). Our replacement layer sits at zIndex 0
+    // (under orthos + charts); the HERE layers hide via the same container
+    // display mechanism as hide-satellite. IMPORTANT: Esri/CARTO URLs match
+    // _SAT_URL_PATTERNS, so applyMapBackgroundVisibility must exempt
+    // _aimBasemapLayer (same trap as the FAA chart in v34.87).
+    const BASEMAP_SOURCES = {
+        esri: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19, attribution: 'Esri, Maxar, Earthstar Geographics' },
+        usgs: { url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16, attribution: 'USGS' },
+        'carto-dark': { url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
+        'carto-light': { url: 'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
+        osm: { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors' },
+    };
+    const BASEMAP_CUSTOM_KEY = 'aim-basemap-custom-url';
+    let _aimBasemapLayer = null;
+    let _aimBasemapKey = '';
+    let _aimBasemapMap = null;
+    function basemapSetCustomUrl() {
+        const cur = gmGet(BASEMAP_CUSTOM_KEY, '');
+        const url = prompt('Custom basemap XYZ tile URL template ({z}/{x}/{y}, {y} may be swapped):\n\nUse a source you have rights to.', cur || 'https://');
+        if (url === null) return;
+        if (!/\{z\}/.test(url) || !/\{x\}/.test(url) || !/\{y\}/.test(url)) {
+            showKMLToast('URL must contain {z}, {x} and {y} placeholders.', 6000);
+            return;
+        }
+        gmSet(BASEMAP_CUSTOM_KEY, url.trim());
+        showKMLToast('Custom basemap saved — pick "Custom tile URL…" as the base layer.', 6000);
+        removeBasemapLayer();
+        applyBasemapLayer();
+    }
+    function applyBasemapLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            const enabled = toggleState['basemap.enabled'] !== false;
+            const source = String(toggleState['basemap.source'] || 'percepto');
+            if (!enabled || source === 'percepto') {
+                basemapOverrideActive = false;
+                removeBasemapLayer();
+                return;
+            }
+            let spec = BASEMAP_SOURCES[source];
+            if (source === 'custom') {
+                const cu = gmGet(BASEMAP_CUSTOM_KEY, '');
+                if (!cu) { showKMLToast('No custom tile URL set — use "Set custom tile URL" first.', 5000); basemapOverrideActive = false; removeBasemapLayer(); return; }
+                spec = { url: cu, maxNative: 20, attribution: 'custom' };
+            }
+            if (!spec) { basemapOverrideActive = false; removeBasemapLayer(); return; }
+            basemapOverrideActive = true;
+            const key = `${source}|${spec.url}`;
+            if (!_aimBasemapLayer || _aimBasemapKey !== key || _aimBasemapMap !== map) {
+                removeBasemapLayer();
+                basemapOverrideActive = true;
+                const layer = makeAimTileLayer(spec.url, {
+                    maxNativeZoom: spec.maxNative, maxZoom: 23, zIndex: 0,
+                    attribution: spec.attribution,
+                });
+                if (!layer) { console.warn(`${TAG} basemap: no TileLayer constructor reachable`); return; }
+                map.addLayer(layer);
+                _aimBasemapLayer = layer;
+                _aimBasemapKey = key;
+                _aimBasemapMap = map;
+                console.log(`${TAG} basemap → ${source}`);
+            }
+            if (_aimBasemapLayer && typeof map.hasLayer === 'function' && !map.hasLayer(_aimBasemapLayer)) {
+                map.addLayer(_aimBasemapLayer);
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyBasemapLayer failed:`, e);
+        }
+    }
+    function removeBasemapLayer() {
+        if (!_aimBasemapLayer) return;
+        try {
+            const map = _aimBasemapMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimBasemapLayer);
+        } catch (e) {}
+        _aimBasemapLayer = null;
+        _aimBasemapKey = '';
+        _aimBasemapMap = null;
+        console.log(`${TAG} basemap → Percepto default`);
+    }
+    const _FAA_CHART_SOURCES = {
+        sectional: {
+            url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
+            minNativeZoom: 8, maxNativeZoom: 12,   // verified: 404 outside 8–12
+        },
+        terminal: {
+            url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Terminal/MapServer/tile/{z}/{y}/{x}',
+            minNativeZoom: 10, maxNativeZoom: 12,  // verified: 404 outside 10–12; coverage = Class B areas only
+        },
+    };
+    // (State lives up by the perf flags — see the TDZ note there.)
+
+    // Build a TileLayer without assuming a global L: prefer the page's
+    // Leaflet (unsafeWindow.L — same source the Map-init prototype patch
+    // uses), else clone the constructor off an existing tile layer already
+    // on the map (the HERE basemap is always there).
+    function makeAimTileLayer(url, opts) {
+        const _L = (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) ? unsafeWindow.L : (window.L || null);
+        if (_L && typeof _L.tileLayer === 'function') return _L.tileLayer(url, opts);
+        const map = getLeafletMap();
+        let donor = null;
+        if (map && typeof map.eachLayer === 'function') {
+            map.eachLayer(l => { if (!donor && l && l._url && typeof l.getTileUrl === 'function') donor = l; });
+        }
+        if (donor) return new donor.constructor(url, opts);
+        return null;
+    }
+
+    function applyFaaChartLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            if (toggleState['faachart.show'] !== true) { removeFaaChartLayer(); return; }
+            const source = String(toggleState['faachart.source'] || 'sectional');
+            const spec = _FAA_CHART_SOURCES[source] || _FAA_CHART_SOURCES.sectional;
+            const rawOpacity = Number(toggleState['faachart.opacity']);
+            const opacity = isNaN(rawOpacity) ? 0.55 : rawOpacity;
+            if (!_aimChartLayer || _aimChartLayerKey !== source || _aimChartLayerMap !== map) {
+                removeFaaChartLayer();
+                const layer = makeAimTileLayer(spec.url, {
+                    opacity,
+                    minNativeZoom: spec.minNativeZoom,
+                    maxNativeZoom: spec.maxNativeZoom,
+                    maxZoom: 23,
+                    zIndex: 9990,
+                    attribution: 'FAA AIS',
+                });
+                if (!layer) {
+                    console.warn(`${TAG} FAA chart: no Leaflet TileLayer constructor reachable — overlay unavailable`);
+                    return;
+                }
+                map.addLayer(layer);
+                _aimChartLayer = layer;
+                _aimChartLayerKey = source;
+                _aimChartLayerMap = map;
+                console.log(`${TAG} FAA chart overlay ON (${source}, opacity ${opacity})`);
+            } else {
+                if (typeof _aimChartLayer.setOpacity === 'function' && _aimChartLayer.options.opacity !== opacity) {
+                    _aimChartLayer.setOpacity(opacity);
+                }
+                // Re-add if Percepto's layer churn dropped it (e.g. site nav).
+                if (typeof map.hasLayer === 'function' && !map.hasLayer(_aimChartLayer)) {
+                    map.addLayer(_aimChartLayer);
+                }
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyFaaChartLayer failed:`, e);
+        }
+    }
+
+    function removeFaaChartLayer() {
+        if (!_aimChartLayer) return;
+        try {
+            const map = _aimChartLayerMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimChartLayer);
+            console.log(`${TAG} FAA chart overlay removed`);
+        } catch (e) {}
+        _aimChartLayer = null;
+        _aimChartLayerKey = '';
+        _aimChartLayerMap = null;
+    }
+
+    // USDA Cropland Data Layer overlay (v34.91). CroplandCROS image
+    // service (pdi.scinet.usda.gov) wrapped as a Leaflet tile layer whose
+    // getTileUrl builds an exportImage request per tile. "Dusted crops"
+    // mode sends a Remap→Colormap renderingRule so only duster-relevant
+    // classes render (official CDL colors), everything else transparent —
+    // verified live over Midland (cotton/wheat/sorghum fields only).
+    // Latest CDL year read from the service's timeExtent on first enable.
+    const CDL_IMAGE_URL = 'https://pdi.scinet.usda.gov/image/rest/services/CDL_WM/ImageServer';
+    // (Crop class table CDL_DUSTED lives above the TOGGLES schema.)
+    const CDL_TIME_FALLBACK = 1735689600000;   // 2025-01-01 — latest at build time
+    let _aimCropLayer = null;
+    let _aimCropLayerKey = '';
+    let _aimCropLayerMap = null;
+    let _cdlTimeMs = null;
+    let _cdlTimeFetching = false;
+    function fetchCdlLatestTime() {
+        if (_cdlTimeMs || _cdlTimeFetching || typeof GM_xmlhttpRequest !== 'function') return;
+        _cdlTimeFetching = true;
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${CDL_IMAGE_URL}?f=json`, timeout: 20000,
+            onload: (resp) => {
+                _cdlTimeFetching = false;
+                try {
+                    const j = JSON.parse(resp.responseText);
+                    const te = j && j.timeInfo && j.timeInfo.timeExtent;
+                    if (Array.isArray(te) && te[1]) {
+                        _cdlTimeMs = te[1];
+                        console.log(`${TAG} CDL latest year timestamp: ${new Date(_cdlTimeMs).toISOString().substring(0, 10)}`);
+                        // Rebuild so tiles pick up the real year.
+                        if (_aimCropLayer) { removeCropLayer(); applyCropLayer(); }
+                        return;
+                    }
+                } catch (e) {}
+                _cdlTimeMs = CDL_TIME_FALLBACK;
+            },
+            onerror: () => { _cdlTimeFetching = false; _cdlTimeMs = CDL_TIME_FALLBACK; },
+            ontimeout: () => { _cdlTimeFetching = false; _cdlTimeMs = CDL_TIME_FALLBACK; },
+        });
+    }
+    function cdlHexToRgb(hex, fallback) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+        const h = m ? m[1] : String(fallback).slice(1);
+        return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    }
+    // Rule reflects the per-crop toggles: hidden crops drop out of the
+    // Remap entirely (transparent); colors come from the pickers.
+    // Returns null when every crop is hidden — caller shows nothing.
+    function cdlRenderingRule() {
+        const inputRanges = [], outputValues = [], colormap = [];
+        CDL_DUSTED.forEach(([code, name, hex]) => {
+            if (toggleState[`crop.${code}.show`] === false) return;
+            const [r, g, b] = cdlHexToRgb(toggleState[`crop.${code}.color`], hex);
+            inputRanges.push(code, code + 1);
+            outputValues.push(code);
+            colormap.push([code, r, g, b]);
+        });
+        if (!colormap.length) return null;
+        return JSON.stringify({
+            rasterFunction: 'Colormap',
+            rasterFunctionArguments: {
+                Colormap: colormap,
+                Raster: {
+                    rasterFunction: 'Remap',
+                    rasterFunctionArguments: { InputRanges: inputRanges, OutputValues: outputValues, AllowUnmatched: false },
+                },
+            },
+        });
+    }
+    function applyCropLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            if (toggleState['crops.show'] !== true) { removeCropLayer(); return; }
+            fetchCdlLatestTime();
+            const mode = String(toggleState['crops.mode'] || 'dusted');
+            const rawOpacity = Number(toggleState['crops.opacity']);
+            const opacity = isNaN(rawOpacity) ? 0.7 : rawOpacity;
+            const timeMs = _cdlTimeMs || CDL_TIME_FALLBACK;
+            const rule = mode === 'dusted' ? cdlRenderingRule() : null;
+            if (mode === 'dusted' && !rule) {
+                // Every crop hidden — nothing to render.
+                removeCropLayer();
+                return;
+            }
+            const key = `${mode}|${timeMs}|${rule || ''}`;
+            if (!_aimCropLayer || _aimCropLayerKey !== key || _aimCropLayerMap !== map) {
+                removeCropLayer();
+                const layer = makeAimTileLayer('', {
+                    opacity,
+                    minNativeZoom: 6, maxNativeZoom: 15,   // CDL is 10 m — z15 is native detail; upscale beyond
+                    maxZoom: 23,
+                    zIndex: 9991,   // above the sectional, still under all vector panes
+                    attribution: 'USDA NASS CDL',
+                });
+                if (!layer) { console.warn(`${TAG} crop layer: no Leaflet TileLayer constructor reachable`); return; }
+                // exportImage-per-tile: web-mercator tile bbox from coords.
+                layer.getTileUrl = function(coords) {
+                    const o = 20037508.342789244;
+                    const size = (2 * o) / Math.pow(2, coords.z);
+                    const xmin = -o + coords.x * size;
+                    const ymax = o - coords.y * size;
+                    const params = new URLSearchParams({
+                        bbox: `${xmin},${ymax - size},${xmin + size},${ymax}`,
+                        bboxSR: '3857', imageSR: '3857',
+                        size: '256,256', format: 'png32', transparent: 'true',
+                        time: String(timeMs), f: 'image',
+                    });
+                    if (rule) params.set('renderingRule', rule);
+                    return `${CDL_IMAGE_URL}/exportImage?${params.toString()}`;
+                };
+                map.addLayer(layer);
+                _aimCropLayer = layer;
+                _aimCropLayerKey = key;
+                _aimCropLayerMap = map;
+                console.log(`${TAG} crop cover ON (${mode}, opacity ${opacity})`);
+            } else if (typeof _aimCropLayer.setOpacity === 'function' && _aimCropLayer.options.opacity !== opacity) {
+                _aimCropLayer.setOpacity(opacity);
+            }
+            if (_aimCropLayer && typeof map.hasLayer === 'function' && !map.hasLayer(_aimCropLayer)) {
+                map.addLayer(_aimCropLayer);
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyCropLayer failed:`, e);
+        }
+    }
+    function removeCropLayer() {
+        if (!_aimCropLayer) return;
+        try {
+            const map = _aimCropLayerMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimCropLayer);
+            console.log(`${TAG} crop cover removed`);
+        } catch (e) {}
+        _aimCropLayer = null;
+        _aimCropLayerKey = '';
+        _aimCropLayerMap = null;
+    }
+
+    // Texas RRC wells + pipelines (v34.93). Public MapServer at
+    // gis.rrc.texas.gov (rrc_public/RRC_Public_Viewer_Srvs): layer 1 =
+    // Well Locations (API, well number, status), layer 2 = Orphan Wells
+    // (API only), layer 13 = Pipelines (operator/commodity/diameter).
+    // View-envelope fetch like the airspace vectors; wells only at
+    // zoom ≥ 12 — a wide Permian view blows past the 1000-record cap.
+    const RRC_BASE = 'https://gis.rrc.texas.gov/server/rest/services/rrc_public/RRC_Public_Viewer_Srvs/MapServer';
+    let _rrcLayers = [];
+    let _rrcKey = '';
+    let _rrcFetching = false;
+    let _rrcSeq = 0;
+    let _rrcTruncated = false;   // last wells fetch hit the 1000-record cap
+    let _rrcToastAt = 0;
+    // Site bounding box (all entity types) — the RRC fetch area is the
+    // SITE bounds + a small buffer (user decision 2026-07-02: "I really
+    // only want around the site, ~500 ft"), not the map view. Bounded
+    // area ⇒ no zoom gating, no record-cap roulette, one fetch per site.
+    let _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false };
+    // One-off scout override: fetch the CURRENT VIEW instead of the site
+    // bounds (scouting vs day-to-day are different jobs — user 2026-07-02).
+    // Cleared by the "Back to site area" button or a site change.
+    let _rrcScoutEnv = null;   // { sid, env, stamp }
+    let _rrcScoutStamp = 0;
+    let _rrcData = null;        // { geomKey, results, wantOrphans } — cached fetch for filter-only redraws
+    let _rrcDrawKey = '';       // geomKey + filter state of what's currently drawn
+    let _rrcOperators = [];     // [{ name, count }] discovered via bulk EWA fetch
+    let _rrcOpFetchKey = '';    // geomKey the bulk operator fetch ran for
+    function rrcEnsureSiteBBox(sid) {
+        if (_rrcSiteBBox.siteID === sid && !_rrcSiteBBox.loading) return _rrcSiteBBox.bbox;
+        if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.loading) return null;
+        _rrcSiteBBox = { siteID: sid, bbox: null, loading: true, failed: false };
+        fetch(MAP_OBJECTS_URL + encodeURIComponent(sid), { credentials: 'include' })
+            .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+            .then(data => {
+                const list = Array.isArray(data) ? data : ((data && data.results) || []);
+                let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+                let nonBaseN = 0;
+                const basePts = [];
+                const eat = (c) => {
+                    if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return;
+                    if (c.lat < minLat) minLat = c.lat; if (c.lat > maxLat) maxLat = c.lat;
+                    if (c.lng < minLng) minLng = c.lng; if (c.lng > maxLng) maxLng = c.lng;
+                };
+                list.forEach(e => {
+                    const cs = Array.isArray(e.coords) ? e.coords : (Array.isArray(e.points) ? e.points : []);
+                    if (e.type === 8) {
+                        // Base stations tracked separately — they anchor the
+                        // "no Site Setup yet" fallback radius.
+                        cs.forEach(c => { if (c && typeof c.lat === 'number') basePts.push({ lat: c.lat, lng: c.lng }); });
+                    } else if (cs.length || (e.arcs && e.arcs.length)) {
+                        nonBaseN++;
+                    }
+                    cs.forEach(eat);
+                    (e.arcs || []).forEach(a => { if (a) { eat(a.point_a); eat(a.point_b); } });
+                });
+                if (getCurrentSiteID() !== sid) { _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false }; return; }
+                _rrcSiteBBox = isFinite(minLat)
+                    ? { siteID: sid, bbox: [minLng, minLat, maxLng, maxLat], basePts, nonBaseN, loading: false, failed: false }
+                    : { siteID: sid, bbox: null, basePts, nonBaseN: 0, loading: false, failed: true };
+                if (!_rrcSiteBBox.bbox) console.warn(`${TAG} RRC: site ${sid} has no entity geometry — nothing to bound the well fetch`);
+                applyRrcLayers();
+            })
+            .catch(err => {
+                _rrcSiteBBox = { siteID: sid, bbox: null, loading: false, failed: true };
+                console.warn(`${TAG} RRC: site bounds fetch failed:`, err);
+            });
+        return null;
+    }
+    function rrcWellColor(desc) {
+        const d2 = String(desc || '');
+        if (/plugged/i.test(d2)) return '#9aa4ad';
+        if (/dry/i.test(d2)) return '#c8a165';
+        if (/injection|disposal/i.test(d2)) return '#3f8cff';
+        if (/gas/i.test(d2)) return '#ff8c00';
+        if (/oil/i.test(d2)) return '#5fff5f';
+        if (/permit|location/i.test(d2)) return '#ffe14d';
+        if (/abandon|cancel/i.test(d2)) return '#6d7680';
+        return '#ffffff';
+    }
+    // Status class ↔ the rrcWellColor buckets — drives the per-type
+    // visibility toggles (rrc.st.*).
+    function rrcStatusClass(desc) {
+        const d2 = String(desc || '');
+        if (/plugged/i.test(d2)) return 'plugged';
+        if (/dry/i.test(d2)) return 'dry';
+        if (/injection|disposal/i.test(d2)) return 'inj';
+        if (/gas/i.test(d2)) return 'gas';
+        if (/oil/i.test(d2)) return 'oil';
+        if (/permit|location/i.test(d2)) return 'permit';
+        return 'other';
+    }
+    function rrcFmtApi(api8) {
+        const a = String(api8 || '').trim();
+        return a.length === 8 ? `42-${a.slice(0, 3)}-${a.slice(3)}` : a;
+    }
+    function rrcQuery(layerId, params, cb) {
+        const qs = new URLSearchParams(Object.assign({ f: 'json', outSR: '4326' }, params)).toString();
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${RRC_BASE}/${layerId}/query?${qs}`, timeout: 25000,
+            onload: (resp) => {
+                let j = null;
+                try { j = JSON.parse(resp.responseText); } catch (e) {}
+                if (!j || j.error) { console.warn(`${TAG} RRC layer ${layerId} query failed:`, resp.status, j && j.error); cb(null); return; }
+                cb(j);
+            },
+            onerror: () => { console.warn(`${TAG} RRC layer ${layerId}: network error`); cb(null); },
+            ontimeout: () => { console.warn(`${TAG} RRC layer ${layerId}: timed out`); cb(null); },
+        });
+    }
+    // Operator / lease / field per well — the GIS layers don't carry them,
+    // but the RRC's EWA wellbore query answers a plain GET by API number.
+    // The response is a Struts HTML page; rrcParseEwa slices the results
+    // row around the API anchor. Fetched ON CLICK only (hundreds of wells
+    // per view — prefetching would hammer the state server), cached for
+    // the session.
+    const _rrcWellInfo = {};   // api8 → parsed | 'pending' | 'none'
+    function rrcParseEwa(html, suffix) {
+        // Anchor text is the FULL 8-digit API ('…32945957</a>') — match on
+        // suffix + closing tag, not '>suffix<'.
+        const i = html.indexOf(`${suffix}</a>`);
+        if (i < 0) return null;
+        const cells = html.substring(i, i + 9000).split('</td>')
+            .map(c => c.replace(/<select[\s\S]*$/, '').replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;|&amp;/g, ' ').replace(/\s+/g, ' ').trim())
+            .filter(c => c && !/^Links\b/.test(c));
+        if (cells.length < 9) return null;
+        // [suffix, district, leaseNo, leaseName, wellNo, field, operator, county, onSched, depth]
+        return {
+            district: cells[1], leaseNo: cells[2], lease: cells[3], wellNo: cells[4],
+            field: cells[5], operator: cells[6], county: cells[7],
+            onSched: cells[8], depth: cells[9] || '',
+        };
+    }
+    function rrcFetchWellInfo(api8, cb) {
+        const cached = _rrcWellInfo[api8];
+        if (cached && cached !== 'pending') { cb(cached === 'none' ? null : cached); return; }
+        if (cached === 'pending') return;
+        if (typeof GM_xmlhttpRequest !== 'function') { cb(null); return; }
+        _rrcWellInfo[api8] = 'pending';
+        const url = 'https://webapps2.rrc.texas.gov/EWA/wellboreQueryAction.do?methodToCall=search'
+            + `&searchArgs.apiNoPrefixArg=${api8.slice(0, 3)}&searchArgs.apiNoSuffixArg=${api8.slice(3)}`;
+        GM_xmlhttpRequest({
+            method: 'GET', url, timeout: 25000,
+            onload: (resp) => {
+                let info = null;
+                try { info = rrcParseEwa(resp.responseText || '', api8.slice(3)); } catch (e) {}
+                _rrcWellInfo[api8] = info || 'none';
+                if (!info) console.warn(`${TAG} RRC EWA: no wellbore record parsed for API ${rrcFmtApi(api8)}`);
+                cb(info);
+            },
+            onerror: () => { delete _rrcWellInfo[api8]; cb(null); },
+            ontimeout: () => { delete _rrcWellInfo[api8]; cb(null); },
+        });
+    }
+    // Bulk operator discovery: with the fetch now SITE-BOUNDED the well
+    // count is small, so fetch every well's EWA record once (sequential,
+    // 300 ms apart — be kind to the state server). Enables the operator
+    // dropdown + operator/lease on plain hover.
+    function rrcBulkFetchOperators(geomKey, results) {
+        if (_rrcOpFetchKey === geomKey) return;
+        const feats = (results && results.wells && results.wells.features) || [];
+        const apis = feats.map(f => String((f.attributes || {}).API || '').trim()).filter(a => a.length === 8);
+        if (!apis.length || apis.length > 100) { if (apis.length) console.log(`${TAG} RRC: ${apis.length} wells — skipping bulk operator fetch (cap 100)`); return; }
+        _rrcOpFetchKey = geomKey;
+        let i = 0;
+        const step = () => {
+            if (toggleState['rrc.show'] !== true || _rrcOpFetchKey !== geomKey) return;
+            while (i < apis.length && _rrcWellInfo[apis[i]] && _rrcWellInfo[apis[i]] !== 'pending') i++;
+            if (i >= apis.length) { rrcOperatorsReady(apis); return; }
+            const api = apis[i++];
+            rrcFetchWellInfo(api, () => setTimeout(step, 300));
+        };
+        step();
+    }
+    function rrcOperatorsReady(apis) {
+        const count = {};
+        apis.forEach(a => {
+            const info = _rrcWellInfo[a];
+            if (info && info !== 'pending' && info !== 'none' && info.operator) count[info.operator] = (count[info.operator] || 0) + 1;
+        });
+        _rrcOperators = Object.keys(count).sort((a, b) => count[b] - count[a] || a.localeCompare(b))
+            .map(name => ({ name, count: count[name] }));
+        console.log(`${TAG} RRC operators on site: ${_rrcOperators.map(o => `${o.name} (${o.count})`).join(', ') || 'none found'}`);
+        if (toggleState['rrc.operator'] === undefined) toggleState['rrc.operator'] = 'all';
+        registerWithControlPanel();
+        // Redraw so hover tooltips pick up operator + lease for every well.
+        _rrcDrawKey = '';
+        applyRrcLayers();
+    }
+    // Operator dropdown rows spliced into the RRC category (mirrors the
+    // asset-equipment dynamic pattern).
+    function buildRrcOperatorToggles() {
+        if (!_rrcOperators.length) return [];
+        return [
+            { type: 'header', label: 'Operator filter' },
+            { id: 'rrc.operator', label: 'Show operator', type: 'select',
+              options: [{ value: 'all', label: 'All operators' }]
+                  .concat(_rrcOperators.map(o => ({ value: o.name, label: `${o.name} (${o.count})` }))),
+              default: 'all' },
+        ];
+    }
+    function applyRrcOperatorsFromBroadcast(d) {
+        if (!d || d.siteID !== getCurrentSiteID()) return;
+        const ops = Array.isArray(d.operators) ? d.operators : [];
+        const sig = ops.map(o => o.name).join('|');
+        if (sig === _rrcOperators.map(o => o.name).join('|')) return;
+        _rrcOperators = ops;
+        if (toggleState['rrc.operator'] === undefined) toggleState['rrc.operator'] = 'all';
+        registerWithControlPanel();
+    }
+    // ============================================================
+    // PAD RECON (v34.100) — reconcile the client-provided assets
+    // against the state's well records. Classifies every asset as a
+    // WELLHEAD pad (RRC well within matchFt) or FACILITY pad (no
+    // wellbore — battery/compressor/SAT, expected), lists wells with
+    // NO asset nearby (pads the client CSV missed, or neighbors), and
+    // rolls up operators near the site (prospecting list).
+    // ============================================================
+    const RRC_RECON_PANEL_ID = 'aim-rrc-recon-panel';
+    function rrcReconEsc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+    function rrcPulseAt(lat, lng) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        let ring;
+        try { ring = L.circleMarker([lat, lng], { radius: 8, color: '#ffee33', weight: 4, fillOpacity: 0, interactive: false }); ring.addTo(map); }
+        catch (e) { return; }
+        let t = 0;
+        const iv = setInterval(() => {
+            t++;
+            const ph = t % 16;
+            try { ring.setRadius(8 + ph * 2.5); ring.setStyle({ opacity: Math.max(0, 1 - ph / 15) }); } catch (e) {}
+            if (t >= 64) { clearInterval(iv); try { map.removeLayer(ring); } catch (e) {} }
+        }, 50);
+    }
+    // Distance (m) from a well point to an asset polygon: 0 inside, else
+    // nearest ring vertex (pads are small — vertex spacing ≪ matchFt).
+    function rrcWellToAssetM(wLat, wLng, poly) {
+        try { if (pointInPolygon(wLat, wLng, poly.coords)) return 0; } catch (e) { console.warn(`${TAG} recon pointInPolygon threw:`, e); }
+        let best = Infinity;
+        poly.coords.forEach(c => {
+            const dLat = (wLat - c.lat) * 110540;
+            const dLng = (wLng - c.lng) * 111320 * Math.cos(wLat * Math.PI / 180);
+            const d = Math.sqrt(dLat * dLat + dLng * dLng);
+            if (d < best) best = d;
+        });
+        return best;
+    }
+    function closeRrcRecon() {
+        const el = document.getElementById(RRC_RECON_PANEL_ID);
+        if (el) el.remove();
+    }
+    function runRrcRecon() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('No site loaded.', 3000); return; }
+        if (toggleState['rrc.show'] !== true) { showKMLToast('Turn ON the Oil & Gas (Texas RRC) overlay first, then run the recon.', 6000); return; }
+        if (!_rrcData || !_rrcData.results || !_rrcData.results.wells) { showKMLToast('RRC wells not loaded yet — give it a moment and run again.', 5000); return; }
+        // Assets are OPTIONAL (user 2026-07-02: client CSVs are incomplete —
+        // scouting can't depend on them). If a fetch is in flight, wait one
+        // round; if the site simply has none, run in SCOUT mode: the report
+        // anchors on the state's own ownership unit — the LEASE — instead.
+        if (assetStateData.siteID === sid && assetStateData.loading) {
+            showKMLToast('Fetching site assets… run the recon again in a few seconds.', 5000);
+            return;
+        }
+        if (assetStateData.siteID !== sid && !assetStateData.loading) {
+            fetchAssetStates(sid);
+        }
+        const rawMatch = Number(toggleState['rrc.matchFt']);
+        const matchFt = isNaN(rawMatch) ? 300 : rawMatch;
+        const matchM = matchFt / 3.28084;
+        const feats = (_rrcData.results.wells.features || []).filter(f => f.geometry && typeof f.geometry.y === 'number');
+        const wells = feats.map(f => {
+            const a = f.attributes || {};
+            const api = String(a.API || '').trim();
+            const info = _rrcWellInfo[api];
+            return {
+                api, lat: f.geometry.y, lng: f.geometry.x,
+                status: (a.GIS_SYMBOL_DESCRIPTION || '?').trim(),
+                wellNo: (a.GIS_WELL_NUMBER || '').trim(),
+                info: (info && info !== 'pending' && info !== 'none') ? info : null,
+                matchedAsset: null, distM: Infinity,
+            };
+        });
+        const assets = (assetStateData.siteID === sid ? assetStateData.polys : []).map(pl => ({ pl, wells: [] }));
+        const scoutMode = !assets.length;
+        // Match every well to its nearest asset (within matchFt).
+        wells.forEach(w2 => {
+            let best = null, bestD = Infinity;
+            assets.forEach(as => {
+                const d = rrcWellToAssetM(w2.lat, w2.lng, as.pl);
+                if (d < bestD) { bestD = d; best = as; }
+            });
+            w2.distM = bestD;
+            if (best && bestD <= matchM) { w2.matchedAsset = best; best.wells.push(w2); }
+        });
+        const opsPending = wells.some(w2 => !w2.info) && _rrcOperators.length === 0;
+        const wellheadPads = assets.filter(as => as.wells.length);
+        const facilityPads = assets.filter(as => !as.wells.length);
+        const unmatched = wells.filter(w2 => !w2.matchedAsset).sort((x, y) => x.distM - y.distM);
+        const opCount = {};
+        wells.forEach(w2 => { if (w2.info && w2.info.operator) opCount[w2.info.operator] = (opCount[w2.info.operator] || 0) + 1; });
+        const ops = Object.keys(opCount).sort((a, b) => opCount[b] - opCount[a] || a.localeCompare(b));
+
+        const h = [];
+        const sect = (t2) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${t2}</div>`);
+        const row = (html, lat, lng) => h.push(`<div ${lat != null ? `data-recon-jump="${lat},${lng}"` : ''} style="margin:2px 0;line-height:1.45;${lat != null ? 'cursor:pointer;' : ''}" ${lat != null ? `onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''" title="Click to view on map"` : ''}>${html}</div>`);
+        const wellTag = (w2) => `API ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${rrcReconEsc(w2.status)}${w2.info ? ` · <strong>${rrcReconEsc(w2.info.operator)}</strong> · "${rrcReconEsc(w2.info.lease)}"` : ''}`;
+        // Lease grouping — the CLIENT-INDEPENDENT ownership map. Every well
+        // cluster gets a lease name + operator straight from state records,
+        // no client CSV involved.
+        const leaseMap = new Map();
+        wells.forEach(w2 => {
+            const k2 = w2.info ? `${w2.info.operator}§${w2.info.lease}` : '§unknown';
+            let g2 = leaseMap.get(k2);
+            if (!g2) { g2 = { operator: w2.info ? w2.info.operator : null, lease: w2.info ? w2.info.lease : null, wells: [] }; leaseMap.set(k2, g2); }
+            g2.wells.push(w2);
+        });
+        const leases = [...leaseMap.values()].sort((a2, b2) => b2.wells.length - a2.wells.length);
+        const statusSummary = (ws) => {
+            const c2 = {};
+            ws.forEach(w2 => { const k3 = w2.status.replace(/\s+/g, ' '); c2[k3] = (c2[k3] || 0) + 1; });
+            return Object.keys(c2).map(k3 => `${c2[k3]}× ${k3}`).join(', ');
+        };
+        h.push(`<div style="margin-bottom:4px;">${scoutMode ? '<span style="color:#ffd54f;font-weight:700;">SCOUT MODE</span> — no client assets on this site; showing what the STATE knows. ' : `${assets.length} assets · `}${wells.length} RRC wells in the area${scoutMode ? '' : ` · match ≤ ${matchFt} ft`}${opsPending ? ' · <span style="color:#ffb020">operator lookups still running — re-run shortly for lease/operator names</span>' : ''}</div>`);
+        sect(`🗺 Leases in the area (${leases.length}) — the ownership map`);
+        leases.forEach(g2 => {
+            const cLat2 = g2.wells.reduce((t2, w2) => t2 + w2.lat, 0) / g2.wells.length;
+            const cLng2 = g2.wells.reduce((t2, w2) => t2 + w2.lng, 0) / g2.wells.length;
+            row(g2.operator
+                ? `<strong>${rrcReconEsc(g2.operator)}</strong> — "${rrcReconEsc(g2.lease)}" · ${g2.wells.length} well${g2.wells.length === 1 ? '' : 's'} · <span style="opacity:0.8">${rrcReconEsc(statusSummary(g2.wells))}</span>`
+                : `<span style="opacity:0.7">${g2.wells.length} well${g2.wells.length === 1 ? '' : 's'} — operator/lease lookup pending</span>`,
+                cLat2, cLng2);
+        });
+        if (!scoutMode) {
+            sect(`🏭 Facility pads — no wellbore (${facilityPads.length})`);
+            h.push('<div style="opacity:0.65;margin-bottom:3px;">Batteries / compressors / SATs — no RRC well on the pad is EXPECTED. If one of these should be a wellhead pad, the well location may be inaccurate (widen the match distance).</div>');
+            facilityPads.forEach(as => row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)}`, as.pl.cLat, as.pl.cLng));
+            sect(`🛢 Wellhead pads (${wellheadPads.length})`);
+            wellheadPads.forEach(as => {
+                row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)} · ${as.wells.length} well${as.wells.length === 1 ? '' : 's'}`, as.pl.cLat, as.pl.cLng);
+                as.wells.forEach(w2 => row(`<span style="opacity:0.85;margin-left:14px;">${wellTag(w2)}</span>`, w2.lat, w2.lng));
+            });
+            sect(`❓ Wells with NO asset within ${matchFt} ft (${unmatched.length})`);
+            h.push('<div style="opacity:0.65;margin-bottom:3px;">Pads the client CSV may have missed — or neighboring operators\u2019 wells. Sorted nearest-first.</div>');
+            unmatched.slice(0, 40).forEach(w2 => row(`${wellTag(w2)} · <span style="opacity:0.75">${isFinite(w2.distM) ? `${Math.round(w2.distM * 3.28084).toLocaleString()} ft from nearest asset` : ''}</span>`, w2.lat, w2.lng));
+            if (unmatched.length > 40) row(`…and ${unmatched.length - 40} more`);
+        }
+        sect(`🤝 Operators in the site area (${ops.length})`);
+        ops.forEach(op => row(`<strong>${rrcReconEsc(op)}</strong> — ${opCount[op]} well${opCount[op] === 1 ? '' : 's'}`));
+
+        closeRrcRecon();
+        const wrap = document.createElement('div');
+        wrap.id = RRC_RECON_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:500px;max-height:74vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(122,223,230,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">📋 Pad Recon</span>
+                <span style="opacity:0.7;">site ${rrcReconEsc(sid)}</span>
+                <span style="flex:1"></span>
+                <button data-recon-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-recon-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${h.join('')}</div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-recon-close]')) { closeRrcRecon(); return; }
+            if (e.target.closest('[data-recon-copy]')) {
+                const out = [`PAD RECON — site ${sid}${scoutMode ? ' (SCOUT MODE — no client assets)' : ` (match ≤ ${matchFt} ft)`}`];
+                out.push(`Leases in area: ${leases.length}`);
+                leases.forEach(g2 => out.push(`  - ${g2.operator ? `${g2.operator} — "${g2.lease}"` : '(lookup pending)'} · ${g2.wells.length} wells · ${statusSummary(g2.wells)}`));
+                if (!scoutMode) out.push(`Facility pads (no wellbore): ${facilityPads.length}`);
+                if (!scoutMode)
+                facilityPads.forEach(as => out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`));
+                if (!scoutMode) out.push(`Wellhead pads: ${wellheadPads.length}`);
+                if (!scoutMode) wellheadPads.forEach(as => {
+                    out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`);
+                    as.wells.forEach(w2 => out.push(`      ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''}`));
+                });
+                if (!scoutMode) out.push(`Wells with no asset within ${matchFt} ft: ${unmatched.length}`);
+                if (!scoutMode) unmatched.forEach(w2 => out.push(`  - ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''} · ${isFinite(w2.distM) ? Math.round(w2.distM * 3.28084) + ' ft from nearest asset' : ''}`));
+                out.push(`Operators in area: ${ops.map(op => `${op} (${opCount[op]})`).join(', ') || 'unknown (lookups pending)'}`);
+                navigator.clipboard.writeText(out.join('\n')).then(
+                    () => showKMLToast('Recon report copied.', 3000),
+                    () => showKMLToast('Copy failed.', 3000));
+                return;
+            }
+            const j = e.target.closest('[data-recon-jump]');
+            if (j) {
+                const [jlat, jlng] = j.getAttribute('data-recon-jump').split(',').map(Number);
+                const map = getLeafletMap();
+                if (map && isFinite(jlat)) {
+                    try { map.setView([jlat, jlng], Math.max(17, map.getZoom())); } catch (err) {}
+                    rrcPulseAt(jlat, jlng);
+                }
+            }
+        });
+        document.body.appendChild(wrap);
+        console.log(`${TAG} pad recon: ${assets.length} assets, ${wells.length} wells → ${wellheadPads.length} wellhead / ${facilityPads.length} facility / ${unmatched.length} unmatched wells / ${ops.length} operators`);
+    }
+    function removeRrcLayers() {
+        _rrcDrawKey = '';
+        if (!_rrcLayers.length) return;
+        const map = getLeafletMap();
+        _rrcLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _rrcLayers = [];
+        console.log(`${TAG} RRC overlay removed`);
+    }
+    function applyRrcLayers() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        if (toggleState['rrc.show'] !== true) { removeRrcLayers(); return; }
+        const wantWells = toggleState['rrc.wells'] !== false;
+        const wantOrphans = toggleState['rrc.orphans'] !== false;
+        const wantPipes = toggleState['rrc.pipelines'] === true;
+        if (!wantWells && !wantPipes) { removeRrcLayers(); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        const sid = getCurrentSiteID();
+        if (!sid) { removeRrcLayers(); return; }
+        // Scout override wins — no site geometry needed at all (pure
+        // prospecting on a bare map works).
+        let scout = (_rrcScoutEnv && _rrcScoutEnv.sid === sid) ? _rrcScoutEnv : null;
+        const bbox = scout ? null : rrcEnsureSiteBBox(sid);
+        if (!scout) {
+            if (!bbox && _rrcSiteBBox.siteID !== sid) return;    // bounds fetch not started/finished
+            if (_rrcSiteBBox.loading) return;                     // in flight — re-applies when done
+        }
+        const rawBuf = Number(toggleState['rrc.bufferFt']);
+        const bufferFt = isNaN(rawBuf) ? 500 : rawBuf;
+        const rawBaseMi = Number(toggleState['rrc.baseRadiusMi']);
+        const baseRadiusMi = isNaN(rawBaseMi) ? 2 : rawBaseMi;
+        // Fetch area: the SITE bounds + buffer when a setup exists; on a
+        // fresh site (base station only) fall back to a radius around the
+        // base so wells show before any FFZ/FP is drawn.
+        let env = null, envMode = '';
+        if (scout) {
+            env = scout.env;
+            envMode = `scout-${scout.stamp}`;
+        } else if (bbox && _rrcSiteBBox.nonBaseN > 0) {
+            const midLat = (bbox[1] + bbox[3]) / 2;
+            const dLat = bufferFt / 364000;                                     // ~ft per degree latitude
+            const dLng = bufferFt / (364000 * Math.cos(midLat * Math.PI / 180));
+            env = [bbox[0] - dLng, bbox[1] - dLat, bbox[2] + dLng, bbox[3] + dLat];
+            envMode = `site+${bufferFt}ft`;
+        } else if (_rrcSiteBBox.basePts && _rrcSiteBBox.basePts.length) {
+            const bp = _rrcSiteBBox.basePts[0];
+            const radFt = baseRadiusMi * 5280;
+            const dLat = radFt / 364000;
+            const dLng = radFt / (364000 * Math.cos(bp.lat * Math.PI / 180));
+            env = [bp.lng - dLng, bp.lat - dLat, bp.lng + dLng, bp.lat + dLat];
+            envMode = `base+${baseRadiusMi}mi`;
+        } else {
+            removeRrcLayers();
+            return;   // no geometry at all — logged by the bounds fetch
+        }
+        const geomKey = `${sid}|${envMode}|${wantWells}|${wantOrphans}|${wantPipes}`;
+        const filterKey = ['oil', 'gas', 'inj', 'plugged', 'permit', 'dry', 'other']
+            .map(k2 => toggleState[`rrc.st.${k2}`] === false ? '0' : '1').join('')
+            + '|' + (toggleState['rrc.operator'] || 'all')
+            + '|' + (toggleState['rrc.padMode'] !== false ? 'pad' : 'ind')
+            + '|' + (toggleState['rrc.padClusterFt'] || 250);
+        // Filter-only change → redraw from the cached fetch, no refetch.
+        if (_rrcData && _rrcData.geomKey === geomKey) {
+            if (_rrcDrawKey !== geomKey + '§' + filterKey) {
+                drawRrcLayers(_rrcData.results, _rrcData.wantOrphans, _rrcData.env);
+                _rrcDrawKey = geomKey + '§' + filterKey;
+            }
+            return;
+        }
+        if (_rrcFetching) return;
+        _rrcFetching = true;
+        const seq = ++_rrcSeq;
+        console.log(`${TAG} RRC fetch area: ${envMode}`);
+        const envParams = {
+            geometry: env.join(','),
+            geometryType: 'esriGeometryEnvelope',
+            inSR: '4326', spatialRel: 'esriSpatialRelIntersects', returnGeometry: 'true',
+        };
+        const results = { wells: null, orphans: null, pipes: null };
+        let pendingN = (wantWells ? 1 : 0) + (wantWells && wantOrphans ? 1 : 0) + (wantPipes ? 1 : 0);
+        const finish = () => {
+            _rrcFetching = false;
+            if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
+            _rrcData = { geomKey, results, wantOrphans, env };
+            drawRrcLayers(results, wantOrphans, env);
+            _rrcDrawKey = geomKey + '§' + filterKey;
+            rrcBulkFetchOperators(geomKey, results);
+        };
+        const done = () => { if (--pendingN <= 0) finish(); };
+        if (!pendingN) { _rrcFetching = false; return; }
+        if (wantWells) {
+            rrcQuery(1, Object.assign({ outFields: 'API,GIS_WELL_NUMBER,GIS_SYMBOL_DESCRIPTION,RELIAB' }, envParams), (j) => { results.wells = j; done(); });
+            if (wantOrphans) rrcQuery(2, Object.assign({ outFields: 'API' }, envParams), (j) => { results.orphans = j; done(); });
+        }
+        if (wantPipes) {
+            rrcQuery(13, Object.assign({ outFields: 'OPERATOR,COMMODITY_DESCRIPTION,SYSTEM_NAME,DIAMETER,INTERSTATE' }, envParams), (j) => { results.pipes = j; done(); });
+        }
+    }
+    // Envelope-intersect queries return WHOLE line features — a pipeline
+    // that merely touches the fetch area arrives with its entire 20-mile
+    // geometry (user caught one drawn 100k ft past the site). Clip drawn
+    // paths to the fetch envelope (+ a small visual margin) client-side.
+    function rrcClipPathToEnv(pth, env) {
+        if (!env) return [pth];
+        const pad = 0.002;   // ~700 ft margin so lines don't stop dead at the edge
+        const w = env[0] - pad, s2 = env[1] - pad, e = env[2] + pad, n = env[3] + pad;
+        const inEnv = (p) => p[1] >= w && p[1] <= e && p[0] >= s2 && p[0] <= n;
+        const out = [];
+        let cur = [];
+        for (let i = 1; i < pth.length; i++) {
+            const a = pth[i - 1], b = pth[i];
+            // Keep the segment if either end is inside, or its bbox crosses
+            // the envelope (a long segment passing straight through).
+            const keep = inEnv(a) || inEnv(b) ||
+                (Math.min(a[1], b[1]) <= e && Math.max(a[1], b[1]) >= w
+                 && Math.min(a[0], b[0]) <= n && Math.max(a[0], b[0]) >= s2);
+            if (keep) {
+                if (!cur.length) cur.push(a);
+                cur.push(b);
+            } else if (cur.length) {
+                out.push(cur);
+                cur = [];
+            }
+        }
+        if (cur.length) out.push(cur);
+        return out;
+    }
+    // ---- TX boundaries overlay (v34.106) — same RRC MapServer as the
+    // wells, so rrcQuery() does the fetching. Districts/counties are huge
+    // statewide polygons: maxAllowableOffset generalizes them to ~2 px so
+    // a district boundary doesn't ship 50k vertices. ----
+    const BND_LAYERS = [
+        { key: 'districts', layerId: 31, outFields: 'DISTRICT',
+          style: { color: '#b478ff', weight: 3.5, opacity: 0.85, fill: false },
+          tip: (a) => `<strong>RRC District ${String(a.DISTRICT || '?').trim()}</strong>` },
+        { key: 'counties', layerId: 29, outFields: 'COUNTY_NAME,FIPS',
+          style: { color: '#ffffff', weight: 2, opacity: 0.7, dashArray: '10,6', fill: false },
+          tip: (a) => `<strong>${String(a.COUNTY_NAME || '?').trim()} County</strong>` },
+        { key: 'cities', layerId: 28, outFields: 'NAMELSAD',
+          style: { color: '#ffa040', weight: 1.5, opacity: 0.8, dashArray: '4,4', fill: false },
+          tip: (a) => `<strong>${String(a.NAMELSAD || '?').trim()}</strong><br>city limits — check drone ordinances` },
+        { key: 'surveys', layerId: 24, outFields: 'ABSTRACT_LABEL,LEVEL1_SURVEY_NAME,LEVEL2_BLOCK_NUMBER,LEVEL3_SURVEY_NUMBER', minZoom: 13,
+          style: { color: '#9aa4ad', weight: 1, opacity: 0.55, fill: false },
+          tip: (a) => `<strong>${String(a.ABSTRACT_LABEL || '').trim() || 'Survey'}</strong><br>${[String(a.LEVEL1_SURVEY_NAME || '').trim(), a.LEVEL2_BLOCK_NUMBER ? `Blk ${String(a.LEVEL2_BLOCK_NUMBER).trim()}` : null, a.LEVEL3_SURVEY_NUMBER ? `Sec ${String(a.LEVEL3_SURVEY_NUMBER).trim()}` : null].filter(Boolean).join(' · ')}` },
+    ];
+    let _bndLayers = [];
+    let _bndKey = '';
+    let _bndFetching = false;
+    let _bndSeq = 0;
+    let _bndData = null;   // { districts: [{a, rings:[{lat,lng}[]]}], counties: [...], cities: [...] } for the badge
+    const BND_BADGE_ID = 'aim-bnd-badge';
+    // Badge follows the CURSOR (v34.109 — panning the map to ask "what's
+    // over there" was backwards). Falls back to view center until the
+    // mouse first enters the map.
+    let _bndCursor = null;
+    let _bndMoveMap = null;
+    let _bndMoveFn = null;
+    let _bndBadgeAt = 0;
+    function bndEnsureCursorHook(map) {
+        if (_bndMoveMap === map || typeof map.on !== 'function') return;
+        if (_bndMoveMap && _bndMoveFn) { try { _bndMoveMap.off('mousemove', _bndMoveFn); } catch (e) {} }
+        _bndMoveFn = (ev) => {
+            _bndCursor = ev.latlng;
+            const now = Date.now();
+            if (now - _bndBadgeAt < 80) return;   // ~12 Hz is plenty
+            _bndBadgeAt = now;
+            updateBndBadge();
+        };
+        try { map.on('mousemove', _bndMoveFn); _bndMoveMap = map; } catch (e) {}
+    }
+    function removeBndBadge() {
+        const el = document.getElementById(BND_BADGE_ID);
+        if (el) el.remove();
+    }
+    // "You are here" badge — hovering a REGION only works on its stroke,
+    // and a shared line can't say which side it names (user feedback).
+    // The badge answers it for the view center: district · county · city.
+    function updateBndBadge() {
+        const map = getLeafletMap();
+        if (!map || !_bndData || toggleState['bounds.show'] !== true) { removeBndBadge(); return; }
+        let c2 = _bndCursor;
+        if (!c2) { try { c2 = map.getCenter(); } catch (e) { return; } }
+        const hit = (key) => {
+            const feats = _bndData[key] || [];
+            for (const f of feats) {
+                for (const ring of f.rings) {
+                    try { if (pointInPolygon(c2.lat, c2.lng, ring)) return f.a; } catch (e) {}
+                }
+            }
+            return null;
+        };
+        const parts = [];
+        if (toggleState['bounds.districts'] !== false) {
+            const d2 = hit('districts');
+            if (d2) parts.push(`RRC District ${String(d2.DISTRICT || '?').trim()}`);
+        }
+        if (toggleState['bounds.counties'] !== false) {
+            const d2 = hit('counties');
+            if (d2) parts.push(`${String(d2.COUNTY_NAME || '?').trim()} County`);
+        }
+        if (toggleState['bounds.cities'] === true) {
+            const d2 = hit('cities');
+            if (d2) parts.push(String(d2.NAMELSAD || '').trim());
+        }
+        if (!parts.length) { removeBndBadge(); return; }
+        let el = document.getElementById(BND_BADGE_ID);
+        if (!el) {
+            const container = (typeof map.getContainer === 'function') ? map.getContainer() : null;
+            if (!container) return;
+            el = document.createElement('div');
+            el.id = BND_BADGE_ID;
+            el.style.cssText = 'position:absolute;left:10px;bottom:22px;z-index:900;pointer-events:none;'
+                + 'background:rgba(16,22,31,0.85);border:1px solid rgba(180,120,255,0.5);border-radius:6px;'
+                + 'padding:3px 10px;color:#e6d8ff;font:600 12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;'
+                + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+            container.appendChild(el);
+        }
+        el.textContent = parts.join(' · ');
+    }
+    function removeTxBoundaries() {
+        removeBndBadge();
+        _bndData = null;
+        _bndCursor = null;
+        if (_bndMoveMap && _bndMoveFn) { try { _bndMoveMap.off('mousemove', _bndMoveFn); } catch (e) {} }
+        _bndMoveMap = null;
+        _bndMoveFn = null;
+        if (!_bndLayers.length) { _bndKey = ''; return; }
+        const map = getLeafletMap();
+        _bndLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _bndLayers = [];
+        _bndKey = '';
+    }
+    function applyTxBoundaries() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        if (toggleState['bounds.show'] !== true) { removeTxBoundaries(); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        bndEnsureCursorHook(map);
+        let b2, zoom;
+        try { b2 = map.getBounds(); zoom = map.getZoom(); } catch (e) { return; }
+        const active = BND_LAYERS.filter(d2 => toggleState[`bounds.${d2.key}`] !== false && !(d2.minZoom && zoom < d2.minZoom) && !(d2.key === 'cities' && toggleState['bounds.cities'] !== true) && !(d2.key === 'surveys' && toggleState['bounds.surveys'] !== true));
+        if (!active.length) { removeTxBoundaries(); return; }
+        const w = b2.getWest(), s2 = b2.getSouth(), e = b2.getEast(), n = b2.getNorth();
+        const optsKey = active.map(d2 => d2.key).join(',');
+        const [kEnv, kOpts] = _bndKey.split('#') .length === 2 ? _bndKey.split('#') : [null, null];
+        if (kOpts === optsKey && kEnv) {
+            const env = kEnv.split(',').map(Number);
+            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) { updateBndBadge(); return; }
+        }
+        if (_bndFetching) return;
+        _bndFetching = true;
+        const seq = ++_bndSeq;
+        const padLng = Math.max(e - w, 0.02), padLat = Math.max(n - s2, 0.02);
+        const fw = w - padLng, fs = s2 - padLat, fe = e + padLng, fn = n + padLat;
+        // ~2 px generalization so statewide polygons arrive light.
+        const offset = (360 / (256 * Math.pow(2, zoom))) * 2;
+        const results = {};
+        let pend = active.length;
+        active.forEach(d2 => {
+            rrcQuery(d2.layerId, {
+                geometry: `${fw},${fs},${fe},${fn}`, geometryType: 'esriGeometryEnvelope',
+                inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+                outFields: d2.outFields, returnGeometry: 'true',
+                maxAllowableOffset: String(offset),
+            }, (j) => {
+                results[d2.key] = j;
+                if (--pend <= 0) {
+                    _bndFetching = false;
+                    if (seq !== _bndSeq || toggleState['bounds.show'] !== true) return;
+                    drawTxBoundaries(active, results);
+                    _bndKey = `${fw},${fs},${fe},${fn}#${optsKey}`;
+                }
+            });
+        });
+    }
+    function drawTxBoundaries(active, results) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        _bndLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _bndLayers = [];
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        let drawn = 0;
+        _bndData = {};
+        active.forEach(d2 => {
+            const j = results[d2.key];
+            if (!j || !Array.isArray(j.features)) return;
+            const badgeFeats = [];
+            j.features.forEach(f => {
+                const a = f.attributes || {};
+                const rings = ((f.geometry && f.geometry.rings) || []).filter(r => Array.isArray(r) && r.length >= 3);
+                const ringsLL = rings.map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })));
+                badgeFeats.push({ a, rings: ringsLL });
+                rings.forEach((r, ri) => {
+                    try {
+                        const poly = L.polygon(r.map(xy => [xy[1], xy[0]]), Object.assign({ interactive: canTip }, d2.style));
+                        if (canTip) { try { poly.bindTooltip(d2.tip(a), { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
+                        poly.addTo(map);
+                        _bndLayers.push(poly);
+                        drawn++;
+                        // Survey squares get their abstract printed INSIDE —
+                        // the stroke-only hover was useless on small tiles.
+                        if (d2.key === 'surveys' && ri === 0) {
+                            const label = String(a.ABSTRACT_LABEL || '').trim();
+                            if (label) {
+                                const ring2 = ringsLL[ri];
+                                const cLat = ring2.reduce((t2, p2) => t2 + p2.lat, 0) / ring2.length;
+                                const cLng = ring2.reduce((t2, p2) => t2 + p2.lng, 0) / ring2.length;
+                                const mk = L.marker([cLat, cLng], {
+                                    interactive: false, keyboard: false,
+                                    icon: L.divIcon({ className: '', iconSize: [80, 14], iconAnchor: [40, 7],
+                                        html: `<div style="color:#c7ced6;font:600 10px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;opacity:0.85;">${label}</div>` }),
+                                });
+                                mk.addTo(map);
+                                _bndLayers.push(mk);
+                            }
+                        }
+                    } catch (e) {}
+                });
+            });
+            _bndData[d2.key] = badgeFeats;
+            if (j.exceededTransferLimit) console.warn(`${TAG} TX boundaries: ${d2.key} hit the record cap in this view — zoom in for full coverage`);
+        });
+        updateBndBadge();
+        console.log(`${TAG} TX boundaries: ${drawn} ring(s) drawn [${active.map(d2 => d2.key).join(', ')}]`);
+    }
+
+    // ---- TX land-parcel identify (v34.104) ----
+    const PARCELS_IDENTIFY_URL = 'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/identify';
+    let _parcelLayers = [];
+    let _parcelArmed = false;
+    let _parcelClickFn = null;
+    function parcelsClear() {
+        const map = getLeafletMap();
+        _parcelLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _parcelLayers = [];
+    }
+    function parcelsDisarm() {
+        if (!_parcelArmed) return;
+        _parcelArmed = false;
+        const map = getLeafletMap();
+        if (map && _parcelClickFn) { try { map.off('click', _parcelClickFn); } catch (e) {} }
+        _parcelClickFn = null;
+    }
+    function parcelsToggleArm() {
+        if (_parcelArmed) {
+            parcelsDisarm();
+            showKMLToast('Land-owner mode OFF.', 3000);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') { showKMLToast('Tampermonkey grants need re-approval.', 5000); return; }
+        _parcelArmed = true;
+        _parcelClickFn = (ev) => {
+            // Shift+click is the REMOVE gesture (handled on the polygon) —
+            // don't identify a fresh parcel underneath it.
+            if (ev.originalEvent && ev.originalEvent.shiftKey) return;
+            try { parcelsIdentify(ev.latlng); } catch (e) { console.warn(`${TAG} parcel identify threw:`, e); }
+        };
+        map.on('click', _parcelClickFn);
+        showKMLToast('🏠 Land-owner mode: click any pad. Click the button again to stop.', 6000);
+    }
+    function parcelsIdentify(latlng) {
+        const map = getLeafletMap();
+        if (!map || !latlng) return;
+        let b2;
+        try { b2 = map.getBounds(); } catch (e) { return; }
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${latlng.lng},${latlng.lat}`,
+            geometryType: 'esriGeometryPoint', sr: '4326',
+            layers: 'all:0', tolerance: '2',
+            mapExtent: `${b2.getWest()},${b2.getSouth()},${b2.getEast()},${b2.getNorth()}`,
+            imageDisplay: '800,600,96', returnGeometry: 'true',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${PARCELS_IDENTIFY_URL}?${params.toString()}`, timeout: 25000,
+            onload: (resp) => {
+                let j = null;
+                try { j = JSON.parse(resp.responseText); } catch (e) {}
+                if (!j || j.error || !Array.isArray(j.results) || !j.results.length) {
+                    showKMLToast('No parcel record at that spot.', 4000);
+                    if (j && j.error) console.warn(`${TAG} parcel identify error:`, j.error);
+                    return;
+                }
+                drawParcel(j.results[0]);
+            },
+            onerror: () => showKMLToast('Parcel lookup failed: network error.', 4000),
+            ontimeout: () => showKMLToast('Parcel lookup timed out.', 4000),
+        });
+    }
+    function drawParcel(res) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        const a = res.attributes || {};
+        const esc = (v) => String(v == null ? '' : v).replace(/</g, '&lt;');
+        const money = (v) => { const n = Number(v); return isFinite(n) && n > 0 ? `$${n.toLocaleString()}` : null; };
+        const acres = (() => { const n = Number(a.GIS_AREA || a.LEGAL_AREA); return isFinite(n) && n > 0 ? `${n.toFixed(1)} ac` : null; })();
+        const rings = ((res.geometry && res.geometry.rings) || []).map(r => r.map(xy => [xy[1], xy[0]])).filter(r => r.length >= 3);
+        if (!rings.length) { showKMLToast(`Owner: ${a.OWNER_NAME || '?'} (no boundary returned)`, 6000); return; }
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        try {
+            const poly = L.polygon(rings, { color: '#c8ff4d', weight: 2.5, dashArray: '6,4', fillColor: '#c8ff4d', fillOpacity: 0.06, interactive: canTip });
+            if (canTip) {
+                const lines = [
+                    `<strong>${esc(a.OWNER_NAME || '?')}</strong>`,
+                    a.LEGAL_DESC ? esc(a.LEGAL_DESC) : null,
+                    [acres, money(a.MKT_VALUE) ? `mkt ${money(a.MKT_VALUE)}` : null].filter(Boolean).join(' · ') || null,
+                    (a.SITUS_ADDR || '').trim().replace(/\s+,/g, ',') ? `Situs: ${esc((a.SITUS_ADDR || '').trim())}` : null,
+                    (a.MAIL_ADDR || '').trim() ? `Mail: ${esc((a.MAIL_ADDR || '').trim())}${a.MAIL_CITY ? `, ${esc(a.MAIL_CITY)}` : ''}` : null,
+                    `<span style="opacity:0.6">${esc(a.SOURCE || 'county appraisal')} · ${esc(a.TAX_YEAR || '')}</span>`,
+                ].filter(Boolean);
+                lines.push('<span style="opacity:0.55">shift-click outline to remove</span>');
+                try { poly.bindTooltip(lines.join('<br>'), { sticky: true, direction: 'top', opacity: 0.97 }); } catch (e) {}
+                // Shift+click removes JUST this parcel (Clear button nukes all).
+                try {
+                    poly.on('click', (ev2) => {
+                        if (!(ev2.originalEvent && ev2.originalEvent.shiftKey)) return;
+                        try { if (L.DomEvent && L.DomEvent.stop) L.DomEvent.stop(ev2); } catch (e) {}
+                        try { map.removeLayer(poly); } catch (e) {}
+                        _parcelLayers = _parcelLayers.filter(l2 => l2 !== poly);
+                        showKMLToast('Parcel outline removed.', 2500);
+                    });
+                } catch (e) {}
+            }
+            poly.addTo(map);
+            _parcelLayers.push(poly);
+            showKMLToast(`🏠 ${a.OWNER_NAME || '?'}${acres ? ` · ${acres}` : ''}`, 6000);
+            console.log(`${TAG} parcel: ${a.OWNER_NAME} · ${a.LEGAL_DESC} · ${acres || ''} · ${a.COUNTY || ''}`);
+        } catch (e) {
+            console.warn(`${TAG} drawParcel threw:`, e);
+        }
+    }
+    // "One point per PAD": single-linkage clustering — wells within
+    // padClusterFt of any cluster member join it. One labeled marker per
+    // cluster: count inside, border = dominant status (orphan trumps),
+    // hover = operator / lease / status rollup / every API.
+    function rrcClusterWells(list, maxM) {
+        const clusters = [];
+        const dM = (a, b) => {
+            const dLat = (a.lat - b.lat) * 110540;
+            const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
+            return Math.sqrt(dLat * dLat + dLng * dLng);
+        };
+        list.forEach(w3 => {
+            const hits = clusters.filter(c => c.some(m => dM(m, w3) <= maxM));
+            if (!hits.length) { clusters.push([w3]); return; }
+            hits[0].push(w3);
+            // w3 bridged several clusters — merge them into the first.
+            for (let i2 = 1; i2 < hits.length; i2++) {
+                hits[0].push(...hits[i2]);
+                hits[i2].length = 0;
+            }
+        });
+        return clusters.filter(c => c.length);
+    }
+    const RRC_STATUS_PRIORITY = ['oil', 'gas', 'inj', 'permit', 'other', 'dry', 'plugged'];
+    function drawRrcPadPoints(visWells, L, map, add, canTip, esc) {
+        const rawClus = Number(toggleState['rrc.padClusterFt']);
+        const maxM = (isNaN(rawClus) ? 250 : rawClus) / 3.28084;
+        const pads = rrcClusterWells(visWells, maxM);
+        pads.forEach(members => {
+            const cLat = members.reduce((t2, m) => t2 + m.lat, 0) / members.length;
+            const cLng = members.reduce((t2, m) => t2 + m.lng, 0) / members.length;
+            const anyOrphan = members.some(m => m.orphan);
+            let cls = 'plugged';
+            members.forEach(m => {
+                const c2 = rrcStatusClass(m.desc);
+                if (RRC_STATUS_PRIORITY.indexOf(c2) < RRC_STATUS_PRIORITY.indexOf(cls)) cls = c2;
+            });
+            const color = anyOrphan ? '#c000ff' : rrcWellColor(members.find(m => rrcStatusClass(m.desc) === cls).desc);
+            const mk = L.marker([cLat, cLng], {
+                interactive: canTip, keyboard: false,
+                icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+                    html: `<div style="width:22px;height:22px;border-radius:50%;background:rgba(16,22,31,0.92);border:3px solid ${color};color:#fff;font:bold 11px/16px sans-serif;text-align:center;box-shadow:0 0 4px #000;">${members.length}</div>` }),
+            });
+            const padTip = () => {
+                const infos = members.map(m => _rrcWellInfo[m.api]).filter(i2 => i2 && i2 !== 'pending' && i2 !== 'none');
+                const opSet = [...new Set(infos.map(i2 => i2.operator))];
+                const leaseSet = [...new Set(infos.map(i2 => `"${i2.lease}"`))];
+                const stat = {};
+                members.forEach(m => { stat[m.desc] = (stat[m.desc] || 0) + 1; });
+                const statTxt = Object.keys(stat).map(k3 => `${stat[k3]}× ${esc(k3)}`).join(', ');
+                const apiLines = members.slice(0, 8).map(m => `API ${rrcFmtApi(m.api)}${m.wellNo ? ` #${esc(m.wellNo)}` : ''}`).join('<br>');
+                return `<strong>${opSet.length ? esc(opSet.join(' + ')) : '<span style="opacity:0.7">operator lookup pending…</span>'}</strong>`
+                    + `${leaseSet.length ? `<br>Lease ${esc(leaseSet.join(', '))}` : ''}`
+                    + `<br>${members.length} well${members.length === 1 ? '' : 's'}: ${statTxt}${anyOrphan ? ' · <span style="color:#c000ff">ORPHAN on pad</span>' : ''}`
+                    + `<br><span style="opacity:0.8">${apiLines}${members.length > 8 ? `<br>…+${members.length - 8} more` : ''}</span>`
+                    + `<br><span style="opacity:0.6">click to copy API list</span>`;
+            };
+            if (canTip) {
+                try {
+                    mk.bindTooltip(padTip(), { sticky: true, direction: 'top', opacity: 0.95 });
+                    mk.on('click', () => {
+                        try { navigator.clipboard.writeText(members.map(m => rrcFmtApi(m.api)).join('\n')); } catch (e) {}
+                        try { mk.setTooltipContent(padTip()); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
+                    });
+                } catch (e) {}
+            }
+            add(mk);
+        });
+        console.log(`${TAG} RRC pad mode: ${visWells.length} wells → ${pads.length} pad point(s)`);
+        return visWells.length;
+    }
+    function drawRrcLayers(results, wantOrphans, env) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        _rrcLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _rrcLayers = [];
+        const canTip = !!(L.Tooltip && L.CircleMarker && L.CircleMarker.prototype.bindTooltip);
+        const esc = (v) => String(v == null ? '' : v).replace(/</g, '&lt;');
+        const add = (mk) => { try { mk.addTo(map); _rrcLayers.push(mk); } catch (e) {} };
+        let wellsN = 0, pipesN = 0;
+        if (!results.wells) _rrcTruncated = false;
+        const orphanApis = new Set();
+        if (wantOrphans && results.orphans && Array.isArray(results.orphans.features)) {
+            results.orphans.features.forEach(f => { if (f.attributes && f.attributes.API != null) orphanApis.add(String(f.attributes.API).trim()); });
+        }
+        if (results.pipes && Array.isArray(results.pipes.features)) {
+            results.pipes.features.forEach(f => {
+                const a = f.attributes || {};
+                ((f.geometry && f.geometry.paths) || []).forEach(pth => {
+                    if (!Array.isArray(pth) || pth.length < 2) return;
+                    rrcClipPathToEnv(pth.map(xy => [xy[1], xy[0]]), env).forEach(clipped => {
+                        if (clipped.length < 2) return;
+                        const pl = L.polyline(clipped, { color: '#2fd6c3', weight: 3, opacity: 0.8, dashArray: '10,4', interactive: canTip });
+                        if (canTip) { try { pl.bindTooltip(`<strong>${esc(a.OPERATOR || 'pipeline')}</strong><br>${esc(a.COMMODITY_DESCRIPTION || '')}${a.DIAMETER ? ` · ${esc(a.DIAMETER)}"` : ''}${a.SYSTEM_NAME ? `<br>${esc(a.SYSTEM_NAME)}` : ''}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
+                        add(pl);
+                        pipesN++;
+                    });
+                });
+            });
+        }
+        if (results.wells && Array.isArray(results.wells.features)) {
+            const opFilter = String(toggleState['rrc.operator'] || 'all');
+            const visWells = [];
+            results.wells.features.forEach(f => {
+                const a = f.attributes || {};
+                if (!f.geometry || typeof f.geometry.y !== 'number') return;
+                const api = String(a.API || '').trim();
+                const orphan = orphanApis.has(api);
+                // Per-status visibility (orphans always show when the orphan
+                // marker toggle is on — an orphan you can't see is the worst).
+                if (!orphan && toggleState[`rrc.st.${rrcStatusClass(a.GIS_SYMBOL_DESCRIPTION)}`] === false) return;
+                // Operator filter (from the bulk EWA fetch). Unknown-operator
+                // wells hide while a specific operator is selected.
+                if (opFilter !== 'all') {
+                    const info = _rrcWellInfo[api];
+                    if (!info || info === 'pending' || info === 'none' || info.operator !== opFilter) return;
+                }
+                visWells.push({ api, lat: f.geometry.y, lng: f.geometry.x, orphan, desc: (a.GIS_SYMBOL_DESCRIPTION || '?').trim(), wellNo: (a.GIS_WELL_NUMBER || '').trim() });
+            });
+            if (toggleState['rrc.padMode'] !== false) {
+                wellsN = drawRrcPadPoints(visWells, L, map, add, canTip, esc);
+            } else {
+                visWells.forEach(w3 => {
+                    const color = w3.orphan ? '#c000ff' : rrcWellColor(w3.desc);
+                    const mk = L.circleMarker([w3.lat, w3.lng], {
+                        radius: w3.orphan ? 7 : 5, color, weight: w3.orphan ? 3 : 2,
+                        fillColor: '#10161f', fillOpacity: 0.85, interactive: canTip,
+                    });
+                    if (canTip) {
+                        try {
+                            const baseTip = `<strong>API ${rrcFmtApi(w3.api)}</strong>${w3.wellNo ? ` · Well ${esc(w3.wellNo)}` : ''}<br>${esc(w3.desc)}${w3.orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}`;
+                            const infoTip = (info) => `${baseTip}<br><strong>${esc(info.operator)}</strong><br>Lease "${esc(info.lease)}" (#${esc(info.leaseNo)}) · ${esc(info.field)}<br>${esc(info.county)} Co · ${info.onSched === 'Y' ? 'on schedule' : 'OFF schedule'}${info.depth ? ` · ${esc(info.depth)} ft` : ''}`;
+                            const known = _rrcWellInfo[w3.api];
+                            mk.bindTooltip(known && known !== 'pending' && known !== 'none' ? infoTip(known)
+                                : `${baseTip}<br><span style="opacity:0.7">click → operator + lease (copies API)</span>`,
+                                { sticky: true, direction: 'top', opacity: 0.95 });
+                            mk.on('click', () => {
+                                try { navigator.clipboard.writeText(rrcFmtApi(w3.api)); } catch (e) {}
+                                rrcFetchWellInfo(w3.api, (info) => {
+                                    if (!info) { try { mk.setTooltipContent(`${baseTip}<br><span style="color:#ff8080">no wellbore record found</span>`); } catch (e) {} return; }
+                                    try { mk.setTooltipContent(infoTip(info)); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
+                                });
+                            });
+                        } catch (e) {}
+                    }
+                    add(mk);
+                    wellsN++;
+                });
+            }
+            _rrcTruncated = !!results.wells.exceededTransferLimit;
+            if (_rrcTruncated) {
+                console.warn(`${TAG} RRC wells: view exceeds the 1000-record cap — showing the first 1000, zoom in for full coverage`);
+                // Console-only was invisible — this is exactly the "why is
+                // there no pin on that pad?" trap, so say it out loud (at
+                // most once a minute).
+                if (Date.now() - _rrcToastAt > 60000) {
+                    _rrcToastAt = Date.now();
+                    try { showKMLToast('⚠ RRC wells: too many in view — showing the first 1000. Zoom in and missing pads will fill in.', 7000); } catch (e) {}
+                }
+            }
+        }
+        console.log(`${TAG} RRC overlay: ${wellsN} well(s)${orphanApis.size ? ` (${orphanApis.size} orphan in view)` : ''}, ${pipesN} pipeline segment(s)`);
+    }
+
+    // Vector airspace boundaries (v34.89). Queries the FAA AIS
+    // Class_Airspace FeatureServer for the current view (padded 2×, so
+    // panning nearby doesn't refetch) and draws Class B/C/D/E rings as
+    // Leaflet polygons — sharp at pad zoom where the raster sectional is
+    // a blur. Hover a boundary for name + floor/ceiling (when this
+    // Leaflet build ships Tooltip). Class A skipped (FL180+).
+    const _ASP_QUERY_URL = 'https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services/Class_Airspace/FeatureServer/0/query';
+    let _aimAspLayers = [];
+    let _aimAspEnvelope = null;    // envelope the current layers were fetched for
+    let _aimAspFetching = false;
+    let _aimAspSeq = 0;
+    function _stylerL() {
+        try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow.L) return unsafeWindow.L; } catch (e) {}
+        try { return window.L || null; } catch (e) {}
+        return null;
+    }
+    function applyAirspaceVectors() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        if (toggleState['faachart.vectors'] !== true) { removeAirspaceVectors(); return; }
+        let b;
+        try { b = map.getBounds(); } catch (e) { return; }
+        const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+        const env = _aimAspEnvelope;
+        if ((env && w >= env.w && e <= env.e && s >= env.s && n <= env.n) || _aimAspFetching) return;
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        _aimAspFetching = true;
+        const seq = ++_aimAspSeq;
+        const padLng = Math.max(e - w, 0.05), padLat = Math.max(n - s, 0.05);
+        const fetched = { w: w - padLng, s: s - padLat, e: e + padLng, n: n + padLat };
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${fetched.w},${fetched.s},${fetched.e},${fetched.n}`,
+            geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'NAME,CLASS,LOWER_VAL,UPPER_VAL,LOWER_UOM,IDENT',
+            returnGeometry: 'true', outSR: '4326',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${_ASP_QUERY_URL}?${params.toString()}`,
+            timeout: 25000,
+            onload: (resp) => {
+                _aimAspFetching = false;
+                if (seq !== _aimAspSeq) return;   // superseded by a newer request
+                if (toggleState['faachart.vectors'] !== true) return;   // toggled off mid-flight
+                let json;
+                try { json = JSON.parse(resp.responseText); } catch (err) { console.warn(`${TAG} airspace vectors: bad JSON`); return; }
+                if (resp.status !== 200 || json.error) {
+                    console.warn(`${TAG} airspace vectors fetch failed:`, resp.status, json && json.error);
+                    return;
+                }
+                _aimAspEnvelope = fetched;
+                drawAirspaceVectors(json.features || []);
+            },
+            onerror: () => { _aimAspFetching = false; console.warn(`${TAG} airspace vectors: network error`); },
+            ontimeout: () => { _aimAspFetching = false; console.warn(`${TAG} airspace vectors: timed out`); },
+        });
+    }
+    function drawAirspaceVectors(feats) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        // wipe previous set (envelope changed)
+        _aimAspLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _aimAspLayers = [];
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        // Roughly the sectional's own conventions: B solid blue, C solid
+        // magenta, D dashed blue, E dashed magenta (fainter for the
+        // 700/1200 ft transition floors that cover most of the country).
+        // Weights are deliberately chunky — the stroke IS the hover target
+        // for the tooltip, and thin lines were fiddly to hit (user feedback
+        // 2026-07-02). Fill stays off: an interactive fill would tooltip
+        // the entire map inside big Class E areas.
+        const styleFor = (cls, floor) => {
+            if (cls === 'B') return { color: '#3f8cff', weight: 5 };
+            if (cls === 'C') return { color: '#d05fd0', weight: 5 };
+            if (cls === 'D') return { color: '#3f8cff', weight: 4, dashArray: '9,6' };
+            return floor > 0
+                ? { color: '#b08ab0', weight: 3, dashArray: '4,8', opacity: 0.55 }
+                : { color: '#d05fd0', weight: 4, dashArray: '5,7' };
+        };
+        let drawn = 0;
+        feats.forEach(f => {
+            const a = f.attributes || {};
+            if (!a.CLASS || a.CLASS === 'A') return;
+            const floor = typeof a.LOWER_VAL === 'number' ? a.LOWER_VAL : Number(a.LOWER_VAL) || 0;
+            const st = styleFor(a.CLASS, floor);
+            ((f.geometry && f.geometry.rings) || []).forEach(r => {
+                if (!Array.isArray(r) || r.length < 3) return;
+                try {
+                    const poly = L.polygon(r.map(xy => [xy[1], xy[0]]), Object.assign({
+                        fill: false, opacity: 0.85, interactive: canTip,
+                    }, st));
+                    if (canTip) {
+                        const top = (typeof a.UPPER_VAL === 'number' && a.UPPER_VAL > 0) ? `${a.UPPER_VAL.toLocaleString()} ft` : '∞';
+                        try { poly.bindTooltip(`<strong>${String(a.NAME || '').replace(/</g, '&lt;')}</strong><br>Class ${a.CLASS} · ${floor <= 0 ? 'surface' : floor.toLocaleString() + ' ft'} → ${top}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {}
+                    }
+                    poly.addTo(map);
+                    _aimAspLayers.push(poly);
+                    drawn++;
+                } catch (e) {}
+            });
+        });
+        console.log(`${TAG} airspace vectors: ${drawn} boundary ring(s) drawn`);
+    }
+    function removeAirspaceVectors() {
+        if (!_aimAspLayers.length) { _aimAspEnvelope = null; return; }
+        const map = getLeafletMap();
+        _aimAspLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _aimAspLayers = [];
+        _aimAspEnvelope = null;
+        console.log(`${TAG} airspace vectors removed`);
     }
 
     // Apply the three Map-performance levers (satellite hide, ortho low-res,
@@ -1511,8 +3155,10 @@
                     equipByName.set(eq.name, eq.slug);
                     equipCount[eq.name] = (equipCount[eq.name] || 0) + 1;
                     polys.push({
+                        name: e.name || (e.id != null ? `#${e.id}` : '?'),
                         state: classifyAssetState(e),
                         equip: eq.slug,
+                        equipName: eq.name,
                         coords: pts,
                         cLat: sLat / pts.length,
                         cLng: sLng / pts.length,
@@ -1595,10 +3241,13 @@
     // equipment set actually changes (it signatures the payload).
     function buildRegistrationToggles() {
         const extra = buildAssetEquipToggles();
-        if (!extra.length) return TOGGLES;
-        return TOGGLES.map(cat => (cat && cat.id === 'asset-cat')
-            ? { ...cat, children: [...cat.children, ...extra] }
-            : cat);
+        const rrcExtra = buildRrcOperatorToggles();
+        if (!extra.length && !rrcExtra.length) return TOGGLES;
+        return TOGGLES.map(cat => {
+            if (cat && cat.id === 'asset-cat' && extra.length) return { ...cat, children: [...cat.children, ...extra] };
+            if (cat && cat.id === 'rrc-cat' && rrcExtra.length) return { ...cat, children: [...cat.children, ...rrcExtra] };
+            return cat;
+        });
     }
 
     // True if the user has unchecked any state or equipment "show" box — i.e.
@@ -3338,6 +4987,99 @@
         });
         if (dropped > 0) setCommitOps(siteID, type, co);
         return { dropped, maxPmIdx };
+    }
+
+    // --- Seed trans KML from HIFLD (v34.88) ---
+    // Fetches the federal HIFLD Electric_Power_Transmission_Lines geometry
+    // for the CURRENT MAP VIEW and stages each line as a pending "added"
+    // op on the trans category — the exact same pending-adds pipeline the
+    // draw tool uses, so lines render as pending, are vertex-editable
+    // before commit, and go to GitHub via the normal "Commit pending
+    // changes" button (which also self-creates the KML on 404 for new
+    // sites). HIFLD covers TRANSMISSION (typically 69 kV+), not local
+    // distribution — it seeds trans.kml only.
+    const HIFLD_LINES_URL = 'https://services1.arcgis.com/Hp6G80Pky0om7QvQ/arcgis/rest/services/Electric_Power_Transmission_Lines/FeatureServer/0';
+    const HIFLD_SEED_MAX_LINES = 300;   // sanity cap per seed action
+    function seedTransLinesFromHIFLD() {
+        const siteID = getCurrentSiteID();
+        if (!siteID) { showKMLToast('No site loaded — open a site first.', 3000); return; }
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') { showKMLToast('Map not ready — try again in a moment.', 3000); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            showKMLToast('Tampermonkey grants need re-approval — open the script in Tampermonkey.', 6000);
+            return;
+        }
+        let b;
+        try { b = map.getBounds().pad(0.25); } catch (e) { showKMLToast('Could not read map bounds.', 3000); return; }
+        const existingCount = (kmlFeatures[kmlKey(siteID, 'trans')] || []).length;
+        const co0 = getCommitOps(siteID, 'trans');
+        const warn = [
+            `Seed transmission lines from HIFLD federal data for the CURRENT MAP VIEW?`,
+            ``,
+            `They are staged as PENDING adds (dashed) — review/edit, then use "Commit pending changes" to write ${siteID}-trans.kml.`,
+        ];
+        if (existingCount) warn.splice(2, 0, `⚠ This site already has ${existingCount} trans line(s) — seeding may create DUPLICATES of lines you already drew.`);
+        if (co0.added && co0.added.length) warn.splice(2, 0, `⚠ ${co0.added.length} pending add(s) already staged — seeding adds on top of them.`);
+        if (!confirm(warn.join('\n'))) return;
+        showKMLToast('Fetching HIFLD transmission lines for this view…', 8000);
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${b.getWest()},${b.getSouth()},${b.getEast()},${b.getNorth()}`,
+            geometryType: 'esriGeometryEnvelope', inSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: 'OBJECTID_1,VOLTAGE,VOLT_CLASS,OWNER',
+            returnGeometry: 'true', outSR: '4326',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `${HIFLD_LINES_URL}/query?${params.toString()}`,
+            timeout: 30000,
+            onload: (resp) => {
+                if (resp.status !== 200) { showKMLToast(`HIFLD fetch failed: HTTP ${resp.status}.`, 6000); return; }
+                let json;
+                try { json = JSON.parse(resp.responseText); } catch (e) { showKMLToast('HIFLD fetch failed: bad JSON.', 5000); return; }
+                if (json.error) { showKMLToast(`HIFLD fetch failed: ${json.error.message || 'ArcGIS error'}.`, 6000); return; }
+                const feats = json.features || [];
+                if (!feats.length) { showKMLToast('HIFLD has no transmission lines in this view.', 5000); return; }
+                const co = getCommitOps(siteID, 'trans');
+                let staged = 0, skippedCap = 0;
+                // Envelope-intersect returns WHOLE line features — a line
+                // clipping the corner of the view arrives with its entire
+                // multi-mile geometry (v34.110 fix: user's seeded KML had
+                // lines running way off the site). Clip every path to the
+                // seed area before staging; a clipped-out middle splits the
+                // line into -a/-b pieces.
+                const seedEnv = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+                feats.forEach(f => {
+                    const a = f.attributes || {};
+                    const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)}kV` : (a.VOLT_CLASS || 'kV?');
+                    // KML-legal-ish name; owner trimmed so placemark names stay readable.
+                    const owner = String(a.OWNER || '').trim().replace(/[<>&"]/g, '').substring(0, 30);
+                    ((f.geometry && f.geometry.paths) || []).forEach((pth, pi) => {
+                        if (!Array.isArray(pth) || pth.length < 2) return;
+                        // rrcClipPathToEnv works in [lat,lng]; convert, clip, convert back.
+                        const pieces = rrcClipPathToEnv(pth.map(xy => [xy[1], xy[0]]), seedEnv);
+                        pieces.forEach((piece, qi) => {
+                            if (piece.length < 2) return;
+                            if (staged >= HIFLD_SEED_MAX_LINES) { skippedCap++; return; }
+                            co.added.push({
+                                name: `HIFLD ${volt}${owner ? ` ${owner}` : ''} #${a.OBJECTID_1 != null ? a.OBJECTID_1 : '?'}${pi ? `-${pi + 1}` : ''}${pieces.length > 1 ? `-${String.fromCharCode(97 + qi)}` : ''}`,
+                                coords: piece.map(ll => [ll[1], ll[0]]),   // back to KML [lng,lat]
+                            });
+                            staged++;
+                        });
+                    });
+                });
+                if (!staged) { showKMLToast('HIFLD returned lines but none had usable geometry.', 5000); return; }
+                setCommitOps(siteID, 'trans', co);
+                console.log(`${TAG} HIFLD seed: staged ${staged} line(s) as pending trans adds${skippedCap ? ` (${skippedCap} over the ${HIFLD_SEED_MAX_LINES}-line cap skipped — zoom in and seed again)` : ''}`);
+                showKMLToast(`Staged ${staged} HIFLD line(s) as pending trans adds${skippedCap ? ` (${skippedCap} skipped — over cap, zoom in for the rest)` : ''}. Review on the map, then "Commit pending changes".`, 9000);
+                if (isActive) runUpdate();
+                try { broadcastPowerLineStatus(); } catch (e) {}
+            },
+            onerror: () => showKMLToast('HIFLD fetch failed: network error.', 5000),
+            ontimeout: () => showKMLToast('HIFLD fetch failed: timed out.', 5000),
+        });
     }
 
     function commitPendingOps(type) {
@@ -5723,6 +7465,24 @@
         restoreOrthoSettings();
         // Re-add any ortho COG layers we removed for the full hide.
         restoreOrthoVisibility();
+        // Remove the FAA chart overlay so deactivating the styler never
+        // strands a chart layer we can no longer manage.
+        removeFaaChartLayer();
+        // Basemap override off + our replacement layer out (HERE restores
+        // via restoreMapBackground above).
+        basemapOverrideActive = false;
+        removeBasemapLayer();
+        // Same for the vector airspace boundaries.
+        removeAirspaceVectors();
+        // And the crop-cover overlay.
+        removeCropLayer();
+        // And the RRC wells/pipelines overlay.
+        removeRrcLayers();
+        // Land-owner click mode + outlines.
+        parcelsDisarm();
+        parcelsClear();
+        // TX boundary rings.
+        removeTxBoundaries();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -6170,6 +7930,28 @@
                 else if (msg.actionId === 'discard-commits-trans') discardCommitOps('trans');
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
+                else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
+                else if (msg.actionId === 'rrc-recon') runRrcRecon();
+                else if (msg.actionId === 'rrc-scout-view') {
+                    const sid2 = getCurrentSiteID();
+                    const map2 = getLeafletMap();
+                    if (!sid2 || !map2 || typeof map2.getBounds !== 'function') { showKMLToast('Map not ready.', 3000); return; }
+                    if (toggleState['rrc.show'] !== true) { showKMLToast('Turn ON the Oil & Gas (Texas RRC) overlay first.', 5000); return; }
+                    try {
+                        const b2 = map2.getBounds();
+                        _rrcScoutEnv = { sid: sid2, stamp: ++_rrcScoutStamp, env: [b2.getWest(), b2.getSouth(), b2.getEast(), b2.getNorth()] };
+                        showKMLToast('🔭 Scouting this view — fetching wells/pipelines for the visible area…', 5000);
+                        applyRrcLayers();
+                    } catch (e) { showKMLToast('Could not read map bounds.', 3000); }
+                }
+                else if (msg.actionId === 'basemap-set-custom') basemapSetCustomUrl();
+                else if (msg.actionId === 'parcels-arm') parcelsToggleArm();
+                else if (msg.actionId === 'parcels-clear') { parcelsClear(); showKMLToast('Parcel outlines cleared.', 3000); }
+                else if (msg.actionId === 'rrc-scout-clear') {
+                    _rrcScoutEnv = null;
+                    showKMLToast('Back to site-area wells only.', 3500);
+                    applyRrcLayers();
+                }
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }
@@ -6253,6 +8035,13 @@
             try {
                 stateChannel.postMessage({
                     action: 'ASSET_EQUIP', siteID: getCurrentSiteID(), equip: assetEquipTypes,
+                });
+            } catch (e) {}
+        }
+        if (CONTEXT === 'IFRAME' && _rrcOperators.length) {
+            try {
+                stateChannel.postMessage({
+                    action: 'RRC_OPERATORS', siteID: getCurrentSiteID(), operators: _rrcOperators,
                 });
             } catch (e) {}
         }
