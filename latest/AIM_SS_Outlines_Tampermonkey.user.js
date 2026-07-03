@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.93
+// @version      34.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -19,6 +19,7 @@
 // @connect      services6.arcgis.com
 // @connect      pdi.scinet.usda.gov
 // @connect      gis.rrc.texas.gov
+// @connect      webapps2.rrc.texas.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -37,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.93';
+    const SCRIPT_VERSION = '34.94';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1621,6 +1622,51 @@
             ontimeout: () => { console.warn(`${TAG} RRC layer ${layerId}: timed out`); cb(null); },
         });
     }
+    // Operator / lease / field per well — the GIS layers don't carry them,
+    // but the RRC's EWA wellbore query answers a plain GET by API number.
+    // The response is a Struts HTML page; rrcParseEwa slices the results
+    // row around the API anchor. Fetched ON CLICK only (hundreds of wells
+    // per view — prefetching would hammer the state server), cached for
+    // the session.
+    const _rrcWellInfo = {};   // api8 → parsed | 'pending' | 'none'
+    function rrcParseEwa(html, suffix) {
+        // Anchor text is the FULL 8-digit API ('…32945957</a>') — match on
+        // suffix + closing tag, not '>suffix<'.
+        const i = html.indexOf(`${suffix}</a>`);
+        if (i < 0) return null;
+        const cells = html.substring(i, i + 9000).split('</td>')
+            .map(c => c.replace(/<select[\s\S]*$/, '').replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;|&amp;/g, ' ').replace(/\s+/g, ' ').trim())
+            .filter(c => c && !/^Links\b/.test(c));
+        if (cells.length < 9) return null;
+        // [suffix, district, leaseNo, leaseName, wellNo, field, operator, county, onSched, depth]
+        return {
+            district: cells[1], leaseNo: cells[2], lease: cells[3], wellNo: cells[4],
+            field: cells[5], operator: cells[6], county: cells[7],
+            onSched: cells[8], depth: cells[9] || '',
+        };
+    }
+    function rrcFetchWellInfo(api8, cb) {
+        const cached = _rrcWellInfo[api8];
+        if (cached && cached !== 'pending') { cb(cached === 'none' ? null : cached); return; }
+        if (cached === 'pending') return;
+        if (typeof GM_xmlhttpRequest !== 'function') { cb(null); return; }
+        _rrcWellInfo[api8] = 'pending';
+        const url = 'https://webapps2.rrc.texas.gov/EWA/wellboreQueryAction.do?methodToCall=search'
+            + `&searchArgs.apiNoPrefixArg=${api8.slice(0, 3)}&searchArgs.apiNoSuffixArg=${api8.slice(3)}`;
+        GM_xmlhttpRequest({
+            method: 'GET', url, timeout: 25000,
+            onload: (resp) => {
+                let info = null;
+                try { info = rrcParseEwa(resp.responseText || '', api8.slice(3)); } catch (e) {}
+                _rrcWellInfo[api8] = info || 'none';
+                if (!info) console.warn(`${TAG} RRC EWA: no wellbore record parsed for API ${rrcFmtApi(api8)}`);
+                cb(info);
+            },
+            onerror: () => { delete _rrcWellInfo[api8]; cb(null); },
+            ontimeout: () => { delete _rrcWellInfo[api8]; cb(null); },
+        });
+    }
     function removeRrcLayers() {
         if (!_rrcLayers.length) { _rrcKey = ''; return; }
         const map = getLeafletMap();
@@ -1723,10 +1769,19 @@
                 });
                 if (canTip) {
                     try {
-                        mk.bindTooltip(`<strong>API ${rrcFmtApi(api)}</strong>${a.GIS_WELL_NUMBER ? ` · Well ${esc(a.GIS_WELL_NUMBER)}` : ''}<br>${esc(a.GIS_SYMBOL_DESCRIPTION || '?')}${orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}<br><span style="opacity:0.7">click to copy API</span>`, { sticky: true, direction: 'top', opacity: 0.95 });
+                        const baseTip = `<strong>API ${rrcFmtApi(api)}</strong>${a.GIS_WELL_NUMBER ? ` · Well ${esc(a.GIS_WELL_NUMBER)}` : ''}<br>${esc(a.GIS_SYMBOL_DESCRIPTION || '?')}${orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}`;
+                        const infoTip = (info) => `${baseTip}<br><strong>${esc(info.operator)}</strong><br>Lease "${esc(info.lease)}" (#${esc(info.leaseNo)}) · ${esc(info.field)}<br>${esc(info.county)} Co · ${info.onSched === 'Y' ? 'on schedule' : 'OFF schedule'}${info.depth ? ` · ${esc(info.depth)} ft` : ''}`;
+                        const known = _rrcWellInfo[api];
+                        mk.bindTooltip(known && known !== 'pending' && known !== 'none' ? infoTip(known)
+                            : `${baseTip}<br><span style="opacity:0.7">click → operator + lease (copies API)</span>`,
+                            { sticky: true, direction: 'top', opacity: 0.95 });
                         mk.on('click', () => {
                             try { navigator.clipboard.writeText(rrcFmtApi(api)); } catch (e) {}
-                            console.log(`${TAG} RRC well API copied: ${rrcFmtApi(api)}`);
+                            rrcFetchWellInfo(api, (info) => {
+                                if (!info) { try { mk.setTooltipContent(`${baseTip}<br><span style="color:#ff8080">no wellbore record found</span>`); } catch (e) {} return; }
+                                try { mk.setTooltipContent(infoTip(info)); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
+                                console.log(`${TAG} RRC ${rrcFmtApi(api)}: ${info.operator} · lease "${info.lease}" · ${info.field}`);
+                            });
                         });
                     } catch (e) {}
                 }

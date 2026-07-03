@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Well operator + lease on click — Map Styler v34.94 (dev/latest)
+
+**Click any RRC well marker and it now shows the full state record**: operator, lease name + number, field, county, on/off proration schedule, and depth (e.g. "PIONEER NATURAL RES. USA, INC. · Lease \"FRANK 11C\" (#60036) · SPRABERRY (TREND AREA) · Midland Co · on schedule · 9,637 ft"). The GIS layer doesn't carry these, so the click queries the RRC's wellbore database by API number — fetched on demand (not for every well in view, to be kind to the state server) and cached for the session. The click still copies the API too.
+
+---
+
 ## 2026-07-02 — 🛢 Oil & Gas overlay (Texas RRC) — Map Styler v34.93 (dev/latest)
 
 New **"Oil & Gas (Texas RRC)"** section: the Railroad Commission's own public well and pipeline records drawn over the pads. **Wells** colored by RRC status (producing oil green, gas orange, injection/disposal blue, plugged gray, permitted-location yellow, dry tan); **orphan wells ringed purple**; hover any well for its API number (formatted 42-XXX-XXXXX), well number, and status — **click to copy the API** for RRC lookups. Optional **RRC pipelines** layer (teal dashed) with operator, commodity, and diameter on hover. Off by default; loads the current view only, at zoom 12+ (a wide Permian view has more wells than the server will return).
