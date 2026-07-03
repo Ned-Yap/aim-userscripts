@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.107
+// @version      34.108
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.107';
+    const SCRIPT_VERSION = '34.108';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -351,6 +351,33 @@
                 // zoom (the raster chart blurs past z12). OFF by default: it
                 // costs one FAA query per map area, zero when off.
                 { id: 'faachart.vectors', label: 'Airspace boundaries (vector, sharp at any zoom)', type: 'boolean', default: false },
+            ],
+        },
+        {
+            // Basemap switcher (v34.108) — swap Percepto's HERE base for
+            // fresher/legal alternatives: Esri World Imagery (usually the
+            // most current satellite in oil country), USGS NAIP aerials
+            // (public domain), OSM streets, CARTO dark/light map modes, or
+            // a custom XYZ template (your key, your terms). Google's
+            // scrape endpoint is deliberately NOT a preset (ToS).
+            type: 'category',
+            id: 'basemap-cat',
+            label: 'Basemap',
+            meta: '(satellite · map · dark mode)',
+            master: { id: 'basemap.enabled', default: true },
+            children: [
+                { id: 'basemap.source', label: 'Base layer', type: 'select',
+                  options: [
+                      { value: 'percepto', label: 'Percepto default (HERE)' },
+                      { value: 'esri', label: 'Esri World Imagery (fresher satellite)' },
+                      { value: 'usgs', label: 'USGS NAIP aerial (public domain)' },
+                      { value: 'carto-dark', label: '🌙 Dark map (CARTO)' },
+                      { value: 'carto-light', label: 'Light map (CARTO)' },
+                      { value: 'osm', label: 'OpenStreetMap' },
+                      { value: 'custom', label: 'Custom tile URL…' },
+                  ],
+                  default: 'percepto' },
+                { id: 'basemap-set-custom', label: 'Set custom tile URL (XYZ template)', type: 'button', action: 'basemap-set-custom' },
             ],
         },
         {
@@ -1119,6 +1146,8 @@
         applyOrthoSettings();
         // 11b. Full ortho hide — remove COG layers to kill their tile storm.
         applyOrthoVisibility();
+        // 11b2. Basemap switcher (replacement base under everything).
+        applyBasemapLayer();
         // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
         applyFaaChartLayer();
         // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
@@ -1168,6 +1197,10 @@
     // when a heavy mission opens and zooms in. Driven by Perf Shield's
     // "Hide orthomosaic imagery" toggle (PERF_TOGGLE key 'hide-ortho').
     let perfHideOrtho = false;
+    // Basemap-override flag — declared up here because
+    // applyMapBackgroundVisibility reads it and can run before the
+    // basemap block executes (same TDZ lesson as the FAA chart state).
+    let basemapOverrideActive = false;
     // FAA chart overlay state — declared up here (not next to its functions
     // further down) because applyMapBackgroundVisibility references
     // _aimChartLayer and can run early; see the TDZ lesson in
@@ -1191,7 +1224,9 @@
     // spam the console with the same diagnostic line every tick.
     const _seenTileLayerUrls = new Set();
     function applyMapBackgroundVisibility() {
-        const hide = perfHideSatellite === true;
+        // Hide the HERE base when the Perf Shield toggle says so OR when a
+        // replacement basemap is active (both restore through _aimHidden).
+        const hide = perfHideSatellite === true || basemapOverrideActive === true;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         try {
@@ -1204,7 +1239,7 @@
                 // hide-satellite would hide the chart the moment both are
                 // on (v34.86 bug, caught by the probe). Match on the FAA
                 // AIS org id so the console-probe layer is excluded too.
-                if (layer === _aimChartLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
+                if (layer === _aimChartLayer || layer === _aimBasemapLayer || /ssFJjBXIUyZDrSYZ/.test(url)) return;
                 // Diagnostic: print every unique tile layer URL once. Helps
                 // identify Percepto's actual satellite provider when our
                 // built-in patterns don't match. Always logs (not just when
@@ -1420,6 +1455,87 @@
     // removed via map.addLayer/removeLayer — like hide-ortho, a hidden
     // tile layer still fetches tiles, so OFF must mean removed. NOTE the
     // ArcGIS tile path is /tile/{z}/{y}/{x} — y BEFORE x.
+    // Basemap switcher (v34.108). Our replacement layer sits at zIndex 0
+    // (under orthos + charts); the HERE layers hide via the same container
+    // display mechanism as hide-satellite. IMPORTANT: Esri/CARTO URLs match
+    // _SAT_URL_PATTERNS, so applyMapBackgroundVisibility must exempt
+    // _aimBasemapLayer (same trap as the FAA chart in v34.87).
+    const BASEMAP_SOURCES = {
+        esri: { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', maxNative: 19, attribution: 'Esri, Maxar, Earthstar Geographics' },
+        usgs: { url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}', maxNative: 16, attribution: 'USGS' },
+        'carto-dark': { url: 'https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
+        'carto-light': { url: 'https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors © CARTO' },
+        osm: { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxNative: 19, attribution: '© OpenStreetMap contributors' },
+    };
+    const BASEMAP_CUSTOM_KEY = 'aim-basemap-custom-url';
+    let _aimBasemapLayer = null;
+    let _aimBasemapKey = '';
+    let _aimBasemapMap = null;
+    function basemapSetCustomUrl() {
+        const cur = gmGet(BASEMAP_CUSTOM_KEY, '');
+        const url = prompt('Custom basemap XYZ tile URL template ({z}/{x}/{y}, {y} may be swapped):\n\nUse a source you have rights to.', cur || 'https://');
+        if (url === null) return;
+        if (!/\{z\}/.test(url) || !/\{x\}/.test(url) || !/\{y\}/.test(url)) {
+            showKMLToast('URL must contain {z}, {x} and {y} placeholders.', 6000);
+            return;
+        }
+        gmSet(BASEMAP_CUSTOM_KEY, url.trim());
+        showKMLToast('Custom basemap saved — pick "Custom tile URL…" as the base layer.', 6000);
+        removeBasemapLayer();
+        applyBasemapLayer();
+    }
+    function applyBasemapLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.addLayer !== 'function') return;
+        try {
+            const enabled = toggleState['basemap.enabled'] !== false;
+            const source = String(toggleState['basemap.source'] || 'percepto');
+            if (!enabled || source === 'percepto') {
+                basemapOverrideActive = false;
+                removeBasemapLayer();
+                return;
+            }
+            let spec = BASEMAP_SOURCES[source];
+            if (source === 'custom') {
+                const cu = gmGet(BASEMAP_CUSTOM_KEY, '');
+                if (!cu) { showKMLToast('No custom tile URL set — use "Set custom tile URL" first.', 5000); basemapOverrideActive = false; removeBasemapLayer(); return; }
+                spec = { url: cu, maxNative: 20, attribution: 'custom' };
+            }
+            if (!spec) { basemapOverrideActive = false; removeBasemapLayer(); return; }
+            basemapOverrideActive = true;
+            const key = `${source}|${spec.url}`;
+            if (!_aimBasemapLayer || _aimBasemapKey !== key || _aimBasemapMap !== map) {
+                removeBasemapLayer();
+                basemapOverrideActive = true;
+                const layer = makeAimTileLayer(spec.url, {
+                    maxNativeZoom: spec.maxNative, maxZoom: 23, zIndex: 0,
+                    attribution: spec.attribution,
+                });
+                if (!layer) { console.warn(`${TAG} basemap: no TileLayer constructor reachable`); return; }
+                map.addLayer(layer);
+                _aimBasemapLayer = layer;
+                _aimBasemapKey = key;
+                _aimBasemapMap = map;
+                console.log(`${TAG} basemap → ${source}`);
+            }
+            if (_aimBasemapLayer && typeof map.hasLayer === 'function' && !map.hasLayer(_aimBasemapLayer)) {
+                map.addLayer(_aimBasemapLayer);
+            }
+        } catch (e) {
+            console.warn(`${TAG} applyBasemapLayer failed:`, e);
+        }
+    }
+    function removeBasemapLayer() {
+        if (!_aimBasemapLayer) return;
+        try {
+            const map = _aimBasemapMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_aimBasemapLayer);
+        } catch (e) {}
+        _aimBasemapLayer = null;
+        _aimBasemapKey = '';
+        _aimBasemapMap = null;
+        console.log(`${TAG} basemap → Percepto default`);
+    }
     const _FAA_CHART_SOURCES = {
         sectional: {
             url: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
@@ -7317,6 +7433,10 @@
         // Remove the FAA chart overlay so deactivating the styler never
         // strands a chart layer we can no longer manage.
         removeFaaChartLayer();
+        // Basemap override off + our replacement layer out (HERE restores
+        // via restoreMapBackground above).
+        basemapOverrideActive = false;
+        removeBasemapLayer();
         // Same for the vector airspace boundaries.
         removeAirspaceVectors();
         // And the crop-cover overlay.
@@ -7789,6 +7909,7 @@
                         applyRrcLayers();
                     } catch (e) { showKMLToast('Could not read map bounds.', 3000); }
                 }
+                else if (msg.actionId === 'basemap-set-custom') basemapSetCustomUrl();
                 else if (msg.actionId === 'parcels-arm') parcelsToggleArm();
                 else if (msg.actionId === 'parcels-clear') { parcelsClear(); showKMLToast('Parcel outlines cleared.', 3000); }
                 else if (msg.actionId === 'rrc-scout-clear') {
