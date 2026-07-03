@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.158
+// @version      4.159
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.158';
+    const SCRIPT_VERSION = '4.159';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2231,13 +2231,13 @@
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
                 e.arcs.forEach((a, i) => {
                     const src = `FP "${nm}" seg #${i + 1}`;
-                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng, src });
-                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng, src });
+                    if (a && a.point_a && typeof a.point_a.lat === 'number') pts.push({ lat: a.point_a.lat, lng: a.point_a.lng, src, t: 15 });
+                    if (a && a.point_b && typeof a.point_b.lat === 'number') pts.push({ lat: a.point_b.lat, lng: a.point_b.lng, src, t: 15 });
                 });
             } else {
                 const src = `${typeReg(e.type).short} "${nm}"`;
                 const cs = entityCoords(e);
-                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng, src }); });
+                if (Array.isArray(cs)) cs.forEach(c => { if (c && typeof c.lat === 'number') pts.push({ lat: c.lat, lng: c.lng, src, t: e.type }); });
             }
         });
         return pts;
@@ -2593,6 +2593,9 @@
             const dispTlM = th.translineShowFt / M_TO_FT;
             const dispObsM = th.obstacleShowNm * NM_TO_M;
             const scanM = Math.max(th.obstacleFt / M_TO_FT, th.windmillFt / M_TO_FT, dispObsM, dispTlM);
+            // Windmills only matter where we actually FLY (user 2026-07-03):
+            // measured against FFZ + FP points, not assets/base/safe.
+            const flightPts = sitePts.filter(p => p.t === 15 || p.t === 16);
             obRes.features.forEach(f => {
                 const a = f.attributes || {};
                 // Lat_DD/Long_DD are STRINGS in the DOF service ('31.829789').
@@ -2607,15 +2610,24 @@
                 const lit = (a.Lighting || '').trim();
                 const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
                 const isWindmill = /WINDMILL|WIND TURBINE|WTG|TURBINE/i.test(type);
-                // Windmills get their own (tighter) standoff per SOP.
+                // Windmills get their own (tighter) standoff per SOP — and
+                // their distance is to the FLIGHT geometry (FFZ/FP), since a
+                // turbine near a non-flyable asset polygon is no hazard.
+                let wNear = near;
+                if (isWindmill && couldHit) {
+                    wNear = flightPts.length ? airMinToSite(oLat, oLng, flightPts) : { d: Infinity, pt: null };
+                }
+                const useNear = isWindmill ? wNear : near;
+                const useDistFt = isWindmill ? Math.round(useNear.d * M_TO_FT) : distFt;
                 const vioFt = isWindmill ? th.windmillFt : th.obstacleFt;
-                const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (near.pt && near.pt.src) || null, hit: false, show: false };
-                if (couldHit && distFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
+                const entry = { type, agl, lit, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
+                const vioDistFt = isWindmill ? useDistFt : distFt;
+                if (couldHit && isFinite(vioDistFt) && vioDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
-                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${distFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${distFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${vioFt} ft)`;
-                    if (isWindmill && near.pt) {
-                        // Box spans the turbine AND the violated entity point.
-                        violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, near.pt.lat, near.pt.lng, 15), note, severity: 'high' });
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${vioDistFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${vioDistFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${vioFt} ft)`;
+                    if (isWindmill && useNear.pt) {
+                        // Corridor spans the turbine AND the violated FFZ/FP point.
+                        violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, useNear.pt.lat, useNear.pt.lng, 15), note, severity: 'high' });
                     } else {
                         boxIssue(oLat, oLng, note, 'high');
                     }

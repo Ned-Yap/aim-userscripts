@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Windmills measured against flight geometry only — Asset Inspector v4.159 (dev/latest)
+
+Windmill/turbine standoff now measures against **FFZs and flight paths only** — where the drone actually flies — not assets/base/safe zones. A turbine near a non-flyable asset polygon is no hazard; one near your flight corridor is. The violation corridor, distance shown, and named entity all reflect the nearest **flight** geometry now. Other obstacle types (towers etc.) still measure against everything.
+
+---
+
 ## 2026-07-03 — Field-test fixes: windmill corridor + seeder clipping — Asset Inspector v4.158, Map Styler v34.110 (dev/latest)
 
 **Asset Inspector v4.158** — the windmill violation box is now a **slim rotated corridor along the turbine→entity line** instead of an axis-aligned rectangle that ballooned on diagonal pairs; turbine detection also matches DOF entries typed "TURBINE" (some turbines log as that instead of WINDMILL — a cause of the "partially working" flagging).
