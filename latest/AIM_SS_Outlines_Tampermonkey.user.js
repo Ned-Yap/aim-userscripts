@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.106
+// @version      34.107
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.106';
+    const SCRIPT_VERSION = '34.107';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2189,7 +2189,60 @@
     let _bndKey = '';
     let _bndFetching = false;
     let _bndSeq = 0;
+    let _bndData = null;   // { districts: [{a, rings:[{lat,lng}[]]}], counties: [...], cities: [...] } for the badge
+    const BND_BADGE_ID = 'aim-bnd-badge';
+    function removeBndBadge() {
+        const el = document.getElementById(BND_BADGE_ID);
+        if (el) el.remove();
+    }
+    // "You are here" badge — hovering a REGION only works on its stroke,
+    // and a shared line can't say which side it names (user feedback).
+    // The badge answers it for the view center: district · county · city.
+    function updateBndBadge() {
+        const map = getLeafletMap();
+        if (!map || !_bndData || toggleState['bounds.show'] !== true) { removeBndBadge(); return; }
+        let c2;
+        try { c2 = map.getCenter(); } catch (e) { return; }
+        const hit = (key) => {
+            const feats = _bndData[key] || [];
+            for (const f of feats) {
+                for (const ring of f.rings) {
+                    try { if (pointInPolygon(c2.lat, c2.lng, ring)) return f.a; } catch (e) {}
+                }
+            }
+            return null;
+        };
+        const parts = [];
+        if (toggleState['bounds.districts'] !== false) {
+            const d2 = hit('districts');
+            if (d2) parts.push(`RRC District ${String(d2.DISTRICT || '?').trim()}`);
+        }
+        if (toggleState['bounds.counties'] !== false) {
+            const d2 = hit('counties');
+            if (d2) parts.push(`${String(d2.COUNTY_NAME || '?').trim()} County`);
+        }
+        if (toggleState['bounds.cities'] === true) {
+            const d2 = hit('cities');
+            if (d2) parts.push(String(d2.NAMELSAD || '').trim());
+        }
+        if (!parts.length) { removeBndBadge(); return; }
+        let el = document.getElementById(BND_BADGE_ID);
+        if (!el) {
+            const container = (typeof map.getContainer === 'function') ? map.getContainer() : null;
+            if (!container) return;
+            el = document.createElement('div');
+            el.id = BND_BADGE_ID;
+            el.style.cssText = 'position:absolute;left:10px;bottom:22px;z-index:900;pointer-events:none;'
+                + 'background:rgba(16,22,31,0.85);border:1px solid rgba(180,120,255,0.5);border-radius:6px;'
+                + 'padding:3px 10px;color:#e6d8ff;font:600 12px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;'
+                + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+            container.appendChild(el);
+        }
+        el.textContent = parts.join(' · ');
+    }
     function removeTxBoundaries() {
+        removeBndBadge();
+        _bndData = null;
         if (!_bndLayers.length) { _bndKey = ''; return; }
         const map = getLeafletMap();
         _bndLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
@@ -2210,7 +2263,7 @@
         const [kEnv, kOpts] = _bndKey.split('#') .length === 2 ? _bndKey.split('#') : [null, null];
         if (kOpts === optsKey && kEnv) {
             const env = kEnv.split(',').map(Number);
-            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) return;
+            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) { updateBndBadge(); return; }
         }
         if (_bndFetching) return;
         _bndFetching = true;
@@ -2246,24 +2299,47 @@
         _bndLayers = [];
         const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
         let drawn = 0;
+        _bndData = {};
         active.forEach(d2 => {
             const j = results[d2.key];
             if (!j || !Array.isArray(j.features)) return;
+            const badgeFeats = [];
             j.features.forEach(f => {
                 const a = f.attributes || {};
-                ((f.geometry && f.geometry.rings) || []).forEach(r => {
-                    if (!Array.isArray(r) || r.length < 3) return;
+                const rings = ((f.geometry && f.geometry.rings) || []).filter(r => Array.isArray(r) && r.length >= 3);
+                const ringsLL = rings.map(r => r.map(xy => ({ lat: xy[1], lng: xy[0] })));
+                badgeFeats.push({ a, rings: ringsLL });
+                rings.forEach((r, ri) => {
                     try {
                         const poly = L.polygon(r.map(xy => [xy[1], xy[0]]), Object.assign({ interactive: canTip }, d2.style));
                         if (canTip) { try { poly.bindTooltip(d2.tip(a), { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
                         poly.addTo(map);
                         _bndLayers.push(poly);
                         drawn++;
+                        // Survey squares get their abstract printed INSIDE —
+                        // the stroke-only hover was useless on small tiles.
+                        if (d2.key === 'surveys' && ri === 0) {
+                            const label = String(a.ABSTRACT_LABEL || '').trim();
+                            if (label) {
+                                const ring2 = ringsLL[ri];
+                                const cLat = ring2.reduce((t2, p2) => t2 + p2.lat, 0) / ring2.length;
+                                const cLng = ring2.reduce((t2, p2) => t2 + p2.lng, 0) / ring2.length;
+                                const mk = L.marker([cLat, cLng], {
+                                    interactive: false, keyboard: false,
+                                    icon: L.divIcon({ className: '', iconSize: [80, 14], iconAnchor: [40, 7],
+                                        html: `<div style="color:#c7ced6;font:600 10px sans-serif;text-align:center;text-shadow:0 0 3px #000,0 0 3px #000;opacity:0.85;">${label}</div>` }),
+                                });
+                                mk.addTo(map);
+                                _bndLayers.push(mk);
+                            }
+                        }
                     } catch (e) {}
                 });
             });
+            _bndData[d2.key] = badgeFeats;
             if (j.exceededTransferLimit) console.warn(`${TAG} TX boundaries: ${d2.key} hit the record cap in this view — zoom in for full coverage`);
         });
+        updateBndBadge();
         console.log(`${TAG} TX boundaries: ${drawn} ring(s) drawn [${active.map(d2 => d2.key).join(', ')}]`);
     }
 

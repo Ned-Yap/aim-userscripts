@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Boundaries: "you are here" badge + survey labels — Map Styler v34.107 (dev/latest)
+
+Region data no longer requires hovering the boundary line (which couldn't even tell you which side it named): a **badge in the map's bottom-left corner** now shows what the view center is inside — "RRC District 08 · Midland County · City of Odessa" — updating as you pan. **Survey squares print their abstract number inside the square** (like the LAANC ceilings), so the grid reads at a glance.
+
+---
+
 ## 2026-07-02 — TX Boundaries overlay — Map Styler v34.106 (dev/latest)
 
 New **TX Boundaries** section (off by default): **RRC districts** (purple — the number every state filing keys on), **counties** (white dashed), **city limits** (orange — drone-ordinance awareness), and the **survey/abstract grid** (gray, zoom 13+) — hover a survey square for its abstract + block/section, so legal descriptions like "SEC 25, BLK 38-T2S" become findable land. All from the same RRC server as the wells; statewide polygons arrive generalized (~2 px) so districts don't ship 50k vertices.
