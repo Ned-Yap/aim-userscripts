@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.159
+// @version      4.160
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.159';
+    const SCRIPT_VERSION = '4.160';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2277,6 +2277,49 @@
             pt(aLat, aLng, -ex - px, -ey - py),
         ];
     }
+    // Site SEGMENTS (FP arcs + polygon edges) — vertex-only distances
+    // undershoot badly on long straight runs (user field case: turbine
+    // 259 ft from the middle of an FP segment measured 684 ft to its
+    // nearest vertex). Point entities (base/safe) stay points.
+    function airCollectSiteSegs(ents) {
+        const segs = [];
+        (ents || []).forEach(e => {
+            if (!AIR_SITE_TYPES.has(e.type)) return;
+            const nm = e.name || (e.id != null ? `#${e.id}` : '?');
+            if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
+                e.arcs.forEach((a, i) => {
+                    if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
+                        segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15 });
+                    }
+                });
+            } else if (e.type === 3 || e.type === 16) {
+                const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
+                const src = `${typeReg(e.type).short} "${nm}"`;
+                for (let i = 0; i < cs.length; i++) {
+                    const a = cs[i], b = cs[(i + 1) % cs.length];
+                    if (cs.length >= 2 && (i < cs.length - 1 || cs.length >= 3)) {
+                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type });
+                    }
+                }
+            }
+        });
+        return segs;
+    }
+    // Min distance to the site as GEOMETRY (segments + standalone points).
+    // Returns { d, pt: {lat, lng, src} } — pt is the projected closest
+    // point ON the geometry, so wrap-corridors land on the segment itself.
+    function airMinToSiteGeom(lat, lng, segs, pts) {
+        let best = Infinity, bestPt = null;
+        for (const sg of segs) {
+            const c = airClosestOnSeg(lat, lng, [sg.aLat, sg.aLng], [sg.bLat, sg.bLng]);
+            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src }; }
+        }
+        for (const p of pts) {
+            const d = approxMeters(lat, lng, p.lat, p.lng);
+            if (d < best) { best = d; bestPt = p; }
+        }
+        return { d: best, pt: bestPt };
+    }
     function airMinToSite(lat, lng, sitePts) {
         let best = Infinity, bestPt = null;
         for (const p of sitePts) {
@@ -2466,6 +2509,11 @@
             if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
         });
         const th = airThresholds;
+        // Segment geometry for accurate standoffs; standalone points cover
+        // base/safe (they have no edges).
+        const siteSegs = airCollectSiteSegs(ents);
+        const sitePtOnly = sitePts.filter(p => p.t === 8 || p.t === 98);
+        const flightSegs = siteSegs.filter(sg => sg.t === 15 || sg.t === 16);
         const errors = [];
         const grab = (label, promise) => promise.catch(e => {
             errors.push(`${label}: ${e && e.message ? e.message : e}`);
@@ -2565,7 +2613,7 @@
                 const a = f.attributes || {};
                 if (!f.geometry || typeof f.geometry.y !== 'number') return;
                 const lat = f.geometry.y, lng = f.geometry.x;
-                const near = airMinToSite(lat, lng, sitePts);
+                const near = airMinToSiteGeom(lat, lng, siteSegs, sitePtOnly);
                 const distNm = near.d / NM_TO_M;
                 const distMi = near.d / MI_TO_M;
                 const kind = AIR_KIND[(a.TYPE_CODE || '').trim()] || (a.TYPE_CODE || 'Facility');
@@ -2593,9 +2641,6 @@
             const dispTlM = th.translineShowFt / M_TO_FT;
             const dispObsM = th.obstacleShowNm * NM_TO_M;
             const scanM = Math.max(th.obstacleFt / M_TO_FT, th.windmillFt / M_TO_FT, dispObsM, dispTlM);
-            // Windmills only matter where we actually FLY (user 2026-07-03):
-            // measured against FFZ + FP points, not assets/base/safe.
-            const flightPts = sitePts.filter(p => p.t === 15 || p.t === 16);
             obRes.features.forEach(f => {
                 const a = f.attributes || {};
                 // Lat_DD/Long_DD are STRINGS in the DOF service ('31.829789').
@@ -2603,7 +2648,7 @@
                 if (!isFinite(oLat) || !isFinite(oLng) || (oLat === 0 && oLng === 0)) return;
                 const dc = approxMeters(clat, clng, oLat, oLng);
                 const couldHit = dc - siteRadM <= scanM * 1.2;
-                const near = couldHit ? airMinToSite(oLat, oLng, sitePts) : { d: dc, pt: null };
+                const near = couldHit ? airMinToSiteGeom(oLat, oLng, siteSegs, sitePtOnly) : { d: dc, pt: null };
                 const distFt = Math.round(near.d * M_TO_FT);
                 const agl = typeof a.AGL === 'number' ? a.AGL : null;
                 const type = (a.Type_Code || '?').trim();
@@ -2615,7 +2660,7 @@
                 // turbine near a non-flyable asset polygon is no hazard.
                 let wNear = near;
                 if (isWindmill && couldHit) {
-                    wNear = flightPts.length ? airMinToSite(oLat, oLng, flightPts) : { d: Infinity, pt: null };
+                    wNear = flightSegs.length ? airMinToSiteGeom(oLat, oLng, flightSegs, []) : { d: Infinity, pt: null };
                 }
                 const useNear = isWindmill ? wNear : near;
                 const useDistFt = isWindmill ? Math.round(useNear.d * M_TO_FT) : distFt;
@@ -2700,7 +2745,7 @@
                 const a = f.attributes || {};
                 if (!f.geometry || typeof f.geometry.y !== 'number') return;
                 if ((a.STATUS_CODE || '').trim() && (a.STATUS_CODE || '').trim() !== 'Open') return;
-                const near = airMinToSite(f.geometry.y, f.geometry.x, sitePts);
+                const near = airMinToSiteGeom(f.geometry.y, f.geometry.x, siteSegs, sitePtOnly);
                 const distNm = near.d / NM_TO_M;
                 const brg = airBearing(clat, clng, f.geometry.y, f.geometry.x);
                 const hit = +distNm.toFixed(2) < th.stadiumNm;

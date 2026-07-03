@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Distances measured to segments, not vertices — Asset Inspector v4.160 (dev/latest)
+
+Field-caught (turbine measured 684 ft that was really 259 ft from the flight path): obstacle/airport/stadium distances were measured to site **vertices**, so anything beside the middle of a long FP segment or FFZ edge read far too safe. All proximity checks now project onto the actual **segments** (FP arcs + polygon edges; base/safe stay points), and violation corridors land on the segment itself. This tightened real numbers: site 1583's lit 300 ft tower is actually **254 ft** from flight_path_2 — previously reported 728 ft.
+
+---
+
 ## 2026-07-03 — Windmills measured against flight geometry only — Asset Inspector v4.159 (dev/latest)
 
 Windmill/turbine standoff now measures against **FFZs and flight paths only** — where the drone actually flies — not assets/base/safe zones. A turbine near a non-flyable asset polygon is no hazard; one near your flight corridor is. The violation corridor, distance shown, and named entity all reflect the nearest **flight** geometry now. Other obstacle types (towers etc.) still measure against everything.
