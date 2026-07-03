@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.20
+// @version      0.30
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, and significant-change diff — stretches of this site's FPs/FFZs outside the shadow site's approved envelope (old FFZs + FPs buffered by a threshold) are highlighted and can be sent to AIM Issues for regs review. Phase 3 (API migration) later.
@@ -39,7 +39,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.20';
+    const SCRIPT_VERSION = '0.30';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -134,7 +134,10 @@
     }
 
     function defaultDiffCfg() {
-        return { thresholdFt: 30, includeFfz: true, color: '#ff2d2d', swipe: false };
+        return {
+            thresholdFt: 30, includeFfz: true, color: '#ff2d2d',
+            swipe: false, swipeMode: 'split', focus: false, newRouteFt: 300,
+        };
     }
     function loadDiffCfg() {
         const d = defaultDiffCfg();
@@ -146,6 +149,9 @@
                 if (typeof stored.includeFfz === 'boolean') d.includeFfz = stored.includeFfz;
                 if (typeof stored.color === 'string') d.color = stored.color;
                 if (typeof stored.swipe === 'boolean') d.swipe = stored.swipe;
+                if (stored.swipeMode === 'split' || stored.swipeMode === 'overlay') d.swipeMode = stored.swipeMode;
+                if (typeof stored.focus === 'boolean') d.focus = stored.focus;
+                if (typeof stored.newRouteFt === 'number') d.newRouteFt = stored.newRouteFt;
             }
         } catch (e) { console.warn(`${TAG} loadDiffCfg:`, e); }
         return d;
@@ -522,6 +528,7 @@
         console.log(`${TAG} shadow of ${shadowLabel}: drew ${drawn} entities (${skipped} hidden/skipped)`);
         updateBadge();
         applySwipeClip();
+        applyFocusMode();
     }
 
     function renderShadow(force) {
@@ -529,6 +536,7 @@
         clearShadowLayers();
         updateBadge();
         applySwipeClip();
+        applyFocusMode();
         if (!masterEnabled || !siteID) return;
         const src = shadowSourceFor(siteID);
         if (!src) return;
@@ -789,6 +797,7 @@
                     const A = proj.toXY(a.point_a), B = proj.toXY(a.point_b);
                     segs.push({
                         ax: A.x, ay: A.y, bx: B.x, by: B.y,
+                        name: e.name || `FP ${e.id}`,
                         minX: Math.min(A.x, B.x) - pad, maxX: Math.max(A.x, B.x) + pad,
                         minY: Math.min(A.y, B.y) - pad, maxY: Math.max(A.y, B.y) + pad,
                     });
@@ -808,7 +817,7 @@
                     if (q.y > maxY) maxY = q.y;
                 });
                 if (xs.length < 3) return;
-                polys.push({ xs, ys, minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad });
+                polys.push({ xs, ys, name: e.name || `FFZ ${e.id}`, minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad });
             }
         });
         return { segs, polys };
@@ -836,18 +845,20 @@
         return best;
     }
 
-    function distToEnvelopeExactM(x, y, env) {
-        let best = Infinity;
+    // Exact (no bbox) scan that also says WHICH old feature is nearest —
+    // used once per stretch for the report ("88 ft from FFZ freezone_4")
+    function nearestOldFeature(x, y, env) {
+        const best = { d: Infinity, name: null, kind: null };
         for (const pg of env.polys) {
-            if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
+            if (pointInRingXY(x, y, pg.xs, pg.ys)) return { d: 0, name: pg.name, kind: 'FFZ' };
             for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
                 const d = segDistM(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
-                if (d < best) best = d;
+                if (d < best.d) { best.d = d; best.name = pg.name; best.kind = 'FFZ'; }
             }
         }
         for (const s of env.segs) {
             const d = segDistM(x, y, s.ax, s.ay, s.bx, s.by);
-            if (d < best) best = d;
+            if (d < best.d) { best.d = d; best.name = s.name; best.kind = 'FP'; }
         }
         return best;
     }
@@ -901,17 +912,20 @@
         const closeRun = () => {
             if (!run) return;
             if (run.samples >= MIN_RUN_SAMPLES && run.worst) {
-                const exact = distToEnvelopeExactM(run.worst.x, run.worst.y, env);
+                const near = nearestOldFeature(run.worst.x, run.worst.y, env);
                 out.push({
                     kind, name, entityId: e.id,
                     pts: run.pts,
                     lengthM: run.lengthM,
-                    maxOffM: isFinite(exact) ? exact : null,   // null = nothing old anywhere near
+                    segStart: run.segStart, segEnd: run.segEnd,
+                    maxOffM: isFinite(near.d) ? near.d : null,   // null = nothing old anywhere
+                    nearName: near.name, nearKind: near.kind,
                 });
             }
             run = null;
         };
-        for (const [P, Q] of segList) {
+        for (let si = 0; si < segList.length; si++) {
+            const [P, Q] = segList[si];
             // Arcs usually chain in order; when they don't (branch jump),
             // close the open run rather than drawing a false connector.
             if (prevEnd && (Math.abs(prevEnd.lat - P.lat) > 1e-6 || Math.abs(prevEnd.lng - P.lng) > 1e-6)) closeRun();
@@ -927,12 +941,13 @@
                 if (d > thrM) {
                     const lat = P.lat + (Q.lat - P.lat) * t, lng = P.lng + (Q.lng - P.lng) * t;
                     if (!run) {
-                        run = { pts: [[lat, lng]], samples: 1, lengthM: 0, lastXY: { x, y }, worst: { x, y, d } };
+                        run = { pts: [[lat, lng]], samples: 1, lengthM: 0, lastXY: { x, y }, worst: { x, y, d }, segStart: si + 1, segEnd: si + 1 };
                     } else {
                         run.pts.push([lat, lng]);
                         run.samples++;
                         run.lengthM += Math.hypot(x - run.lastXY.x, y - run.lastXY.y);
                         run.lastXY = { x, y };
+                        run.segEnd = si + 1;
                         if (d > run.worst.d) run.worst = { x, y, d };
                     }
                 } else {
@@ -943,6 +958,21 @@
             }
         }
         closeRun();
+    }
+
+    // One place formats a stretch for the panel, the report, and the issue
+    // note — keeps all three telling the same story.
+    function stretchDesc(s) {
+        const lenFt = Math.round(s.lengthM * FT_PER_M);
+        const segTxt = s.kind === 'FP'
+            ? (s.segStart === s.segEnd ? `seg ${s.segStart}` : `segs ${s.segStart}–${s.segEnd}`)
+            : 'perimeter';
+        const offFt = s.maxOffM === null ? null : Math.round(s.maxOffM * FT_PER_M);
+        const isNew = offFt === null || offFt > diffCfg.newRouteFt;
+        const offTxt = isNew
+            ? `NEW route (nothing old within ${diffCfg.newRouteFt} ft)`
+            : `max ${offFt} ft from ${s.nearKind} "${s.nearName}"`;
+        return { lenFt, segTxt, offTxt, isNew };
     }
 
     function drawDiffStretches() {
@@ -1063,12 +1093,11 @@
         if (!ch) { setDiffStatus('Issues channel unavailable.'); return; }
         const thrFt = diffMeta ? diffMeta.thrFt : diffCfg.thresholdFt;
         const issues = diffStretches.map(s => {
-            const lenFt = Math.round(s.lengthM * FT_PER_M);
-            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft beyond`;
+            const d = stretchDesc(s);
             return {
                 shape: 'polygon',
                 polygon: bufferStretchRing(s.pts, 5),
-                note: `Site Diff: new ${s.kind} route ${lenFt} ft outside the old envelope (${offTxt}, threshold ${thrFt} ft) — ${s.name}`,
+                note: `Site Diff: ${s.kind} "${s.name}" ${d.segTxt} — ${d.lenFt} ft outside the old envelope (thr ${thrFt} ft) — ${d.offTxt}`,
             };
         });
         ch.postMessage({ type: 'DIFF_ISSUES', siteID, issues });
@@ -1082,10 +1111,9 @@
         lines.push(`AIM Site Diff report — site ${siteID} vs shadow ${diffMeta ? diffMeta.shadowLabel : ''}`);
         lines.push(`Threshold ${thrFt} ft · ${diffStretches.length} significant stretch(es)`);
         diffStretches.forEach((s, i) => {
-            const lenFt = Math.round(s.lengthM * FT_PER_M);
-            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft out`;
+            const d = stretchDesc(s);
             const mid = s.pts[Math.floor(s.pts.length / 2)];
-            lines.push(`${i + 1}. ${s.kind} · ${s.name} — ${lenFt} ft long, ${offTxt} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
+            lines.push(`${i + 1}. ${s.kind} · ${s.name} (${d.segTxt}) — ${d.lenFt} ft long — ${d.offTxt} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
         });
         return lines.join('\n');
     }
@@ -1103,11 +1131,14 @@
         if (!el) return;
         if (!diffStretches.length) { el.innerHTML = ''; return; }
         el.innerHTML = diffStretches.map((s, i) => {
-            const lenFt = Math.round(s.lengthM * FT_PER_M);
-            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft out`;
+            const d = stretchDesc(s);
+            const offHtml = d.isNew
+                ? `<span style="color:#ff5252;font-weight:bold">NEW</span>`
+                : escapeHtml(d.offTxt);
             return `<div class="aim-sd-row" data-di="${i}">`
                 + `<span style="color:${s.kind === 'FP' ? '#ffa030' : '#d05fff'}">${s.kind}</span> · `
-                + `${escapeHtml(s.name)} — ${lenFt.toLocaleString()} ft, ${offTxt}</div>`;
+                + `${escapeHtml(s.name)} <span style="color:#666">(${d.segTxt})</span>`
+                + ` — ${d.lenFt.toLocaleString()} ft — ${offHtml}</div>`;
         }).join('');
     }
 
@@ -1178,9 +1209,18 @@
             + '<div style="position:absolute;top:0;bottom:0;left:5px;width:2px;background:#ffa030;box-shadow:0 0 4px #000;"></div>'
             + '<div style="position:absolute;top:50%;left:-6px;width:24px;height:24px;margin-top:-12px;border-radius:50%;'
             + 'background:#14181f;border:2px solid #ffa030;color:#ffa030;font:12px/20px monospace;text-align:center;user-select:none;">⇔</div>';
+        swipeHandleEl.title = 'Drag with M1 = split view (left Original / right New) · M2 = overlay reveal (ghost right of handle)';
         const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+        swipeHandleEl.addEventListener('contextmenu', stop);
         swipeHandleEl.addEventListener('pointerdown', (ev) => {
             stop(ev);
+            // Mouse button picks the mode: M1 = split, M2 = overlay reveal
+            const wantMode = ev.button === 2 ? 'overlay' : 'split';
+            if (wantMode !== diffCfg.swipeMode) {
+                diffCfg.swipeMode = wantMode;
+                saveDiffCfg();
+                console.log(`${TAG} swipe mode → ${wantMode}`);
+            }
             try { swipeHandleEl.setPointerCapture(ev.pointerId); } catch (e) {}
             const onMove = (mv) => {
                 const rect = container.getBoundingClientRect();
@@ -1203,6 +1243,21 @@
         container.appendChild(swipeHandleEl);
     }
 
+    // Percepto's own entity rendering lives in these default panes — in
+    // split mode they get clipped to the right side so the left shows the
+    // shadow (Original) only. Cleared the moment split mode is off.
+    const NATIVE_SWIPE_PANES = ['overlayPane', 'markerPane', 'shadowPane'];
+    let nativeClipsApplied = false;
+
+    function setNativeClips(map, clip) {
+        NATIVE_SWIPE_PANES.forEach(n => {
+            try { const p = map.getPane(n); if (p) p.style.clipPath = clip; } catch (e) {}
+        });
+        // Diff highlights mark THIS site's geometry → they belong to the New side
+        try { const hl = map.getPane(HL_PANE_NAME); if (hl) hl.style.clipPath = clip; } catch (e) {}
+        nativeClipsApplied = !!clip;
+    }
+
     function applySwipeClip() {
         const map = getLeafletMap();
         const L = getL();
@@ -1212,18 +1267,30 @@
         const active = diffCfg.swipe && masterEnabled && !!shadowSourceFor(siteID);
         if (!active) {
             pane.style.clipPath = '';
+            if (nativeClipsApplied) setNativeClips(map, '');
             if (swipeHandleEl) swipeHandleEl.style.display = 'none';
             return;
         }
-        // Panes are 0×0 translated divs, so clip in pane-local coords with a
-        // polygon() big enough to cover any child geometry. Shadow shows
-        // RIGHT of the handle.
-        let pos = { x: 0, y: 0 };
-        try { const p = L.DomUtil.getPosition(pane); if (p) pos = p; } catch (e) {}
+        // Clip in LAYER coords — the coordinate space of pane children. The
+        // map pane carries the pan translation (our pane's own offset is 0),
+        // so v0.20's getPosition(pane) drifted off the handle after any pan;
+        // containerPointToLayerPoint accounts for it exactly.
         const size = map.getSize();
-        const cx = swipeFrac * size.x - pos.x;
+        let lx;
+        try { lx = map.containerPointToLayerPoint([swipeFrac * size.x, 0]).x; }
+        catch (e) { lx = swipeFrac * size.x; }
         const BIG = 1000000;
-        pane.style.clipPath = `polygon(${cx}px ${-BIG}px, ${BIG}px ${-BIG}px, ${BIG}px ${BIG}px, ${cx}px ${BIG}px)`;
+        const rightOfHandle = `polygon(${lx}px ${-BIG}px, ${BIG}px ${-BIG}px, ${BIG}px ${BIG}px, ${lx}px ${BIG}px)`;
+        const leftOfHandle = `polygon(${-BIG}px ${-BIG}px, ${lx}px ${-BIG}px, ${lx}px ${BIG}px, ${-BIG}px ${BIG}px)`;
+        if (diffCfg.swipeMode === 'overlay') {
+            // Overlay reveal: full New view everywhere, ghost only right of handle
+            pane.style.clipPath = rightOfHandle;
+            if (nativeClipsApplied) setNativeClips(map, '');
+        } else {
+            // Split: LEFT = Original (shadow) only · RIGHT = New (this site) only
+            pane.style.clipPath = leftOfHandle;
+            setNativeClips(map, rightOfHandle);
+        }
         ensureSwipeHandle(map);
         swipeHandleEl.style.display = 'block';
         swipeHandleEl.style.left = `${Math.round(swipeFrac * size.x)}px`;
@@ -1233,6 +1300,19 @@
                 swipeHookedMap = map;
             } catch (e) { console.warn(`${TAG} swipe map hook failed:`, e); }
         }
+    }
+
+    // Focus mode: hide every entity layer (native + shadow) except the diff
+    // highlights, so flagged stretches stand alone over the basemap.
+    function applyFocusMode() {
+        const map = getLeafletMap();
+        if (!map) return;
+        const on = diffCfg.focus && masterEnabled;
+        const vis = on ? 'hidden' : '';
+        NATIVE_SWIPE_PANES.forEach(n => {
+            try { const p = map.getPane(n); if (p) p.style.visibility = vis; } catch (e) {}
+        });
+        try { const sp = map.getPane(PANE_NAME); if (sp) sp.style.visibility = vis; } catch (e) {}
     }
 
     // ------------------------------------------------------------------
@@ -1253,9 +1333,15 @@
                 { id: 'choose-site', label: '🗺 Choose shadow (site or JSON backup)…', type: 'button', action: 'choose-site' },
                 { id: 'refresh-shadow', label: '⟳ Refresh shadow data', type: 'button', action: 'refresh-shadow' },
                 { type: 'header', label: 'Compare' },
-                { id: 'swipe', label: 'Swipe divider (shadow shows right of handle)', type: 'boolean', default: false },
+                { id: 'swipe', label: 'Swipe divider', type: 'boolean', default: false },
+                { id: 'swipe-mode', label: 'Swipe mode (or drag handle: M1 split / M2 overlay)', type: 'select', default: 'split', options: [
+                    { value: 'split', label: 'Split — left Original · right New' },
+                    { value: 'overlay', label: 'Overlay reveal — ghost right of handle' },
+                ] },
                 { id: 'diff-threshold', label: 'Significant-change threshold', type: 'number', min: 5, max: 300, step: 5, default: 30, unit: 'ft' },
+                { id: 'diff-new-threshold', label: 'Label "NEW route" beyond', type: 'number', min: 50, max: 2000, step: 50, default: 300, unit: 'ft' },
                 { id: 'diff-ffz', label: 'Diff FFZ perimeters too (not just FPs)', type: 'boolean', default: true },
+                { id: 'diff-focus', label: 'Focus mode — hide all entities except change highlights', type: 'boolean', default: false },
                 { id: 'diff-color', label: 'Change highlight color', type: 'color', default: '#ff2d2d' },
                 { id: 'run-diff', label: '⚖ Run significant-change diff', type: 'button', action: 'run-diff' },
                 { id: 'clear-diff', label: 'Clear diff highlights + issues', type: 'button', action: 'clear-diff' },
@@ -1308,12 +1394,36 @@
             applySwipeClip();
             return;
         }
+        if (id === 'swipe-mode') {
+            const v = String(rawVal);
+            if ((v !== 'split' && v !== 'overlay') || v === diffCfg.swipeMode) return;
+            diffCfg.swipeMode = v;
+            saveDiffCfg();
+            applySwipeClip();
+            return;
+        }
         if (id === 'diff-threshold') {
             const n = Number(rawVal);
             if (isNaN(n) || n === diffCfg.thresholdFt) return;
             diffCfg.thresholdFt = n;
             saveDiffCfg();
             return;   // takes effect on the next diff run
+        }
+        if (id === 'diff-new-threshold') {
+            const n = Number(rawVal);
+            if (isNaN(n) || n === diffCfg.newRouteFt) return;
+            diffCfg.newRouteFt = n;
+            saveDiffCfg();
+            renderDiffList();   // relabels NEW vs distance rows in place
+            return;
+        }
+        if (id === 'diff-focus') {
+            const v = !!rawVal;
+            if (v === diffCfg.focus) return;
+            diffCfg.focus = v;
+            saveDiffCfg();
+            applyFocusMode();
+            return;
         }
         if (id === 'diff-ffz') {
             const v = !!rawVal;
@@ -1428,6 +1538,13 @@
     }
     attachHashListener();
     siteID = readSiteIdFromHash();
+    // Safety net: Percepto is an SPA and some navigations can slip past the
+    // hashchange listeners — poll so a stale shadow never survives onto a
+    // site it wasn't paired with.
+    setInterval(() => {
+        const id = readSiteIdFromHash();
+        if (id !== siteID) setCurrentSite(id);
+    }, 2000);
     renderShadow(false);
     console.log(`${TAG} v${SCRIPT_VERSION} ready (master ${masterEnabled ? 'ON' : 'OFF'}${siteID ? `, site ${siteID}` : ''})`);
 })();
