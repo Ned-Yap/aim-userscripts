@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Missing well pins fix — Map Styler v34.95 (dev/latest)
+
+Wells could be missing from pads you were looking straight at: a zoomed-out first fetch hits the state server's **1,000-record cap**, and the overlay then kept serving that truncated set even after zooming in. Truncated fetches are no longer treated as complete — any view change while truncated re-fetches tighter bounds, so zooming to a pad now fills in its wells. The cap also shows a **visible toast** ("too many in view — showing the first 1000, zoom in") instead of a console-only note, and the fetch envelope is tighter to stay under the cap more often.
+
+---
+
 ## 2026-07-02 — Well operator + lease on click — Map Styler v34.94 (dev/latest)
 
 **Click any RRC well marker and it now shows the full state record**: operator, lease name + number, field, county, on/off proration schedule, and depth (e.g. "PIONEER NATURAL RES. USA, INC. · Lease \"FRANK 11C\" (#60036) · SPRABERRY (TREND AREA) · Midland Co · on schedule · 9,637 ft"). The GIS layer doesn't carry these, so the click queries the RRC's wellbore database by API number — fetched on demand (not for every well in view, to be kind to the state server) and cached for the session. The click still copies the API too.

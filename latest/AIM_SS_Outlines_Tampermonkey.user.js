@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.94
+// @version      34.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.94';
+    const SCRIPT_VERSION = '34.95';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1593,6 +1593,8 @@
     let _rrcFetching = false;
     let _rrcSeq = 0;
     let _rrcZoomHintAt = 0;
+    let _rrcTruncated = false;   // last wells fetch hit the 1000-record cap
+    let _rrcToastAt = 0;
     function rrcWellColor(desc) {
         const d2 = String(desc || '');
         if (/plugged/i.test(d2)) return '#9aa4ad';
@@ -1697,12 +1699,20 @@
         const w = b.getWest(), s2 = b.getSouth(), e = b.getEast(), n = b.getNorth();
         // Refetch only when the view leaves the fetched envelope or the
         // sublayer toggles change.
-        const padLng = Math.max((e - w) * 0.5, 0.01), padLat = Math.max((n - s2) * 0.5, 0.01);
+        const padLng = Math.max((e - w) * 0.25, 0.005), padLat = Math.max((n - s2) * 0.25, 0.005);
         const key = `${wantWells}|${wantOrphans}|${wantPipes}`;
-        const [kEnv, kOpts] = _rrcKey.split('#opts#').length === 2 ? _rrcKey.split('#opts#') : [null, null];
+        const _kp = _rrcKey.split('#opts#');
+        const kEnv = _kp.length === 2 ? _kp[0] : null;
+        const kOpts = _kp.length === 2 ? _kp[1].split('#view#')[0] : null;
         if (kOpts === key && kEnv) {
             const env = kEnv.split(',').map(Number);
-            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) return;
+            const covered = w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3];
+            // A TRUNCATED fetch (1000-record cap) is NOT authoritative — a
+            // pad inside the envelope can be missing its wells. Any view
+            // change while truncated triggers a fresh, tighter fetch; only
+            // an identical view is skipped.
+            if (covered && !_rrcTruncated) return;
+            if (covered && _rrcTruncated && `${w},${s2},${e},${n}` === (_rrcKey.split('#view#')[1] || '')) return;
         }
         if (_rrcFetching) return;
         _rrcFetching = true;
@@ -1718,7 +1728,7 @@
             _rrcFetching = false;
             if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
             drawRrcLayers(results, wantOrphans);
-            _rrcKey = `${fw},${fs},${fe},${fn}#opts#${key}`;
+            _rrcKey = `${fw},${fs},${fe},${fn}#opts#${key}#view#${w},${s2},${e},${n}`;
         };
         const done = () => { if (--pendingN <= 0) finish(); };
         if (!pendingN) { _rrcFetching = false; return; }
@@ -1740,6 +1750,7 @@
         const esc = (v) => String(v == null ? '' : v).replace(/</g, '&lt;');
         const add = (mk) => { try { mk.addTo(map); _rrcLayers.push(mk); } catch (e) {} };
         let wellsN = 0, pipesN = 0;
+        if (!results.wells) _rrcTruncated = false;
         const orphanApis = new Set();
         if (wantOrphans && results.orphans && Array.isArray(results.orphans.features)) {
             results.orphans.features.forEach(f => { if (f.attributes && f.attributes.API != null) orphanApis.add(String(f.attributes.API).trim()); });
@@ -1788,8 +1799,16 @@
                 add(mk);
                 wellsN++;
             });
-            if (results.wells.exceededTransferLimit) {
+            _rrcTruncated = !!results.wells.exceededTransferLimit;
+            if (_rrcTruncated) {
                 console.warn(`${TAG} RRC wells: view exceeds the 1000-record cap — showing the first 1000, zoom in for full coverage`);
+                // Console-only was invisible — this is exactly the "why is
+                // there no pin on that pad?" trap, so say it out loud (at
+                // most once a minute).
+                if (Date.now() - _rrcToastAt > 60000) {
+                    _rrcToastAt = Date.now();
+                    try { showKMLToast('⚠ RRC wells: too many in view — showing the first 1000. Zoom in and missing pads will fill in.', 7000); } catch (e) {}
+                }
             }
         }
         console.log(`${TAG} RRC overlay: ${wellsN} well(s)${orphanApis.size ? ` (${orphanApis.size} orphan in view)` : ''}, ${pipesN} pipeline segment(s)`);
