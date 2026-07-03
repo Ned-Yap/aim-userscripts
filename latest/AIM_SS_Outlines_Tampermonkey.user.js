@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.104
+// @version      34.105
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.104';
+    const SCRIPT_VERSION = '34.105';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2173,7 +2173,12 @@
         if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
         if (typeof GM_xmlhttpRequest !== 'function') { showKMLToast('Tampermonkey grants need re-approval.', 5000); return; }
         _parcelArmed = true;
-        _parcelClickFn = (ev) => { try { parcelsIdentify(ev.latlng); } catch (e) { console.warn(`${TAG} parcel identify threw:`, e); } };
+        _parcelClickFn = (ev) => {
+            // Shift+click is the REMOVE gesture (handled on the polygon) —
+            // don't identify a fresh parcel underneath it.
+            if (ev.originalEvent && ev.originalEvent.shiftKey) return;
+            try { parcelsIdentify(ev.latlng); } catch (e) { console.warn(`${TAG} parcel identify threw:`, e); }
+        };
         map.on('click', _parcelClickFn);
         showKMLToast('🏠 Land-owner mode: click any pad. Click the button again to stop.', 6000);
     }
@@ -2228,7 +2233,18 @@
                     (a.MAIL_ADDR || '').trim() ? `Mail: ${esc((a.MAIL_ADDR || '').trim())}${a.MAIL_CITY ? `, ${esc(a.MAIL_CITY)}` : ''}` : null,
                     `<span style="opacity:0.6">${esc(a.SOURCE || 'county appraisal')} · ${esc(a.TAX_YEAR || '')}</span>`,
                 ].filter(Boolean);
+                lines.push('<span style="opacity:0.55">shift-click outline to remove</span>');
                 try { poly.bindTooltip(lines.join('<br>'), { sticky: true, direction: 'top', opacity: 0.97 }); } catch (e) {}
+                // Shift+click removes JUST this parcel (Clear button nukes all).
+                try {
+                    poly.on('click', (ev2) => {
+                        if (!(ev2.originalEvent && ev2.originalEvent.shiftKey)) return;
+                        try { if (L.DomEvent && L.DomEvent.stop) L.DomEvent.stop(ev2); } catch (e) {}
+                        try { map.removeLayer(poly); } catch (e) {}
+                        _parcelLayers = _parcelLayers.filter(l2 => l2 !== poly);
+                        showKMLToast('Parcel outline removed.', 2500);
+                    });
+                } catch (e) {}
             }
             poly.addTo(map);
             _parcelLayers.push(poly);

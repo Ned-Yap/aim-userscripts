@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Shift-click removes one parcel — Map Styler v34.105 (dev/latest)
+
+**Shift+click a parcel outline to remove just that one** (the Clear button still removes all). While the identify mode is armed, a shift-click never identifies a new parcel underneath — it's purely the remove gesture. The hover card notes it.
+
+---
+
 ## 2026-07-02 — 🏠 Land ownership (TX parcels) — Map Styler v34.104 (dev/latest)
 
 New **Land Ownership (TX parcels)** section: click **🏠 Identify land owner**, then click any graded pad on the map — the parcel boundary draws (lime dashed) with the **county appraisal record on hover: owner name, legal description, acreage, market value, situs + mailing address**, statewide (TxGIO StratMap, all 254 counties). This answers "whose land is that?" for the pads the well data can't — facilities, yards, fresh grading. Click the button again to exit the mode; Clear removes the outlines. Verified live: site 1583 sits on MC DONALD DWIGHT M's SW/4 Sec 25 Blk 38-T2S (160 ac, Midland CAD 2025).
