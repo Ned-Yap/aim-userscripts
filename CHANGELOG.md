@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — All obstacles: flight geometry + fly-over clearance — Asset Inspector v4.162 (dev/latest)
+
+The T-L rule generalized to **every obstacle type**: all obstacles now measure against **FFZs/flight paths only** (never assets/base/safe), and all get the **fly-over clearance exemption** — an obstacle whose top the segment floor clears by 50 ft goes quiet; anything taller than the band can't be cleared and flags on proximity alone. Per-type standoffs: windmills 500 ft, T-L towers 100 ft, everything else 2,640 ft (all editable). Every violation note shows the altitude math. The old vertical-buffer backlog item is now fully shipped for obstacles.
+
+---
+
 ## 2026-07-03 — T-L towers: 100 ft + fly-over clearance — Asset Inspector v4.161 (dev/latest)
 
 Transmission-line towers stop crying wolf: they now flag only when **within 100 ft of an FFZ/FP** (editable) **and** the flight can't clear them — a tower is exempt when the nearest segment's **floor (MSL) clears the tower's top (FAA-surveyed MSL) by 50 ft** (editable). That implements the "we're fine if we're 50 ft above whatever's under us" rule with real altitudes instead of a fixed height guess, so it stays correct for 80 ft poles and 140 ft towers alike. When one does flag, the note shows the altitude math ("segment floor 2,950 ft MSL vs tower top 2,930 ft MSL"). Like windmills, T-L towers measure against flight geometry only.
