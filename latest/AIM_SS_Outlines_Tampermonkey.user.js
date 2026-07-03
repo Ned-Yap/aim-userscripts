@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.105
+// @version      34.106
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.105';
+    const SCRIPT_VERSION = '34.106';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -435,6 +435,25 @@
             children: [
                 { id: 'parcels-arm', label: '🏠 Identify land owner (click pads on the map)', type: 'button', action: 'parcels-arm' },
                 { id: 'parcels-clear', label: 'Clear parcel outlines', type: 'button', action: 'parcels-clear' },
+            ],
+        },
+        {
+            // TX boundaries (v34.106) — RRC districts / counties / city
+            // limits / the survey-abstract grid, all from the same RRC
+            // MapServer the wells come from. The survey grid makes legal
+            // descriptions ("SEC 25, BLK 38-T2S") findable land; city
+            // limits matter for drone ordinances; districts frame every
+            // RRC filing. Fetched per view area, OFF by default.
+            type: 'category',
+            id: 'bounds-cat',
+            label: 'TX Boundaries',
+            meta: '(districts · counties · cities · survey grid)',
+            master: { id: 'bounds.show', default: false },
+            children: [
+                { id: 'bounds.districts', label: 'RRC districts (purple)', type: 'boolean', default: true },
+                { id: 'bounds.counties', label: 'Counties (white dashed)', type: 'boolean', default: true },
+                { id: 'bounds.cities', label: 'City limits (orange)', type: 'boolean', default: false },
+                { id: 'bounds.surveys', label: 'Survey / abstract grid (zoom 13+, gray)', type: 'boolean', default: false },
             ],
         },
         {
@@ -1108,6 +1127,8 @@
         applyCropLayer();
         // 11f. Texas RRC wells / pipelines overlay.
         applyRrcLayers();
+        // 11g. TX boundaries (districts / counties / cities / surveys).
+        applyTxBoundaries();
         // 12. Flight-path vertex dots: hide / resize / recolor via CSS.
         applyVertexStyle();
 
@@ -2146,6 +2167,106 @@
         if (cur.length) out.push(cur);
         return out;
     }
+    // ---- TX boundaries overlay (v34.106) — same RRC MapServer as the
+    // wells, so rrcQuery() does the fetching. Districts/counties are huge
+    // statewide polygons: maxAllowableOffset generalizes them to ~2 px so
+    // a district boundary doesn't ship 50k vertices. ----
+    const BND_LAYERS = [
+        { key: 'districts', layerId: 31, outFields: 'DISTRICT',
+          style: { color: '#b478ff', weight: 3.5, opacity: 0.85, fill: false },
+          tip: (a) => `<strong>RRC District ${String(a.DISTRICT || '?').trim()}</strong>` },
+        { key: 'counties', layerId: 29, outFields: 'COUNTY_NAME,FIPS',
+          style: { color: '#ffffff', weight: 2, opacity: 0.7, dashArray: '10,6', fill: false },
+          tip: (a) => `<strong>${String(a.COUNTY_NAME || '?').trim()} County</strong>` },
+        { key: 'cities', layerId: 28, outFields: 'NAMELSAD',
+          style: { color: '#ffa040', weight: 1.5, opacity: 0.8, dashArray: '4,4', fill: false },
+          tip: (a) => `<strong>${String(a.NAMELSAD || '?').trim()}</strong><br>city limits — check drone ordinances` },
+        { key: 'surveys', layerId: 24, outFields: 'ABSTRACT_LABEL,LEVEL1_SURVEY_NAME,LEVEL2_BLOCK_NUMBER,LEVEL3_SURVEY_NUMBER', minZoom: 13,
+          style: { color: '#9aa4ad', weight: 1, opacity: 0.55, fill: false },
+          tip: (a) => `<strong>${String(a.ABSTRACT_LABEL || '').trim() || 'Survey'}</strong><br>${[String(a.LEVEL1_SURVEY_NAME || '').trim(), a.LEVEL2_BLOCK_NUMBER ? `Blk ${String(a.LEVEL2_BLOCK_NUMBER).trim()}` : null, a.LEVEL3_SURVEY_NUMBER ? `Sec ${String(a.LEVEL3_SURVEY_NUMBER).trim()}` : null].filter(Boolean).join(' · ')}` },
+    ];
+    let _bndLayers = [];
+    let _bndKey = '';
+    let _bndFetching = false;
+    let _bndSeq = 0;
+    function removeTxBoundaries() {
+        if (!_bndLayers.length) { _bndKey = ''; return; }
+        const map = getLeafletMap();
+        _bndLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _bndLayers = [];
+        _bndKey = '';
+    }
+    function applyTxBoundaries() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        if (toggleState['bounds.show'] !== true) { removeTxBoundaries(); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        let b2, zoom;
+        try { b2 = map.getBounds(); zoom = map.getZoom(); } catch (e) { return; }
+        const active = BND_LAYERS.filter(d2 => toggleState[`bounds.${d2.key}`] !== false && !(d2.minZoom && zoom < d2.minZoom) && !(d2.key === 'cities' && toggleState['bounds.cities'] !== true) && !(d2.key === 'surveys' && toggleState['bounds.surveys'] !== true));
+        if (!active.length) { removeTxBoundaries(); return; }
+        const w = b2.getWest(), s2 = b2.getSouth(), e = b2.getEast(), n = b2.getNorth();
+        const optsKey = active.map(d2 => d2.key).join(',');
+        const [kEnv, kOpts] = _bndKey.split('#') .length === 2 ? _bndKey.split('#') : [null, null];
+        if (kOpts === optsKey && kEnv) {
+            const env = kEnv.split(',').map(Number);
+            if (w >= env[0] && s2 >= env[1] && e <= env[2] && n <= env[3]) return;
+        }
+        if (_bndFetching) return;
+        _bndFetching = true;
+        const seq = ++_bndSeq;
+        const padLng = Math.max(e - w, 0.02), padLat = Math.max(n - s2, 0.02);
+        const fw = w - padLng, fs = s2 - padLat, fe = e + padLng, fn = n + padLat;
+        // ~2 px generalization so statewide polygons arrive light.
+        const offset = (360 / (256 * Math.pow(2, zoom))) * 2;
+        const results = {};
+        let pend = active.length;
+        active.forEach(d2 => {
+            rrcQuery(d2.layerId, {
+                geometry: `${fw},${fs},${fe},${fn}`, geometryType: 'esriGeometryEnvelope',
+                inSR: '4326', spatialRel: 'esriSpatialRelIntersects',
+                outFields: d2.outFields, returnGeometry: 'true',
+                maxAllowableOffset: String(offset),
+            }, (j) => {
+                results[d2.key] = j;
+                if (--pend <= 0) {
+                    _bndFetching = false;
+                    if (seq !== _bndSeq || toggleState['bounds.show'] !== true) return;
+                    drawTxBoundaries(active, results);
+                    _bndKey = `${fw},${fs},${fe},${fn}#${optsKey}`;
+                }
+            });
+        });
+    }
+    function drawTxBoundaries(active, results) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        _bndLayers.forEach(l => { try { map.removeLayer(l); } catch (e) {} });
+        _bndLayers = [];
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        let drawn = 0;
+        active.forEach(d2 => {
+            const j = results[d2.key];
+            if (!j || !Array.isArray(j.features)) return;
+            j.features.forEach(f => {
+                const a = f.attributes || {};
+                ((f.geometry && f.geometry.rings) || []).forEach(r => {
+                    if (!Array.isArray(r) || r.length < 3) return;
+                    try {
+                        const poly = L.polygon(r.map(xy => [xy[1], xy[0]]), Object.assign({ interactive: canTip }, d2.style));
+                        if (canTip) { try { poly.bindTooltip(d2.tip(a), { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
+                        poly.addTo(map);
+                        _bndLayers.push(poly);
+                        drawn++;
+                    } catch (e) {}
+                });
+            });
+            if (j.exceededTransferLimit) console.warn(`${TAG} TX boundaries: ${d2.key} hit the record cap in this view — zoom in for full coverage`);
+        });
+        console.log(`${TAG} TX boundaries: ${drawn} ring(s) drawn [${active.map(d2 => d2.key).join(', ')}]`);
+    }
+
     // ---- TX land-parcel identify (v34.104) ----
     const PARCELS_IDENTIFY_URL = 'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/identify';
     let _parcelLayers = [];
@@ -7129,6 +7250,8 @@
         // Land-owner click mode + outlines.
         parcelsDisarm();
         parcelsClear();
+        // TX boundary rings.
+        removeTxBoundaries();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:

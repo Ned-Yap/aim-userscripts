@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — TX Boundaries overlay — Map Styler v34.106 (dev/latest)
+
+New **TX Boundaries** section (off by default): **RRC districts** (purple — the number every state filing keys on), **counties** (white dashed), **city limits** (orange — drone-ordinance awareness), and the **survey/abstract grid** (gray, zoom 13+) — hover a survey square for its abstract + block/section, so legal descriptions like "SEC 25, BLK 38-T2S" become findable land. All from the same RRC server as the wells; statewide polygons arrive generalized (~2 px) so districts don't ship 50k vertices.
+
+---
+
 ## 2026-07-02 — Shift-click removes one parcel — Map Styler v34.105 (dev/latest)
 
 **Shift+click a parcel outline to remove just that one** (the Clear button still removes all). While the identify mode is armed, a shift-click never identifies a new parcel underneath — it's purely the remove gesture. The hover card notes it.
