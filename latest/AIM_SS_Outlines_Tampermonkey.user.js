@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.102
+// @version      34.103
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.102';
+    const SCRIPT_VERSION = '34.103';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -400,6 +400,8 @@
                 { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
                 { id: 'rrc.padMode', label: 'One point per PAD (grouped wells)', type: 'boolean', default: true },
                 { id: 'rrc.padClusterFt', label: 'Pad grouping distance', type: 'number', min: 50, max: 1000, step: 50, default: 250, unit: 'ft' },
+                { id: 'rrc-scout-view', label: '🔭 Scout current view (fetch this area once)', type: 'button', action: 'rrc-scout-view' },
+                { id: 'rrc-scout-clear', label: 'Back to site area only', type: 'button', action: 'rrc-scout-clear' },
                 { id: 'rrc.orphans', label: '🟣 Mark orphan wells (purple ring)', type: 'boolean', default: true },
                 { id: 'rrc.pipelines', label: 'RRC pipelines (mostly buried — same area)', type: 'boolean', default: false },
                 // Per-status visibility doubles as the COLOR LEGEND. Defaults
@@ -1617,6 +1619,11 @@
     // only want around the site, ~500 ft"), not the map view. Bounded
     // area ⇒ no zoom gating, no record-cap roulette, one fetch per site.
     let _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false };
+    // One-off scout override: fetch the CURRENT VIEW instead of the site
+    // bounds (scouting vs day-to-day are different jobs — user 2026-07-02).
+    // Cleared by the "Back to site area" button or a site change.
+    let _rrcScoutEnv = null;   // { sid, env, stamp }
+    let _rrcScoutStamp = 0;
     let _rrcData = null;        // { geomKey, results, wantOrphans } — cached fetch for filter-only redraws
     let _rrcDrawKey = '';       // geomKey + filter state of what's currently drawn
     let _rrcOperators = [];     // [{ name, count }] discovered via bulk EWA fetch
@@ -2014,9 +2021,14 @@
         if (typeof GM_xmlhttpRequest !== 'function') return;
         const sid = getCurrentSiteID();
         if (!sid) { removeRrcLayers(); return; }
-        const bbox = rrcEnsureSiteBBox(sid);
-        if (!bbox && _rrcSiteBBox.siteID !== sid) return;    // bounds fetch not started/finished
-        if (_rrcSiteBBox.loading) return;                     // in flight — re-applies when done
+        // Scout override wins — no site geometry needed at all (pure
+        // prospecting on a bare map works).
+        let scout = (_rrcScoutEnv && _rrcScoutEnv.sid === sid) ? _rrcScoutEnv : null;
+        const bbox = scout ? null : rrcEnsureSiteBBox(sid);
+        if (!scout) {
+            if (!bbox && _rrcSiteBBox.siteID !== sid) return;    // bounds fetch not started/finished
+            if (_rrcSiteBBox.loading) return;                     // in flight — re-applies when done
+        }
         const rawBuf = Number(toggleState['rrc.bufferFt']);
         const bufferFt = isNaN(rawBuf) ? 500 : rawBuf;
         const rawBaseMi = Number(toggleState['rrc.baseRadiusMi']);
@@ -2025,7 +2037,10 @@
         // fresh site (base station only) fall back to a radius around the
         // base so wells show before any FFZ/FP is drawn.
         let env = null, envMode = '';
-        if (bbox && _rrcSiteBBox.nonBaseN > 0) {
+        if (scout) {
+            env = scout.env;
+            envMode = `scout-${scout.stamp}`;
+        } else if (bbox && _rrcSiteBBox.nonBaseN > 0) {
             const midLat = (bbox[1] + bbox[3]) / 2;
             const dLat = bufferFt / 364000;                                     // ~ft per degree latitude
             const dLng = bufferFt / (364000 * Math.cos(midLat * Math.PI / 180));
@@ -7435,6 +7450,23 @@
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
                 else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
                 else if (msg.actionId === 'rrc-recon') runRrcRecon();
+                else if (msg.actionId === 'rrc-scout-view') {
+                    const sid2 = getCurrentSiteID();
+                    const map2 = getLeafletMap();
+                    if (!sid2 || !map2 || typeof map2.getBounds !== 'function') { showKMLToast('Map not ready.', 3000); return; }
+                    if (toggleState['rrc.show'] !== true) { showKMLToast('Turn ON the Oil & Gas (Texas RRC) overlay first.', 5000); return; }
+                    try {
+                        const b2 = map2.getBounds();
+                        _rrcScoutEnv = { sid: sid2, stamp: ++_rrcScoutStamp, env: [b2.getWest(), b2.getSouth(), b2.getEast(), b2.getNorth()] };
+                        showKMLToast('🔭 Scouting this view — fetching wells/pipelines for the visible area…', 5000);
+                        applyRrcLayers();
+                    } catch (e) { showKMLToast('Could not read map bounds.', 3000); }
+                }
+                else if (msg.actionId === 'rrc-scout-clear') {
+                    _rrcScoutEnv = null;
+                    showKMLToast('Back to site-area wells only.', 3500);
+                    applyRrcLayers();
+                }
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }

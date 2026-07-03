@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 🔭 Scout current view — Map Styler v34.103 (dev/latest)
+
+New **🔭 Scout current view** button in the Oil & Gas card: one-off fetch of wells + pipelines for **whatever area you're looking at**, ignoring the site-bounds limit — frame a prospect, click, and every pad point in view loads (works with zero site entities too). **Back to site area only** returns to the tight day-to-day fetch. Reminder when pads still look missing while scouting: check the ⚫ Plugged / 🟡 Permitted filters (hidden by default), and pads with no wellbore (batteries/compressors) never get a state pin.
+
+---
+
 ## 2026-07-02 — One point per PAD — Map Styler v34.102 (dev/latest)
 
 Wells now display as **one point per pad** (default on): wells within 250 ft of each other (editable "Pad grouping distance") merge into a single circled marker showing the **well count**, bordered in the pad's dominant status color (purple if an orphan is on the pad). **Hover the point** for the full pad card: operator, lease name, status rollup ("3× Oil Well, 1× Plugged"), and every API + well number; **click copies the whole API list**. Uncheck "One point per PAD" to get back the individual wellhead dots. Status and operator filters apply before grouping, so a pad point reflects only the wells you've chosen to see.
