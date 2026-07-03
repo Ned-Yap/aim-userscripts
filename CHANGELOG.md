@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 🏠 Land ownership (TX parcels) — Map Styler v34.104 (dev/latest)
+
+New **Land Ownership (TX parcels)** section: click **🏠 Identify land owner**, then click any graded pad on the map — the parcel boundary draws (lime dashed) with the **county appraisal record on hover: owner name, legal description, acreage, market value, situs + mailing address**, statewide (TxGIO StratMap, all 254 counties). This answers "whose land is that?" for the pads the well data can't — facilities, yards, fresh grading. Click the button again to exit the mode; Clear removes the outlines. Verified live: site 1583 sits on MC DONALD DWIGHT M's SW/4 Sec 25 Blk 38-T2S (160 ac, Midland CAD 2025).
+
+---
+
 ## 2026-07-02 — 🔭 Scout current view — Map Styler v34.103 (dev/latest)
 
 New **🔭 Scout current view** button in the Oil & Gas card: one-off fetch of wells + pipelines for **whatever area you're looking at**, ignoring the site-bounds limit — frame a prospect, click, and every pad point in view loads (works with zero site entities too). **Back to site area only** returns to the tight day-to-day fetch. Reminder when pads still look missing while scouting: check the ⚫ Plugged / 🟡 Permitted filters (hidden by default), and pads with no wellbore (batteries/compressors) never get a state pin.

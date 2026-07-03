@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.103
+// @version      34.104
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -20,6 +20,7 @@
 // @connect      pdi.scinet.usda.gov
 // @connect      gis.rrc.texas.gov
 // @connect      webapps2.rrc.texas.gov
+// @connect      feature.geographic.texas.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -38,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.103';
+    const SCRIPT_VERSION = '34.104';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -418,6 +419,22 @@
                 { id: 'rrc.st.permit', label: '🟡 Permitted / not drilled', type: 'boolean', default: false },
                 { id: 'rrc.st.dry', label: '🟤 Dry hole', type: 'boolean', default: false },
                 { id: 'rrc.st.other', label: '⚪ Other / unknown', type: 'boolean', default: true },
+            ],
+        },
+        {
+            // TX land-parcel ownership (v34.104) — statewide county-appraisal
+            // parcels (TxGIO StratMap). Bulk query is disabled on the service;
+            // point-IDENTIFY works, so this is a click tool: arm it, click any
+            // graded pad, get the parcel boundary + owner/legal/acres/value.
+            // Answers "whose land is this?" for pads with no well record.
+            type: 'category',
+            id: 'parcels-cat',
+            label: 'Land Ownership (TX parcels)',
+            meta: '(county appraisal data · click to identify)',
+            master: { id: 'parcels.show', default: true },
+            children: [
+                { id: 'parcels-arm', label: '🏠 Identify land owner (click pads on the map)', type: 'button', action: 'parcels-arm' },
+                { id: 'parcels-clear', label: 'Clear parcel outlines', type: 'button', action: 'parcels-clear' },
             ],
         },
         {
@@ -2128,6 +2145,98 @@
         }
         if (cur.length) out.push(cur);
         return out;
+    }
+    // ---- TX land-parcel identify (v34.104) ----
+    const PARCELS_IDENTIFY_URL = 'https://feature.geographic.texas.gov/arcgis/rest/services/Parcels/stratmap_land_parcels_48_most_recent/MapServer/identify';
+    let _parcelLayers = [];
+    let _parcelArmed = false;
+    let _parcelClickFn = null;
+    function parcelsClear() {
+        const map = getLeafletMap();
+        _parcelLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        _parcelLayers = [];
+    }
+    function parcelsDisarm() {
+        if (!_parcelArmed) return;
+        _parcelArmed = false;
+        const map = getLeafletMap();
+        if (map && _parcelClickFn) { try { map.off('click', _parcelClickFn); } catch (e) {} }
+        _parcelClickFn = null;
+    }
+    function parcelsToggleArm() {
+        if (_parcelArmed) {
+            parcelsDisarm();
+            showKMLToast('Land-owner mode OFF.', 3000);
+            return;
+        }
+        const map = getLeafletMap();
+        if (!map || typeof map.on !== 'function') { showKMLToast('Map not ready.', 3000); return; }
+        if (typeof GM_xmlhttpRequest !== 'function') { showKMLToast('Tampermonkey grants need re-approval.', 5000); return; }
+        _parcelArmed = true;
+        _parcelClickFn = (ev) => { try { parcelsIdentify(ev.latlng); } catch (e) { console.warn(`${TAG} parcel identify threw:`, e); } };
+        map.on('click', _parcelClickFn);
+        showKMLToast('🏠 Land-owner mode: click any pad. Click the button again to stop.', 6000);
+    }
+    function parcelsIdentify(latlng) {
+        const map = getLeafletMap();
+        if (!map || !latlng) return;
+        let b2;
+        try { b2 = map.getBounds(); } catch (e) { return; }
+        const params = new URLSearchParams({
+            f: 'json',
+            geometry: `${latlng.lng},${latlng.lat}`,
+            geometryType: 'esriGeometryPoint', sr: '4326',
+            layers: 'all:0', tolerance: '2',
+            mapExtent: `${b2.getWest()},${b2.getSouth()},${b2.getEast()},${b2.getNorth()}`,
+            imageDisplay: '800,600,96', returnGeometry: 'true',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET', url: `${PARCELS_IDENTIFY_URL}?${params.toString()}`, timeout: 25000,
+            onload: (resp) => {
+                let j = null;
+                try { j = JSON.parse(resp.responseText); } catch (e) {}
+                if (!j || j.error || !Array.isArray(j.results) || !j.results.length) {
+                    showKMLToast('No parcel record at that spot.', 4000);
+                    if (j && j.error) console.warn(`${TAG} parcel identify error:`, j.error);
+                    return;
+                }
+                drawParcel(j.results[0]);
+            },
+            onerror: () => showKMLToast('Parcel lookup failed: network error.', 4000),
+            ontimeout: () => showKMLToast('Parcel lookup timed out.', 4000),
+        });
+    }
+    function drawParcel(res) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        const a = res.attributes || {};
+        const esc = (v) => String(v == null ? '' : v).replace(/</g, '&lt;');
+        const money = (v) => { const n = Number(v); return isFinite(n) && n > 0 ? `$${n.toLocaleString()}` : null; };
+        const acres = (() => { const n = Number(a.GIS_AREA || a.LEGAL_AREA); return isFinite(n) && n > 0 ? `${n.toFixed(1)} ac` : null; })();
+        const rings = ((res.geometry && res.geometry.rings) || []).map(r => r.map(xy => [xy[1], xy[0]])).filter(r => r.length >= 3);
+        if (!rings.length) { showKMLToast(`Owner: ${a.OWNER_NAME || '?'} (no boundary returned)`, 6000); return; }
+        const canTip = !!(L.Tooltip && L.Polygon && L.Polygon.prototype.bindTooltip);
+        try {
+            const poly = L.polygon(rings, { color: '#c8ff4d', weight: 2.5, dashArray: '6,4', fillColor: '#c8ff4d', fillOpacity: 0.06, interactive: canTip });
+            if (canTip) {
+                const lines = [
+                    `<strong>${esc(a.OWNER_NAME || '?')}</strong>`,
+                    a.LEGAL_DESC ? esc(a.LEGAL_DESC) : null,
+                    [acres, money(a.MKT_VALUE) ? `mkt ${money(a.MKT_VALUE)}` : null].filter(Boolean).join(' · ') || null,
+                    (a.SITUS_ADDR || '').trim().replace(/\s+,/g, ',') ? `Situs: ${esc((a.SITUS_ADDR || '').trim())}` : null,
+                    (a.MAIL_ADDR || '').trim() ? `Mail: ${esc((a.MAIL_ADDR || '').trim())}${a.MAIL_CITY ? `, ${esc(a.MAIL_CITY)}` : ''}` : null,
+                    `<span style="opacity:0.6">${esc(a.SOURCE || 'county appraisal')} · ${esc(a.TAX_YEAR || '')}</span>`,
+                ].filter(Boolean);
+                try { poly.bindTooltip(lines.join('<br>'), { sticky: true, direction: 'top', opacity: 0.97 }); } catch (e) {}
+            }
+            poly.addTo(map);
+            _parcelLayers.push(poly);
+            showKMLToast(`🏠 ${a.OWNER_NAME || '?'}${acres ? ` · ${acres}` : ''}`, 6000);
+            console.log(`${TAG} parcel: ${a.OWNER_NAME} · ${a.LEGAL_DESC} · ${acres || ''} · ${a.COUNTY || ''}`);
+        } catch (e) {
+            console.warn(`${TAG} drawParcel threw:`, e);
+        }
     }
     // "One point per PAD": single-linkage clustering — wells within
     // padClusterFt of any cluster member join it. One labeled marker per
@@ -7001,6 +7110,9 @@
         removeCropLayer();
         // And the RRC wells/pipelines overlay.
         removeRrcLayers();
+        // Land-owner click mode + outlines.
+        parcelsDisarm();
+        parcelsClear();
     }
 
     // 50ms quiet-after-last-mutation, 300ms hard cap. Tuning history:
@@ -7462,6 +7574,8 @@
                         applyRrcLayers();
                     } catch (e) { showKMLToast('Could not read map bounds.', 3000); }
                 }
+                else if (msg.actionId === 'parcels-arm') parcelsToggleArm();
+                else if (msg.actionId === 'parcels-clear') { parcelsClear(); showKMLToast('Parcel outlines cleared.', 3000); }
                 else if (msg.actionId === 'rrc-scout-clear') {
                     _rrcScoutEnv = null;
                     showKMLToast('Back to site-area wells only.', 3500);
