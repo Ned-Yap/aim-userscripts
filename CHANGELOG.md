@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — NEW SCRIPT: AIM Site Diff v0.10 (dev/latest only)
+
+Phase 1 of the site-comparison suite: overlay another site's Site Setup on the current map as a **ghost layer**. Pick a shadow site (🗺 button in the new "Site Diff" Control Panel card, or click the ◈ badge bottom-left) and its FFZs/FPs/NFZs/assets/markers draw dashed in warm shadow colors on top of the live site — per-type show/color/opacity, line weight, marker size all editable. Built for the offline-copy workflow: duplicate a site, rebuild it, then shadow the staging copy over the live one to see what moved. View-only and cheap (non-interactive vectors, one fetch). Phase 2 adds swipe compare + significant-change highlighting into AIM Issues; Phase 3 the API cutover.
+
+---
+
 ## 2026-07-03 — 🚀 PROMOTED TO PROD: Airspace Validator + map overlay suite — Asset Inspector v4.164, Map Styler v34.110, Control Panel v1.34
 
 **Everything from the last two days ships to everyone.** Coworkers jump: Asset Inspector v4.36 → **v4.164**, Map Styler v34.85 → **v34.110**, Control Panel v1.33 → **v1.34** on their next Tampermonkey update check.
