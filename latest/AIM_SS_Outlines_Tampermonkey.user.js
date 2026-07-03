@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.98
+// @version      34.99
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.98';
+    const SCRIPT_VERSION = '34.99';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1853,7 +1853,7 @@
         // Filter-only change → redraw from the cached fetch, no refetch.
         if (_rrcData && _rrcData.geomKey === geomKey) {
             if (_rrcDrawKey !== geomKey + '§' + filterKey) {
-                drawRrcLayers(_rrcData.results, _rrcData.wantOrphans);
+                drawRrcLayers(_rrcData.results, _rrcData.wantOrphans, _rrcData.env);
                 _rrcDrawKey = geomKey + '§' + filterKey;
             }
             return;
@@ -1872,8 +1872,8 @@
         const finish = () => {
             _rrcFetching = false;
             if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
-            _rrcData = { geomKey, results, wantOrphans };
-            drawRrcLayers(results, wantOrphans);
+            _rrcData = { geomKey, results, wantOrphans, env };
+            drawRrcLayers(results, wantOrphans, env);
             _rrcDrawKey = geomKey + '§' + filterKey;
             rrcBulkFetchOperators(geomKey, results);
         };
@@ -1887,7 +1887,36 @@
             rrcQuery(13, Object.assign({ outFields: 'OPERATOR,COMMODITY_DESCRIPTION,SYSTEM_NAME,DIAMETER,INTERSTATE' }, envParams), (j) => { results.pipes = j; done(); });
         }
     }
-    function drawRrcLayers(results, wantOrphans) {
+    // Envelope-intersect queries return WHOLE line features — a pipeline
+    // that merely touches the fetch area arrives with its entire 20-mile
+    // geometry (user caught one drawn 100k ft past the site). Clip drawn
+    // paths to the fetch envelope (+ a small visual margin) client-side.
+    function rrcClipPathToEnv(pth, env) {
+        if (!env) return [pth];
+        const pad = 0.002;   // ~700 ft margin so lines don't stop dead at the edge
+        const w = env[0] - pad, s2 = env[1] - pad, e = env[2] + pad, n = env[3] + pad;
+        const inEnv = (p) => p[1] >= w && p[1] <= e && p[0] >= s2 && p[0] <= n;
+        const out = [];
+        let cur = [];
+        for (let i = 1; i < pth.length; i++) {
+            const a = pth[i - 1], b = pth[i];
+            // Keep the segment if either end is inside, or its bbox crosses
+            // the envelope (a long segment passing straight through).
+            const keep = inEnv(a) || inEnv(b) ||
+                (Math.min(a[1], b[1]) <= e && Math.max(a[1], b[1]) >= w
+                 && Math.min(a[0], b[0]) <= n && Math.max(a[0], b[0]) >= s2);
+            if (keep) {
+                if (!cur.length) cur.push(a);
+                cur.push(b);
+            } else if (cur.length) {
+                out.push(cur);
+                cur = [];
+            }
+        }
+        if (cur.length) out.push(cur);
+        return out;
+    }
+    function drawRrcLayers(results, wantOrphans, env) {
         const map = getLeafletMap();
         const L = _stylerL();
         if (!map || !L) return;
@@ -1907,10 +1936,13 @@
                 const a = f.attributes || {};
                 ((f.geometry && f.geometry.paths) || []).forEach(pth => {
                     if (!Array.isArray(pth) || pth.length < 2) return;
-                    const pl = L.polyline(pth.map(xy => [xy[1], xy[0]]), { color: '#2fd6c3', weight: 3, opacity: 0.8, dashArray: '10,4', interactive: canTip });
-                    if (canTip) { try { pl.bindTooltip(`<strong>${esc(a.OPERATOR || 'pipeline')}</strong><br>${esc(a.COMMODITY_DESCRIPTION || '')}${a.DIAMETER ? ` · ${esc(a.DIAMETER)}"` : ''}${a.SYSTEM_NAME ? `<br>${esc(a.SYSTEM_NAME)}` : ''}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
-                    add(pl);
-                    pipesN++;
+                    rrcClipPathToEnv(pth.map(xy => [xy[1], xy[0]]), env).forEach(clipped => {
+                        if (clipped.length < 2) return;
+                        const pl = L.polyline(clipped, { color: '#2fd6c3', weight: 3, opacity: 0.8, dashArray: '10,4', interactive: canTip });
+                        if (canTip) { try { pl.bindTooltip(`<strong>${esc(a.OPERATOR || 'pipeline')}</strong><br>${esc(a.COMMODITY_DESCRIPTION || '')}${a.DIAMETER ? ` · ${esc(a.DIAMETER)}"` : ''}${a.SYSTEM_NAME ? `<br>${esc(a.SYSTEM_NAME)}` : ''}`, { sticky: true, direction: 'top', opacity: 0.95 }); } catch (e) {} }
+                        add(pl);
+                        pipesN++;
+                    });
                 });
             });
         }

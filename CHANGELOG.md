@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Pipelines clipped to the site area — Map Styler v34.99 (dev/latest)
+
+Pipelines could draw tens of miles past the site: the server returns any line that *touches* the fetch area with its **entire geometry** (one was drawn 100k ft out). Pipeline paths are now clipped to the site fetch area (+ ~700 ft visual margin) before drawing — wells were never affected (points can't leak).
+
+---
+
 ## 2026-07-02 — Well filters, color legend, operator dropdown — Map Styler v34.98 (dev/latest)
 
 The Oil & Gas card now filters to what matters for **surface-equipment emission work**: per-status checkboxes that double as the **color legend** (🟢 producing oil, 🟠 gas, 🔵 injection/disposal, ⚫ plugged, 🟡 permitted/not drilled, 🟤 dry, ⚪ other) — defaults show **operational wells only**; plugged and permitted are one checkbox away. Because the fetch is site-bounded, every well's operator is now looked up automatically in the background (gently — one query every 300 ms), which enables two things: **operator + lease on plain hover** for every well (no click needed), and an **operator dropdown** ("Show operator: PIONEER NATURAL RES. USA (14)") to isolate a single operator's wells. Orphan wells always show when the orphan marker is on, regardless of status filters. Filter changes redraw instantly from cache — no refetch.
