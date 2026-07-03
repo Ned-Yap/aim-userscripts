@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — One point per PAD — Map Styler v34.102 (dev/latest)
+
+Wells now display as **one point per pad** (default on): wells within 250 ft of each other (editable "Pad grouping distance") merge into a single circled marker showing the **well count**, bordered in the pad's dominant status color (purple if an orphan is on the pad). **Hover the point** for the full pad card: operator, lease name, status rollup ("3× Oil Well, 1× Plugged"), and every API + well number; **click copies the whole API list**. Uncheck "One point per PAD" to get back the individual wellhead dots. Status and operator filters apply before grouping, so a pad point reflects only the wells you've chosen to see.
+
+---
+
 ## 2026-07-02 — Pad Recon: scout mode + lease map — Map Styler v34.101 (dev/latest)
 
 The recon no longer depends on client assets. New **🗺 Leases in the area** section (always first): every well cluster grouped by the state's own ownership unit — **operator + lease name, well count, status breakdown** — with click-to-jump to the cluster. On a site with **no assets at all** the report runs in **SCOUT MODE**: pure state-side picture (leases + operators), no client CSV required — drop a base station on a prospect and scout it. When assets exist, the reconciliation sections (facility/wellhead/unmatched) appear beneath the lease map as before.

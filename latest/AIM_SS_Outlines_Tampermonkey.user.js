@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.101
+// @version      34.102
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.101';
+    const SCRIPT_VERSION = '34.102';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -398,6 +398,8 @@
                 { id: 'rrc.bufferFt', label: 'Include wells within (of site bounds)', type: 'number', min: 0, max: 10560, step: 100, default: 500, unit: 'ft' },
                 { id: 'rrc.baseRadiusMi', label: 'No Site Setup yet: fetch around base station', type: 'number', min: 0.5, max: 10, step: 0.5, default: 2, unit: 'mi' },
                 { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
+                { id: 'rrc.padMode', label: 'One point per PAD (grouped wells)', type: 'boolean', default: true },
+                { id: 'rrc.padClusterFt', label: 'Pad grouping distance', type: 'number', min: 50, max: 1000, step: 50, default: 250, unit: 'ft' },
                 { id: 'rrc.orphans', label: '🟣 Mark orphan wells (purple ring)', type: 'boolean', default: true },
                 { id: 'rrc.pipelines', label: 'RRC pipelines (mostly buried — same area)', type: 'boolean', default: false },
                 // Per-status visibility doubles as the COLOR LEGEND. Defaults
@@ -2043,7 +2045,9 @@
         const geomKey = `${sid}|${envMode}|${wantWells}|${wantOrphans}|${wantPipes}`;
         const filterKey = ['oil', 'gas', 'inj', 'plugged', 'permit', 'dry', 'other']
             .map(k2 => toggleState[`rrc.st.${k2}`] === false ? '0' : '1').join('')
-            + '|' + (toggleState['rrc.operator'] || 'all');
+            + '|' + (toggleState['rrc.operator'] || 'all')
+            + '|' + (toggleState['rrc.padMode'] !== false ? 'pad' : 'ind')
+            + '|' + (toggleState['rrc.padClusterFt'] || 250);
         // Filter-only change → redraw from the cached fetch, no refetch.
         if (_rrcData && _rrcData.geomKey === geomKey) {
             if (_rrcDrawKey !== geomKey + '§' + filterKey) {
@@ -2110,6 +2114,77 @@
         if (cur.length) out.push(cur);
         return out;
     }
+    // "One point per PAD": single-linkage clustering — wells within
+    // padClusterFt of any cluster member join it. One labeled marker per
+    // cluster: count inside, border = dominant status (orphan trumps),
+    // hover = operator / lease / status rollup / every API.
+    function rrcClusterWells(list, maxM) {
+        const clusters = [];
+        const dM = (a, b) => {
+            const dLat = (a.lat - b.lat) * 110540;
+            const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
+            return Math.sqrt(dLat * dLat + dLng * dLng);
+        };
+        list.forEach(w3 => {
+            const hits = clusters.filter(c => c.some(m => dM(m, w3) <= maxM));
+            if (!hits.length) { clusters.push([w3]); return; }
+            hits[0].push(w3);
+            // w3 bridged several clusters — merge them into the first.
+            for (let i2 = 1; i2 < hits.length; i2++) {
+                hits[0].push(...hits[i2]);
+                hits[i2].length = 0;
+            }
+        });
+        return clusters.filter(c => c.length);
+    }
+    const RRC_STATUS_PRIORITY = ['oil', 'gas', 'inj', 'permit', 'other', 'dry', 'plugged'];
+    function drawRrcPadPoints(visWells, L, map, add, canTip, esc) {
+        const rawClus = Number(toggleState['rrc.padClusterFt']);
+        const maxM = (isNaN(rawClus) ? 250 : rawClus) / 3.28084;
+        const pads = rrcClusterWells(visWells, maxM);
+        pads.forEach(members => {
+            const cLat = members.reduce((t2, m) => t2 + m.lat, 0) / members.length;
+            const cLng = members.reduce((t2, m) => t2 + m.lng, 0) / members.length;
+            const anyOrphan = members.some(m => m.orphan);
+            let cls = 'plugged';
+            members.forEach(m => {
+                const c2 = rrcStatusClass(m.desc);
+                if (RRC_STATUS_PRIORITY.indexOf(c2) < RRC_STATUS_PRIORITY.indexOf(cls)) cls = c2;
+            });
+            const color = anyOrphan ? '#c000ff' : rrcWellColor(members.find(m => rrcStatusClass(m.desc) === cls).desc);
+            const mk = L.marker([cLat, cLng], {
+                interactive: canTip, keyboard: false,
+                icon: L.divIcon({ className: '', iconSize: [26, 26], iconAnchor: [13, 13],
+                    html: `<div style="width:22px;height:22px;border-radius:50%;background:rgba(16,22,31,0.92);border:3px solid ${color};color:#fff;font:bold 11px/16px sans-serif;text-align:center;box-shadow:0 0 4px #000;">${members.length}</div>` }),
+            });
+            const padTip = () => {
+                const infos = members.map(m => _rrcWellInfo[m.api]).filter(i2 => i2 && i2 !== 'pending' && i2 !== 'none');
+                const opSet = [...new Set(infos.map(i2 => i2.operator))];
+                const leaseSet = [...new Set(infos.map(i2 => `"${i2.lease}"`))];
+                const stat = {};
+                members.forEach(m => { stat[m.desc] = (stat[m.desc] || 0) + 1; });
+                const statTxt = Object.keys(stat).map(k3 => `${stat[k3]}× ${esc(k3)}`).join(', ');
+                const apiLines = members.slice(0, 8).map(m => `API ${rrcFmtApi(m.api)}${m.wellNo ? ` #${esc(m.wellNo)}` : ''}`).join('<br>');
+                return `<strong>${opSet.length ? esc(opSet.join(' + ')) : '<span style="opacity:0.7">operator lookup pending…</span>'}</strong>`
+                    + `${leaseSet.length ? `<br>Lease ${esc(leaseSet.join(', '))}` : ''}`
+                    + `<br>${members.length} well${members.length === 1 ? '' : 's'}: ${statTxt}${anyOrphan ? ' · <span style="color:#c000ff">ORPHAN on pad</span>' : ''}`
+                    + `<br><span style="opacity:0.8">${apiLines}${members.length > 8 ? `<br>…+${members.length - 8} more` : ''}</span>`
+                    + `<br><span style="opacity:0.6">click to copy API list</span>`;
+            };
+            if (canTip) {
+                try {
+                    mk.bindTooltip(padTip(), { sticky: true, direction: 'top', opacity: 0.95 });
+                    mk.on('click', () => {
+                        try { navigator.clipboard.writeText(members.map(m => rrcFmtApi(m.api)).join('\n')); } catch (e) {}
+                        try { mk.setTooltipContent(padTip()); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
+                    });
+                } catch (e) {}
+            }
+            add(mk);
+        });
+        console.log(`${TAG} RRC pad mode: ${visWells.length} wells → ${pads.length} pad point(s)`);
+        return visWells.length;
+    }
     function drawRrcLayers(results, wantOrphans, env) {
         const map = getLeafletMap();
         const L = _stylerL();
@@ -2142,6 +2217,7 @@
         }
         if (results.wells && Array.isArray(results.wells.features)) {
             const opFilter = String(toggleState['rrc.operator'] || 'all');
+            const visWells = [];
             results.wells.features.forEach(f => {
                 const a = f.attributes || {};
                 if (!f.geometry || typeof f.geometry.y !== 'number') return;
@@ -2156,32 +2232,38 @@
                     const info = _rrcWellInfo[api];
                     if (!info || info === 'pending' || info === 'none' || info.operator !== opFilter) return;
                 }
-                const color = orphan ? '#c000ff' : rrcWellColor(a.GIS_SYMBOL_DESCRIPTION);
-                const mk = L.circleMarker([f.geometry.y, f.geometry.x], {
-                    radius: orphan ? 7 : 5, color, weight: orphan ? 3 : 2,
-                    fillColor: '#10161f', fillOpacity: 0.85, interactive: canTip,
-                });
-                if (canTip) {
-                    try {
-                        const baseTip = `<strong>API ${rrcFmtApi(api)}</strong>${a.GIS_WELL_NUMBER ? ` · Well ${esc(a.GIS_WELL_NUMBER)}` : ''}<br>${esc(a.GIS_SYMBOL_DESCRIPTION || '?')}${orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}`;
-                        const infoTip = (info) => `${baseTip}<br><strong>${esc(info.operator)}</strong><br>Lease "${esc(info.lease)}" (#${esc(info.leaseNo)}) · ${esc(info.field)}<br>${esc(info.county)} Co · ${info.onSched === 'Y' ? 'on schedule' : 'OFF schedule'}${info.depth ? ` · ${esc(info.depth)} ft` : ''}`;
-                        const known = _rrcWellInfo[api];
-                        mk.bindTooltip(known && known !== 'pending' && known !== 'none' ? infoTip(known)
-                            : `${baseTip}<br><span style="opacity:0.7">click → operator + lease (copies API)</span>`,
-                            { sticky: true, direction: 'top', opacity: 0.95 });
-                        mk.on('click', () => {
-                            try { navigator.clipboard.writeText(rrcFmtApi(api)); } catch (e) {}
-                            rrcFetchWellInfo(api, (info) => {
-                                if (!info) { try { mk.setTooltipContent(`${baseTip}<br><span style="color:#ff8080">no wellbore record found</span>`); } catch (e) {} return; }
-                                try { mk.setTooltipContent(infoTip(info)); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
-                                console.log(`${TAG} RRC ${rrcFmtApi(api)}: ${info.operator} · lease "${info.lease}" · ${info.field}`);
-                            });
-                        });
-                    } catch (e) {}
-                }
-                add(mk);
-                wellsN++;
+                visWells.push({ api, lat: f.geometry.y, lng: f.geometry.x, orphan, desc: (a.GIS_SYMBOL_DESCRIPTION || '?').trim(), wellNo: (a.GIS_WELL_NUMBER || '').trim() });
             });
+            if (toggleState['rrc.padMode'] !== false) {
+                wellsN = drawRrcPadPoints(visWells, L, map, add, canTip, esc);
+            } else {
+                visWells.forEach(w3 => {
+                    const color = w3.orphan ? '#c000ff' : rrcWellColor(w3.desc);
+                    const mk = L.circleMarker([w3.lat, w3.lng], {
+                        radius: w3.orphan ? 7 : 5, color, weight: w3.orphan ? 3 : 2,
+                        fillColor: '#10161f', fillOpacity: 0.85, interactive: canTip,
+                    });
+                    if (canTip) {
+                        try {
+                            const baseTip = `<strong>API ${rrcFmtApi(w3.api)}</strong>${w3.wellNo ? ` · Well ${esc(w3.wellNo)}` : ''}<br>${esc(w3.desc)}${w3.orphan ? ' · <span style="color:#c000ff">ORPHAN</span>' : ''}`;
+                            const infoTip = (info) => `${baseTip}<br><strong>${esc(info.operator)}</strong><br>Lease "${esc(info.lease)}" (#${esc(info.leaseNo)}) · ${esc(info.field)}<br>${esc(info.county)} Co · ${info.onSched === 'Y' ? 'on schedule' : 'OFF schedule'}${info.depth ? ` · ${esc(info.depth)} ft` : ''}`;
+                            const known = _rrcWellInfo[w3.api];
+                            mk.bindTooltip(known && known !== 'pending' && known !== 'none' ? infoTip(known)
+                                : `${baseTip}<br><span style="opacity:0.7">click → operator + lease (copies API)</span>`,
+                                { sticky: true, direction: 'top', opacity: 0.95 });
+                            mk.on('click', () => {
+                                try { navigator.clipboard.writeText(rrcFmtApi(w3.api)); } catch (e) {}
+                                rrcFetchWellInfo(w3.api, (info) => {
+                                    if (!info) { try { mk.setTooltipContent(`${baseTip}<br><span style="color:#ff8080">no wellbore record found</span>`); } catch (e) {} return; }
+                                    try { mk.setTooltipContent(infoTip(info)); if (mk.openTooltip) mk.openTooltip(); } catch (e) {}
+                                });
+                            });
+                        } catch (e) {}
+                    }
+                    add(mk);
+                    wellsN++;
+                });
+            }
             _rrcTruncated = !!results.wells.exceededTransferLimit;
             if (_rrcTruncated) {
                 console.warn(`${TAG} RRC wells: view exceeds the 1000-record cap — showing the first 1000, zoom in for full coverage`);
