@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Boundaries badge follows the cursor — Map Styler v34.109 (dev/latest)
+
+The district/county/city badge now reads out **wherever your mouse is**, not the view center — hover around the map and it updates live (~12×/sec, against already-fetched polygons, so it's free). Falls back to view center until the mouse first enters the map.
+
+---
+
 ## 2026-07-02 — 🗺 Basemap switcher (fresh satellite + dark mode) — Map Styler v34.108 (dev/latest)
 
 New **Basemap** section: swap Percepto's HERE base for **Esri World Imagery** (usually the most current satellite in oil country), **USGS NAIP aerials** (public domain), **🌙 Dark map** or Light map (CARTO), **OpenStreetMap**, or a **custom XYZ tile URL** you provide (your source, your terms — Google's scrape endpoint is deliberately not a preset since it violates their ToS; their official Map Tiles API works via the custom slot with your key). The replacement sits under all orthos/charts/entities; switching back to "Percepto default" restores HERE instantly.

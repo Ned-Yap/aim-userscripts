@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.108
+// @version      34.109
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.108';
+    const SCRIPT_VERSION = '34.109';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -2307,6 +2307,25 @@
     let _bndSeq = 0;
     let _bndData = null;   // { districts: [{a, rings:[{lat,lng}[]]}], counties: [...], cities: [...] } for the badge
     const BND_BADGE_ID = 'aim-bnd-badge';
+    // Badge follows the CURSOR (v34.109 — panning the map to ask "what's
+    // over there" was backwards). Falls back to view center until the
+    // mouse first enters the map.
+    let _bndCursor = null;
+    let _bndMoveMap = null;
+    let _bndMoveFn = null;
+    let _bndBadgeAt = 0;
+    function bndEnsureCursorHook(map) {
+        if (_bndMoveMap === map || typeof map.on !== 'function') return;
+        if (_bndMoveMap && _bndMoveFn) { try { _bndMoveMap.off('mousemove', _bndMoveFn); } catch (e) {} }
+        _bndMoveFn = (ev) => {
+            _bndCursor = ev.latlng;
+            const now = Date.now();
+            if (now - _bndBadgeAt < 80) return;   // ~12 Hz is plenty
+            _bndBadgeAt = now;
+            updateBndBadge();
+        };
+        try { map.on('mousemove', _bndMoveFn); _bndMoveMap = map; } catch (e) {}
+    }
     function removeBndBadge() {
         const el = document.getElementById(BND_BADGE_ID);
         if (el) el.remove();
@@ -2317,8 +2336,8 @@
     function updateBndBadge() {
         const map = getLeafletMap();
         if (!map || !_bndData || toggleState['bounds.show'] !== true) { removeBndBadge(); return; }
-        let c2;
-        try { c2 = map.getCenter(); } catch (e) { return; }
+        let c2 = _bndCursor;
+        if (!c2) { try { c2 = map.getCenter(); } catch (e) { return; } }
         const hit = (key) => {
             const feats = _bndData[key] || [];
             for (const f of feats) {
@@ -2359,6 +2378,10 @@
     function removeTxBoundaries() {
         removeBndBadge();
         _bndData = null;
+        _bndCursor = null;
+        if (_bndMoveMap && _bndMoveFn) { try { _bndMoveMap.off('mousemove', _bndMoveFn); } catch (e) {} }
+        _bndMoveMap = null;
+        _bndMoveFn = null;
         if (!_bndLayers.length) { _bndKey = ''; return; }
         const map = getLeafletMap();
         _bndLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
@@ -2370,6 +2393,7 @@
         if (!map || typeof map.getBounds !== 'function') return;
         if (toggleState['bounds.show'] !== true) { removeTxBoundaries(); return; }
         if (typeof GM_xmlhttpRequest !== 'function') return;
+        bndEnsureCursorHook(map);
         let b2, zoom;
         try { b2 = map.getBounds(); zoom = map.getZoom(); } catch (e) { return; }
         const active = BND_LAYERS.filter(d2 => toggleState[`bounds.${d2.key}`] !== false && !(d2.minZoom && zoom < d2.minZoom) && !(d2.key === 'cities' && toggleState['bounds.cities'] !== true) && !(d2.key === 'surveys' && toggleState['bounds.surveys'] !== true));
