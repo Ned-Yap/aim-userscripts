@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.30
+// @version      0.31
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, and significant-change diff — stretches of this site's FPs/FFZs outside the shadow site's approved envelope (old FFZs + FPs buffered by a threshold) are highlighted and can be sent to AIM Issues for regs review. Phase 3 (API migration) later.
@@ -39,7 +39,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.30';
+    const SCRIPT_VERSION = '0.31';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -972,7 +972,7 @@
         const offTxt = isNew
             ? `NEW route (nothing old within ${diffCfg.newRouteFt} ft)`
             : `max ${offFt} ft from ${s.nearKind} "${s.nearName}"`;
-        return { lenFt, segTxt, offTxt, isNew };
+        return { lenFt, segTxt, offTxt, offFt, isNew };
     }
 
     function drawDiffStretches() {
@@ -1118,48 +1118,155 @@
         return lines.join('\n');
     }
 
-    // ---------------- Diff results panel ----------------
+    // ---------------- Diff results panel (table) ----------------
     let diffPanelEl = null;
+    let diffSort = { key: 'lengthM', dir: -1 };
+    let diffFilter = { text: '', type: 'all', newOnly: false };
+    const DIFF_COLS = [
+        { key: 'kind', label: 'Type', w: 46 },
+        { key: 'name', label: 'Name', w: 160 },
+        { key: 'segs', label: 'Segs', w: 64 },
+        { key: 'lengthM', label: 'Length', w: 72 },
+        { key: 'off', label: 'Offset', w: 72 },
+        { key: 'from', label: 'From (old)', w: 150 },
+    ];
 
     function setDiffStatus(msg) {
         const el = diffPanelEl && diffPanelEl.querySelector('#aim-sd-diff-status');
         if (el) el.textContent = msg;
     }
 
+    function diffRowsView() {
+        const rows = diffStretches
+            .map((s, i) => ({ i, s, d: stretchDesc(s) }))
+            .filter(r => {
+                if (diffFilter.type !== 'all' && r.s.kind !== diffFilter.type) return false;
+                if (diffFilter.newOnly && !r.d.isNew) return false;
+                if (diffFilter.text) {
+                    const hay = `${r.s.name} ${r.s.nearName || ''}`.toLowerCase();
+                    if (!hay.includes(diffFilter.text)) return false;
+                }
+                return true;
+            });
+        const { key, dir } = diffSort;
+        rows.sort((a, b) => {
+            let va, vb;
+            switch (key) {
+                case 'kind': va = a.s.kind; vb = b.s.kind; break;
+                case 'name': va = a.s.name || ''; vb = b.s.name || ''; break;
+                case 'segs': va = a.s.segStart || 0; vb = b.s.segStart || 0; break;
+                case 'off':
+                    // NEW (null / beyond threshold) sorts as farthest-out
+                    va = a.s.maxOffM === null ? Infinity : a.s.maxOffM;
+                    vb = b.s.maxOffM === null ? Infinity : b.s.maxOffM;
+                    break;
+                case 'from': va = a.s.nearName || ''; vb = b.s.nearName || ''; break;
+                default: va = a.s.lengthM; vb = b.s.lengthM;
+            }
+            if (typeof va === 'string') return va.localeCompare(vb) * dir;
+            return (va - vb) * dir;
+        });
+        return rows;
+    }
+
     function renderDiffList() {
-        const el = diffPanelEl && diffPanelEl.querySelector('#aim-sd-diff-list');
-        if (!el) return;
-        if (!diffStretches.length) { el.innerHTML = ''; return; }
-        el.innerHTML = diffStretches.map((s, i) => {
-            const d = stretchDesc(s);
-            const offHtml = d.isNew
-                ? `<span style="color:#ff5252;font-weight:bold">NEW</span>`
-                : escapeHtml(d.offTxt);
-            return `<div class="aim-sd-row" data-di="${i}">`
-                + `<span style="color:${s.kind === 'FP' ? '#ffa030' : '#d05fff'}">${s.kind}</span> · `
-                + `${escapeHtml(s.name)} <span style="color:#666">(${d.segTxt})</span>`
-                + ` — ${d.lenFt.toLocaleString()} ft — ${offHtml}</div>`;
+        const wrap = diffPanelEl && diffPanelEl.querySelector('#aim-sd-diff-list');
+        if (!wrap) return;
+        const countEl = diffPanelEl.querySelector('#aim-sd-diff-count');
+        if (!diffStretches.length) {
+            wrap.innerHTML = '';
+            if (countEl) countEl.textContent = '';
+            return;
+        }
+        const rows = diffRowsView();
+        if (countEl) countEl.textContent = `${rows.length}/${diffStretches.length}`;
+        const arrow = (k) => diffSort.key === k ? (diffSort.dir === 1 ? ' ▲' : ' ▼') : '';
+        const cols = DIFF_COLS.map((c, ci) => `<col data-ci="${ci}" style="width:${c.w}px">`).join('');
+        const ths = DIFF_COLS.map((c, ci) =>
+            `<th data-sk="${c.key}" style="position:sticky;top:0;z-index:1;background:#1a2029;color:#7adfe6;`
+            + 'text-align:left;padding:4px 6px;cursor:pointer;border-bottom:1px solid #2a3140;'
+            + `white-space:nowrap;overflow:hidden;">${c.label}${arrow(c.key)}`
+            + `<span class="aim-sd-grip" data-ci="${ci}" style="position:absolute;right:0;top:0;bottom:0;width:7px;cursor:col-resize;"></span></th>`
+        ).join('');
+        const trs = rows.map(r => {
+            const offHtml = r.d.isNew
+                ? '<span style="color:#ff5252;font-weight:bold">NEW</span>'
+                : `${r.d.offFt} ft`;
+            const fromTxt = r.d.isNew ? '—' : `${r.s.nearKind} ${r.s.nearName}`;
+            const td = 'padding:3px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-bottom:1px solid #1d2430;';
+            return `<tr class="aim-sd-tr" data-di="${r.i}" style="cursor:pointer;">`
+                + `<td style="${td}color:${r.s.kind === 'FP' ? '#ffa030' : '#d05fff'}">${r.s.kind}</td>`
+                + `<td style="${td}" title="${escapeHtml(r.s.name)}">${escapeHtml(r.s.name)}</td>`
+                + `<td style="${td}color:#888">${escapeHtml(r.d.segTxt.replace(/^segs? /, ''))}</td>`
+                + `<td style="${td}">${r.d.lenFt.toLocaleString()} ft</td>`
+                + `<td style="${td}">${offHtml}</td>`
+                + `<td style="${td}color:#aaa" title="${escapeHtml(fromTxt)}">${escapeHtml(fromTxt)}</td>`
+                + '</tr>';
         }).join('');
+        wrap.innerHTML = `<table style="border-collapse:collapse;table-layout:fixed;width:max-content;min-width:100%;">`
+            + `<colgroup>${cols}</colgroup><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+    }
+
+    const KEY_DIFF_GEOM = 'aim-sd-diff-geom';
+    let diffGeomSaveTimer = null;
+
+    function saveDiffGeom() {
+        if (!diffPanelEl) return;
+        if (diffGeomSaveTimer) clearTimeout(diffGeomSaveTimer);
+        diffGeomSaveTimer = setTimeout(() => {
+            diffGeomSaveTimer = null;
+            try {
+                const r = diffPanelEl.getBoundingClientRect();
+                gmSet(KEY_DIFF_GEOM, JSON.stringify({ left: r.left, top: r.top, w: r.width, h: r.height }));
+            } catch (e) {}
+        }, 300);
     }
 
     function openDiffPanel() {
         if (!diffPanelEl) {
+            let geom = { left: 16, top: 70, w: 620, h: 440 };
+            try {
+                const raw = gmGet(KEY_DIFF_GEOM, null);
+                if (raw) {
+                    const g = JSON.parse(raw);
+                    if (typeof g.left === 'number' && typeof g.w === 'number') geom = g;
+                }
+            } catch (e) {}
+            // Keep it reachable if the window shrank since last session
+            geom.left = Math.max(0, Math.min(geom.left, window.innerWidth - 120));
+            geom.top = Math.max(0, Math.min(geom.top, window.innerHeight - 80));
+
             diffPanelEl = document.createElement('div');
             diffPanelEl.id = 'aim-sd-diff-panel';
-            diffPanelEl.style.cssText = 'position:fixed;top:70px;left:16px;z-index:2147480001;width:340px;'
-                + 'background:#14181f;color:#ddd;border:1px solid #2a3140;border-radius:6px;'
-                + 'font:12px/1.5 monospace;box-shadow:0 4px 18px rgba(0,0,0,0.5);';
+            diffPanelEl.style.cssText = `position:fixed;top:${geom.top}px;left:${geom.left}px;width:${geom.w}px;height:${geom.h}px;`
+                + 'z-index:2147480001;background:#14181f;color:#ddd;border:1px solid #2a3140;border-radius:6px;'
+                + 'font:12px/1.5 monospace;box-shadow:0 4px 18px rgba(0,0,0,0.5);'
+                + 'display:flex;flex-direction:column;resize:both;overflow:hidden;min-width:360px;min-height:220px;';
             diffPanelEl.innerHTML = ''
-                + '<div style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;">'
+                + '<div id="aim-sd-diff-drag" style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;cursor:move;user-select:none;flex:none;">'
                 + '⚖ Site Diff — significant changes <span id="aim-sd-diff-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
-                + '<div id="aim-sd-diff-status" style="padding:6px 10px;border-bottom:1px solid #222834;color:#aaa;"></div>'
-                + '<div id="aim-sd-diff-list" style="max-height:300px;overflow-y:auto;padding:0 4px;"></div>'
-                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:10px;flex-wrap:wrap;">'
+                + '<div id="aim-sd-diff-status" style="padding:5px 10px;border-bottom:1px solid #222834;color:#aaa;flex:none;"></div>'
+                + '<div style="display:flex;gap:6px;padding:5px 10px;border-bottom:1px solid #222834;align-items:center;flex:none;">'
+                + '<input id="aim-sd-diff-search" type="text" placeholder="Filter name / old feature…" '
+                + 'style="flex:1;min-width:60px;box-sizing:border-box;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:3px 6px;font:inherit;outline:none;">'
+                + '<select id="aim-sd-diff-type" style="background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:3px 4px;font:inherit;">'
+                + '<option value="all">All</option><option value="FP">FP</option><option value="FFZ">FFZ</option></select>'
+                + '<label style="display:flex;align-items:center;gap:3px;color:#ff5252;cursor:pointer;white-space:nowrap;">'
+                + '<input id="aim-sd-diff-new" type="checkbox"> NEW only</label>'
+                + '<span id="aim-sd-diff-count" style="color:#666;white-space:nowrap;"></span>'
+                + '</div>'
+                + '<div id="aim-sd-diff-list" style="flex:1;overflow:auto;"></div>'
+                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:10px;flex-wrap:wrap;flex:none;">'
                 + '<span id="aim-sd-diff-issues" style="cursor:pointer;color:#ff8ac2">🚩 Send to Issues</span>'
                 + '<span id="aim-sd-diff-copy" style="cursor:pointer;color:#7adfe6">📋 Copy report</span>'
                 + '<span id="aim-sd-diff-clear" style="cursor:pointer;color:#ff5252">Clear</span>'
                 + '</div>';
             document.body.appendChild(diffPanelEl);
+
+            const hoverCss = document.createElement('style');
+            hoverCss.textContent = '#aim-sd-diff-list .aim-sd-tr:hover td{background:#222a38;}';
+            diffPanelEl.appendChild(hoverCss);
+
             diffPanelEl.querySelector('#aim-sd-diff-close').addEventListener('click', () => { diffPanelEl.style.display = 'none'; });
             diffPanelEl.querySelector('#aim-sd-diff-issues').addEventListener('click', sendDiffIssues);
             diffPanelEl.querySelector('#aim-sd-diff-clear').addEventListener('click', () => clearDiff(true));
@@ -1170,9 +1277,80 @@
                         .catch(e => { console.warn(`${TAG} clipboard write failed:`, e); setDiffStatus('Clipboard write failed.'); });
                 } catch (e) { console.warn(`${TAG} clipboard unavailable:`, e); }
             });
-            // Click a row → zoom to the stretch + briefly fatten it
-            diffPanelEl.querySelector('#aim-sd-diff-list').addEventListener('click', (ev) => {
-                const row = ev.target.closest('[data-di]');
+
+            // Filters
+            diffPanelEl.querySelector('#aim-sd-diff-search').addEventListener('input', (ev) => {
+                diffFilter.text = ev.target.value.trim().toLowerCase();
+                renderDiffList();
+            });
+            diffPanelEl.querySelector('#aim-sd-diff-type').addEventListener('change', (ev) => {
+                diffFilter.type = ev.target.value;
+                renderDiffList();
+            });
+            diffPanelEl.querySelector('#aim-sd-diff-new').addEventListener('change', (ev) => {
+                diffFilter.newOnly = ev.target.checked;
+                renderDiffList();
+            });
+
+            // Drag the panel by its header
+            const dragBar = diffPanelEl.querySelector('#aim-sd-diff-drag');
+            dragBar.addEventListener('pointerdown', (ev) => {
+                if (ev.target.id === 'aim-sd-diff-close') return;
+                ev.preventDefault();
+                const r = diffPanelEl.getBoundingClientRect();
+                const offX = ev.clientX - r.left, offY = ev.clientY - r.top;
+                const onMove = (mv) => {
+                    diffPanelEl.style.left = `${Math.max(0, mv.clientX - offX)}px`;
+                    diffPanelEl.style.top = `${Math.max(0, mv.clientY - offY)}px`;
+                };
+                const onUp = () => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                    saveDiffGeom();
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+            });
+            try { new ResizeObserver(saveDiffGeom).observe(diffPanelEl); } catch (e) {}
+
+            // Table interactions — delegated (the table is rebuilt on every
+            // render, the wrapper is stable)
+            const listWrap = diffPanelEl.querySelector('#aim-sd-diff-list');
+            let colResizing = false;
+            listWrap.addEventListener('pointerdown', (ev) => {
+                const grip = ev.target.closest('.aim-sd-grip');
+                if (!grip) return;
+                ev.preventDefault();
+                ev.stopPropagation();
+                colResizing = true;
+                const ci = Number(grip.getAttribute('data-ci'));
+                const startX = ev.clientX;
+                const startW = DIFF_COLS[ci].w;
+                const colEl = listWrap.querySelector(`col[data-ci="${ci}"]`);
+                const onMove = (mv) => {
+                    DIFF_COLS[ci].w = Math.max(32, startW + (mv.clientX - startX));
+                    if (colEl) colEl.style.width = `${DIFF_COLS[ci].w}px`;
+                };
+                const onUp = () => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                    // Swallow the click that follows so it doesn't sort
+                    setTimeout(() => { colResizing = false; }, 0);
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+            });
+            listWrap.addEventListener('click', (ev) => {
+                if (colResizing) return;
+                const th = ev.target.closest('th[data-sk]');
+                if (th) {
+                    const k = th.getAttribute('data-sk');
+                    if (diffSort.key === k) diffSort.dir = -diffSort.dir;
+                    else diffSort = { key: k, dir: k === 'name' || k === 'kind' || k === 'from' ? 1 : -1 };
+                    renderDiffList();
+                    return;
+                }
+                const row = ev.target.closest('tr[data-di]');
                 if (!row) return;
                 const s = diffStretches[Number(row.getAttribute('data-di'))];
                 if (!s) return;
@@ -1188,7 +1366,7 @@
                 } catch (e) { console.warn(`${TAG} zoom-to-stretch failed:`, e); }
             });
         }
-        diffPanelEl.style.display = 'block';
+        diffPanelEl.style.display = 'flex';
         renderDiffList();
     }
 

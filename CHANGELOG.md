@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Site Diff v0.31: diff results become a real table (dev/latest)
+
+The results panel is now a proper table: **Type / Name / Segs / Length / Offset / From (old)** columns with click-to-sort headers (arrow shows direction), **drag-resizable columns**, a **filter bar** (name/old-feature text search, FP/FFZ dropdown, NEW-only checkbox with visible/total count), and rows still click-to-zoom. The panel itself is **draggable by its header and resizable from the corner**, and remembers its position and size.
+
+---
+
 ## 2026-07-03 — Site Diff v0.30: split-view swipe, richer diff report, focus mode (dev/latest)
 
 Field feedback round. **Swipe fixed + upgraded**: the divider now clips exactly at the handle (v0.20 drifted after panning), and the default is a true **split view — left shows the Original (shadow) only, right shows the New site only**. Drag with **M1 for split, M2 for the overlay-reveal** ghost mode (also a dropdown in the card). **Diff report leveled up**: every stretch now names its FP segment numbers and which old FP/FFZ it measured against (`FP · path_3 (segs 4–7) — 431 ft — max 88 ft from FFZ "freezone_4"`); anything farther than the new **"NEW route" threshold** (default 300 ft, editable) is labeled **NEW** with no distance noise. New **Focus mode** toggle hides every entity layer except the red change highlights. Plus a site-poll safety net so a shadow never carries onto a site it wasn't paired with.
