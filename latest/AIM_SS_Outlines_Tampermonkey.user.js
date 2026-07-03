@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.99
+// @version      34.100
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.99';
+    const SCRIPT_VERSION = '34.100';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -403,6 +403,9 @@
                 // Per-status visibility doubles as the COLOR LEGEND. Defaults
                 // = operational wells only (user spec 2026-07-02); plugged /
                 // permitted / dry are one checkbox away.
+                { type: 'header', label: 'Pad recon (assets ↔ wells)' },
+                { id: 'rrc.matchFt', label: 'Asset ↔ well match distance', type: 'number', min: 50, max: 2000, step: 50, default: 300, unit: 'ft' },
+                { id: 'rrc-recon', label: '📋 Pad recon report', type: 'button', action: 'rrc-recon' },
                 { type: 'header', label: 'Well types (color legend)' },
                 { id: 'rrc.st.oil', label: '🟢 Producing oil', type: 'boolean', default: true },
                 { id: 'rrc.st.gas', label: '🟠 Gas', type: 'boolean', default: true },
@@ -1799,6 +1802,160 @@
         if (toggleState['rrc.operator'] === undefined) toggleState['rrc.operator'] = 'all';
         registerWithControlPanel();
     }
+    // ============================================================
+    // PAD RECON (v34.100) — reconcile the client-provided assets
+    // against the state's well records. Classifies every asset as a
+    // WELLHEAD pad (RRC well within matchFt) or FACILITY pad (no
+    // wellbore — battery/compressor/SAT, expected), lists wells with
+    // NO asset nearby (pads the client CSV missed, or neighbors), and
+    // rolls up operators near the site (prospecting list).
+    // ============================================================
+    const RRC_RECON_PANEL_ID = 'aim-rrc-recon-panel';
+    function rrcReconEsc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+    function rrcPulseAt(lat, lng) {
+        const map = getLeafletMap();
+        const L = _stylerL();
+        if (!map || !L) return;
+        let ring;
+        try { ring = L.circleMarker([lat, lng], { radius: 8, color: '#ffee33', weight: 4, fillOpacity: 0, interactive: false }); ring.addTo(map); }
+        catch (e) { return; }
+        let t = 0;
+        const iv = setInterval(() => {
+            t++;
+            const ph = t % 16;
+            try { ring.setRadius(8 + ph * 2.5); ring.setStyle({ opacity: Math.max(0, 1 - ph / 15) }); } catch (e) {}
+            if (t >= 64) { clearInterval(iv); try { map.removeLayer(ring); } catch (e) {} }
+        }, 50);
+    }
+    // Distance (m) from a well point to an asset polygon: 0 inside, else
+    // nearest ring vertex (pads are small — vertex spacing ≪ matchFt).
+    function rrcWellToAssetM(wLat, wLng, poly) {
+        try { if (pointInPolygon(wLat, wLng, poly.coords)) return 0; } catch (e) { console.warn(`${TAG} recon pointInPolygon threw:`, e); }
+        let best = Infinity;
+        poly.coords.forEach(c => {
+            const dLat = (wLat - c.lat) * 110540;
+            const dLng = (wLng - c.lng) * 111320 * Math.cos(wLat * Math.PI / 180);
+            const d = Math.sqrt(dLat * dLat + dLng * dLng);
+            if (d < best) best = d;
+        });
+        return best;
+    }
+    function closeRrcRecon() {
+        const el = document.getElementById(RRC_RECON_PANEL_ID);
+        if (el) el.remove();
+    }
+    function runRrcRecon() {
+        const sid = getCurrentSiteID();
+        if (!sid) { showKMLToast('No site loaded.', 3000); return; }
+        if (toggleState['rrc.show'] !== true) { showKMLToast('Turn ON the Oil & Gas (Texas RRC) overlay first, then run the recon.', 6000); return; }
+        if (!_rrcData || !_rrcData.results || !_rrcData.results.wells) { showKMLToast('RRC wells not loaded yet — give it a moment and run again.', 5000); return; }
+        if (assetStateData.siteID !== sid || (!assetStateData.polys.length && !assetStateData.failed)) {
+            fetchAssetStates(sid);
+            showKMLToast('Fetching site assets… run the recon again in a few seconds.', 5000);
+            return;
+        }
+        const rawMatch = Number(toggleState['rrc.matchFt']);
+        const matchFt = isNaN(rawMatch) ? 300 : rawMatch;
+        const matchM = matchFt / 3.28084;
+        const feats = (_rrcData.results.wells.features || []).filter(f => f.geometry && typeof f.geometry.y === 'number');
+        const wells = feats.map(f => {
+            const a = f.attributes || {};
+            const api = String(a.API || '').trim();
+            const info = _rrcWellInfo[api];
+            return {
+                api, lat: f.geometry.y, lng: f.geometry.x,
+                status: (a.GIS_SYMBOL_DESCRIPTION || '?').trim(),
+                wellNo: (a.GIS_WELL_NUMBER || '').trim(),
+                info: (info && info !== 'pending' && info !== 'none') ? info : null,
+                matchedAsset: null, distM: Infinity,
+            };
+        });
+        const assets = assetStateData.polys.map(pl => ({ pl, wells: [] }));
+        // Match every well to its nearest asset (within matchFt).
+        wells.forEach(w2 => {
+            let best = null, bestD = Infinity;
+            assets.forEach(as => {
+                const d = rrcWellToAssetM(w2.lat, w2.lng, as.pl);
+                if (d < bestD) { bestD = d; best = as; }
+            });
+            w2.distM = bestD;
+            if (best && bestD <= matchM) { w2.matchedAsset = best; best.wells.push(w2); }
+        });
+        const opsPending = wells.some(w2 => !w2.info) && _rrcOperators.length === 0;
+        const wellheadPads = assets.filter(as => as.wells.length);
+        const facilityPads = assets.filter(as => !as.wells.length);
+        const unmatched = wells.filter(w2 => !w2.matchedAsset).sort((x, y) => x.distM - y.distM);
+        const opCount = {};
+        wells.forEach(w2 => { if (w2.info && w2.info.operator) opCount[w2.info.operator] = (opCount[w2.info.operator] || 0) + 1; });
+        const ops = Object.keys(opCount).sort((a, b) => opCount[b] - opCount[a] || a.localeCompare(b));
+
+        const h = [];
+        const sect = (t2) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${t2}</div>`);
+        const row = (html, lat, lng) => h.push(`<div ${lat != null ? `data-recon-jump="${lat},${lng}"` : ''} style="margin:2px 0;line-height:1.45;${lat != null ? 'cursor:pointer;' : ''}" ${lat != null ? `onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''" title="Click to view on map"` : ''}>${html}</div>`);
+        const wellTag = (w2) => `API ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${rrcReconEsc(w2.status)}${w2.info ? ` · <strong>${rrcReconEsc(w2.info.operator)}</strong> · "${rrcReconEsc(w2.info.lease)}"` : ''}`;
+        h.push(`<div style="margin-bottom:4px;">${assets.length} assets · ${wells.length} RRC wells in the site area · match ≤ ${matchFt} ft${opsPending ? ' · <span style="color:#ffb020">operator lookups still running — re-run shortly for full names</span>' : ''}</div>`);
+        sect(`🏭 Facility pads — no wellbore (${facilityPads.length})`);
+        h.push('<div style="opacity:0.65;margin-bottom:3px;">Batteries / compressors / SATs — no RRC well on the pad is EXPECTED. If one of these should be a wellhead pad, the well location may be inaccurate (widen the match distance).</div>');
+        facilityPads.forEach(as => row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)}`, as.pl.cLat, as.pl.cLng));
+        sect(`🛢 Wellhead pads (${wellheadPads.length})`);
+        wellheadPads.forEach(as => {
+            row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)} · ${as.wells.length} well${as.wells.length === 1 ? '' : 's'}`, as.pl.cLat, as.pl.cLng);
+            as.wells.forEach(w2 => row(`<span style="opacity:0.85;margin-left:14px;">${wellTag(w2)}</span>`, w2.lat, w2.lng));
+        });
+        sect(`❓ Wells with NO asset within ${matchFt} ft (${unmatched.length})`);
+        h.push('<div style="opacity:0.65;margin-bottom:3px;">Pads the client CSV may have missed — or neighboring operators\u2019 wells. Sorted nearest-first.</div>');
+        unmatched.slice(0, 40).forEach(w2 => row(`${wellTag(w2)} · <span style="opacity:0.75">${isFinite(w2.distM) ? `${Math.round(w2.distM * 3.28084).toLocaleString()} ft from nearest asset` : 'no assets on site'}</span>`, w2.lat, w2.lng));
+        if (unmatched.length > 40) row(`…and ${unmatched.length - 40} more`);
+        sect(`🤝 Operators in the site area (${ops.length})`);
+        ops.forEach(op => row(`<strong>${rrcReconEsc(op)}</strong> — ${opCount[op]} well${opCount[op] === 1 ? '' : 's'}`));
+
+        closeRrcRecon();
+        const wrap = document.createElement('div');
+        wrap.id = RRC_RECON_PANEL_ID;
+        wrap.style.cssText = 'position:fixed;top:70px;right:56px;width:500px;max-height:74vh;z-index:2147483000;'
+            + 'background:rgba(16,22,32,0.96);border:1px solid rgba(122,223,230,0.45);border-radius:10px;'
+            + 'color:#dfe9f0;font:12px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;box-shadow:0 8px 30px rgba(0,0,0,0.55);display:flex;flex-direction:column;';
+        wrap.innerHTML = `
+            <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid rgba(122,223,230,0.25);">
+                <span style="color:#7adfe6;font-weight:700;">📋 Pad Recon</span>
+                <span style="opacity:0.7;">site ${rrcReconEsc(sid)}</span>
+                <span style="flex:1"></span>
+                <button data-recon-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
+                <button data-recon-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:8px 12px;overflow-y:auto;">${h.join('')}</div>`;
+        wrap.addEventListener('click', (e) => {
+            if (e.target.closest('[data-recon-close]')) { closeRrcRecon(); return; }
+            if (e.target.closest('[data-recon-copy]')) {
+                const out = [`PAD RECON — site ${sid} (match ≤ ${matchFt} ft)`];
+                out.push(`Facility pads (no wellbore): ${facilityPads.length}`);
+                facilityPads.forEach(as => out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`));
+                out.push(`Wellhead pads: ${wellheadPads.length}`);
+                wellheadPads.forEach(as => {
+                    out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`);
+                    as.wells.forEach(w2 => out.push(`      ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''}`));
+                });
+                out.push(`Wells with no asset within ${matchFt} ft: ${unmatched.length}`);
+                unmatched.forEach(w2 => out.push(`  - ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''} · ${isFinite(w2.distM) ? Math.round(w2.distM * 3.28084) + ' ft from nearest asset' : ''}`));
+                out.push(`Operators in area: ${ops.map(op => `${op} (${opCount[op]})`).join(', ') || 'unknown (lookups pending)'}`);
+                navigator.clipboard.writeText(out.join('\n')).then(
+                    () => showKMLToast('Recon report copied.', 3000),
+                    () => showKMLToast('Copy failed.', 3000));
+                return;
+            }
+            const j = e.target.closest('[data-recon-jump]');
+            if (j) {
+                const [jlat, jlng] = j.getAttribute('data-recon-jump').split(',').map(Number);
+                const map = getLeafletMap();
+                if (map && isFinite(jlat)) {
+                    try { map.setView([jlat, jlng], Math.max(17, map.getZoom())); } catch (err) {}
+                    rrcPulseAt(jlat, jlng);
+                }
+            }
+        });
+        document.body.appendChild(wrap);
+        console.log(`${TAG} pad recon: ${assets.length} assets, ${wells.length} wells → ${wellheadPads.length} wellhead / ${facilityPads.length} facility / ${unmatched.length} unmatched wells / ${ops.length} operators`);
+    }
     function removeRrcLayers() {
         _rrcDrawKey = '';
         if (!_rrcLayers.length) return;
@@ -2402,8 +2559,10 @@
                     equipByName.set(eq.name, eq.slug);
                     equipCount[eq.name] = (equipCount[eq.name] || 0) + 1;
                     polys.push({
+                        name: e.name || (e.id != null ? `#${e.id}` : '?'),
                         state: classifyAssetState(e),
                         equip: eq.slug,
+                        equipName: eq.name,
                         coords: pts,
                         cLat: sLat / pts.length,
                         cLng: sLng / pts.length,
@@ -7156,6 +7315,7 @@
                 else if (msg.actionId === 'add-new-distro') enterDrawMode('distro');
                 else if (msg.actionId === 'add-new-trans') enterDrawMode('trans');
                 else if (msg.actionId === 'seed-hifld-trans') seedTransLinesFromHIFLD();
+                else if (msg.actionId === 'rrc-recon') runRrcRecon();
                 else if (msg.actionId === 'refresh-asset-data') {
                     const sid = getCurrentSiteID();
                     if (sid) { console.log(`${TAG} asset-state: manual refresh requested`); fetchAssetStates(sid, true); }

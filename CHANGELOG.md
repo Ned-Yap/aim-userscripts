@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — 📋 Pad Recon report — Map Styler v34.100 (dev/latest)
+
+New **📋 Pad recon report** button in the Oil & Gas card: reconciles the client-provided assets against the state's well records. Every asset classifies as a **🛢 Wellhead pad** (RRC well within 300 ft — editable — with API, status, operator, lease per well) or a **🏭 Facility pad** (no wellbore — expected for batteries/compressors/SATs). Then the flip side: **❓ wells with NO asset nearby** — pads the client CSV missed, or neighboring operators' wells — sorted nearest-first. Ends with an **🤝 operator rollup** of everyone operating in the site area (prospecting list). Every row click-jumps the map with a pulse; **Copy report** produces the plain-text version. Run it after the wells overlay loads (operator names fill in as the background lookups finish).
+
+---
+
 ## 2026-07-02 — Pipelines clipped to the site area — Map Styler v34.99 (dev/latest)
 
 Pipelines could draw tens of miles past the site: the server returns any line that *touches* the fetch area with its **entire geometry** (one was drawn 100k ft out). Pipeline paths are now clipped to the site fetch area (+ ~700 ft visual margin) before drawing — wells were never affected (points can't leak).
