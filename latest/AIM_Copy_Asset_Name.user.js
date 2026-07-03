@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.160
+// @version      4.161
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.160';
+    const SCRIPT_VERSION = '4.161';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -147,6 +147,8 @@
         stadiumNm: 3,         // stadium TFR radius (14 CFR 99.7: 3 NM, SFC–3000 AGL during events)
         // Display/noise filters + special standoffs (2026-07-02 user spec):
         windmillFt: 500,      // windmill/turbine violation standoff (tighter than obstacleFt)
+        tlTowerFt: 100,       // T-L tower standoff from FLIGHT geometry (user 2026-07-03)
+        tlClearFt: 50,        // vertical fly-over clearance — T-L tower doesn't flag when the segment floor clears its top by this
         obstacleShowNm: 1.5,  // hide non-T-L obstacles beyond this (panel + dots)
         translineShowFt: 1000,// hide HIFLD lines AND T-L tower dots beyond this
         tfrShowNm: 3,         // TFRs beyond this are ignored entirely
@@ -2289,16 +2291,18 @@
             if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) {
                 e.arcs.forEach((a, i) => {
                     if (a && a.point_a && a.point_b && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number') {
-                        segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15 });
+                        segs.push({ aLat: a.point_a.lat, aLng: a.point_a.lng, bLat: a.point_b.lat, bLng: a.point_b.lng, src: `FP "${nm}" seg #${i + 1}`, t: 15,
+                            floorM: (typeof a.min_alt === 'number') ? a.min_alt : null });
                     }
                 });
             } else if (e.type === 3 || e.type === 16) {
                 const cs = (entityCoords(e) || []).filter(c => c && typeof c.lat === 'number');
                 const src = `${typeReg(e.type).short} "${nm}"`;
+                const floorM = (e.type === 16 && e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null;
                 for (let i = 0; i < cs.length; i++) {
                     const a = cs[i], b = cs[(i + 1) % cs.length];
                     if (cs.length >= 2 && (i < cs.length - 1 || cs.length >= 3)) {
-                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type });
+                        segs.push({ aLat: a.lat, aLng: a.lng, bLat: b.lat, bLng: b.lng, src, t: e.type, floorM });
                     }
                 }
             }
@@ -2312,7 +2316,7 @@
         let best = Infinity, bestPt = null;
         for (const sg of segs) {
             const c = airClosestOnSeg(lat, lng, [sg.aLat, sg.aLng], [sg.bLat, sg.bLng]);
-            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src }; }
+            if (c.d < best) { best = c.d; bestPt = { lat: c.lat, lng: c.lng, src: sg.src, floorM: (typeof sg.floorM === 'number') ? sg.floorM : null }; }
         }
         for (const p of pts) {
             const d = approxMeters(lat, lng, p.lat, p.lng);
@@ -2658,19 +2662,28 @@
                 // Windmills get their own (tighter) standoff per SOP — and
                 // their distance is to the FLIGHT geometry (FFZ/FP), since a
                 // turbine near a non-flyable asset polygon is no hazard.
+                // Windmills AND T-L towers only matter where we FLY —
+                // measured vs flight segments (user 2026-07-03).
                 let wNear = near;
-                if (isWindmill && couldHit) {
+                if ((isWindmill || isTL) && couldHit) {
                     wNear = flightSegs.length ? airMinToSiteGeom(oLat, oLng, flightSegs, []) : { d: Infinity, pt: null };
                 }
-                const useNear = isWindmill ? wNear : near;
-                const useDistFt = isWindmill ? Math.round(useNear.d * M_TO_FT) : distFt;
-                const vioFt = isWindmill ? th.windmillFt : th.obstacleFt;
+                const useNear = (isWindmill || isTL) ? wNear : near;
+                const useDistFt = (isWindmill || isTL) ? Math.round(useNear.d * M_TO_FT) : distFt;
+                const vioFt = isWindmill ? th.windmillFt : isTL ? th.tlTowerFt : th.obstacleFt;
+                // Fly-over clearance: a T-L tower doesn't flag when the
+                // nearest segment's FLOOR (MSL) clears the tower's TOP
+                // (DOF AMSL) by tlClearFt — we're comfortably above it.
+                let tlCleared = false;
+                if (isTL && useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number') {
+                    tlCleared = useNear.pt.floorM * M_TO_FT >= a.AMSL + th.tlClearFt;
+                }
                 const entry = { type, agl, lit, distFt: isFinite(useDistFt) ? useDistFt : distFt, distMi: (isFinite(useNear.d) ? useNear.d : near.d) / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (useNear.pt && useNear.pt.src) || (near.pt && near.pt.src) || null, hit: false, show: false };
-                const vioDistFt = isWindmill ? useDistFt : distFt;
-                if (couldHit && isFinite(vioDistFt) && vioDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
+                const vioDistFt = (isWindmill || isTL) ? useDistFt : distFt;
+                if (couldHit && !tlCleared && isFinite(vioDistFt) && vioDistFt < vioFt && agl != null && agl >= th.obstacleMinAglFt) {
                     entry.hit = true;
-                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${vioDistFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${vioDistFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${vioFt} ft)`;
-                    if (isWindmill && useNear.pt) {
+                    const note = `violation: FAA ${isWindmill ? 'WINDMILL/turbine' : `obstacle ${type}`} (${agl} ft AGL${lit && lit !== 'N' ? ', lit' : ', unlit'}) is ${vioDistFt < 100 ? `effectively ON ${entry.src || 'the site'} (< 100 ft — DOF coords are only accurate to tens of ft)` : `${vioDistFt.toLocaleString()} ft from ${entry.src || 'the nearest site entity'}`} (threshold ${vioFt} ft)${isTL && useNear.pt && typeof useNear.pt.floorM === 'number' && typeof a.AMSL === 'number' ? ` — segment floor ${Math.round(useNear.pt.floorM * M_TO_FT).toLocaleString()} ft MSL vs tower top ${a.AMSL.toLocaleString()} ft MSL` : ''}`;
+                    if ((isWindmill || isTL) && useNear.pt) {
                         // Corridor spans the turbine AND the violated FFZ/FP point.
                         violations.push({ shape: 'polygon', polygon: airWrapBox(oLat, oLng, useNear.pt.lat, useNear.pt.lng, 15), note, severity: 'high' });
                     } else {
@@ -4532,6 +4545,8 @@
                 { id: 'obstacleFt', label: 'Obstacle proximity', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.obstacleFt, unit: 'ft' },
                 { id: 'obstacleMinAglFt', label: 'Ignore obstacles shorter than', type: 'number', min: 0, max: 500, step: 10, default: AIR_THRESH_DEFAULTS.obstacleMinAglFt, unit: 'ft' },
                 { id: 'windmillFt', label: 'Windmill / turbine standoff', type: 'number', min: 0, max: 5000, step: 50, default: AIR_THRESH_DEFAULTS.windmillFt, unit: 'ft' },
+                { id: 'tlTowerFt', label: 'T-L tower standoff (from FFZ/FP)', type: 'number', min: 0, max: 2000, step: 25, default: AIR_THRESH_DEFAULTS.tlTowerFt, unit: 'ft' },
+                { id: 'tlClearFt', label: 'T-L fly-over clearance (floor above tower top)', type: 'number', min: 0, max: 300, step: 10, default: AIR_THRESH_DEFAULTS.tlClearFt, unit: 'ft' },
                 { id: 'obstacleShowNm', label: 'Show obstacles within', type: 'number', min: 0.25, max: 10, step: 0.25, default: AIR_THRESH_DEFAULTS.obstacleShowNm, unit: 'NM' },
                 { id: 'translineShowFt', label: 'Show transmission lines / T-L towers within', type: 'number', min: 100, max: 26400, step: 100, default: AIR_THRESH_DEFAULTS.translineShowFt, unit: 'ft' },
                 { id: 'laanc', label: 'Check · LAANC grid ceiling over site', type: 'boolean', default: AIR_ENABLE_DEFAULTS.laanc },
