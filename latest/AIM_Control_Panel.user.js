@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.33
+// @version      1.34
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -1699,6 +1699,7 @@
             // Site Setup — entity inspection, validation, creation.
             'aim-copy-asset': 'Site Setup',
             'aim-sop-validators': 'Site Setup',
+            'aim-airspace-checker': 'Airspace Validator',
             'aim-new-entity-macro': 'Site Setup',
             'aim-site-setup-generator': 'Site Setup',
             // Map Tools — quick one-shot map utilities.
@@ -1761,6 +1762,7 @@
             'group:Map Display': 10,
             'group:Power Lines': 20,
             'group:Site Setup': 30,
+            'group:Airspace Validator': 35,
             'group:Map Tools': 40,
             'group:Missions': 50,
             'group:Issues': 60,

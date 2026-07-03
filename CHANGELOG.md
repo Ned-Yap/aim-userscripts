@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — "Airspace Validator" section + tighter tower standoff — Asset Inspector v4.163, Control Panel v1.34 (dev/latest)
+
+The airspace card is now **"Airspace Validator"** in its own panel section of the same name (sits right under Site Setup). And the general-obstacle standoff default drops **2,640 → 500 ft** — the half-mile default made every mid-distance tower flag; 500 ft matches the windmill standoff and the team's actual comfort zone (a stored 2,640 auto-migrates once; still editable).
+
+---
+
 ## 2026-07-03 — All obstacles: flight geometry + fly-over clearance — Asset Inspector v4.162 (dev/latest)
 
 The T-L rule generalized to **every obstacle type**: all obstacles now measure against **FFZs/flight paths only** (never assets/base/safe), and all get the **fly-over clearance exemption** — an obstacle whose top the segment floor clears by 50 ft goes quiet; anything taller than the band can't be cleared and flags on proximity alone. Per-type standoffs: windmills 500 ft, T-L towers 100 ft, everything else 2,640 ft (all editable). Every violation note shows the altitude math. The old vertical-buffer backlog item is now fully shipped for obstacles.

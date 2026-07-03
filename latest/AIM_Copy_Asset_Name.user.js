@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.162
+// @version      4.163
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.162';
+    const SCRIPT_VERSION = '4.163';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -140,7 +140,7 @@
     const MI_TO_M = 1609.344;
     const AIR_THRESH_DEFAULTS = {
         stripNm: 3,           // manned strip / helipad standoff (nautical miles)
-        obstacleFt: 2640,     // obstacle proximity to any site entity (ft; 0.5 mi)
+        obstacleFt: 500,      // obstacle proximity to flight geometry (was 2640 — user field-tuned 2026-07-03)
         obstacleMinAglFt: 50, // ignore obstacles shorter than this
         maxOpAglFt: 210,      // our max operating AGL — LAANC ceilings below this flag
         inventoryMi: 15,      // inventory radius for airports/airspace listing
@@ -184,6 +184,10 @@
         catch (e) { console.warn(`${TAG} saveAirEnabled threw:`, e); }
     }
     let airThresholds = loadAirThresholds();
+    // Migration (v4.163): the general-obstacle standoff default dropped
+    // 2640 → 500 ft. A stored 2640 is almost certainly the OLD DEFAULT
+    // rather than a deliberate choice — update it once.
+    if (airThresholds.obstacleFt === 2640) { airThresholds.obstacleFt = 500; saveAirThresholds(); }
     let airEnabled = loadAirEnabled();
 
     // ============================================================
@@ -4533,9 +4537,9 @@
         // Validators group. External-world checks (FAA data) vs the SOP
         // card's internal-geometry checks.
         controlChannel.postMessage({
-            type: 'REGISTER', scriptId: AIRSPACE_SCRIPT_ID, name: 'Airspace Checker',
+            type: 'REGISTER', scriptId: AIRSPACE_SCRIPT_ID, name: 'Airspace Validator',
             description: 'Checks the site against FAA data: controlled airspace, manned strips/helipads within the standoff, obstacles (towers/turbines), and LAANC grid ceilings. Violations are drawn as Validator issues; the full inventory opens in a panel.',
-            version: SCRIPT_VERSION, group: 'SOP Validators', scope: 'site-setup', priority: 20,
+            version: SCRIPT_VERSION, group: 'Airspace Validator', scope: 'site-setup', priority: 20,
             toggles: [
                 { id: 'air-master', label: 'Enable Airspace Checker', type: 'boolean', default: true, master: true },
                 { id: 'inventoryMi', label: 'Inventory radius', type: 'number', min: 5, max: 50, step: 1, default: AIR_THRESH_DEFAULTS.inventoryMi, unit: 'mi' },
