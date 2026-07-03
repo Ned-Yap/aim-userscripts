@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Site Diff Phase 2: swipe + significant-change diff + JSON-backup shadows — Site Diff v0.20, Asset Inspector v4.165 (dev/latest)
+
+**Compare mode is here.** New "Compare" section in the Site Diff card: a **swipe divider** (drag the ⇔ handle — shadow shows right of it), and **⚖ Run significant-change diff** — builds the old approved envelope from the shadow (Live site's FFZs + FPs buffered by the threshold, default 30 ft) and highlights every stretch of the open site's FPs/FFZ-perimeters that leaves it. A new FP routed through a removed FFZ corridor stays quiet (already regs-reviewed); genuinely new routes light up red. Results panel: click a row to zoom, 📋 Copy report, and **🚩 Send to Issues** — stretches land as ephemeral Validator issues for regs review (Asset Inspector v4.165 adds the Site Diff feed to the validator-issue union). Also new: **shadow from a JSON backup** — the picker's 📂 button loads a saved /map_objects export as the shadow instead of a live site ID (persists per-site across reloads).
+
+---
+
 ## 2026-07-03 — NEW SCRIPT: AIM Site Diff v0.10 (dev/latest only)
 
 Phase 1 of the site-comparison suite: overlay another site's Site Setup on the current map as a **ghost layer**. Pick a shadow site (🗺 button in the new "Site Diff" Control Panel card, or click the ◈ badge bottom-left) and its FFZs/FPs/NFZs/assets/markers draw dashed in warm shadow colors on top of the live site — per-type show/color/opacity, line weight, marker size all editable. Built for the offline-copy workflow: duplicate a site, rebuild it, then shadow the staging copy over the live one to see what moved. View-only and cheap (non-interactive vectors, one fetch). Phase 2 adds swipe compare + significant-change highlighting into AIM Issues; Phase 3 the API cutover.

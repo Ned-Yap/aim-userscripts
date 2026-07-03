@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164
+// @version      4.165
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164';
+    const SCRIPT_VERSION = '4.165';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2099,6 +2099,7 @@
     let sopLastIssues = [], sopIssuesSite = null;
     let airLastIssues = [], airIssuesSite = null;
     let tfrLastIssues = [], tfrIssuesSite = null;   // live TFRs — replaced by the auto-sweep independently
+    let diffLastIssues = [], diffIssuesSite = null; // AIM Site Diff — fed over AIM_SITEDIFF_ISSUES (4th union member)
     function postValidatorIssues(sid) {
         const ch = ensureValidatorChannel();
         if (!ch) return false;
@@ -2107,11 +2108,39 @@
         if (sopIssuesSite !== sid) { sopLastIssues = []; sopIssuesSite = sid; }
         if (airIssuesSite !== sid) { airLastIssues = []; airIssuesSite = sid; }
         if (tfrIssuesSite !== sid) { tfrLastIssues = []; tfrIssuesSite = sid; }
-        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues);
+        if (diffIssuesSite !== sid) { diffLastIssues = []; diffIssuesSite = sid; }
+        const all = sopLastIssues.concat(airLastIssues, tfrLastIssues, diffLastIssues);
         if (all.length) ch.postMessage({ type: 'VALIDATOR_ISSUES', siteID: sid, issues: all });
         else ch.postMessage({ type: 'CLEAR_VALIDATOR_ISSUES', siteID: sid });
         return true;
     }
+
+    // ---- AIM Site Diff → validator-issue union bridge ----
+    // Site Diff can't post VALIDATOR_ISSUES itself: AIM Issues replaces ALL
+    // validator issues per message, so an independent sender would clobber the
+    // SOP/Airspace/TFR batches. It posts here instead and we re-post the union.
+    // IFRAME-gated — both AI contexts hear the broadcast; one union post is enough.
+    (function setupSiteDiffIssueBridge() {
+        if (CONTEXT !== 'IFRAME') return;
+        let ch = null;
+        try { ch = new BroadcastChannel('AIM_SITEDIFF_ISSUES'); }
+        catch (e) { console.warn(`${TAG} sitediff bridge channel unavailable:`, e); return; }
+        ch.onmessage = (ev) => {
+            const m = ev.data || {};
+            const sid = getCurrentSiteID();
+            if (!sid || (m.siteID != null && String(m.siteID) !== String(sid))) return;
+            if (m.type === 'DIFF_ISSUES') {
+                diffIssuesSite = sid;
+                diffLastIssues = Array.isArray(m.issues) ? m.issues : [];
+                console.log(`${TAG} Site Diff issues received: ${diffLastIssues.length} — posting union`);
+                postValidatorIssues(sid);
+            } else if (m.type === 'CLEAR_DIFF_ISSUES') {
+                diffIssuesSite = sid;
+                diffLastIssues = [];
+                postValidatorIssues(sid);
+            }
+        };
+    })();
 
     function drawSopIssues() {
         const sid = getCurrentSiteID();

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.10
+// @version      0.20
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
-// @description  Shadow-site overlay: render another site's Site Setup on the current map as a ghost layer (per-type show/color/opacity) for old vs new comparison. Phase 1 of the Site Diff suite (Phase 2: swipe + significant-change diff, Phase 3: API migration).
+// @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, and significant-change diff — stretches of this site's FPs/FFZs outside the shadow site's approved envelope (old FFZs + FPs buffered by a threshold) are highlighted and can be sent to AIM Issues for regs review. Phase 3 (API migration) later.
 // @author       Payden
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -14,10 +14,18 @@
 // @run-at       document-end
 // ==/UserScript==
 
-// AIM Site Diff — overlays a second site's Site Setup ("shadow site") on the
-// current map so an offline/staging copy can be compared against the live
-// site. Phase 1 is view-only: pick a shadow site, its entities draw as a
-// dashed ghost layer with per-type show/color/opacity controls.
+// AIM Site Diff — compares two sites' Site Setups. Workflow terms: the
+// LIVE site is the original (running ops); the OFFLINE site is the rebuilt
+// copy from "Duplicate Site with Site Setup". You work ON the Offline site
+// and shadow the Live site.
+//   Phase 1 — ghost overlay: shadow site's entities draw dashed with
+//     per-type show/color/opacity controls.
+//   Phase 2 — compare: swipe divider (shadow shows right of the handle) +
+//     significant-change diff. Envelope = shadow FFZ polygons + FP segments
+//     buffered by the threshold (default 30 ft); stretches of THIS site's
+//     FPs (and optionally FFZ perimeters) outside the envelope are
+//     highlighted and can be sent to AIM Issues (needs Asset Inspector
+//     v4.165+ which unions them into the validator-issue channel).
 // No hotkeys. Log tag: [AIM DIFF]
 
 (function () {
@@ -31,15 +39,18 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.10';
+    const SCRIPT_VERSION = '0.20';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
+    const HL_PANE_NAME = 'aim-site-diff-hl';
     const SITE_ID_RE = /#\/site\/(\d+)\//;
 
     const KEY_MASTER = 'aim-sd-master';
     const KEY_STYLE = 'aim-sd-style';
     const KEY_PAIRS = 'aim-sd-pairs';
     const KEY_SITES_CACHE = 'aim-sd-sites-cache';
+    const KEY_DIFF = 'aim-sd-diff';
+    const KEY_FILE_PREFIX = 'aim-sd-file-';   // + siteID → stored JSON-backup shadow
 
     console.log(`${TAG} v${SCRIPT_VERSION} loading`);
 
@@ -122,13 +133,52 @@
         catch (e) { console.warn(`${TAG} savePairs:`, e); }
     }
 
+    function defaultDiffCfg() {
+        return { thresholdFt: 30, includeFfz: true, color: '#ff2d2d', swipe: false };
+    }
+    function loadDiffCfg() {
+        const d = defaultDiffCfg();
+        try {
+            const raw = gmGet(KEY_DIFF, null);
+            if (raw) {
+                const stored = JSON.parse(raw);
+                if (typeof stored.thresholdFt === 'number') d.thresholdFt = stored.thresholdFt;
+                if (typeof stored.includeFfz === 'boolean') d.includeFfz = stored.includeFfz;
+                if (typeof stored.color === 'string') d.color = stored.color;
+                if (typeof stored.swipe === 'boolean') d.swipe = stored.swipe;
+            }
+        } catch (e) { console.warn(`${TAG} loadDiffCfg:`, e); }
+        return d;
+    }
+    function saveDiffCfg() {
+        try { gmSet(KEY_DIFF, JSON.stringify(diffCfg)); }
+        catch (e) { console.warn(`${TAG} saveDiffCfg:`, e); }
+    }
+
     let masterEnabled = gmGet(KEY_MASTER, false) === true;
     let style = loadStyle();
-    let pairs = loadPairs();               // { currentSiteId: shadowSiteId }
-    const shadowCache = {};                // { siteId: { entities, fetchedAt } }
+    let diffCfg = loadDiffCfg();
+    let pairs = loadPairs();               // { siteId: '<shadowSiteId>' | {kind:'file', name} }
+    const shadowCache = {};                // { cacheKey: { entities, fetchedAt } }
     let sitesList = null;                  // [{id, name}]
     let siteID = null;
     let controlChannel = null;
+
+    // Shadow source model: a pairs[] value is either a site-id string
+    // (v0.10 format, kept as-is) or {kind:'file', name} for an uploaded
+    // /map_objects JSON backup (stored per-site in GM, survives reloads).
+    function shadowSourceFor(sid) {
+        const v = sid ? pairs[sid] : null;
+        if (!v) return null;
+        if (typeof v === 'string') return { kind: 'site', id: v };
+        if (v && v.kind === 'file') return v;
+        return null;
+    }
+    function shadowSourceLabel(src) {
+        if (!src) return '';
+        if (src.kind === 'site') return siteLabel(src.id);
+        return `file "${src.name}"`;
+    }
 
     // ------------------------------------------------------------------
     // Leaflet access (patterns from AIM Issues — see that script for the
@@ -219,6 +269,11 @@
             // clearly, below the markerPane icons (600) so native markers
             // stay visible. Never interactive.
             if (pane) { pane.style.zIndex = 550; pane.style.pointerEvents = 'none'; }
+            // Diff highlights get their own pane: NOT swipe-clipped (they
+            // mark THIS site's geometry, not the shadow's) and above markers
+            // so a flagged stretch is never buried.
+            const hl = map.createPane(HL_PANE_NAME);
+            if (hl) { hl.style.zIndex = 620; hl.style.pointerEvents = 'none'; }
             map._aim_sd_pane_created = true;
         } catch (e) {
             console.warn(`${TAG} ensurePane failed:`, e);
@@ -263,6 +318,60 @@
             console.warn(`${TAG} shadow fetch failed for site ${shadowId}:`, e);
             return null;
         }
+    }
+
+    function validateBackupEntities(data) {
+        // A /map_objects backup is a bare array of entity objects. Accept a
+        // wrapped array too (some exports nest it), then sanity-check shape.
+        let list = data;
+        if (!Array.isArray(list) && data && typeof data === 'object') {
+            for (const k of ['entities', 'results', 'objects', 'data', 'map_objects']) {
+                if (Array.isArray(data[k])) { list = data[k]; break; }
+            }
+        }
+        if (!Array.isArray(list) || !list.length) return { error: 'not an entity array' };
+        const plausible = list.filter(e => e && typeof e === 'object'
+            && typeof e.type === 'number'
+            && (entityCoords(e) || (Array.isArray(e.arcs) && e.arcs.length)));
+        if (!plausible.length) return { error: 'no entities with geometry (type + coords/points/arcs)' };
+        return { entities: list, drawable: plausible.length };
+    }
+
+    function fileCacheKey(sid) { return `file:${sid}`; }
+
+    function storeShadowFile(sid, name, entities) {
+        shadowCache[fileCacheKey(sid)] = { entities, fetchedAt: Date.now() };
+        try {
+            gmSet(KEY_FILE_PREFIX + sid, JSON.stringify({ name, savedAt: Date.now(), entities }));
+        } catch (e) {
+            // A very large backup may exceed storage limits — overlay still
+            // works this session from memory, it just won't survive a reload.
+            console.warn(`${TAG} could not persist backup file (session-only):`, e);
+        }
+    }
+
+    function loadShadowFileEntities(sid) {
+        const cached = shadowCache[fileCacheKey(sid)];
+        if (cached) return cached.entities;
+        try {
+            const raw = gmGet(KEY_FILE_PREFIX + sid, null);
+            if (raw) {
+                const stored = JSON.parse(raw);
+                if (stored && Array.isArray(stored.entities)) {
+                    shadowCache[fileCacheKey(sid)] = { entities: stored.entities, fetchedAt: stored.savedAt || Date.now() };
+                    return stored.entities;
+                }
+            }
+        } catch (e) { console.warn(`${TAG} loadShadowFileEntities:`, e); }
+        return null;
+    }
+
+    async function getShadowEntities(sid, src, force) {
+        if (!src) return null;
+        if (src.kind === 'site') return fetchShadowEntities(src.id, force);
+        const ents = loadShadowFileEntities(sid);
+        if (!ents) console.warn(`${TAG} shadow file "${src.name}" not found in storage — re-upload it via the picker`);
+        return ents;
     }
 
     function extractList(parsed) {
@@ -378,13 +487,13 @@
         }))];
     }
 
-    function drawAttempt(entities, shadowId, attempt, seq) {
+    function drawAttempt(entities, shadowLabel, attempt, seq) {
         if (seq !== renderSeq) return;
         const map = getLeafletMap();
         const L = getL();
         if (!map || !L) {
             if (attempt < 60) {
-                setTimeout(() => drawAttempt(entities, shadowId, attempt + 1, seq), 500);
+                setTimeout(() => drawAttempt(entities, shadowLabel, attempt + 1, seq), 500);
             } else if (document.querySelector('.leaflet-container')) {
                 console.warn(`${TAG} draw gave up — Leaflet map never appeared after ${attempt} tries`);
             }
@@ -410,20 +519,22 @@
                 console.warn(`${TAG} draw failed for entity ${e && e.id}:`, err);
             }
         });
-        console.log(`${TAG} shadow of site ${shadowId}: drew ${drawn} entities (${skipped} hidden/skipped)`);
+        console.log(`${TAG} shadow of ${shadowLabel}: drew ${drawn} entities (${skipped} hidden/skipped)`);
         updateBadge();
+        applySwipeClip();
     }
 
     function renderShadow(force) {
         const seq = ++renderSeq;
         clearShadowLayers();
         updateBadge();
+        applySwipeClip();
         if (!masterEnabled || !siteID) return;
-        const shadowId = pairs[siteID];
-        if (!shadowId) return;
-        fetchShadowEntities(shadowId, force).then(entities => {
+        const src = shadowSourceFor(siteID);
+        if (!src) return;
+        getShadowEntities(siteID, src, force).then(entities => {
             if (seq !== renderSeq || !entities) return;
-            drawAttempt(entities, shadowId, 0, seq);
+            drawAttempt(entities, shadowSourceLabel(src), 0, seq);
         });
     }
 
@@ -438,8 +549,8 @@
     // ------------------------------------------------------------------
     function updateBadge() {
         let b = document.getElementById('aim-sd-badge');
-        const shadowId = (masterEnabled && siteID) ? pairs[siteID] : null;
-        if (!shadowId || !document.querySelector('.leaflet-container')) {
+        const src = (masterEnabled && siteID) ? shadowSourceFor(siteID) : null;
+        if (!src || !document.querySelector('.leaflet-container')) {
             if (b) b.style.display = 'none';
             return;
         }
@@ -457,9 +568,9 @@
             });
             document.body.appendChild(b);
         }
-        const cached = shadowCache[shadowId];
+        const cached = shadowCache[src.kind === 'site' ? src.id : fileCacheKey(siteID)];
         const count = cached ? ` · ${cached.entities.length}` : '';
-        b.textContent = `◈ Shadow: ${siteLabel(shadowId)}${count}`;
+        b.textContent = `◈ Shadow: ${shadowSourceLabel(src)}${count}`;
         b.style.display = 'block';
     }
 
@@ -469,11 +580,12 @@
     let pickerEl = null;
 
     function pickerStatusHtml() {
-        const shadowId = siteID ? pairs[siteID] : null;
-        if (!shadowId) return '<span style="color:#888">No shadow site selected for this site.</span>';
-        const cached = shadowCache[shadowId];
+        const src = siteID ? shadowSourceFor(siteID) : null;
+        if (!src) return '<span style="color:#888">No shadow selected for this site. Pick the Live (original) site below, or load a JSON backup.</span>';
+        const cached = shadowCache[src.kind === 'site' ? src.id : fileCacheKey(siteID)];
         const count = cached ? ` — ${cached.entities.length} entities` : '';
-        return `Shadowing <span style="color:#ffa030">${escapeHtml(siteLabel(shadowId))}</span> <span style="color:#666">#${shadowId}</span>${count}`;
+        const idBit = src.kind === 'site' ? ` <span style="color:#666">#${src.id}</span>` : '';
+        return `Shadowing <span style="color:#ffa030">${escapeHtml(shadowSourceLabel(src))}</span>${idBit}${count}`;
     }
 
     function escapeHtml(s) {
@@ -494,7 +606,8 @@
                 .filter(s => !f || s.name.toLowerCase().includes(f) || s.id.includes(f))
                 .slice(0, 200)
                 .forEach(s => {
-                    const active = pairs[siteID] === s.id;
+                    const cur = shadowSourceFor(siteID);
+                    const active = !!(cur && cur.kind === 'site' && cur.id === s.id);
                     rows.push(`<div class="aim-sd-row" data-sid="${s.id}" style="${active ? 'color:#ffa030;' : ''}">`
                         + `${escapeHtml(s.name)} <span style="color:#666">#${s.id}</span>${active ? ' ◈' : ''}</div>`);
                 });
@@ -518,10 +631,12 @@
                 + '<div style="padding:6px 10px;"><input id="aim-sd-search" type="text" placeholder="Search sites or type a site ID…" '
                 + 'style="width:100%;box-sizing:border-box;background:#0e1218;color:#ddd;border:1px solid #2a3140;border-radius:3px;padding:4px 6px;font:inherit;outline:none;"></div>'
                 + '<div id="aim-sd-list" style="max-height:280px;overflow-y:auto;padding:0 4px 4px;"></div>'
-                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:8px;">'
-                + '<span id="aim-sd-clear" style="cursor:pointer;color:#ff5252">Clear shadow</span>'
+                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:10px;flex-wrap:wrap;">'
+                + '<span id="aim-sd-file" style="cursor:pointer;color:#ffa030">📂 JSON backup…</span>'
                 + '<span id="aim-sd-refresh" style="cursor:pointer;color:#7adfe6">⟳ Refresh data</span>'
-                + '</div>';
+                + '<span id="aim-sd-clear" style="cursor:pointer;color:#ff5252">Clear shadow</span>'
+                + '</div>'
+                + '<input id="aim-sd-file-input" type="file" accept=".json,application/json" style="display:none">';
             document.body.appendChild(pickerEl);
 
             const style2 = document.createElement('style');
@@ -534,12 +649,52 @@
             pickerEl.querySelector('#aim-sd-clear').addEventListener('click', () => {
                 if (siteID && pairs[siteID]) {
                     console.log(`${TAG} cleared shadow pairing for site ${siteID}`);
+                    const src = shadowSourceFor(siteID);
+                    if (src && src.kind === 'file') {
+                        delete shadowCache[fileCacheKey(siteID)];
+                        gmSet(KEY_FILE_PREFIX + siteID, '');   // drop the stored backup too
+                    }
                     delete pairs[siteID];
                     savePairs();
                     renderShadow(false);
                     refreshPickerStatus();
                     renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
                 }
+            });
+            pickerEl.querySelector('#aim-sd-file').addEventListener('click', () => {
+                pickerEl.querySelector('#aim-sd-file-input').click();
+            });
+            pickerEl.querySelector('#aim-sd-file-input').addEventListener('change', (ev) => {
+                const f = ev.target.files && ev.target.files[0];
+                ev.target.value = '';   // allow re-uploading the same filename later
+                if (!f) return;
+                if (!siteID) { setPickerNote('Open a site first, then load the backup.', true); return; }
+                const reader = new FileReader();
+                reader.onload = () => {
+                    try {
+                        const parsed = JSON.parse(String(reader.result));
+                        const v = validateBackupEntities(parsed);
+                        if (v.error) {
+                            setPickerNote(`"${f.name}" doesn't look like a /map_objects backup — ${v.error}`, true);
+                            return;
+                        }
+                        storeShadowFile(siteID, f.name, v.entities);
+                        pairs[siteID] = { kind: 'file', name: f.name };
+                        savePairs();
+                        console.log(`${TAG} site ${siteID} now shadows JSON backup "${f.name}" (${v.entities.length} entities, ${v.drawable} drawable)`);
+                        if (!masterEnabled) {
+                            console.log(`${TAG} note: master toggle is OFF — enable "Site Diff" in the Control Panel to see the overlay`);
+                        }
+                        renderShadow(false);
+                        refreshPickerStatus();
+                        renderPickerList(pickerEl.querySelector('#aim-sd-search').value);
+                    } catch (e) {
+                        console.warn(`${TAG} backup parse failed:`, e);
+                        setPickerNote(`Could not parse "${f.name}" — not valid JSON.`, true);
+                    }
+                };
+                reader.onerror = () => setPickerNote('File read failed.', true);
+                reader.readAsText(f);
             });
             pickerEl.querySelector('#aim-sd-refresh').addEventListener('click', () => {
                 fetchSiteList(true).then(() => renderPickerList(pickerEl.querySelector('#aim-sd-search').value));
@@ -578,6 +733,508 @@
         if (el) el.innerHTML = pickerStatusHtml();
     }
 
+    function setPickerNote(msg, isError) {
+        const el = pickerEl && pickerEl.querySelector('#aim-sd-status');
+        if (el) el.innerHTML = `<span style="color:${isError ? '#ff5252' : '#7adfe6'}">${escapeHtml(msg)}</span>`;
+    }
+
+    // ==================================================================
+    // Phase 2 — significant-change diff (approved-envelope model)
+    //
+    // Envelope = the shadow's (Live site's) FFZ polygons + FP segments,
+    // buffered by the threshold. A stretch of THIS site's flight geometry
+    // outside the envelope was never regs-reviewed → significant change.
+    // A new FP threading through a removed FFZ corridor stays quiet.
+    // ==================================================================
+    const FT_PER_M = 3.28084;
+    const SAMPLE_STEP_M = 3;          // ~10 ft sampling along new geometry
+    const MIN_RUN_SAMPLES = 2;        // ignore single-sample blips
+
+    function projector(lat0) {
+        // Local equirectangular — plenty accurate at site scale
+        const mLat = 111320;
+        const mLng = 111320 * Math.cos(lat0 * Math.PI / 180) || 1e-6;
+        return {
+            toXY: (p) => ({ x: p.lng * mLng, y: p.lat * mLat }),
+            toLatLng: (x, y) => [y / mLat, x / mLng],
+        };
+    }
+
+    function segDistM(px, py, ax, ay, bx, by) {
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = 0;
+        if (len2 > 0) t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+        return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    }
+
+    function pointInRingXY(px, py, xs, ys) {
+        let inside = false;
+        for (let i = 0, j = xs.length - 1; i < xs.length; j = i++) {
+            if (((ys[i] > py) !== (ys[j] > py))
+                && (px < (xs[j] - xs[i]) * (py - ys[i]) / (ys[j] - ys[i]) + xs[i])) inside = !inside;
+        }
+        return inside;
+    }
+
+    function buildEnvelope(entities, proj, thrM) {
+        const segs = [];    // shadow FP arcs
+        const polys = [];   // shadow FFZ rings
+        const pad = thrM + 1;   // bbox pad ≥ threshold → coverage tests stay exact
+        (entities || []).forEach(e => {
+            if (e.type === 15 && Array.isArray(e.arcs)) {
+                e.arcs.forEach(a => {
+                    if (!a || !a.point_a || !a.point_b) return;
+                    if (typeof a.point_a.lat !== 'number' || typeof a.point_b.lat !== 'number') return;
+                    const A = proj.toXY(a.point_a), B = proj.toXY(a.point_b);
+                    segs.push({
+                        ax: A.x, ay: A.y, bx: B.x, by: B.y,
+                        minX: Math.min(A.x, B.x) - pad, maxX: Math.max(A.x, B.x) + pad,
+                        minY: Math.min(A.y, B.y) - pad, maxY: Math.max(A.y, B.y) + pad,
+                    });
+                });
+            } else if (e.type === 16) {
+                const cs = entityCoords(e);
+                if (!cs || cs.length < 3) return;
+                const xs = [], ys = [];
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+                cs.forEach(p => {
+                    if (!p || typeof p.lat !== 'number') return;
+                    const q = proj.toXY(p);
+                    xs.push(q.x); ys.push(q.y);
+                    if (q.x < minX) minX = q.x;
+                    if (q.x > maxX) maxX = q.x;
+                    if (q.y < minY) minY = q.y;
+                    if (q.y > maxY) maxY = q.y;
+                });
+                if (xs.length < 3) return;
+                polys.push({ xs, ys, minX: minX - pad, maxX: maxX + pad, minY: minY - pad, maxY: maxY + pad });
+            }
+        });
+        return { segs, polys };
+    }
+
+    // Min distance to the envelope with bbox prefilter. The pad equals the
+    // threshold, so covered/uncovered decisions are exact; the returned
+    // distance for far-away points is only a lower bound (Infinity if no
+    // bbox matched) — use distToEnvelopeExactM for reporting.
+    function distToEnvelopeM(x, y, env) {
+        let best = Infinity;
+        for (const pg of env.polys) {
+            if (x < pg.minX || x > pg.maxX || y < pg.minY || y > pg.maxY) continue;
+            if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
+            for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
+                const d = segDistM(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
+                if (d < best) best = d;
+            }
+        }
+        for (const s of env.segs) {
+            if (x < s.minX || x > s.maxX || y < s.minY || y > s.maxY) continue;
+            const d = segDistM(x, y, s.ax, s.ay, s.bx, s.by);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+
+    function distToEnvelopeExactM(x, y, env) {
+        let best = Infinity;
+        for (const pg of env.polys) {
+            if (pointInRingXY(x, y, pg.xs, pg.ys)) return 0;
+            for (let i = 0, j = pg.xs.length - 1; i < pg.xs.length; j = i++) {
+                const d = segDistM(x, y, pg.xs[j], pg.ys[j], pg.xs[i], pg.ys[i]);
+                if (d < best) best = d;
+            }
+        }
+        for (const s of env.segs) {
+            const d = segDistM(x, y, s.ax, s.ay, s.bx, s.by);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+
+    let diffLayers = [];
+    let diffStretches = [];
+    let diffRunning = false;
+    let diffMeta = null;   // { thrFt, shadowLabel, at }
+    let sdIssuesChannel = null;
+
+    function ensureIssuesChannel() {
+        if (sdIssuesChannel) return sdIssuesChannel;
+        try { sdIssuesChannel = new BroadcastChannel('AIM_SITEDIFF_ISSUES'); }
+        catch (e) { console.warn(`${TAG} sitediff issues channel unavailable:`, e); }
+        return sdIssuesChannel;
+    }
+
+    function clearDiff(alsoIssues) {
+        const map = getLeafletMap();
+        diffLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
+        diffLayers = [];
+        diffStretches = [];
+        diffMeta = null;
+        if (alsoIssues && siteID) {
+            const ch = ensureIssuesChannel();
+            if (ch) ch.postMessage({ type: 'CLEAR_DIFF_ISSUES', siteID });
+        }
+        if (diffPanelEl && diffPanelEl.style.display !== 'none') {
+            setDiffStatus('Cleared.');
+            renderDiffList();
+        }
+    }
+
+    async function diffEntity(e, proj, env, thrM, out) {
+        const kind = e.type === 15 ? 'FP' : 'FFZ';
+        const name = e.name || `${kind} ${e.id}`;
+        let segList = [];
+        if (e.type === 15) {
+            segList = (e.arcs || [])
+                .filter(a => a && a.point_a && a.point_b
+                    && typeof a.point_a.lat === 'number' && typeof a.point_b.lat === 'number')
+                .map(a => [a.point_a, a.point_b]);
+        } else {
+            const cs = (entityCoords(e) || []).filter(p => p && typeof p.lat === 'number');
+            if (cs.length < 3) return;
+            for (let i = 0; i < cs.length; i++) segList.push([cs[i], cs[(i + 1) % cs.length]]);
+        }
+        let run = null;
+        let prevEnd = null;
+        let ops = 0;
+        const closeRun = () => {
+            if (!run) return;
+            if (run.samples >= MIN_RUN_SAMPLES && run.worst) {
+                const exact = distToEnvelopeExactM(run.worst.x, run.worst.y, env);
+                out.push({
+                    kind, name, entityId: e.id,
+                    pts: run.pts,
+                    lengthM: run.lengthM,
+                    maxOffM: isFinite(exact) ? exact : null,   // null = nothing old anywhere near
+                });
+            }
+            run = null;
+        };
+        for (const [P, Q] of segList) {
+            // Arcs usually chain in order; when they don't (branch jump),
+            // close the open run rather than drawing a false connector.
+            if (prevEnd && (Math.abs(prevEnd.lat - P.lat) > 1e-6 || Math.abs(prevEnd.lng - P.lng) > 1e-6)) closeRun();
+            prevEnd = Q;
+            const A = proj.toXY(P), B = proj.toXY(Q);
+            const segLen = Math.hypot(B.x - A.x, B.y - A.y);
+            if (segLen === 0) continue;
+            const n = Math.max(1, Math.ceil(segLen / SAMPLE_STEP_M));
+            for (let i = 0; i <= n; i++) {
+                const t = i / n;
+                const x = A.x + (B.x - A.x) * t, y = A.y + (B.y - A.y) * t;
+                const d = distToEnvelopeM(x, y, env);
+                if (d > thrM) {
+                    const lat = P.lat + (Q.lat - P.lat) * t, lng = P.lng + (Q.lng - P.lng) * t;
+                    if (!run) {
+                        run = { pts: [[lat, lng]], samples: 1, lengthM: 0, lastXY: { x, y }, worst: { x, y, d } };
+                    } else {
+                        run.pts.push([lat, lng]);
+                        run.samples++;
+                        run.lengthM += Math.hypot(x - run.lastXY.x, y - run.lastXY.y);
+                        run.lastXY = { x, y };
+                        if (d > run.worst.d) run.worst = { x, y, d };
+                    }
+                } else {
+                    closeRun();
+                }
+                // Cooperative yield so big sites don't freeze the tab
+                if (++ops >= 500) { ops = 0; await new Promise(r => setTimeout(r, 0)); }
+            }
+        }
+        closeRun();
+    }
+
+    function drawDiffStretches() {
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) return;
+        ensurePane(map);
+        diffStretches.forEach(s => {
+            try {
+                const line = L.polyline(s.pts, {
+                    color: diffCfg.color,
+                    weight: 5,
+                    opacity: 0.95,
+                    interactive: false,
+                    bubblingMouseEvents: false,
+                    pane: HL_PANE_NAME,
+                });
+                line.addTo(map);
+                try { if (line._path) line._path.style.pointerEvents = 'none'; } catch (e) {}
+                s._layer = line;
+                diffLayers.push(line);
+            } catch (e) {
+                console.warn(`${TAG} diff draw failed:`, e);
+            }
+        });
+    }
+
+    async function runDiff() {
+        if (diffRunning) return;
+        if (!siteID) { openDiffPanel(); setDiffStatus('No site loaded.'); return; }
+        const src = shadowSourceFor(siteID);
+        if (!src) {
+            openDiffPanel();
+            setDiffStatus('Pick a shadow first — the Live (original) site or a JSON backup.');
+            return;
+        }
+        diffRunning = true;
+        clearDiff(false);
+        openDiffPanel();
+        setDiffStatus('Running diff…');
+        try {
+            const [mine, theirs] = await Promise.all([
+                fetchShadowEntities(siteID, true),          // THIS (Offline) site — always fresh
+                getShadowEntities(siteID, src, false),      // shadow (Live) baseline
+            ]);
+            if (!mine) { setDiffStatus('Could not fetch this site\'s entities.'); return; }
+            if (!theirs) { setDiffStatus('Could not load the shadow\'s entities.'); return; }
+            let anchorLat = null;
+            for (const e of theirs.concat(mine)) {
+                const cs = entityCoords(e);
+                if (cs && cs[0] && typeof cs[0].lat === 'number') { anchorLat = cs[0].lat; break; }
+                if (Array.isArray(e.arcs) && e.arcs[0] && e.arcs[0].point_a) { anchorLat = e.arcs[0].point_a.lat; break; }
+            }
+            if (anchorLat === null) { setDiffStatus('No geometry found on either side.'); return; }
+            const thrFt = diffCfg.thresholdFt;
+            const thrM = thrFt / FT_PER_M;
+            const proj = projector(anchorLat);
+            const env = buildEnvelope(theirs, proj, thrM);
+            if (!env.segs.length && !env.polys.length) {
+                setDiffStatus('Shadow has no FFZ/FP geometry — every flight route here would flag. Aborted.');
+                return;
+            }
+            const targets = [];
+            (mine || []).forEach(e => {
+                if (e.type === 15 && Array.isArray(e.arcs) && e.arcs.length) targets.push(e);
+                else if (diffCfg.includeFfz && e.type === 16) {
+                    const cs = entityCoords(e);
+                    if (cs && cs.length >= 3) targets.push(e);
+                }
+            });
+            const stretches = [];
+            let done = 0;
+            for (const e of targets) {
+                await diffEntity(e, proj, env, thrM, stretches);
+                done++;
+                if (done % 5 === 0) setDiffStatus(`Running diff… ${done}/${targets.length}`);
+            }
+            stretches.sort((a, b) => b.lengthM - a.lengthM);
+            diffStretches = stretches;
+            diffMeta = { thrFt, shadowLabel: shadowSourceLabel(src), at: new Date() };
+            drawDiffStretches();
+            const totalFt = Math.round(stretches.reduce((s, x) => s + x.lengthM, 0) * FT_PER_M);
+            console.log(`${TAG} diff done: ${stretches.length} significant stretch(es), ${totalFt} ft total (thr ${thrFt} ft, ${targets.length} entities checked vs ${env.polys.length} FFZs + ${env.segs.length} FP segs)`);
+            setDiffStatus(stretches.length
+                ? `${stretches.length} significant stretch(es) — ${totalFt.toLocaleString()} ft total outside the old envelope (threshold ${thrFt} ft).`
+                : `No significant changes — all flight geometry within ${thrFt} ft of the old envelope ✓`);
+            renderDiffList();
+        } catch (e) {
+            console.warn(`${TAG} runDiff threw:`, e);
+            setDiffStatus('Diff failed — see console.');
+        } finally {
+            diffRunning = false;
+        }
+    }
+
+    // Thin corridor polygon around a stretch line → AIM Issues polygon
+    function bufferStretchRing(pts, halfM) {
+        const proj = projector(pts[0][0]);
+        const P = pts.map(p => proj.toXY({ lat: p[0], lng: p[1] }));
+        if (P.length === 1) P.push({ x: P[0].x + 1, y: P[0].y });
+        const left = [], right = [];
+        let nx = 0, ny = 1;
+        for (let i = 0; i < P.length; i++) {
+            const a = P[Math.max(0, i - 1)], b = P[Math.min(P.length - 1, i + 1)];
+            const dx = b.x - a.x, dy = b.y - a.y;
+            const len = Math.hypot(dx, dy);
+            if (len > 0) { nx = -dy / len; ny = dx / len; }
+            left.push([P[i].x + nx * halfM, P[i].y + ny * halfM]);
+            right.push([P[i].x - nx * halfM, P[i].y - ny * halfM]);
+        }
+        return left.concat(right.reverse()).map(q => proj.toLatLng(q[0], q[1]));
+    }
+
+    function sendDiffIssues() {
+        if (!siteID) return;
+        if (!diffStretches.length) { setDiffStatus('Nothing to send — run the diff first.'); return; }
+        const ch = ensureIssuesChannel();
+        if (!ch) { setDiffStatus('Issues channel unavailable.'); return; }
+        const thrFt = diffMeta ? diffMeta.thrFt : diffCfg.thresholdFt;
+        const issues = diffStretches.map(s => {
+            const lenFt = Math.round(s.lengthM * FT_PER_M);
+            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft beyond`;
+            return {
+                shape: 'polygon',
+                polygon: bufferStretchRing(s.pts, 5),
+                note: `Site Diff: new ${s.kind} route ${lenFt} ft outside the old envelope (${offTxt}, threshold ${thrFt} ft) — ${s.name}`,
+            };
+        });
+        ch.postMessage({ type: 'DIFF_ISSUES', siteID, issues });
+        console.log(`${TAG} sent ${issues.length} diff issue(s) to the validator union`);
+        setDiffStatus(`Sent ${issues.length} issue(s) — needs Asset Inspector v4.165+ and AIM Issues enabled to draw.`);
+    }
+
+    function buildDiffReport() {
+        const lines = [];
+        const thrFt = diffMeta ? diffMeta.thrFt : diffCfg.thresholdFt;
+        lines.push(`AIM Site Diff report — site ${siteID} vs shadow ${diffMeta ? diffMeta.shadowLabel : ''}`);
+        lines.push(`Threshold ${thrFt} ft · ${diffStretches.length} significant stretch(es)`);
+        diffStretches.forEach((s, i) => {
+            const lenFt = Math.round(s.lengthM * FT_PER_M);
+            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft out`;
+            const mid = s.pts[Math.floor(s.pts.length / 2)];
+            lines.push(`${i + 1}. ${s.kind} · ${s.name} — ${lenFt} ft long, ${offTxt} @ ${mid[0].toFixed(6)}, ${mid[1].toFixed(6)}`);
+        });
+        return lines.join('\n');
+    }
+
+    // ---------------- Diff results panel ----------------
+    let diffPanelEl = null;
+
+    function setDiffStatus(msg) {
+        const el = diffPanelEl && diffPanelEl.querySelector('#aim-sd-diff-status');
+        if (el) el.textContent = msg;
+    }
+
+    function renderDiffList() {
+        const el = diffPanelEl && diffPanelEl.querySelector('#aim-sd-diff-list');
+        if (!el) return;
+        if (!diffStretches.length) { el.innerHTML = ''; return; }
+        el.innerHTML = diffStretches.map((s, i) => {
+            const lenFt = Math.round(s.lengthM * FT_PER_M);
+            const offTxt = s.maxOffM === null ? 'far outside' : `max ${Math.round(s.maxOffM * FT_PER_M)} ft out`;
+            return `<div class="aim-sd-row" data-di="${i}">`
+                + `<span style="color:${s.kind === 'FP' ? '#ffa030' : '#d05fff'}">${s.kind}</span> · `
+                + `${escapeHtml(s.name)} — ${lenFt.toLocaleString()} ft, ${offTxt}</div>`;
+        }).join('');
+    }
+
+    function openDiffPanel() {
+        if (!diffPanelEl) {
+            diffPanelEl = document.createElement('div');
+            diffPanelEl.id = 'aim-sd-diff-panel';
+            diffPanelEl.style.cssText = 'position:fixed;top:70px;left:16px;z-index:2147480001;width:340px;'
+                + 'background:#14181f;color:#ddd;border:1px solid #2a3140;border-radius:6px;'
+                + 'font:12px/1.5 monospace;box-shadow:0 4px 18px rgba(0,0,0,0.5);';
+            diffPanelEl.innerHTML = ''
+                + '<div style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;">'
+                + '⚖ Site Diff — significant changes <span id="aim-sd-diff-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+                + '<div id="aim-sd-diff-status" style="padding:6px 10px;border-bottom:1px solid #222834;color:#aaa;"></div>'
+                + '<div id="aim-sd-diff-list" style="max-height:300px;overflow-y:auto;padding:0 4px;"></div>'
+                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:10px;flex-wrap:wrap;">'
+                + '<span id="aim-sd-diff-issues" style="cursor:pointer;color:#ff8ac2">🚩 Send to Issues</span>'
+                + '<span id="aim-sd-diff-copy" style="cursor:pointer;color:#7adfe6">📋 Copy report</span>'
+                + '<span id="aim-sd-diff-clear" style="cursor:pointer;color:#ff5252">Clear</span>'
+                + '</div>';
+            document.body.appendChild(diffPanelEl);
+            diffPanelEl.querySelector('#aim-sd-diff-close').addEventListener('click', () => { diffPanelEl.style.display = 'none'; });
+            diffPanelEl.querySelector('#aim-sd-diff-issues').addEventListener('click', sendDiffIssues);
+            diffPanelEl.querySelector('#aim-sd-diff-clear').addEventListener('click', () => clearDiff(true));
+            diffPanelEl.querySelector('#aim-sd-diff-copy').addEventListener('click', () => {
+                try {
+                    navigator.clipboard.writeText(buildDiffReport())
+                        .then(() => setDiffStatus('Report copied to clipboard.'))
+                        .catch(e => { console.warn(`${TAG} clipboard write failed:`, e); setDiffStatus('Clipboard write failed.'); });
+                } catch (e) { console.warn(`${TAG} clipboard unavailable:`, e); }
+            });
+            // Click a row → zoom to the stretch + briefly fatten it
+            diffPanelEl.querySelector('#aim-sd-diff-list').addEventListener('click', (ev) => {
+                const row = ev.target.closest('[data-di]');
+                if (!row) return;
+                const s = diffStretches[Number(row.getAttribute('data-di'))];
+                if (!s) return;
+                const map = getLeafletMap();
+                const L = getL();
+                if (!map || !L) return;
+                try {
+                    map.fitBounds(L.latLngBounds(s.pts).pad(0.6));
+                    if (s._layer) {
+                        s._layer.setStyle({ weight: 10 });
+                        setTimeout(() => { try { s._layer.setStyle({ weight: 5 }); } catch (e) {} }, 1200);
+                    }
+                } catch (e) { console.warn(`${TAG} zoom-to-stretch failed:`, e); }
+            });
+        }
+        diffPanelEl.style.display = 'block';
+        renderDiffList();
+    }
+
+    // ---------------- Swipe divider ----------------
+    let swipeHandleEl = null;
+    let swipeFrac = 0.5;
+    let swipeHookedMap = null;
+
+    function ensureSwipeHandle(map) {
+        const container = map.getContainer();
+        if (swipeHandleEl && swipeHandleEl.parentElement === container) return;
+        try { if (swipeHandleEl) swipeHandleEl.remove(); } catch (e) {}
+        swipeHandleEl = document.createElement('div');
+        swipeHandleEl.id = 'aim-sd-swipe';
+        swipeHandleEl.style.cssText = 'position:absolute;top:0;bottom:0;width:12px;margin-left:-6px;'
+            + 'cursor:ew-resize;z-index:1200;touch-action:none;';
+        swipeHandleEl.innerHTML = ''
+            + '<div style="position:absolute;top:0;bottom:0;left:5px;width:2px;background:#ffa030;box-shadow:0 0 4px #000;"></div>'
+            + '<div style="position:absolute;top:50%;left:-6px;width:24px;height:24px;margin-top:-12px;border-radius:50%;'
+            + 'background:#14181f;border:2px solid #ffa030;color:#ffa030;font:12px/20px monospace;text-align:center;user-select:none;">⇔</div>';
+        const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+        swipeHandleEl.addEventListener('pointerdown', (ev) => {
+            stop(ev);
+            try { swipeHandleEl.setPointerCapture(ev.pointerId); } catch (e) {}
+            const onMove = (mv) => {
+                const rect = container.getBoundingClientRect();
+                if (rect.width > 0) {
+                    swipeFrac = Math.max(0.02, Math.min(0.98, (mv.clientX - rect.left) / rect.width));
+                    applySwipeClip();
+                }
+            };
+            const onUp = (up) => {
+                try { swipeHandleEl.releasePointerCapture(up.pointerId); } catch (e) {}
+                swipeHandleEl.removeEventListener('pointermove', onMove);
+                swipeHandleEl.removeEventListener('pointerup', onUp);
+            };
+            swipeHandleEl.addEventListener('pointermove', onMove);
+            swipeHandleEl.addEventListener('pointerup', onUp);
+        });
+        // Keep Leaflet from turning handle drags into map pans
+        ['mousedown', 'touchstart', 'dblclick', 'click'].forEach(t =>
+            swipeHandleEl.addEventListener(t, (ev) => ev.stopPropagation()));
+        container.appendChild(swipeHandleEl);
+    }
+
+    function applySwipeClip() {
+        const map = getLeafletMap();
+        const L = getL();
+        if (!map || !L) return;
+        const pane = map.getPane && map.getPane(PANE_NAME);
+        if (!pane) return;
+        const active = diffCfg.swipe && masterEnabled && !!shadowSourceFor(siteID);
+        if (!active) {
+            pane.style.clipPath = '';
+            if (swipeHandleEl) swipeHandleEl.style.display = 'none';
+            return;
+        }
+        // Panes are 0×0 translated divs, so clip in pane-local coords with a
+        // polygon() big enough to cover any child geometry. Shadow shows
+        // RIGHT of the handle.
+        let pos = { x: 0, y: 0 };
+        try { const p = L.DomUtil.getPosition(pane); if (p) pos = p; } catch (e) {}
+        const size = map.getSize();
+        const cx = swipeFrac * size.x - pos.x;
+        const BIG = 1000000;
+        pane.style.clipPath = `polygon(${cx}px ${-BIG}px, ${BIG}px ${-BIG}px, ${BIG}px ${BIG}px, ${cx}px ${BIG}px)`;
+        ensureSwipeHandle(map);
+        swipeHandleEl.style.display = 'block';
+        swipeHandleEl.style.left = `${Math.round(swipeFrac * size.x)}px`;
+        if (swipeHookedMap !== map) {
+            try {
+                map.on('move zoom viewreset resize', applySwipeClip);
+                swipeHookedMap = map;
+            } catch (e) { console.warn(`${TAG} swipe map hook failed:`, e); }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Control Panel integration
     // ------------------------------------------------------------------
@@ -593,8 +1250,15 @@
             priority: 50,
             toggles: [
                 { id: 'master', label: 'Enable shadow overlay', type: 'boolean', default: false, master: true },
-                { id: 'choose-site', label: '🗺 Choose shadow site…', type: 'button', action: 'choose-site' },
+                { id: 'choose-site', label: '🗺 Choose shadow (site or JSON backup)…', type: 'button', action: 'choose-site' },
                 { id: 'refresh-shadow', label: '⟳ Refresh shadow data', type: 'button', action: 'refresh-shadow' },
+                { type: 'header', label: 'Compare' },
+                { id: 'swipe', label: 'Swipe divider (shadow shows right of handle)', type: 'boolean', default: false },
+                { id: 'diff-threshold', label: 'Significant-change threshold', type: 'number', min: 5, max: 300, step: 5, default: 30, unit: 'ft' },
+                { id: 'diff-ffz', label: 'Diff FFZ perimeters too (not just FPs)', type: 'boolean', default: true },
+                { id: 'diff-color', label: 'Change highlight color', type: 'color', default: '#ff2d2d' },
+                { id: 'run-diff', label: '⚖ Run significant-change diff', type: 'button', action: 'run-diff' },
+                { id: 'clear-diff', label: 'Clear diff highlights + issues', type: 'button', action: 'clear-diff' },
                 { type: 'header', label: 'Style' },
                 { id: 'dashed', label: 'Dashed lines (ghost look)', type: 'boolean', default: true },
                 { id: 'weight', label: 'Line weight', type: 'number', min: 1, max: 8, step: 1, default: 2, unit: 'px' },
@@ -636,6 +1300,36 @@
             scheduleRedraw();
             return;
         }
+        if (id === 'swipe') {
+            const v = !!rawVal;
+            if (v === diffCfg.swipe) return;
+            diffCfg.swipe = v;
+            saveDiffCfg();
+            applySwipeClip();
+            return;
+        }
+        if (id === 'diff-threshold') {
+            const n = Number(rawVal);
+            if (isNaN(n) || n === diffCfg.thresholdFt) return;
+            diffCfg.thresholdFt = n;
+            saveDiffCfg();
+            return;   // takes effect on the next diff run
+        }
+        if (id === 'diff-ffz') {
+            const v = !!rawVal;
+            if (v === diffCfg.includeFfz) return;
+            diffCfg.includeFfz = v;
+            saveDiffCfg();
+            return;
+        }
+        if (id === 'diff-color') {
+            const v = String(rawVal);
+            if (v === diffCfg.color) return;
+            diffCfg.color = v;
+            saveDiffCfg();
+            diffLayers.forEach(l => { try { l.setStyle({ color: v }); } catch (e) {} });
+            return;
+        }
         if (id === 'weight' || id === 'marker-size') {
             const n = Number(rawVal);
             if (isNaN(n)) return;
@@ -672,6 +1366,8 @@
         if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
         if (actionId === 'choose-site') openPicker();
         else if (actionId === 'refresh-shadow') renderShadow(true);
+        else if (actionId === 'run-diff') runDiff();
+        else if (actionId === 'clear-diff') clearDiff(true);
     }
 
     function setupControlPanel() {
@@ -700,9 +1396,12 @@
 
     function setCurrentSite(newId) {
         if (newId === siteID) return;
+        // Diff results belong to the site they ran on — never carry across
+        clearDiff(false);
         siteID = newId;
         console.log(`${TAG} site → ${siteID || '(none)'}`);
         if (pickerEl) { pickerEl.style.display = 'none'; }
+        if (diffPanelEl) { diffPanelEl.style.display = 'none'; }
         renderShadow(false);
     }
 
