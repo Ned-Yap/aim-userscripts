@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.100
+// @version      34.101
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.100';
+    const SCRIPT_VERSION = '34.101';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1849,10 +1849,16 @@
         if (!sid) { showKMLToast('No site loaded.', 3000); return; }
         if (toggleState['rrc.show'] !== true) { showKMLToast('Turn ON the Oil & Gas (Texas RRC) overlay first, then run the recon.', 6000); return; }
         if (!_rrcData || !_rrcData.results || !_rrcData.results.wells) { showKMLToast('RRC wells not loaded yet — give it a moment and run again.', 5000); return; }
-        if (assetStateData.siteID !== sid || (!assetStateData.polys.length && !assetStateData.failed)) {
-            fetchAssetStates(sid);
+        // Assets are OPTIONAL (user 2026-07-02: client CSVs are incomplete —
+        // scouting can't depend on them). If a fetch is in flight, wait one
+        // round; if the site simply has none, run in SCOUT mode: the report
+        // anchors on the state's own ownership unit — the LEASE — instead.
+        if (assetStateData.siteID === sid && assetStateData.loading) {
             showKMLToast('Fetching site assets… run the recon again in a few seconds.', 5000);
             return;
+        }
+        if (assetStateData.siteID !== sid && !assetStateData.loading) {
+            fetchAssetStates(sid);
         }
         const rawMatch = Number(toggleState['rrc.matchFt']);
         const matchFt = isNaN(rawMatch) ? 300 : rawMatch;
@@ -1870,7 +1876,8 @@
                 matchedAsset: null, distM: Infinity,
             };
         });
-        const assets = assetStateData.polys.map(pl => ({ pl, wells: [] }));
+        const assets = (assetStateData.siteID === sid ? assetStateData.polys : []).map(pl => ({ pl, wells: [] }));
+        const scoutMode = !assets.length;
         // Match every well to its nearest asset (within matchFt).
         wells.forEach(w2 => {
             let best = null, bestD = Infinity;
@@ -1893,19 +1900,46 @@
         const sect = (t2) => h.push(`<div style="color:#7adfe6;font-weight:600;margin:10px 0 4px;border-bottom:1px solid rgba(122,223,230,0.25);padding-bottom:2px;">${t2}</div>`);
         const row = (html, lat, lng) => h.push(`<div ${lat != null ? `data-recon-jump="${lat},${lng}"` : ''} style="margin:2px 0;line-height:1.45;${lat != null ? 'cursor:pointer;' : ''}" ${lat != null ? `onmouseover="this.style.background='rgba(122,223,230,0.12)'" onmouseout="this.style.background=''" title="Click to view on map"` : ''}>${html}</div>`);
         const wellTag = (w2) => `API ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${rrcReconEsc(w2.status)}${w2.info ? ` · <strong>${rrcReconEsc(w2.info.operator)}</strong> · "${rrcReconEsc(w2.info.lease)}"` : ''}`;
-        h.push(`<div style="margin-bottom:4px;">${assets.length} assets · ${wells.length} RRC wells in the site area · match ≤ ${matchFt} ft${opsPending ? ' · <span style="color:#ffb020">operator lookups still running — re-run shortly for full names</span>' : ''}</div>`);
-        sect(`🏭 Facility pads — no wellbore (${facilityPads.length})`);
-        h.push('<div style="opacity:0.65;margin-bottom:3px;">Batteries / compressors / SATs — no RRC well on the pad is EXPECTED. If one of these should be a wellhead pad, the well location may be inaccurate (widen the match distance).</div>');
-        facilityPads.forEach(as => row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)}`, as.pl.cLat, as.pl.cLng));
-        sect(`🛢 Wellhead pads (${wellheadPads.length})`);
-        wellheadPads.forEach(as => {
-            row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)} · ${as.wells.length} well${as.wells.length === 1 ? '' : 's'}`, as.pl.cLat, as.pl.cLng);
-            as.wells.forEach(w2 => row(`<span style="opacity:0.85;margin-left:14px;">${wellTag(w2)}</span>`, w2.lat, w2.lng));
+        // Lease grouping — the CLIENT-INDEPENDENT ownership map. Every well
+        // cluster gets a lease name + operator straight from state records,
+        // no client CSV involved.
+        const leaseMap = new Map();
+        wells.forEach(w2 => {
+            const k2 = w2.info ? `${w2.info.operator}§${w2.info.lease}` : '§unknown';
+            let g2 = leaseMap.get(k2);
+            if (!g2) { g2 = { operator: w2.info ? w2.info.operator : null, lease: w2.info ? w2.info.lease : null, wells: [] }; leaseMap.set(k2, g2); }
+            g2.wells.push(w2);
         });
-        sect(`❓ Wells with NO asset within ${matchFt} ft (${unmatched.length})`);
-        h.push('<div style="opacity:0.65;margin-bottom:3px;">Pads the client CSV may have missed — or neighboring operators\u2019 wells. Sorted nearest-first.</div>');
-        unmatched.slice(0, 40).forEach(w2 => row(`${wellTag(w2)} · <span style="opacity:0.75">${isFinite(w2.distM) ? `${Math.round(w2.distM * 3.28084).toLocaleString()} ft from nearest asset` : 'no assets on site'}</span>`, w2.lat, w2.lng));
-        if (unmatched.length > 40) row(`…and ${unmatched.length - 40} more`);
+        const leases = [...leaseMap.values()].sort((a2, b2) => b2.wells.length - a2.wells.length);
+        const statusSummary = (ws) => {
+            const c2 = {};
+            ws.forEach(w2 => { const k3 = w2.status.replace(/\s+/g, ' '); c2[k3] = (c2[k3] || 0) + 1; });
+            return Object.keys(c2).map(k3 => `${c2[k3]}× ${k3}`).join(', ');
+        };
+        h.push(`<div style="margin-bottom:4px;">${scoutMode ? '<span style="color:#ffd54f;font-weight:700;">SCOUT MODE</span> — no client assets on this site; showing what the STATE knows. ' : `${assets.length} assets · `}${wells.length} RRC wells in the area${scoutMode ? '' : ` · match ≤ ${matchFt} ft`}${opsPending ? ' · <span style="color:#ffb020">operator lookups still running — re-run shortly for lease/operator names</span>' : ''}</div>`);
+        sect(`🗺 Leases in the area (${leases.length}) — the ownership map`);
+        leases.forEach(g2 => {
+            const cLat2 = g2.wells.reduce((t2, w2) => t2 + w2.lat, 0) / g2.wells.length;
+            const cLng2 = g2.wells.reduce((t2, w2) => t2 + w2.lng, 0) / g2.wells.length;
+            row(g2.operator
+                ? `<strong>${rrcReconEsc(g2.operator)}</strong> — "${rrcReconEsc(g2.lease)}" · ${g2.wells.length} well${g2.wells.length === 1 ? '' : 's'} · <span style="opacity:0.8">${rrcReconEsc(statusSummary(g2.wells))}</span>`
+                : `<span style="opacity:0.7">${g2.wells.length} well${g2.wells.length === 1 ? '' : 's'} — operator/lease lookup pending</span>`,
+                cLat2, cLng2);
+        });
+        if (!scoutMode) {
+            sect(`🏭 Facility pads — no wellbore (${facilityPads.length})`);
+            h.push('<div style="opacity:0.65;margin-bottom:3px;">Batteries / compressors / SATs — no RRC well on the pad is EXPECTED. If one of these should be a wellhead pad, the well location may be inaccurate (widen the match distance).</div>');
+            facilityPads.forEach(as => row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)}`, as.pl.cLat, as.pl.cLng));
+            sect(`🛢 Wellhead pads (${wellheadPads.length})`);
+            wellheadPads.forEach(as => {
+                row(`<strong>${rrcReconEsc(as.pl.name)}</strong> — ${rrcReconEsc(as.pl.equipName || as.pl.equip)} · ${as.wells.length} well${as.wells.length === 1 ? '' : 's'}`, as.pl.cLat, as.pl.cLng);
+                as.wells.forEach(w2 => row(`<span style="opacity:0.85;margin-left:14px;">${wellTag(w2)}</span>`, w2.lat, w2.lng));
+            });
+            sect(`❓ Wells with NO asset within ${matchFt} ft (${unmatched.length})`);
+            h.push('<div style="opacity:0.65;margin-bottom:3px;">Pads the client CSV may have missed — or neighboring operators\u2019 wells. Sorted nearest-first.</div>');
+            unmatched.slice(0, 40).forEach(w2 => row(`${wellTag(w2)} · <span style="opacity:0.75">${isFinite(w2.distM) ? `${Math.round(w2.distM * 3.28084).toLocaleString()} ft from nearest asset` : ''}</span>`, w2.lat, w2.lng));
+            if (unmatched.length > 40) row(`…and ${unmatched.length - 40} more`);
+        }
         sect(`🤝 Operators in the site area (${ops.length})`);
         ops.forEach(op => row(`<strong>${rrcReconEsc(op)}</strong> — ${opCount[op]} well${opCount[op] === 1 ? '' : 's'}`));
 
@@ -1927,16 +1961,19 @@
         wrap.addEventListener('click', (e) => {
             if (e.target.closest('[data-recon-close]')) { closeRrcRecon(); return; }
             if (e.target.closest('[data-recon-copy]')) {
-                const out = [`PAD RECON — site ${sid} (match ≤ ${matchFt} ft)`];
-                out.push(`Facility pads (no wellbore): ${facilityPads.length}`);
+                const out = [`PAD RECON — site ${sid}${scoutMode ? ' (SCOUT MODE — no client assets)' : ` (match ≤ ${matchFt} ft)`}`];
+                out.push(`Leases in area: ${leases.length}`);
+                leases.forEach(g2 => out.push(`  - ${g2.operator ? `${g2.operator} — "${g2.lease}"` : '(lookup pending)'} · ${g2.wells.length} wells · ${statusSummary(g2.wells)}`));
+                if (!scoutMode) out.push(`Facility pads (no wellbore): ${facilityPads.length}`);
+                if (!scoutMode)
                 facilityPads.forEach(as => out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`));
-                out.push(`Wellhead pads: ${wellheadPads.length}`);
-                wellheadPads.forEach(as => {
+                if (!scoutMode) out.push(`Wellhead pads: ${wellheadPads.length}`);
+                if (!scoutMode) wellheadPads.forEach(as => {
                     out.push(`  - ${as.pl.name} — ${as.pl.equipName || as.pl.equip}`);
                     as.wells.forEach(w2 => out.push(`      ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''}`));
                 });
-                out.push(`Wells with no asset within ${matchFt} ft: ${unmatched.length}`);
-                unmatched.forEach(w2 => out.push(`  - ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''} · ${isFinite(w2.distM) ? Math.round(w2.distM * 3.28084) + ' ft from nearest asset' : ''}`));
+                if (!scoutMode) out.push(`Wells with no asset within ${matchFt} ft: ${unmatched.length}`);
+                if (!scoutMode) unmatched.forEach(w2 => out.push(`  - ${rrcFmtApi(w2.api)}${w2.wellNo ? ` #${w2.wellNo}` : ''} · ${w2.status}${w2.info ? ` · ${w2.info.operator} · "${w2.info.lease}"` : ''} · ${isFinite(w2.distM) ? Math.round(w2.distM * 3.28084) + ' ft from nearest asset' : ''}`));
                 out.push(`Operators in area: ${ops.map(op => `${op} (${opCount[op]})`).join(', ') || 'unknown (lookups pending)'}`);
                 navigator.clipboard.writeText(out.join('\n')).then(
                     () => showKMLToast('Recon report copied.', 3000),

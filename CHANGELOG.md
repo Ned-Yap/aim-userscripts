@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Pad Recon: scout mode + lease map — Map Styler v34.101 (dev/latest)
+
+The recon no longer depends on client assets. New **🗺 Leases in the area** section (always first): every well cluster grouped by the state's own ownership unit — **operator + lease name, well count, status breakdown** — with click-to-jump to the cluster. On a site with **no assets at all** the report runs in **SCOUT MODE**: pure state-side picture (leases + operators), no client CSV required — drop a base station on a prospect and scout it. When assets exist, the reconciliation sections (facility/wellhead/unmatched) appear beneath the lease map as before.
+
+---
+
 ## 2026-07-02 — 📋 Pad Recon report — Map Styler v34.100 (dev/latest)
 
 New **📋 Pad recon report** button in the Oil & Gas card: reconciles the client-provided assets against the state's well records. Every asset classifies as a **🛢 Wellhead pad** (RRC well within 300 ft — editable — with API, status, operator, lease per well) or a **🏭 Facility pad** (no wellbore — expected for batteries/compressors/SATs). Then the flip side: **❓ wells with NO asset nearby** — pads the client CSV missed, or neighboring operators' wells — sorted nearest-first. Ends with an **🤝 operator rollup** of everyone operating in the site area (prospecting list). Every row click-jumps the map with a pulse; **Copy report** produces the plain-text version. Run it after the wells overlay loads (operator names fill in as the background lookups finish).
