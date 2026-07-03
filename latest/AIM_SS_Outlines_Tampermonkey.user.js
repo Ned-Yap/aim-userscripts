@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.97
+// @version      34.98
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -38,7 +38,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.97';
+    const SCRIPT_VERSION = '34.98';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -52,6 +52,7 @@
         // scriptId → last register wins, so they MUST agree). See
         // applyEquipFromBroadcast.
         else if (d.action === "ASSET_EQUIP") applyEquipFromBroadcast(d);
+        else if (d.action === "RRC_OPERATORS") applyRrcOperatorsFromBroadcast(d);
     };
 
     // --- AIM Control Panel integration ---
@@ -397,8 +398,19 @@
                 { id: 'rrc.bufferFt', label: 'Include wells within (of site bounds)', type: 'number', min: 0, max: 10560, step: 100, default: 500, unit: 'ft' },
                 { id: 'rrc.baseRadiusMi', label: 'No Site Setup yet: fetch around base station', type: 'number', min: 0.5, max: 10, step: 0.5, default: 2, unit: 'mi' },
                 { id: 'rrc.wells', label: 'Well locations (colored by status)', type: 'boolean', default: true },
-                { id: 'rrc.orphans', label: 'Mark orphan wells (purple ring)', type: 'boolean', default: true },
-                { id: 'rrc.pipelines', label: 'RRC pipelines (operator + commodity)', type: 'boolean', default: false },
+                { id: 'rrc.orphans', label: '🟣 Mark orphan wells (purple ring)', type: 'boolean', default: true },
+                { id: 'rrc.pipelines', label: 'RRC pipelines (mostly buried — same area)', type: 'boolean', default: false },
+                // Per-status visibility doubles as the COLOR LEGEND. Defaults
+                // = operational wells only (user spec 2026-07-02); plugged /
+                // permitted / dry are one checkbox away.
+                { type: 'header', label: 'Well types (color legend)' },
+                { id: 'rrc.st.oil', label: '🟢 Producing oil', type: 'boolean', default: true },
+                { id: 'rrc.st.gas', label: '🟠 Gas', type: 'boolean', default: true },
+                { id: 'rrc.st.inj', label: '🔵 Injection / disposal', type: 'boolean', default: true },
+                { id: 'rrc.st.plugged', label: '⚫ Plugged (gray)', type: 'boolean', default: false },
+                { id: 'rrc.st.permit', label: '🟡 Permitted / not drilled', type: 'boolean', default: false },
+                { id: 'rrc.st.dry', label: '🟤 Dry hole', type: 'boolean', default: false },
+                { id: 'rrc.st.other', label: '⚪ Other / unknown', type: 'boolean', default: true },
             ],
         },
         {
@@ -1600,6 +1612,10 @@
     // only want around the site, ~500 ft"), not the map view. Bounded
     // area ⇒ no zoom gating, no record-cap roulette, one fetch per site.
     let _rrcSiteBBox = { siteID: null, bbox: null, loading: false, failed: false };
+    let _rrcData = null;        // { geomKey, results, wantOrphans } — cached fetch for filter-only redraws
+    let _rrcDrawKey = '';       // geomKey + filter state of what's currently drawn
+    let _rrcOperators = [];     // [{ name, count }] discovered via bulk EWA fetch
+    let _rrcOpFetchKey = '';    // geomKey the bulk operator fetch ran for
     function rrcEnsureSiteBBox(sid) {
         if (_rrcSiteBBox.siteID === sid && !_rrcSiteBBox.loading) return _rrcSiteBBox.bbox;
         if (_rrcSiteBBox.siteID === sid && _rrcSiteBBox.loading) return null;
@@ -1651,6 +1667,18 @@
         if (/permit|location/i.test(d2)) return '#ffe14d';
         if (/abandon|cancel/i.test(d2)) return '#6d7680';
         return '#ffffff';
+    }
+    // Status class ↔ the rrcWellColor buckets — drives the per-type
+    // visibility toggles (rrc.st.*).
+    function rrcStatusClass(desc) {
+        const d2 = String(desc || '');
+        if (/plugged/i.test(d2)) return 'plugged';
+        if (/dry/i.test(d2)) return 'dry';
+        if (/injection|disposal/i.test(d2)) return 'inj';
+        if (/gas/i.test(d2)) return 'gas';
+        if (/oil/i.test(d2)) return 'oil';
+        if (/permit|location/i.test(d2)) return 'permit';
+        return 'other';
     }
     function rrcFmtApi(api8) {
         const a = String(api8 || '').trim();
@@ -1715,12 +1743,68 @@
             ontimeout: () => { delete _rrcWellInfo[api8]; cb(null); },
         });
     }
+    // Bulk operator discovery: with the fetch now SITE-BOUNDED the well
+    // count is small, so fetch every well's EWA record once (sequential,
+    // 300 ms apart — be kind to the state server). Enables the operator
+    // dropdown + operator/lease on plain hover.
+    function rrcBulkFetchOperators(geomKey, results) {
+        if (_rrcOpFetchKey === geomKey) return;
+        const feats = (results && results.wells && results.wells.features) || [];
+        const apis = feats.map(f => String((f.attributes || {}).API || '').trim()).filter(a => a.length === 8);
+        if (!apis.length || apis.length > 100) { if (apis.length) console.log(`${TAG} RRC: ${apis.length} wells — skipping bulk operator fetch (cap 100)`); return; }
+        _rrcOpFetchKey = geomKey;
+        let i = 0;
+        const step = () => {
+            if (toggleState['rrc.show'] !== true || _rrcOpFetchKey !== geomKey) return;
+            while (i < apis.length && _rrcWellInfo[apis[i]] && _rrcWellInfo[apis[i]] !== 'pending') i++;
+            if (i >= apis.length) { rrcOperatorsReady(apis); return; }
+            const api = apis[i++];
+            rrcFetchWellInfo(api, () => setTimeout(step, 300));
+        };
+        step();
+    }
+    function rrcOperatorsReady(apis) {
+        const count = {};
+        apis.forEach(a => {
+            const info = _rrcWellInfo[a];
+            if (info && info !== 'pending' && info !== 'none' && info.operator) count[info.operator] = (count[info.operator] || 0) + 1;
+        });
+        _rrcOperators = Object.keys(count).sort((a, b) => count[b] - count[a] || a.localeCompare(b))
+            .map(name => ({ name, count: count[name] }));
+        console.log(`${TAG} RRC operators on site: ${_rrcOperators.map(o => `${o.name} (${o.count})`).join(', ') || 'none found'}`);
+        if (toggleState['rrc.operator'] === undefined) toggleState['rrc.operator'] = 'all';
+        registerWithControlPanel();
+        // Redraw so hover tooltips pick up operator + lease for every well.
+        _rrcDrawKey = '';
+        applyRrcLayers();
+    }
+    // Operator dropdown rows spliced into the RRC category (mirrors the
+    // asset-equipment dynamic pattern).
+    function buildRrcOperatorToggles() {
+        if (!_rrcOperators.length) return [];
+        return [
+            { type: 'header', label: 'Operator filter' },
+            { id: 'rrc.operator', label: 'Show operator', type: 'select',
+              options: [{ value: 'all', label: 'All operators' }]
+                  .concat(_rrcOperators.map(o => ({ value: o.name, label: `${o.name} (${o.count})` }))),
+              default: 'all' },
+        ];
+    }
+    function applyRrcOperatorsFromBroadcast(d) {
+        if (!d || d.siteID !== getCurrentSiteID()) return;
+        const ops = Array.isArray(d.operators) ? d.operators : [];
+        const sig = ops.map(o => o.name).join('|');
+        if (sig === _rrcOperators.map(o => o.name).join('|')) return;
+        _rrcOperators = ops;
+        if (toggleState['rrc.operator'] === undefined) toggleState['rrc.operator'] = 'all';
+        registerWithControlPanel();
+    }
     function removeRrcLayers() {
-        if (!_rrcLayers.length) { _rrcKey = ''; return; }
+        _rrcDrawKey = '';
+        if (!_rrcLayers.length) return;
         const map = getLeafletMap();
         _rrcLayers.forEach(l => { try { if (map) map.removeLayer(l); } catch (e) {} });
         _rrcLayers = [];
-        _rrcKey = '';
         console.log(`${TAG} RRC overlay removed`);
     }
     function applyRrcLayers() {
@@ -1762,8 +1846,19 @@
             removeRrcLayers();
             return;   // no geometry at all — logged by the bounds fetch
         }
-        const key = `${sid}|${envMode}|${wantWells}|${wantOrphans}|${wantPipes}`;
-        if (_rrcKey === key || _rrcFetching) return;
+        const geomKey = `${sid}|${envMode}|${wantWells}|${wantOrphans}|${wantPipes}`;
+        const filterKey = ['oil', 'gas', 'inj', 'plugged', 'permit', 'dry', 'other']
+            .map(k2 => toggleState[`rrc.st.${k2}`] === false ? '0' : '1').join('')
+            + '|' + (toggleState['rrc.operator'] || 'all');
+        // Filter-only change → redraw from the cached fetch, no refetch.
+        if (_rrcData && _rrcData.geomKey === geomKey) {
+            if (_rrcDrawKey !== geomKey + '§' + filterKey) {
+                drawRrcLayers(_rrcData.results, _rrcData.wantOrphans);
+                _rrcDrawKey = geomKey + '§' + filterKey;
+            }
+            return;
+        }
+        if (_rrcFetching) return;
         _rrcFetching = true;
         const seq = ++_rrcSeq;
         console.log(`${TAG} RRC fetch area: ${envMode}`);
@@ -1777,8 +1872,10 @@
         const finish = () => {
             _rrcFetching = false;
             if (seq !== _rrcSeq || toggleState['rrc.show'] !== true) return;
+            _rrcData = { geomKey, results, wantOrphans };
             drawRrcLayers(results, wantOrphans);
-            _rrcKey = key;
+            _rrcDrawKey = geomKey + '§' + filterKey;
+            rrcBulkFetchOperators(geomKey, results);
         };
         const done = () => { if (--pendingN <= 0) finish(); };
         if (!pendingN) { _rrcFetching = false; return; }
@@ -1818,11 +1915,21 @@
             });
         }
         if (results.wells && Array.isArray(results.wells.features)) {
+            const opFilter = String(toggleState['rrc.operator'] || 'all');
             results.wells.features.forEach(f => {
                 const a = f.attributes || {};
                 if (!f.geometry || typeof f.geometry.y !== 'number') return;
                 const api = String(a.API || '').trim();
                 const orphan = orphanApis.has(api);
+                // Per-status visibility (orphans always show when the orphan
+                // marker toggle is on — an orphan you can't see is the worst).
+                if (!orphan && toggleState[`rrc.st.${rrcStatusClass(a.GIS_SYMBOL_DESCRIPTION)}`] === false) return;
+                // Operator filter (from the bulk EWA fetch). Unknown-operator
+                // wells hide while a specific operator is selected.
+                if (opFilter !== 'all') {
+                    const info = _rrcWellInfo[api];
+                    if (!info || info === 'pending' || info === 'none' || info.operator !== opFilter) return;
+                }
                 const color = orphan ? '#c000ff' : rrcWellColor(a.GIS_SYMBOL_DESCRIPTION);
                 const mk = L.circleMarker([f.geometry.y, f.geometry.x], {
                     radius: orphan ? 7 : 5, color, weight: orphan ? 3 : 2,
@@ -2347,10 +2454,13 @@
     // equipment set actually changes (it signatures the payload).
     function buildRegistrationToggles() {
         const extra = buildAssetEquipToggles();
-        if (!extra.length) return TOGGLES;
-        return TOGGLES.map(cat => (cat && cat.id === 'asset-cat')
-            ? { ...cat, children: [...cat.children, ...extra] }
-            : cat);
+        const rrcExtra = buildRrcOperatorToggles();
+        if (!extra.length && !rrcExtra.length) return TOGGLES;
+        return TOGGLES.map(cat => {
+            if (cat && cat.id === 'asset-cat' && extra.length) return { ...cat, children: [...cat.children, ...extra] };
+            if (cat && cat.id === 'rrc-cat' && rrcExtra.length) return { ...cat, children: [...cat.children, ...rrcExtra] };
+            return cat;
+        });
     }
 
     // True if the user has unchecked any state or equipment "show" box — i.e.
@@ -7097,6 +7207,13 @@
             try {
                 stateChannel.postMessage({
                     action: 'ASSET_EQUIP', siteID: getCurrentSiteID(), equip: assetEquipTypes,
+                });
+            } catch (e) {}
+        }
+        if (CONTEXT === 'IFRAME' && _rrcOperators.length) {
+            try {
+                stateChannel.postMessage({
+                    action: 'RRC_OPERATORS', siteID: getCurrentSiteID(), operators: _rrcOperators,
                 });
             } catch (e) {}
         }

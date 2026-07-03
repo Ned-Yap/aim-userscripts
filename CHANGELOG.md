@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-02 — Well filters, color legend, operator dropdown — Map Styler v34.98 (dev/latest)
+
+The Oil & Gas card now filters to what matters for **surface-equipment emission work**: per-status checkboxes that double as the **color legend** (🟢 producing oil, 🟠 gas, 🔵 injection/disposal, ⚫ plugged, 🟡 permitted/not drilled, 🟤 dry, ⚪ other) — defaults show **operational wells only**; plugged and permitted are one checkbox away. Because the fetch is site-bounded, every well's operator is now looked up automatically in the background (gently — one query every 300 ms), which enables two things: **operator + lease on plain hover** for every well (no click needed), and an **operator dropdown** ("Show operator: PIONEER NATURAL RES. USA (14)") to isolate a single operator's wells. Orphan wells always show when the orphan marker is on, regardless of status filters. Filter changes redraw instantly from cache — no refetch.
+
+---
+
 ## 2026-07-02 — RRC fetch = site bounds only — Map Styler v34.96–v34.97 (dev/latest)
 
 The Oil & Gas overlay no longer loads wells for the whole map view — it fetches **only around the site**: the site's entity bounds plus a buffer (**500 ft default, editable**). On a **fresh site with no Site Setup yet**, it falls back to a radius around the **base station** (**2 mi default, editable**). One bounded fetch per site: no zoom gating, no 1,000-record cap roulette, and nothing drawn miles away that nobody asked about. Buffer changes refetch immediately.
