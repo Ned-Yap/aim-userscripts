@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Site Diff v0.40: Migration Planner, read-only (dev/latest)
+
+Phase 3a. New **Migration (CSM only)** section: **🧭 Plan migration** builds the full Offline→Live change plan without writing anything — entities matched by type+name, every difference classified as **UPDATE** (with reasons: moved vertices/arcs, altitude bands, description…), **CREATE**, **DELETE**, or **REVIEW** (duplicate-name ambiguities, and Live-only assets — assets are never auto-deleted since flight/image/issue history hangs off their IDs). Base Stations and Safe Zones are always skipped (hardware-bound). Copyable plan report, and **💾 Backup Live JSON** downloads the target site's full setup as a rollback reference (works standalone too — it's the same file you'd re-upload as a shadow). The write executor is Phase 3b, gated on two recon checks.
+
+---
+
 ## 2026-07-03 — Site Diff v0.31: diff results become a real table (dev/latest)
 
 The results panel is now a proper table: **Type / Name / Segs / Length / Offset / From (old)** columns with click-to-sort headers (arrow shows direction), **drag-resizable columns**, a **filter bar** (name/old-feature text search, FP/FFZ dropdown, NEW-only checkbox with visible/total count), and rows still click-to-zoom. The panel itself is **draggable by its header and resizable from the corner**, and remembers its position and size.

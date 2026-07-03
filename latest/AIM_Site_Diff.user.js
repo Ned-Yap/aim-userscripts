@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Site Diff
 // @namespace    http://tampermonkey.net/
-// @version      0.31
+// @version      0.40
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Site_Diff.user.js
 // @description  Site comparison suite: shadow-site ghost overlay (per-type show/color/opacity), swipe divider, and significant-change diff — stretches of this site's FPs/FFZs outside the shadow site's approved envelope (old FFZs + FPs buffered by a threshold) are highlighted and can be sent to AIM Issues for regs review. Phase 3 (API migration) later.
@@ -39,7 +39,7 @@
     }
 
     const SCRIPT_ID = 'aim-site-diff';
-    const SCRIPT_VERSION = '0.31';
+    const SCRIPT_VERSION = '0.40';
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const PANE_NAME = 'aim-site-diff-pane';
     const HL_PANE_NAME = 'aim-site-diff-hl';
@@ -1370,6 +1370,320 @@
         renderDiffList();
     }
 
+    // ==================================================================
+    // Phase 3a — Migration Planner (READ-ONLY)
+    //
+    // Direction: the OFFLINE site (open on screen, the rebuilt copy) is the
+    // source of truth; the LIVE site (the shadow) is the target. Entities
+    // match by type + name. The planner only reports what the executor
+    // (Phase 3b, not built yet) would do — it never writes.
+    // Full/CSM mode only.
+    // ==================================================================
+    const MIG_EPS_M = 0.3;   // vertices closer than this count as unmoved
+
+    function isFullMode() {
+        try { return localStorage.getItem('aim-mode') === 'full'; }
+        catch (e) { return false; }
+    }
+
+    function migKey(e) { return `${e.type}:${String(e.name || '').trim().toLowerCase()}`; }
+
+    function migPtEqual(a, b, proj) {
+        if (!a || !b || typeof a.lat !== 'number' || typeof b.lat !== 'number') return false;
+        const A = proj.toXY(a), B = proj.toXY(b);
+        return Math.hypot(A.x - B.x, A.y - B.y) <= MIG_EPS_M;
+    }
+
+    function numEq(a, b, tol) {
+        if (a == null && b == null) return true;
+        if (typeof a !== 'number' || typeof b !== 'number') return a === b;
+        return Math.abs(a - b) <= (tol || 0.01);
+    }
+
+    // Reasons an entity on Live would need an update to match Offline
+    function migCompare(off, live, proj) {
+        const reasons = [];
+        if (off.type === 15) {
+            const oa = Array.isArray(off.arcs) ? off.arcs : [];
+            const la = Array.isArray(live.arcs) ? live.arcs : [];
+            if (oa.length !== la.length) {
+                reasons.push(`arcs ${la.length}→${oa.length}`);
+            } else {
+                let moved = 0, alt = 0;
+                for (let i = 0; i < oa.length; i++) {
+                    const o = oa[i], l = la[i];
+                    if (!migPtEqual(o.point_a, l.point_a, proj) || !migPtEqual(o.point_b, l.point_b, proj)) moved++;
+                    if (!numEq(o.min_alt, l.min_alt) || !numEq(o.max_alt, l.max_alt)
+                        || !numEq(o.min_emergency_alt, l.min_emergency_alt)) alt++;
+                }
+                if (moved) reasons.push(`${moved} arc(s) moved`);
+                if (alt) reasons.push(`${alt} arc altitude band(s)`);
+            }
+        } else {
+            const oc = entityCoords(off) || [];
+            const lc = entityCoords(live) || [];
+            if (oc.length !== lc.length) {
+                reasons.push(`vertices ${lc.length}→${oc.length}`);
+            } else {
+                let moved = 0;
+                for (let i = 0; i < oc.length; i++) if (!migPtEqual(oc[i], lc[i], proj)) moved++;
+                if (moved) reasons.push(`${moved} vertex(es) moved`);
+            }
+            const or = off.restrictions, lr = live.restrictions;
+            if (or && lr && (typeof or.minAlt === 'number' || typeof lr.minAlt === 'number')) {
+                if (!numEq(or.minAlt, lr.minAlt) || !numEq(or.maxAlt, lr.maxAlt)) {
+                    reasons.push(`alt band ${lr.minAlt}–${lr.maxAlt}→${or.minAlt}–${or.maxAlt} m`);
+                }
+            }
+        }
+        if (String(off.description || '') !== String(live.description || '')) reasons.push('description');
+        if (off.type === 19) {
+            if (String(off.general_marker_type || '') !== String(live.general_marker_type || '')) reasons.push('marker type');
+            if (!numEq(off.marker_height, live.marker_height)) reasons.push('marker height');
+        }
+        if (off.type === 3 && !!off.is_unshielded !== !!live.is_unshielded) reasons.push('unshielded flag');
+        return reasons;
+    }
+
+    let migPlan = null;   // { rows, summary, offLabel, liveLabel, liveSiteId }
+
+    async function planMigration() {
+        if (!isFullMode()) {
+            openMigPanel();
+            setMigBody('<span style="color:#ff5252">CSM Full mode required — migration tools are inert in Lite mode.</span>');
+            return;
+        }
+        if (!siteID) { openMigPanel(); setMigBody('No site loaded.'); return; }
+        const src = shadowSourceFor(siteID);
+        if (!src) {
+            openMigPanel();
+            setMigBody('Pick a shadow first — the LIVE (original) site this plan would write to.');
+            return;
+        }
+        openMigPanel();
+        setMigBody('<span style="color:#aaa">Building plan…</span>');
+        try {
+            const [offline, live] = await Promise.all([
+                fetchShadowEntities(siteID, true),
+                getShadowEntities(siteID, src, true),
+            ]);
+            if (!offline || !live) { setMigBody('Could not fetch one of the sides — see console.'); return; }
+            let anchorLat = null;
+            for (const e of live.concat(offline)) {
+                const cs = entityCoords(e);
+                if (cs && cs[0] && typeof cs[0].lat === 'number') { anchorLat = cs[0].lat; break; }
+                if (Array.isArray(e.arcs) && e.arcs[0] && e.arcs[0].point_a) { anchorLat = e.arcs[0].point_a.lat; break; }
+            }
+            const proj = projector(anchorLat || 0);
+
+            const SKIP_TYPES = { 8: 'Base Station', 98: 'Safe Zone' };   // hardware-bound — never migrated
+            const rows = [];
+            const liveByKey = new Map();
+            const dupLive = new Set();
+            live.forEach(e => {
+                if (SKIP_TYPES[e.type]) return;
+                const k = migKey(e);
+                if (liveByKey.has(k)) dupLive.add(k);
+                else liveByKey.set(k, e);
+            });
+            const offSeen = new Set();
+            const dupOff = new Set();
+            offline.forEach(e => {
+                const k = migKey(e);
+                if (offSeen.has(k)) dupOff.add(k);
+                offSeen.add(k);
+            });
+            const matchedLiveIds = new Set();
+
+            offline.forEach(off => {
+                const reg = typeReg(off.type);
+                if (SKIP_TYPES[off.type]) {
+                    rows.push({ action: 'skip', kind: reg.short, name: off.name, note: `${SKIP_TYPES[off.type]} — hardware-bound, never migrated` });
+                    return;
+                }
+                const k = migKey(off);
+                if (dupOff.has(k) || dupLive.has(k)) {
+                    rows.push({ action: 'review', kind: reg.short, name: off.name, note: 'ambiguous — duplicate name+type on one side, match manually' });
+                    return;
+                }
+                const liveMatch = liveByKey.get(k);
+                if (!liveMatch) {
+                    const detail = off.type === 15 ? `${(off.arcs || []).length} arcs` : `${(entityCoords(off) || []).length} verts`;
+                    rows.push({ action: 'create', kind: reg.short, name: off.name, note: detail });
+                    return;
+                }
+                matchedLiveIds.add(liveMatch.id);
+                const reasons = migCompare(off, liveMatch, proj);
+                if (reasons.length) {
+                    rows.push({ action: 'update', kind: reg.short, name: off.name, liveId: liveMatch.id, note: reasons.join(', ') });
+                } else {
+                    rows.push({ action: 'same', kind: reg.short, name: off.name, liveId: liveMatch.id });
+                }
+            });
+            live.forEach(l => {
+                if (SKIP_TYPES[l.type] || matchedLiveIds.has(l.id)) return;
+                const k = migKey(l);
+                if (dupLive.has(k) || dupOff.has(k)) return;   // already flagged as review
+                const reg = typeReg(l.type);
+                if (l.type === 3) {
+                    rows.push({ action: 'review', kind: reg.short, name: l.name, liveId: l.id, note: 'asset exists on Live only — assets are NEVER auto-deleted (flight/image/issue history)' });
+                } else {
+                    rows.push({ action: 'delete', kind: reg.short, name: l.name, liveId: l.id, note: 'exists on Live only' });
+                }
+            });
+
+            const order = { update: 0, create: 1, delete: 2, review: 3, skip: 4, same: 5 };
+            rows.sort((a, b) => (order[a.action] - order[b.action]) || String(a.name).localeCompare(String(b.name)));
+            const summary = {};
+            rows.forEach(r => { summary[r.action] = (summary[r.action] || 0) + 1; });
+            migPlan = {
+                rows, summary,
+                offLabel: `site ${siteID}`,
+                liveLabel: shadowSourceLabel(src),
+                liveSiteId: src.kind === 'site' ? src.id : null,
+                liveEntities: live,
+            };
+            console.log(`${TAG} migration plan: ${JSON.stringify(summary)}`);
+            renderMigPlan();
+        } catch (e) {
+            console.warn(`${TAG} planMigration threw:`, e);
+            setMigBody('Plan failed — see console.');
+        }
+    }
+
+    const MIG_ACTION_STYLE = {
+        update: '#ffa030', create: '#5fff5f', delete: '#ff5252',
+        review: '#ff8ac2', skip: '#888', same: '#556',
+    };
+
+    function buildMigReport() {
+        if (!migPlan) return '';
+        const lines = [];
+        lines.push('AIM Site Diff — migration plan (READ-ONLY preview, nothing was written)');
+        lines.push(`Source (Offline/new): ${migPlan.offLabel} · Target (Live/original): ${migPlan.liveLabel}`);
+        lines.push(Object.keys(migPlan.summary).map(k => `${k.toUpperCase()} ${migPlan.summary[k]}`).join(' · '));
+        lines.push('');
+        migPlan.rows.filter(r => r.action !== 'same').forEach(r => {
+            lines.push(`${r.action.toUpperCase()} ${r.kind} "${r.name}"${r.liveId ? ` (live id ${r.liveId})` : ''}${r.note ? ` — ${r.note}` : ''}`);
+        });
+        return lines.join('\n');
+    }
+
+    function renderMigPlan() {
+        if (!migPlan) return;
+        const s = migPlan.summary;
+        const chip = (a, label) => (s[a] ? `<span style="color:${MIG_ACTION_STYLE[a]}">${label} ${s[a]}</span>` : '');
+        const head = [chip('update', 'UPDATE'), chip('create', 'CREATE'), chip('delete', 'DELETE'),
+            chip('review', 'REVIEW'), chip('skip', 'skip'), chip('same', 'unchanged')]
+            .filter(Boolean).join(' · ');
+        const rowsHtml = migPlan.rows.filter(r => r.action !== 'same').map(r =>
+            `<div style="padding:2px 6px;border-bottom:1px solid #1d2430;">`
+            + `<span style="color:${MIG_ACTION_STYLE[r.action]};font-weight:bold">${r.action.toUpperCase()}</span> `
+            + `<span style="color:#7adfe6">${r.kind}</span> ${escapeHtml(String(r.name || ''))}`
+            + `${r.note ? `<span style="color:#888"> — ${escapeHtml(r.note)}</span>` : ''}</div>`
+        ).join('') || '<div style="color:#5fff5f;padding:6px">Sites are identical (within tolerance) — nothing to migrate ✓</div>';
+        setMigBody(
+            `<div style="padding:4px 6px;border-bottom:1px solid #222834;">${migPlan.offLabel} (source) → ${escapeHtml(migPlan.liveLabel)} (target)<br>${head}</div>`
+            + `<div style="max-height:46vh;overflow-y:auto;">${rowsHtml}</div>`
+            + '<div style="padding:6px;color:#888;font-size:11px;">Read-only preview. The executor (Phase 3b) is gated on delete-endpoint + mission-reference recon.</div>'
+        );
+    }
+
+    function downloadJson(filename, data) {
+        // Blob downloads from the sandboxed map iframe are blocked — hand
+        // the anchor to the TOP document (same-origin), the proven pattern
+        // from the Site Setup Analyzer's KML export.
+        try {
+            const topWin = window.top || window;
+            const doc = topWin.document;
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = topWin.URL.createObjectURL(blob);
+            const a = doc.createElement('a');
+            a.href = url;
+            a.download = filename;
+            doc.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => { try { topWin.URL.revokeObjectURL(url); } catch (e) {} }, 5000);
+            return true;
+        } catch (e) {
+            console.warn(`${TAG} download failed:`, e);
+            return false;
+        }
+    }
+
+    async function backupLiveSite() {
+        if (!siteID) return;
+        const src = shadowSourceFor(siteID);
+        if (!src) { openMigPanel(); setMigBody('Pick a shadow (the Live site) first.'); return; }
+        if (src.kind !== 'site') { openMigPanel(); setMigBody('Shadow is already a JSON file — nothing to back up.'); return; }
+        const ents = await fetchShadowEntities(src.id, true);
+        if (!ents) { openMigPanel(); setMigBody('Backup fetch failed — see console.'); return; }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        const name = `site-${src.id}-map_objects-${stamp}.json`;
+        if (downloadJson(name, ents)) {
+            console.log(`${TAG} rollback backup downloaded: ${name} (${ents.length} entities)`);
+            openMigPanel();
+            setMigBody(`<span style="color:#5fff5f">Backup saved: ${escapeHtml(name)} (${ents.length} entities).</span> This exact file re-uploads as a shadow if a rollback reference is ever needed.`);
+        }
+    }
+
+    // ---------------- Migration panel ----------------
+    let migPanelEl = null;
+
+    function setMigBody(html) {
+        const el = migPanelEl && migPanelEl.querySelector('#aim-sd-mig-body');
+        if (el) el.innerHTML = html;
+    }
+
+    function openMigPanel() {
+        if (!migPanelEl) {
+            migPanelEl = document.createElement('div');
+            migPanelEl.id = 'aim-sd-mig-panel';
+            migPanelEl.style.cssText = 'position:fixed;top:90px;left:40px;z-index:2147480002;width:520px;'
+                + 'background:#14181f;color:#ddd;border:1px solid #2a3140;border-radius:6px;'
+                + 'font:12px/1.5 monospace;box-shadow:0 4px 18px rgba(0,0,0,0.5);';
+            migPanelEl.innerHTML = ''
+                + '<div id="aim-sd-mig-drag" style="padding:7px 10px;color:#7adfe6;font-weight:bold;border-bottom:1px solid #2a3140;cursor:move;user-select:none;">'
+                + '🧭 Site Diff — migration plan (read-only) <span id="aim-sd-mig-close" style="float:right;cursor:pointer;color:#888">✕</span></div>'
+                + '<div id="aim-sd-mig-body"></div>'
+                + '<div style="padding:6px 10px;border-top:1px solid #222834;display:flex;gap:10px;flex-wrap:wrap;">'
+                + '<span id="aim-sd-mig-copy" style="cursor:pointer;color:#7adfe6">📋 Copy plan</span>'
+                + '<span id="aim-sd-mig-backup" style="cursor:pointer;color:#5fff5f">💾 Backup Live JSON</span>'
+                + '</div>';
+            document.body.appendChild(migPanelEl);
+            migPanelEl.querySelector('#aim-sd-mig-close').addEventListener('click', () => { migPanelEl.style.display = 'none'; });
+            migPanelEl.querySelector('#aim-sd-mig-backup').addEventListener('click', () => { backupLiveSite(); });
+            migPanelEl.querySelector('#aim-sd-mig-copy').addEventListener('click', () => {
+                const txt = buildMigReport();
+                if (!txt) return;
+                try {
+                    navigator.clipboard.writeText(txt)
+                        .then(() => console.log(`${TAG} migration plan copied`))
+                        .catch(e => console.warn(`${TAG} clipboard write failed:`, e));
+                } catch (e) { console.warn(`${TAG} clipboard unavailable:`, e); }
+            });
+            const dragBar = migPanelEl.querySelector('#aim-sd-mig-drag');
+            dragBar.addEventListener('pointerdown', (ev) => {
+                if (ev.target.id === 'aim-sd-mig-close') return;
+                ev.preventDefault();
+                const r = migPanelEl.getBoundingClientRect();
+                const offX = ev.clientX - r.left, offY = ev.clientY - r.top;
+                const onMove = (mv) => {
+                    migPanelEl.style.left = `${Math.max(0, mv.clientX - offX)}px`;
+                    migPanelEl.style.top = `${Math.max(0, mv.clientY - offY)}px`;
+                };
+                const onUp = () => {
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                };
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+            });
+        }
+        migPanelEl.style.display = 'block';
+    }
+
     // ---------------- Swipe divider ----------------
     let swipeHandleEl = null;
     let swipeFrac = 0.5;
@@ -1523,6 +1837,9 @@
                 { id: 'diff-color', label: 'Change highlight color', type: 'color', default: '#ff2d2d' },
                 { id: 'run-diff', label: '⚖ Run significant-change diff', type: 'button', action: 'run-diff' },
                 { id: 'clear-diff', label: 'Clear diff highlights + issues', type: 'button', action: 'clear-diff' },
+                { type: 'header', label: 'Migration (CSM only)' },
+                { id: 'plan-migration', label: '🧭 Plan migration (read-only preview)', type: 'button', action: 'plan-migration' },
+                { id: 'backup-live', label: '💾 Backup Live site JSON', type: 'button', action: 'backup-live' },
                 { type: 'header', label: 'Style' },
                 { id: 'dashed', label: 'Dashed lines (ghost look)', type: 'boolean', default: true },
                 { id: 'weight', label: 'Line weight', type: 'number', min: 1, max: 8, step: 1, default: 2, unit: 'px' },
@@ -1656,6 +1973,8 @@
         else if (actionId === 'refresh-shadow') renderShadow(true);
         else if (actionId === 'run-diff') runDiff();
         else if (actionId === 'clear-diff') clearDiff(true);
+        else if (actionId === 'plan-migration') planMigration();
+        else if (actionId === 'backup-live') backupLiveSite();
     }
 
     function setupControlPanel() {
