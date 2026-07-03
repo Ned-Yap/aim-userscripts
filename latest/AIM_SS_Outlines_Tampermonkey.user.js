@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.109
+// @version      34.110
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.109';
+    const SCRIPT_VERSION = '34.110';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -5043,6 +5043,13 @@
                 if (!feats.length) { showKMLToast('HIFLD has no transmission lines in this view.', 5000); return; }
                 const co = getCommitOps(siteID, 'trans');
                 let staged = 0, skippedCap = 0;
+                // Envelope-intersect returns WHOLE line features — a line
+                // clipping the corner of the view arrives with its entire
+                // multi-mile geometry (v34.110 fix: user's seeded KML had
+                // lines running way off the site). Clip every path to the
+                // seed area before staging; a clipped-out middle splits the
+                // line into -a/-b pieces.
+                const seedEnv = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
                 feats.forEach(f => {
                     const a = f.attributes || {};
                     const volt = (a.VOLTAGE != null && Number(a.VOLTAGE) > 0) ? `${Number(a.VOLTAGE)}kV` : (a.VOLT_CLASS || 'kV?');
@@ -5050,13 +5057,17 @@
                     const owner = String(a.OWNER || '').trim().replace(/[<>&"]/g, '').substring(0, 30);
                     ((f.geometry && f.geometry.paths) || []).forEach((pth, pi) => {
                         if (!Array.isArray(pth) || pth.length < 2) return;
-                        if (staged >= HIFLD_SEED_MAX_LINES) { skippedCap++; return; }
-                        // ArcGIS [x,y] IS KML [lng,lat] order — no swap needed.
-                        co.added.push({
-                            name: `HIFLD ${volt}${owner ? ` ${owner}` : ''} #${a.OBJECTID_1 != null ? a.OBJECTID_1 : '?'}${pi ? `-${pi + 1}` : ''}`,
-                            coords: pth.map(xy => [xy[0], xy[1]]),
+                        // rrcClipPathToEnv works in [lat,lng]; convert, clip, convert back.
+                        const pieces = rrcClipPathToEnv(pth.map(xy => [xy[1], xy[0]]), seedEnv);
+                        pieces.forEach((piece, qi) => {
+                            if (piece.length < 2) return;
+                            if (staged >= HIFLD_SEED_MAX_LINES) { skippedCap++; return; }
+                            co.added.push({
+                                name: `HIFLD ${volt}${owner ? ` ${owner}` : ''} #${a.OBJECTID_1 != null ? a.OBJECTID_1 : '?'}${pi ? `-${pi + 1}` : ''}${pieces.length > 1 ? `-${String.fromCharCode(97 + qi)}` : ''}`,
+                                coords: piece.map(ll => [ll[1], ll[0]]),   // back to KML [lng,lat]
+                            });
+                            staged++;
                         });
-                        staged++;
                     });
                 });
                 if (!staged) { showKMLToast('HIFLD returned lines but none had usable geometry.', 5000); return; }

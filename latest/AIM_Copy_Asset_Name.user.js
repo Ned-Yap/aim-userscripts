@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.157
+// @version      4.158
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.157';
+    const SCRIPT_VERSION = '4.158';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -2257,15 +2257,25 @@
         const cx = ax + t * dx, cy = ay + t * dy;
         return { d: Math.sqrt(cx * cx + cy * cy), lat: a[0] + (b[0] - a[0]) * t, lng: a[1] + (b[1] - a[1]) * t };
     }
-    // Rectangle wrapping two points (padded) — used for windmill issues
-    // so the drawn box spans BOTH the turbine and the violating entity.
-    function airWrapBox(aLat, aLng, bLat, bLng, padM) {
+    // Slim ROTATED rectangle along the turbine→entity axis (v4.158 — the
+    // old axis-aligned bounding box ballooned on diagonal pairs; a
+    // corridor reads as "this thing ↔ that thing" at a glance).
+    function airWrapBox(aLat, aLng, bLat, bLng, halfWidthM) {
         const midLat = (aLat + bLat) / 2;
-        const dLat = padM / 110540;
-        const dLng = padM / (111320 * Math.cos(midLat * Math.PI / 180));
-        const minLat = Math.min(aLat, bLat) - dLat, maxLat = Math.max(aLat, bLat) + dLat;
-        const minLng = Math.min(aLng, bLng) - dLng, maxLng = Math.max(aLng, bLng) + dLng;
-        return [[minLat, minLng], [minLat, maxLng], [maxLat, maxLng], [maxLat, minLng]];
+        const mPerLat = 110540, mPerLng = 111320 * Math.cos(midLat * Math.PI / 180);
+        let dx = (bLng - aLng) * mPerLng, dy = (bLat - aLat) * mPerLat;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        dx /= len; dy /= len;
+        // perpendicular half-width + extend both ends by the same margin
+        const px = -dy * halfWidthM, py = dx * halfWidthM;
+        const ex = dx * halfWidthM, ey = dy * halfWidthM;
+        const pt = (baseLat, baseLng, mx, my) => [baseLat + my / mPerLat, baseLng + mx / mPerLng];
+        return [
+            pt(aLat, aLng, -ex + px, -ey + py),
+            pt(bLat, bLng, ex + px, ey + py),
+            pt(bLat, bLng, ex - px, ey - py),
+            pt(aLat, aLng, -ex - px, -ey - py),
+        ];
     }
     function airMinToSite(lat, lng, sitePts) {
         let best = Infinity, bestPt = null;
@@ -2596,7 +2606,7 @@
                 const type = (a.Type_Code || '?').trim();
                 const lit = (a.Lighting || '').trim();
                 const isTL = /^T-?L\b/i.test(type) || /UTILITY POLE/i.test(type);
-                const isWindmill = /WINDMILL|WIND TURBINE|WTG/i.test(type);
+                const isWindmill = /WINDMILL|WIND TURBINE|WTG|TURBINE/i.test(type);
                 // Windmills get their own (tighter) standoff per SOP.
                 const vioFt = isWindmill ? th.windmillFt : th.obstacleFt;
                 const entry = { type, agl, lit, distFt, distMi: near.d / MI_TO_M, qty: (a.Quantity || '').trim(), lat: oLat, lng: oLng, src: (near.pt && near.pt.src) || null, hit: false, show: false };

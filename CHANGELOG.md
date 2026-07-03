@@ -6,6 +6,14 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-03 — Field-test fixes: windmill corridor + seeder clipping — Asset Inspector v4.158, Map Styler v34.110 (dev/latest)
+
+**Asset Inspector v4.158** — the windmill violation box is now a **slim rotated corridor along the turbine→entity line** instead of an axis-aligned rectangle that ballooned on diagonal pairs; turbine detection also matches DOF entries typed "TURBINE" (some turbines log as that instead of WINDMILL — a cause of the "partially working" flagging).
+
+**Map Styler v34.110** — the HIFLD KML seeder had the whole-feature bug the RRC pipelines overlay had: a line clipping the corner of the view got staged with its entire multi-mile geometry, so seeded KMLs contained lines running far off the site. Seeded paths are now **clipped to the seeded view area** (split pieces get -a/-b name suffixes). Sites seeded before this fix should delete the runaway lines (edit mode → mark for delete → commit) and re-seed.
+
+---
+
 ## 2026-07-02 — Boundaries badge follows the cursor — Map Styler v34.109 (dev/latest)
 
 The district/county/city badge now reads out **wherever your mouse is**, not the view center — hover around the map and it updates live (~12×/sec, against already-fetched polygons, so it's free). Falls back to view center until the mouse first enters the map.
