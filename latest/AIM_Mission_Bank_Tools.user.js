@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.65
+// @version      1.66
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.65';
+    const SCRIPT_VERSION = '1.66';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -7480,6 +7480,74 @@ ${snapPlacemarks}
     }
 
     // --- floating report popup -------------------------------------------
+    // Escape a violation detail and colorize the "N ft under/over" delta
+    // (under = red, over = blue) so it pops in the report + Sheets copy.
+    const SOP_UNDER_COLOR = '#ff5252', SOP_OVER_COLOR = '#4dc3ff';
+    function sopParseDelta(detail) {
+        const m = /— (\d+ ft (under|over))/.exec(detail);
+        return m ? { text: m[1], color: m[2] === 'under' ? SOP_UNDER_COLOR : SOP_OVER_COLOR } : null;
+    }
+    function sopDetailHtml(detail) {
+        return escapeHtml(detail).replace(/— (\d+ ft (under|over))/g, (m, d, dir) =>
+            `— <strong style="color:${dir === 'under' ? SOP_UNDER_COLOR : SOP_OVER_COLOR}">${d}</strong>`);
+    }
+
+    // Last completed run, kept for the 📋 Sheets copy.
+    let lastSopResult = null;
+
+    // Copy the last SOP report as a rich HTML table — pasting into Google
+    // Sheets/Excel yields formatted cells. Plain-text TSV as fallback.
+    function copySopReportForSheets() {
+        const res = lastSopResult;
+        if (!res || !Array.isArray(res.violations)) { showToast('Run the SOP check first.', '#ff9800'); return; }
+        const v = res.violations;
+        const sid = getCurrentSiteID();
+        let siteName = ''; try { siteName = getCurrentSiteName() || ''; } catch (e) {}
+        const missionsWith = new Set(v.map(x => x.id)).size;
+        const title = `Mission SOP Check — Site ${sid || '?'}${siteName ? ` · ${siteName}` : ''}`;
+        const summary = `${v.length} issue${v.length === 1 ? '' : 's'} across ${missionsWith} of ${res.missionCount} missions · ` +
+            `${res.missionCount - missionsWith} clean · ${res.ffzCount} FFZs · preset ${MISSION_SOP_PRESETS[sopPreset].label} · ${new Date().toLocaleString()}`;
+        const th = 'background:#263238;color:#ffffff;font-weight:bold;border:1px solid #90a4ae;padding:4px 8px;text-align:left';
+        const td = 'border:1px solid #cfd8dc;padding:4px 8px;vertical-align:top';
+        const rowsHtml = v.map(x => {
+            const delta = sopParseDelta(x.detail);
+            const sevColor = x.severity === 'high' ? '#c62828' : '#b8860b';
+            return `<tr>
+                <td style="${td}">${escapeHtml(x.name)}</td>
+                <td style="${td}">${escapeHtml(x.check)}</td>
+                <td style="${td};text-align:right">${x.stepIndex != null ? x.stepIndex : ''}</td>
+                <td style="${td}">${escapeHtml(x.detail)}</td>
+                <td style="${td};font-weight:bold;color:${delta ? delta.color : '#000000'}">${delta ? escapeHtml(delta.text) : ''}</td>
+                <td style="${td};font-weight:bold;color:${sevColor}">${x.severity === 'high' ? 'HARD' : 'WARN'}</td>
+            </tr>`;
+        }).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">
+            <tr><td colspan="6" style="font-weight:bold;font-size:14px;padding:4px 8px">${escapeHtml(title)}</td></tr>
+            <tr><td colspan="6" style="color:#555555;padding:2px 8px">${escapeHtml(summary)}</td></tr>
+            <tr><th style="${th}">Mission</th><th style="${th}">Check</th><th style="${th}">Step</th><th style="${th}">Detail</th><th style="${th}">Δ</th><th style="${th}">Severity</th></tr>
+            ${rowsHtml || `<tr><td colspan="6" style="${td};color:#2e7d32">No violations — all ${res.missionCount} missions pass.</td></tr>`}
+        </table>`;
+        const tsv = [title, summary, ['Mission', 'Check', 'Step', 'Detail', 'Delta', 'Severity'].join('\t')]
+            .concat(v.map(x => {
+                const delta = sopParseDelta(x.detail);
+                return [x.name, x.check, x.stepIndex != null ? x.stepIndex : '', x.detail, delta ? delta.text : '', x.severity === 'high' ? 'HARD' : 'WARN']
+                    .map(c => String(c).replace(/[\t\n]/g, ' ')).join('\t');
+            })).join('\n');
+        try {
+            const item = new ClipboardItem({
+                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/plain': new Blob([tsv], { type: 'text/plain' }),
+            });
+            navigator.clipboard.write([item]).then(
+                () => showToast('SOP report copied — paste into Google Sheets.', '#5fff5f'),
+                (e) => { console.warn(`${TAG} SOP rich copy failed, falling back to TSV`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
+        } catch (e) {
+            console.warn(`${TAG} ClipboardItem unavailable, falling back to TSV`, e);
+            copyToClipboard(tsv);
+            showToast('Copied as plain text (TSV).', '#ff9800');
+        }
+    }
+
     function closeSopReport() {
         const el = document.getElementById(SOP_REPORT_ID);
         if (el) el.remove();
@@ -7498,6 +7566,7 @@ ${snapPlacemarks}
         } else if (state.loading) {
             body = `<div style="padding:16px;color:#9ad">${escapeHtml(state.loading)}</div>`;
         } else {
+            lastSopResult = state;
             const v = state.violations || [];
             // Group by mission.
             const byMission = {};
@@ -7511,7 +7580,7 @@ ${snapPlacemarks}
                 const items = g.items.map(it => `
                     <div style="display:flex;gap:8px;padding:3px 0;font-size:11px;border-top:1px solid rgba(255,255,255,0.05)">
                         <span style="color:${sevColor(it.severity)};font-weight:700;flex-shrink:0">${it.severity === 'high' ? '●' : '▲'}</span>
-                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${escapeHtml(it.detail)}</span></span>
+                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${sopDetailHtml(it.detail)}</span></span>
                     </div>`).join('');
                 return `
                     <div class="aim-sop-mrow" data-mid="${mid}" style="padding:7px 12px;border-bottom:1px solid #1f2430;cursor:pointer">
@@ -7531,6 +7600,7 @@ ${snapPlacemarks}
         pop.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
                 <div style="flex:1;text-align:center;font-weight:700;color:#5fff5f;font-size:13px">🚩 Mission SOP Check</div>
+                <button data-sop-copy title="Copy report as a table — paste into Google Sheets" style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">📋 Sheets</button>
                 <button data-sop-rerun style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">Re-run</button>
                 <button data-sop-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
@@ -7538,6 +7608,7 @@ ${snapPlacemarks}
         document.body.appendChild(pop);
         pop.querySelector('[data-sop-x]').onclick = closeSopReport;
         pop.querySelector('[data-sop-rerun]').onclick = runMissionSopAndReport;
+        pop.querySelector('[data-sop-copy]').onclick = copySopReportForSheets;
         pop.querySelectorAll('.aim-sop-mrow').forEach(r => {
             r.onclick = () => { try { openPanelAndDrill(Number(r.dataset.mid)); } catch (e) { console.warn(`${TAG} drill failed`, e); } };
         });

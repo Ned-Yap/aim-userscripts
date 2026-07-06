@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.66: SOP report colored deltas + Copy → Sheets (dev/latest)
+
+The ft-under/over deltas in the Mission SOP report are now color-coded — **red for under the floor, blue for over the ceiling** — so violations pop at a glance. New **📋 Sheets** button in the report header copies the whole report as a rich formatted table (Mission / Check / Step / Detail / Δ / Severity, with a title + summary line and the same red/blue delta coloring): paste straight into Google Sheets or Excel. Falls back to plain TSV if the browser blocks rich clipboard.
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.65: SOP floor alert readability + new FFZ-ceiling check (dev/latest)
 
 Mission SOP Check upgrades. The **Navigate below FFZ floor** alert now shows the navigate's **AGL** alongside the MSL number and states exactly **how many ft under** the floor it is (e.g. `Navigate 2762 ft · AGL 96 ft < FFZ floor 2766 ft — 4 ft under (freezone_449)`). New check: **Navigate ≤ FFZ ceiling** — flags any Navigate above its containing FFZ's max altitude, with the same AGL + ft-over readout and its own on-by-default toggle + slack threshold in the Control Panel (Mission SOP section).
