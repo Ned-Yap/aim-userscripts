@@ -66,6 +66,12 @@ Phase 1 of the site-comparison suite: overlay another site's Site Setup on the c
 
 ---
 
+## 2026-07-03 — Terrain: legend fix + smooth color changes — Map Styler v34.113 (dev/latest)
+
+The **altitude legend now actually appears** (its statistics lookup needed a Tampermonkey permission that wasn't declared — after updating, Tampermonkey may ask once to allow `elevation.nationalmap.gov`; say yes). Color changes are smooth now: rebuilds wait 450 ms after you stop adjusting (a picker drag was firing a full server render per tick), and the old render **stays on screen until the new one has loaded** instead of vanishing into a blank window.
+
+---
+
 ## 2026-07-03 — Terrain v2: site-locked, custom colors, altitude legend, alignment fix — Map Styler v34.112 (dev/latest)
 
 Field feedback round on the terrain overlay, all four addressed: (1) **Alignment fixed** — on wide monitors the requested image's pixel aspect didn't match the requested ground area, and the elevation service silently *adjusts the ground area to fit*, so the render landed at the wrong scale ("more zoomed than the map"). The image size is now derived from the area's aspect ratio — nothing gets adjusted, everything pins true. (2) **Site-locked render**: the overlay now covers the **site + a radius** (1 mi default, editable) instead of re-rendering every pan — one fetch per site, smooth map, stable colors. (3) **Custom colors**: low/mid/high color pickers drive the elevation ramp. (4) **On-map altitude legend**: bottom-left gradient bar with the real min/mid/max **feet** for the rendered area (e.g. "2,653 ft — 2,722 — 2,791 ft"), queried from the same USGS data.

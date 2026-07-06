@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.112
+// @version      34.113
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -21,6 +21,7 @@
 // @connect      gis.rrc.texas.gov
 // @connect      webapps2.rrc.texas.gov
 // @connect      feature.geographic.texas.gov
+// @connect      elevation.nationalmap.gov
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
 // @run-at       document-end
 // ==/UserScript==
@@ -39,7 +40,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.112';
+    const SCRIPT_VERSION = '34.113';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1590,6 +1591,8 @@
     let _terrainLayer = null;
     let _terrainKey = '';
     let _terrainMap = null;
+    let _terrainRebuildT = null;
+    let _terrainScheduledKey = '';
     const TERRAIN_LEGEND_ID = 'aim-terrain-legend';
     function removeTerrainLegend() {
         const el = document.getElementById(TERRAIN_LEGEND_ID);
@@ -1709,6 +1712,21 @@
                 if (typeof map.hasLayer === 'function' && !map.hasLayer(_terrainLayer)) map.addLayer(_terrainLayer);
                 return;
             }
+            // Debounce rebuilds: a color-picker drag fires a toggle change
+            // per tick and each rebuild is a full server render. Rebuild
+            // 450 ms after the settings stop moving.
+            if (_terrainLayer && _terrainScheduledKey !== key) {
+                _terrainScheduledKey = key;
+                clearTimeout(_terrainRebuildT);
+                _terrainRebuildT = setTimeout(() => {
+                    _terrainRebuildT = null;
+                    _terrainScheduledKey = '';
+                    _terrainKey = '';        // force the rebuild path
+                    applyTerrainLayer();
+                }, 450);
+                return;
+            }
+            _terrainScheduledKey = '';
             const merc = (lng, lat) => {
                 const x = lng * 20037508.342789244 / 180;
                 const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.342789244 / 180;
@@ -1734,7 +1752,15 @@
             _terrainLayer = fresh;
             _terrainKey = key;
             _terrainMap = map;
-            if (stale) setTimeout(() => { try { map.removeLayer(stale); } catch (e) {} }, 800);
+            // Swap on LOAD — the old render stays visible until the new
+            // image has actually arrived (fixed-delay removal left a blank
+            // window during slow server renders). 10 s failsafe.
+            if (stale) {
+                let swapped = false;
+                const drop = () => { if (swapped) return; swapped = true; try { map.removeLayer(stale); } catch (e) {} };
+                try { fresh.on('load', drop); } catch (e) {}
+                setTimeout(drop, 10000);
+            }
             if (mode === 'local-color') terrainFetchLegendStats(x1, y1, x2, y2, radiusMi, key);
             else removeTerrainLegend();
             console.log(`${TAG} terrain: site-locked render (${mode}, ${radiusMi} mi around site, ${w}×${h})`);
@@ -1743,6 +1769,9 @@
         }
     }
     function removeTerrainLayer() {
+        clearTimeout(_terrainRebuildT);
+        _terrainRebuildT = null;
+        _terrainScheduledKey = '';
         if (!_terrainLayer) return;
         try {
             const map = _terrainMap || getLeafletMap();
