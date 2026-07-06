@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.166
+// @version      4.167
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.166';
+    const SCRIPT_VERSION = '4.167';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4403,70 +4403,130 @@
     // ============================================================
     const AGL_TIP_RE = /ALT\s*\(ft\)\s*([\d,]+)\s*[-–]\s*([\d,]+)/i;
     const AGL_TIP_NEAREST_M = 30; // accept the nearest cached DEM point within this many metres
+    const AGL_TIP_MAX_RETRY = 3;  // deferred-fetch retries per tooltip appearance (guards a dead DEM endpoint looping)
     let aglTipLastLL = null;      // cursor position in map lat/lng (tooltips carry no coords)
+    let aglTipWatcherActive = false;
     let aglTipWarned = false;
     function aglTipWarnOnce(e) {
         if (aglTipWarned) return;
         aglTipWarned = true;
         console.warn(`${TAG} AGL hover tooltip augment failed (further errors muted):`, e);
     }
-    function augmentAglHoverTip(el) {
+    function refreshAglHoverTip(el, depth) {
         try {
-            if (!aglHoverTipEnabled || !el || el.nodeType !== 1) return;
-            // ONE augment per tooltip: skip if this element, an ancestor, OR a
-            // descendant is already done (the wrapper AND an inner span both
-            // match the text → dup).
-            if ((el.getAttribute && el.getAttribute('data-aim-agl'))
-                || (el.closest && el.closest('[data-aim-agl]'))
-                || (el.querySelector && el.querySelector('[data-aim-agl]'))) return;
+            if (!aglHoverTipEnabled || !el || el.nodeType !== 1 || !el.isConnected) return;
+            // Percepto REUSES one tooltip element (show/hide + text swap per
+            // entity), so first route to the already-augmented wrapper if this
+            // node sits inside/above one. Same values → done; changed values →
+            // strip the stale AGL line and rebuild below.
+            let host = null;
+            if (el.hasAttribute && el.hasAttribute('data-aim-agl')) host = el;
+            if (!host && el.closest) host = el.closest('[data-aim-agl]');
+            if (!host && el.querySelector) host = el.querySelector('[data-aim-agl]');
+            if (host) {
+                const cur = ((host.textContent || '').match(AGL_TIP_RE) || [])[0] || '';
+                if (cur === host.getAttribute('data-aim-agl')) return; // already augmented for these values
+                host.querySelectorAll('[data-aim-agl-line]').forEach(d => d.remove());
+                host.removeAttribute('data-aim-agl');
+                el = host;
+            }
             const txt = el.textContent || '';
-            if (txt.length > 80 || txt.indexOf('ALT') < 0) return;
+            if (txt.length > 100 || txt.indexOf('ALT') < 0) return;
             const m = txt.match(AGL_TIP_RE);
             if (!m) return;
             const sid = getCurrentSiteID();
             if (!sid) return;
+            const retry = (depth || 0) < AGL_TIP_MAX_RETRY ? (() => refreshAglHoverTip(el, (depth || 0) + 1)) : (() => {});
             const am = siteAltModeCache[sid];
-            if (!am) { siteAltMode(sid).catch(aglTipWarnOnce); return; } // warm; NOT marked → re-hover retries
+            // Cold caches: warm them, then re-augment this SAME element when the
+            // fetch lands (the tooltip is usually still open; and since Percepto
+            // reuses the element, waiting for the next addedNodes never fires).
+            if (!am) { siteAltMode(sid).then(retry).catch(aglTipWarnOnce); return; }
             if (am.mode !== 'msl') return; // AGL sites already display AGL
             if (!aglTipLastLL) return;
             let g = getElevationFromCache(aglTipLastLL.lat, aglTipLastLL.lng);
             if (g == null) g = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
-            if (g == null) { fetchElevation(aglTipLastLL.lat, aglTipLastLL.lng).catch(aglTipWarnOnce); return; } // warm; NOT marked → re-hover retries
-            el.setAttribute('data-aim-agl', '1'); // mark only once we actually augment (so a cold spot stays retryable)
+            if (g == null) { fetchElevation(aglTipLastLL.lat, aglTipLastLL.lng).then(retry).catch(aglTipWarnOnce); return; }
+            el.setAttribute('data-aim-agl', m[0]); // record the MSL text we augmented, to detect reuse with new values
             const gFt = g * 3.28084;
             const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt);
             const hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
             // AGL on TOP and bigger (what the user cares about); Percepto's MSL line stays below.
             const add = document.createElement('div');
+            add.setAttribute('data-aim-agl-line', '1');
             add.style.cssText = 'color:#7fd1ff;font-size:15px;font-weight:700;margin-bottom:3px';
             add.textContent = `${lo} – ${hi} ft AGL`;
             el.insertBefore(add, el.firstChild);
         } catch (e) { aglTipWarnOnce(e); }
     }
+    // Pre-fetch the site's MSL/AGL mode so the very first hover can augment
+    // (one small GET, cached per site).
+    function warmAglTipMode() {
+        try {
+            const sid = getCurrentSiteID();
+            if (sid && !siteAltModeCache[sid]) siteAltMode(sid).catch(aglTipWarnOnce);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
     function watchAglHoverTips() {
         try {
-            const map = getLeafletMap();
-            // Tooltips render inside the map container; body fallback still
-            // catches them (subtree) if the map hasn't mounted yet.
-            const root = (map && map.getContainer && map.getContainer()) || document.body;
+            warmAglTipMode();
+            window.addEventListener('hashchange', warmAglTipMode);
             document.addEventListener('mousemove', (e) => {
                 try {
                     const mp = getLeafletMap();
                     if (mp && mp.mouseEventToLatLng) aglTipLastLL = mp.mouseEventToLatLng(e);
                 } catch (er) { aglTipWarnOnce(er); }
             }, true);
+            // Observe the whole document: the tooltip may portal OUTSIDE the map
+            // container, and characterData catches the reused-element text swaps
+            // that childList alone misses.
             const obs = new MutationObserver(muts => {
                 if (!aglHoverTipEnabled) return;
-                for (const mu of muts) for (const n of mu.addedNodes) {
-                    if (!n || n.nodeType !== 1) continue;
-                    augmentAglHoverTip(n);
-                    if (n.children && n.children.length && n.children.length < 12 && n.querySelectorAll) n.querySelectorAll('*').forEach(augmentAglHoverTip);
+                for (const mu of muts) {
+                    if (mu.type === 'characterData') {
+                        const hostEl = mu.target && mu.target.parentElement;
+                        if (hostEl) refreshAglHoverTip(hostEl);
+                        continue;
+                    }
+                    for (const n of mu.addedNodes) {
+                        if (!n || n.nodeType !== 1) continue;
+                        refreshAglHoverTip(n);
+                        if (n.children && n.children.length && n.children.length < 12 && n.querySelectorAll) n.querySelectorAll('*').forEach(el => refreshAglHoverTip(el));
+                    }
                 }
             });
-            obs.observe(root, { childList: true, subtree: true });
+            obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+            aglTipWatcherActive = true;
             console.log(`${TAG} AGL hover-tooltip watcher active (MSL sites: native ALT(ft) tooltip gains an AGL line)`);
         } catch (e) { console.warn(`${TAG} AGL hover-tooltip watcher failed:`, e); }
     }
+    // One-call remote diagnostic: run __aimAglTipStatus() in the MAP IFRAME
+    // console and read which gate is failing.
+    try {
+        unsafeWindow.__aimAglTipStatus = () => {
+            const sid = getCurrentSiteID();
+            const am = sid ? siteAltModeCache[sid] : null;
+            let ground = null;
+            if (aglTipLastLL) {
+                ground = getElevationFromCache(aglTipLastLL.lat, aglTipLastLL.lng);
+                if (ground == null) ground = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
+            }
+            const st = {
+                version: SCRIPT_VERSION,
+                context: CONTEXT,
+                watcherActive: aglTipWatcherActive,
+                toggleEnabled: aglHoverTipEnabled,
+                siteID: sid,
+                altMode: am ? am.mode : '(not fetched yet)',
+                mapFound: !!getLeafletMap(),
+                cursorLL: aglTipLastLL ? `${aglTipLastLL.lat.toFixed(5)},${aglTipLastLL.lng.toFixed(5)}` : '(no mousemove seen)',
+                groundAtCursorM: ground,
+                markedTooltipsInDom: document.querySelectorAll('[data-aim-agl]').length,
+            };
+            console.log(`${TAG} AGL hover tip status:`, st);
+            return st;
+        };
+    } catch (e) { console.warn(`${TAG} could not expose __aimAglTipStatus:`, e); }
 
     // ============================================================
     // Control Panel integration

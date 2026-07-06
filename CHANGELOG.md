@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Asset Inspector v4.167: hover AGL tooltip actually fires (dev/latest)
+
+v4.166 field test: no AGL line appeared. Three fixes: (1) Percepto **reuses one tooltip element** (show/hide + text swap), so the watcher now also reacts to text changes and re-augments the same element — including replacing a stale AGL line when you move to a different FFZ/FP; (2) on a cold cache (first hover on a site) the deferred alt-mode/DEM fetch now **re-augments the still-open tooltip when it lands** instead of waiting for a next-appearance that never comes, and the site's MSL/AGL mode is pre-fetched at load; (3) the observer watches the whole document, not just the map container, in case the tooltip portals outside it. Also new: run `__aimAglTipStatus()` in the map-iframe console to see every gate (version, watcher, site mode, cursor, ground) when reporting problems.
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.67: SOP Sheets export → sortable columns (dev/latest)
 
 The 📋 Sheets copy is now a fully structured table instead of a sentence per row: **Mission / Check / Step / Navigate MSL / Navigate AGL / FFZ Name / FFZ Min MSL / FFZ Min AGL / FFZ Max MSL / FFZ Max AGL / Ft Over (+) / Under (−) / Severity / Detail**. The over/under column is a signed **number** (+21 blue = over ceiling, −4 red = under floor) so the sheet sorts and filters properly; FFZ AGL values are relative to the ground at the navigate point. Non-altitude checks (scan-block, distance, etc.) keep their sentence in the Detail column. The on-screen report popup is unchanged.
