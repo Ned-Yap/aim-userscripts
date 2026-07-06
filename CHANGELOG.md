@@ -66,6 +66,12 @@ Phase 1 of the site-comparison suite: overlay another site's Site Setup on the c
 
 ---
 
+## 2026-07-03 — Terrain legend clear of the GPS box — Map Styler v34.115 (dev/latest)
+
+Legend nudged up so it sits fully above Percepto's GPS coordinate readout instead of behind it.
+
+---
+
 ## 2026-07-03 — Terrain legend moved bottom-right — Map Styler v34.114 (dev/latest)
 
 The elevation legend now sits bottom-right, directly above Percepto's GPS coordinate readout.
