@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.110
+// @version      34.111
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.110';
+    const SCRIPT_VERSION = '34.111';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -378,6 +378,33 @@
                   ],
                   default: 'percepto' },
                 { id: 'basemap-set-custom', label: 'Set custom tile URL (XYZ template)', type: 'button', action: 'basemap-set-custom' },
+            ],
+        },
+        {
+            // Terrain overlay (v34.111) — USGS 3DEP elevation rendered
+            // per-VIEW (not per-tile): "Color by elevation" uses a
+            // dynamic-range stretch so the ramp normalizes to the CURRENT
+            // VIEW's own min/max — real high/low color coding even on
+            // 30 ft of Permian relief (a national ramp reads flat there).
+            // Contours (2/5/10 ft) / slope / hillshade for other reads.
+            type: 'category',
+            id: 'terrain-cat',
+            label: 'Terrain (USGS 3DEP)',
+            meta: '(color-coded high/low · contours · slope)',
+            master: { id: 'terrain.show', default: false },
+            children: [
+                { id: 'terrain.mode', label: 'Mode', type: 'select',
+                  options: [
+                      { value: 'local-color', label: 'Color by elevation (local high/low)' },
+                      { value: 'contour2', label: 'Contours — 2 ft' },
+                      { value: 'contour5', label: 'Contours — 5 ft' },
+                      { value: 'contour10', label: 'Contours — 10 ft' },
+                      { value: 'slope', label: 'Slope map' },
+                      { value: 'hillshade', label: 'Hillshade (multidirectional)' },
+                  ],
+                  default: 'local-color' },
+                { id: 'terrain.opacity', label: 'Opacity', type: 'number',
+                  min: 0.1, max: 1, step: 0.05, default: 0.6, unit: 'fill' },
             ],
         },
         {
@@ -1148,6 +1175,8 @@
         applyOrthoVisibility();
         // 11b2. Basemap switcher (replacement base under everything).
         applyBasemapLayer();
+        // 11b3. USGS terrain overlay (per-view elevation render).
+        applyTerrainLayer();
         // 11c. FAA airspace chart overlay (sectional / TAC tile layer).
         applyFaaChartLayer();
         // 11d. Vector airspace boundaries (Class B/C/D/E polygons).
@@ -1535,6 +1564,85 @@
         _aimBasemapKey = '';
         _aimBasemapMap = null;
         console.log(`${TAG} basemap → Percepto default`);
+    }
+    // Terrain overlay (v34.111). Per-VIEW L.imageOverlay refreshed on
+    // moveend — NOT a tile layer, because the local-color mode's DRA
+    // stretch must normalize over one whole image (per-tile stretches
+    // would seam at every tile edge). Lives in tilePane under all vectors.
+    const TERRAIN_URL = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage';
+    const TERRAIN_RULES = {
+        'local-color': '{"rasterFunction":"Colormap","rasterFunctionArguments":{"ColorrampName":"Surface","Raster":{"rasterFunction":"Stretch","rasterFunctionArguments":{"StretchType":6,"DRA":true,"Min":0,"Max":255,"Gamma":[1],"UseGamma":true}}}}',
+        contour2: '{"rasterFunction":"Preset 2ft Contour Interval"}',
+        contour5: '{"rasterFunction":"Preset 5ft Contour Interval"}',
+        contour10: '{"rasterFunction":"Preset 10ft Contour Interval"}',
+        slope: '{"rasterFunction":"Slope Map"}',
+        hillshade: '{"rasterFunction":"Hillshade Multidirectional"}',
+    };
+    let _terrainLayer = null;
+    let _terrainKey = '';
+    let _terrainMap = null;
+    let _terrainMoveHooked = null;
+    function applyTerrainLayer() {
+        const map = getLeafletMap();
+        if (!map || typeof map.getBounds !== 'function') return;
+        try {
+            if (toggleState['terrain.show'] !== true) { removeTerrainLayer(); return; }
+            const L = _stylerL();
+            if (!L || typeof L.imageOverlay !== 'function') return;
+            // Refresh on pan/zoom — moveend is the authoritative signal
+            // (heartbeat may skip when nothing else mutated).
+            if (_terrainMoveHooked !== map) {
+                try { map.on('moveend', () => { try { applyTerrainLayer(); } catch (e) {} }); _terrainMoveHooked = map; } catch (e) {}
+            }
+            const mode = String(toggleState['terrain.mode'] || 'local-color');
+            const rule = TERRAIN_RULES[mode] || TERRAIN_RULES['local-color'];
+            const rawOp = Number(toggleState['terrain.opacity']);
+            const opacity = isNaN(rawOp) ? 0.6 : rawOp;
+            const b = map.getBounds();
+            const key = `${mode}|${b.getWest().toFixed(5)},${b.getSouth().toFixed(5)},${b.getEast().toFixed(5)},${b.getNorth().toFixed(5)}`;
+            if (_terrainLayer && _terrainKey === key && _terrainMap === map) {
+                if (typeof _terrainLayer.setOpacity === 'function' && _terrainLayer.options.opacity !== opacity) _terrainLayer.setOpacity(opacity);
+                return;
+            }
+            // Web-mercator bbox for the export; image sized to the container
+            // (capped — the service maxes ~4k and big images are slow).
+            const merc = (lng, lat) => {
+                const x = lng * 20037508.342789244 / 180;
+                const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.342789244 / 180;
+                return [x, y];
+            };
+            const [x1, y1] = merc(b.getWest(), b.getSouth());
+            const [x2, y2] = merc(b.getEast(), b.getNorth());
+            let w = 1024, h = 768;
+            try { const sz = map.getSize(); w = Math.min(1600, Math.max(256, Math.round(sz.x))); h = Math.min(1600, Math.max(256, Math.round(sz.y))); } catch (e) {}
+            const params = new URLSearchParams({
+                bbox: `${x1},${y1},${x2},${y2}`, bboxSR: '3857', imageSR: '3857',
+                size: `${w},${h}`, format: 'png32', transparent: 'true',
+                renderingRule: rule, f: 'image',
+            });
+            const url = `${TERRAIN_URL}?${params.toString()}`;
+            const fresh = L.imageOverlay(url, b, { opacity, pane: 'tilePane', zIndex: 9992, interactive: false });
+            fresh.addTo(map);
+            // Swap after add so pans don't flash to blank.
+            const stale = _terrainLayer;
+            _terrainLayer = fresh;
+            _terrainKey = key;
+            _terrainMap = map;
+            if (stale) setTimeout(() => { try { map.removeLayer(stale); } catch (e) {} }, 800);
+        } catch (e) {
+            console.warn(`${TAG} applyTerrainLayer failed:`, e);
+        }
+    }
+    function removeTerrainLayer() {
+        if (!_terrainLayer) return;
+        try {
+            const map = _terrainMap || getLeafletMap();
+            if (map && typeof map.removeLayer === 'function') map.removeLayer(_terrainLayer);
+        } catch (e) {}
+        _terrainLayer = null;
+        _terrainKey = '';
+        _terrainMap = null;
+        console.log(`${TAG} terrain overlay removed`);
     }
     const _FAA_CHART_SOURCES = {
         sectional: {
@@ -7472,6 +7580,8 @@
         // via restoreMapBackground above).
         basemapOverrideActive = false;
         removeBasemapLayer();
+        // Terrain overlay out.
+        removeTerrainLayer();
         // Same for the vector airspace boundaries.
         removeAirspaceVectors();
         // And the crop-cover overlay.

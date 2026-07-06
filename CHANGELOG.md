@@ -66,6 +66,12 @@ Phase 1 of the site-comparison suite: overlay another site's Site Setup on the c
 
 ---
 
+## 2026-07-03 — ⛰ Terrain overlay (color-coded elevation) — Map Styler v34.111 (dev/latest)
+
+New **Terrain (USGS 3DEP)** section: **"Color by elevation"** paints the view green (low) → yellow → pink/white (high), normalized to the **current view's own relief** — so even 30 ft of Permian roll reads clearly (a national color ramp shows flat country as one uniform tint; this doesn't). Also: **2 / 5 / 10 ft contours** (the 2 ft preset is remarkably readable in flat country), slope map, and multidirectional hillshade. Renders per-view and refreshes as you pan/zoom; off by default with an opacity slider.
+
+---
+
 ## 2026-07-03 — 🚀 PROMOTED TO PROD: Airspace Validator + map overlay suite — Asset Inspector v4.164, Map Styler v34.110, Control Panel v1.34
 
 **Everything from the last two days ships to everyone.** Coworkers jump: Asset Inspector v4.36 → **v4.164**, Map Styler v34.85 → **v34.110**, Control Panel v1.33 → **v1.34** on their next Tampermonkey update check.
