@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.113
+// @version      34.114
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.113';
+    const SCRIPT_VERSION = '34.114';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -1634,7 +1634,9 @@
         const midFt = Math.round((minFt + maxFt) / 2);
         const el = document.createElement('div');
         el.id = TERRAIN_LEGEND_ID;
-        el.style.cssText = 'position:absolute;left:10px;bottom:52px;z-index:900;pointer-events:none;'
+        // Bottom-RIGHT, stacked directly above Percepto's GPS coordinate
+        // box (user placement request 2026-07-03).
+        el.style.cssText = 'position:absolute;right:10px;bottom:46px;z-index:900;pointer-events:none;'
             + 'background:rgba(16,22,31,0.85);border:1px solid rgba(122,223,230,0.4);border-radius:6px;'
             + 'padding:5px 10px;color:#dfe9f0;font:600 11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;'
             + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';

@@ -66,6 +66,12 @@ Phase 1 of the site-comparison suite: overlay another site's Site Setup on the c
 
 ---
 
+## 2026-07-03 — Terrain legend moved bottom-right — Map Styler v34.114 (dev/latest)
+
+The elevation legend now sits bottom-right, directly above Percepto's GPS coordinate readout.
+
+---
+
 ## 2026-07-03 — Terrain: legend fix + smooth color changes — Map Styler v34.113 (dev/latest)
 
 The **altitude legend now actually appears** (its statistics lookup needed a Tampermonkey permission that wasn't declared — after updating, Tampermonkey may ask once to allow `elevation.nationalmap.gov`; say yes). Color changes are smooth now: rebuilds wait 450 ms after you stop adjusting (a picker drag was firing a full server render per tick), and the old render **stays on screen until the new one has loaded** instead of vanishing into a blank window.
