@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.64
+// @version      1.65
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.64';
+    const SCRIPT_VERSION = '1.65';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -7241,12 +7241,13 @@ ${snapPlacemarks}
     // per-check enables + editable thresholds, and a "🚩 Run check"
     // action that lists every violation in a floating report.
     //
-    // 5 checks (per the SOP spec):
+    // 6 checks (per the SOP spec):
     //   1. navInFfz     — no Navigate is OUTSIDE an FFZ
     //   2. navAboveFfz  — no Navigate is lower than the FFZ it sits in
-    //   3. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
-    //   4. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
-    //   5. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
+    //   3. navUnderCeil — no Navigate is higher than the FFZ ceiling
+    //   4. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
+    //   5. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
+    //   6. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
     //
     // Presets are pluggable: add a key to MISSION_SOP_PRESETS and it
     // appears in the selector. Per-preset threshold/enable EDITS persist
@@ -7262,7 +7263,7 @@ ${snapPlacemarks}
 
     // Per-check default enables (shared across presets unless overridden).
     const MISSION_SOP_ENABLE_DEFAULTS = {
-        navInFfz: true, navAboveFfz: true, snapAgl: true, blockBalance: true, navSnapDist: true,
+        navInFfz: true, navAboveFfz: true, navUnderCeil: true, snapAgl: true, blockBalance: true, navSnapDist: true,
     };
     // Threshold defaults per preset. Upstream = the live SOP numbers.
     // Downstream / T&D start as copies (editable) until their SOPs land.
@@ -7271,6 +7272,7 @@ ${snapPlacemarks}
         navSnapMaxFt: 204,  // Navigate→Snapshot max standoff
         snapMinAglFt: 0,    // Snapshot must be at/above this AGL
         navFloorTolFt: 0,   // slack on "Navigate ≥ FFZ min alt"
+        navCeilTolFt: 0,    // slack on "Navigate ≤ FFZ max alt"
     };
     const MISSION_SOP_PRESETS = {
         upstream:   { label: 'OIL · Upstream',   thresholds: { ...UPSTREAM_THRESH } },
@@ -7328,8 +7330,16 @@ ${snapPlacemarks}
             Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
         return (2 * R * Math.asin(Math.min(1, Math.sqrt(s)))) * 3.28084;
     }
+    // " · AGL 96 ft" suffix for a step's altitude, or '' when the DEM
+    // cache has no ground for that point (never blocks the check itself).
+    function sopAglStr(s) {
+        if (!s.location || typeof s.value1 !== 'number') return '';
+        const groundM = getElevationFromCache(s.location.lat, s.location.lng);
+        if (typeof groundM !== 'number') return '';
+        return ` · AGL ${Math.round((s.value1 - groundM) * 3.28084)} ft`;
+    }
 
-    // Fetch the site's FFZs (type 16) → [{ring, minAltM}]. Cookie auth,
+    // Fetch the site's FFZs (type 16) → [{ring, minAltM, maxAltM}]. Cookie auth,
     // same endpoint the Asset Inspector uses. Cached per site for the
     // session so repeat runs don't re-hit the network.
     const sopFfzCache = {};
@@ -7344,6 +7354,7 @@ ${snapPlacemarks}
                     .map(e => ({
                         ring: e.coords.map(c => ({ lat: c.lat, lng: c.lng })),
                         minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null,
+                        maxAltM: (e.restrictions && typeof e.restrictions.maxAlt === 'number') ? e.restrictions.maxAlt : null,
                         name: e.name || '',
                     }));
                 sopFfzCache[siteID] = ffzs;
@@ -7356,11 +7367,17 @@ ${snapPlacemarks}
         const th = effectiveSopThresholds();
         const violations = [];
 
-        // Pre-warm DEM cache for all snapshot points (AGL check).
-        if (sopEnabled.snapAgl) {
+        // Pre-warm DEM cache: snapshot points (AGL check) + navigate points
+        // (AGL readout in the floor/ceiling violation details).
+        const wantNavDem = sopEnabled.navAboveFfz || sopEnabled.navUnderCeil;
+        if (sopEnabled.snapAgl || wantNavDem) {
             const pts = [];
             missions.forEach(m => realSteps(m.instructions).forEach(s => {
-                if (s.type_name === 'snapshot' && s.location) pts.push({ lat: s.location.lat, lng: s.location.lng });
+                if (!s.location) return;
+                if ((s.type_name === 'snapshot' && sopEnabled.snapAgl) ||
+                    (s.type_name === 'navigate' && wantNavDem)) {
+                    pts.push({ lat: s.location.lat, lng: s.location.lng });
+                }
             }));
             if (pts.length) { try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} SOP DEM prefetch failed`, e); } }
         }
@@ -7383,15 +7400,23 @@ ${snapPlacemarks}
                     }
                     // 2. Navigate altitude ≥ containing FFZ min alt (− tolerance).
                     if (sopEnabled.navAboveFfz && containing && typeof containing.minAltM === 'number' && typeof s.value1 === 'number') {
-                        const navFt = s.value1 * 3.28084, floorFt = containing.minAltM * 3.28084;
-                        if (Math.round(navFt) < Math.round(floorFt) - th.navFloorTolFt) {
+                        const navFt = Math.round(s.value1 * 3.28084), floorFt = Math.round(containing.minAltM * 3.28084);
+                        if (navFt < floorFt - th.navFloorTolFt) {
                             violations.push({ ...ctx, check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
-                                detail: `Navigate ${Math.round(navFt)} ft < FFZ min ${Math.round(floorFt)} ft${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                                detail: `Navigate ${navFt} ft${sopAglStr(s)} < FFZ floor ${floorFt} ft — ${floorFt - navFt} ft under${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                        }
+                    }
+                    // 3. Navigate altitude ≤ containing FFZ max alt (+ tolerance).
+                    if (sopEnabled.navUnderCeil && containing && typeof containing.maxAltM === 'number' && typeof s.value1 === 'number') {
+                        const navFt = Math.round(s.value1 * 3.28084), ceilFt = Math.round(containing.maxAltM * 3.28084);
+                        if (navFt > ceilFt + th.navCeilTolFt) {
+                            violations.push({ ...ctx, check: 'Navigate above FFZ ceiling', stepIndex: s.index_in_app,
+                                detail: `Navigate ${navFt} ft${sopAglStr(s)} > FFZ ceiling ${ceilFt} ft — ${navFt - ceilFt} ft over${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
                         }
                     }
                 } else if (s.type_name === 'snapshot') {
                     snapN++;
-                    // 3. Snapshot AGL ≥ min (default 0 → not underground).
+                    // 4. Snapshot AGL ≥ min (default 0 → not underground).
                     if (sopEnabled.snapAgl && s.location && typeof s.value1 === 'number') {
                         const groundM = getElevationFromCache(s.location.lat, s.location.lng);
                         if (typeof groundM === 'number') {
@@ -7402,7 +7427,7 @@ ${snapPlacemarks}
                             }
                         }
                     }
-                    // 5. Navigate→Snapshot distance within band.
+                    // 6. Navigate→Snapshot distance within band.
                     if (sopEnabled.navSnapDist && lastNav && lastNav.location && s.location) {
                         const dFt = sopHaversineFt(lastNav.location, s.location);
                         if (dFt < th.navSnapMinFt || dFt > th.navSnapMaxFt) {
@@ -7419,7 +7444,7 @@ ${snapPlacemarks}
                 }
             });
 
-            // 4. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
+            // 5. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
             if (sopEnabled.blockBalance) {
                 const parts = [];
                 if (camOn !== snapN) parts.push(`Thermal-on ${camOn}`);
@@ -7559,6 +7584,8 @@ ${snapPlacemarks}
                 { id: 'navInFfz', label: 'Check · Navigate inside an FFZ', type: 'boolean', default: sopEnabled.navInFfz },
                 { id: 'navAboveFfz', label: 'Check · Navigate ≥ FFZ floor', type: 'boolean', default: sopEnabled.navAboveFfz },
                 { id: 'navFloorTolFt', label: 'Navigate-vs-floor slack', type: 'number', min: 0, max: 100, step: 1, default: th.navFloorTolFt, unit: 'ft' },
+                { id: 'navUnderCeil', label: 'Check · Navigate ≤ FFZ ceiling', type: 'boolean', default: sopEnabled.navUnderCeil },
+                { id: 'navCeilTolFt', label: 'Navigate-vs-ceiling slack', type: 'number', min: 0, max: 100, step: 1, default: th.navCeilTolFt, unit: 'ft' },
                 { id: 'snapAgl', label: 'Check · Snapshot ≥ min AGL', type: 'boolean', default: sopEnabled.snapAgl },
                 { id: 'snapMinAglFt', label: 'Snapshot min AGL', type: 'number', min: -50, max: 200, step: 1, default: th.snapMinAglFt, unit: 'ft' },
                 { id: 'blockBalance', label: 'Check · Scan-block balance per snapshot', type: 'boolean', default: sopEnabled.blockBalance },

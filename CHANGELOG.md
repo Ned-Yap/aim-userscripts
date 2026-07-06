@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.65: SOP floor alert readability + new FFZ-ceiling check (dev/latest)
+
+Mission SOP Check upgrades. The **Navigate below FFZ floor** alert now shows the navigate's **AGL** alongside the MSL number and states exactly **how many ft under** the floor it is (e.g. `Navigate 2762 ft · AGL 96 ft < FFZ floor 2766 ft — 4 ft under (freezone_449)`). New check: **Navigate ≤ FFZ ceiling** — flags any Navigate above its containing FFZ's max altitude, with the same AGL + ft-over readout and its own on-by-default toggle + slack threshold in the Control Panel (Mission SOP section).
+
+---
+
 ## 2026-07-05 — Asset Inspector v4.166: AGL on the hover altitude tooltip (dev/latest)
 
 Ported from the (personal) Map Editor as a standalone feature. On **MSL (mountain-terrain) sites**, hovering an FFZ or flight-path line shows Percepto's native "ALT(ft) 2799 – 2828" tooltip in MSL only — now a bold cyan **"X – Y ft AGL"** line is added on top, computed from the DEM ground at your cursor. AGL-datum sites are untouched (they already display AGL). Uses the Inspector's warm elevation cache; a cold spot silently warms the cache so the next hover shows the number. Toggle: Control Panel → Site Setup Tools → "Hover ALT tooltip: add AGL line (MSL sites)" (on by default).
