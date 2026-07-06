@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.111
+// @version      34.112
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -39,7 +39,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.111';
+    const SCRIPT_VERSION = '34.112';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -395,7 +395,7 @@
             children: [
                 { id: 'terrain.mode', label: 'Mode', type: 'select',
                   options: [
-                      { value: 'local-color', label: 'Color by elevation (local high/low)' },
+                      { value: 'local-color', label: 'Color by elevation (site high/low)' },
                       { value: 'contour2', label: 'Contours — 2 ft' },
                       { value: 'contour5', label: 'Contours — 5 ft' },
                       { value: 'contour10', label: 'Contours — 10 ft' },
@@ -403,8 +403,14 @@
                       { value: 'hillshade', label: 'Hillshade (multidirectional)' },
                   ],
                   default: 'local-color' },
+                { id: 'terrain.radiusMi', label: 'Render around site', type: 'number',
+                  min: 0.25, max: 5, step: 0.25, default: 1, unit: 'mi' },
                 { id: 'terrain.opacity', label: 'Opacity', type: 'number',
                   min: 0.1, max: 1, step: 0.05, default: 0.6, unit: 'fill' },
+                { type: 'header', label: 'Elevation colors (low → mid → high)' },
+                { id: 'terrain.colLow', label: 'Low ground', type: 'color', default: '#2e8b57' },
+                { id: 'terrain.colMid', label: 'Mid', type: 'color', default: '#ffe08a' },
+                { id: 'terrain.colHigh', label: 'High ground', type: 'color', default: '#ffffff' },
             ],
         },
         {
@@ -1565,13 +1571,16 @@
         _aimBasemapMap = null;
         console.log(`${TAG} basemap → Percepto default`);
     }
-    // Terrain overlay (v34.111). Per-VIEW L.imageOverlay refreshed on
-    // moveend — NOT a tile layer, because the local-color mode's DRA
-    // stretch must normalize over one whole image (per-tile stretches
-    // would seam at every tile edge). Lives in tilePane under all vectors.
+    // Terrain overlay (v34.112). SITE-LOCKED render: one exportImage for
+    // the site bounds + terrain.radiusMi (default 1 mi), reused until the
+    // site / mode / radius / colors change. v34.111 re-rendered per VIEW
+    // on every moveend — "running very rough" (user) — and the colors
+    // shifted as you panned. Site-locking fixes both: one fetch, stable
+    // normalization over the site area. Local-color mode builds a 256-row
+    // colormap from the three CP color pickers (verified: ~5 KB GET is
+    // accepted by the service).
     const TERRAIN_URL = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage';
-    const TERRAIN_RULES = {
-        'local-color': '{"rasterFunction":"Colormap","rasterFunctionArguments":{"ColorrampName":"Surface","Raster":{"rasterFunction":"Stretch","rasterFunctionArguments":{"StretchType":6,"DRA":true,"Min":0,"Max":255,"Gamma":[1],"UseGamma":true}}}}',
+    const TERRAIN_PRESET_RULES = {
         contour2: '{"rasterFunction":"Preset 2ft Contour Interval"}',
         contour5: '{"rasterFunction":"Preset 5ft Contour Interval"}',
         contour10: '{"rasterFunction":"Preset 10ft Contour Interval"}',
@@ -1581,54 +1590,154 @@
     let _terrainLayer = null;
     let _terrainKey = '';
     let _terrainMap = null;
-    let _terrainMoveHooked = null;
+    const TERRAIN_LEGEND_ID = 'aim-terrain-legend';
+    function removeTerrainLegend() {
+        const el = document.getElementById(TERRAIN_LEGEND_ID);
+        if (el) el.remove();
+    }
+    // On-map altitude legend for the color mode: gradient bar + the real
+    // min/max feet for the rendered area (from computeStatisticsHistograms
+    // — pixelSize 30 m keeps the request under the service's size limit).
+    function terrainFetchLegendStats(x1, y1, x2, y2, radiusMi, forKey) {
+        if (typeof GM_xmlhttpRequest !== 'function') return;
+        const params = new URLSearchParams({
+            geometry: JSON.stringify({ xmin: x1, ymin: y1, xmax: x2, ymax: y2, spatialReference: { wkid: 3857 } }),
+            geometryType: 'esriGeometryEnvelope',
+            pixelSize: '{"x":30,"y":30}',
+            f: 'json',
+        });
+        GM_xmlhttpRequest({
+            method: 'GET',
+            url: `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/computeStatisticsHistograms?${params.toString()}`,
+            timeout: 25000,
+            onload: (resp) => {
+                if (_terrainKey !== forKey) return;   // superseded
+                let st = null;
+                try { st = (JSON.parse(resp.responseText).statistics || [])[0]; } catch (e) {}
+                if (!st || typeof st.min !== 'number') { console.warn(`${TAG} terrain legend: stats unavailable`); return; }
+                renderTerrainLegend(Math.round(st.min * 3.28084), Math.round(st.max * 3.28084), radiusMi);
+            },
+            onerror: () => console.warn(`${TAG} terrain legend: stats fetch failed`),
+            ontimeout: () => console.warn(`${TAG} terrain legend: stats fetch timed out`),
+        });
+    }
+    function renderTerrainLegend(minFt, maxFt, radiusMi) {
+        const map = getLeafletMap();
+        if (!map || typeof map.getContainer !== 'function') return;
+        removeTerrainLegend();
+        const lo = String(toggleState['terrain.colLow'] || '#2e8b57');
+        const mid = String(toggleState['terrain.colMid'] || '#ffe08a');
+        const hi = String(toggleState['terrain.colHigh'] || '#ffffff');
+        const midFt = Math.round((minFt + maxFt) / 2);
+        const el = document.createElement('div');
+        el.id = TERRAIN_LEGEND_ID;
+        el.style.cssText = 'position:absolute;left:10px;bottom:52px;z-index:900;pointer-events:none;'
+            + 'background:rgba(16,22,31,0.85);border:1px solid rgba(122,223,230,0.4);border-radius:6px;'
+            + 'padding:5px 10px;color:#dfe9f0;font:600 11px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;'
+            + 'box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+        el.innerHTML = `
+            <div style="margin-bottom:3px;opacity:0.75;">Elevation (site ± ${radiusMi} mi)</div>
+            <div style="width:170px;height:10px;border-radius:3px;background:linear-gradient(90deg, ${lo}, ${mid}, ${hi});"></div>
+            <div style="display:flex;justify-content:space-between;width:170px;margin-top:2px;">
+                <span>${minFt.toLocaleString()} ft</span><span style="opacity:0.7">${midFt.toLocaleString()}</span><span>${maxFt.toLocaleString()} ft</span>
+            </div>`;
+        try { map.getContainer().appendChild(el); } catch (e) {}
+    }
+    function terrainHex2Rgb(hex, fallback) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+        const h = m ? m[1] : fallback.slice(1);
+        return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    }
+    function terrainLocalColorRule() {
+        const lo = terrainHex2Rgb(toggleState['terrain.colLow'], '#2e8b57');
+        const mid = terrainHex2Rgb(toggleState['terrain.colMid'], '#ffe08a');
+        const hi = terrainHex2Rgb(toggleState['terrain.colHigh'], '#ffffff');
+        const cm = [];
+        for (let v = 0; v < 256; v++) {
+            let a, b2, t;
+            if (v < 128) { a = lo; b2 = mid; t = v / 127; }
+            else { a = mid; b2 = hi; t = (v - 128) / 127; }
+            cm.push([v,
+                Math.round(a[0] + (b2[0] - a[0]) * t),
+                Math.round(a[1] + (b2[1] - a[1]) * t),
+                Math.round(a[2] + (b2[2] - a[2]) * t)]);
+        }
+        return JSON.stringify({
+            rasterFunction: 'Colormap',
+            rasterFunctionArguments: {
+                Colormap: cm,
+                Raster: { rasterFunction: 'Stretch', rasterFunctionArguments: { StretchType: 6, DRA: true, Min: 0, Max: 255, Gamma: [1], UseGamma: true } },
+            },
+        });
+    }
     function applyTerrainLayer() {
         const map = getLeafletMap();
-        if (!map || typeof map.getBounds !== 'function') return;
+        if (!map || typeof map.addLayer !== 'function') return;
         try {
             if (toggleState['terrain.show'] !== true) { removeTerrainLayer(); return; }
             const L = _stylerL();
             if (!L || typeof L.imageOverlay !== 'function') return;
-            // Refresh on pan/zoom — moveend is the authoritative signal
-            // (heartbeat may skip when nothing else mutated).
-            if (_terrainMoveHooked !== map) {
-                try { map.on('moveend', () => { try { applyTerrainLayer(); } catch (e) {} }); _terrainMoveHooked = map; } catch (e) {}
-            }
-            const mode = String(toggleState['terrain.mode'] || 'local-color');
-            const rule = TERRAIN_RULES[mode] || TERRAIN_RULES['local-color'];
-            const rawOp = Number(toggleState['terrain.opacity']);
-            const opacity = isNaN(rawOp) ? 0.6 : rawOp;
-            const b = map.getBounds();
-            const key = `${mode}|${b.getWest().toFixed(5)},${b.getSouth().toFixed(5)},${b.getEast().toFixed(5)},${b.getNorth().toFixed(5)}`;
-            if (_terrainLayer && _terrainKey === key && _terrainMap === map) {
-                if (typeof _terrainLayer.setOpacity === 'function' && _terrainLayer.options.opacity !== opacity) _terrainLayer.setOpacity(opacity);
+            const sid = getCurrentSiteID();
+            if (!sid) { removeTerrainLayer(); return; }
+            // Reuse the RRC site-bounds cache (all entities + base fallback).
+            const bbox = rrcEnsureSiteBBox(sid);
+            if (_rrcSiteBBox.loading) return;   // re-applies when the fetch lands
+            const rawR = Number(toggleState['terrain.radiusMi']);
+            const radiusMi = isNaN(rawR) ? 1 : rawR;
+            let w0, s0, e0, n0;
+            if (bbox && _rrcSiteBBox.nonBaseN > 0) {
+                [w0, s0, e0, n0] = bbox;
+            } else if (_rrcSiteBBox.basePts && _rrcSiteBBox.basePts.length) {
+                const bp = _rrcSiteBBox.basePts[0];
+                w0 = e0 = bp.lng; s0 = n0 = bp.lat;
+            } else {
+                removeTerrainLayer();
                 return;
             }
-            // Web-mercator bbox for the export; image sized to the container
-            // (capped — the service maxes ~4k and big images are slow).
+            const midLat = (s0 + n0) / 2;
+            const radFt = radiusMi * 5280;
+            const dLat = radFt / 364000;
+            const dLng = radFt / (364000 * Math.cos(midLat * Math.PI / 180));
+            const west = w0 - dLng, south = s0 - dLat, east = e0 + dLng, north = n0 + dLat;
+            const mode = String(toggleState['terrain.mode'] || 'local-color');
+            const rule = mode === 'local-color' ? terrainLocalColorRule() : (TERRAIN_PRESET_RULES[mode] || TERRAIN_PRESET_RULES.hillshade);
+            const rawOp = Number(toggleState['terrain.opacity']);
+            const opacity = isNaN(rawOp) ? 0.6 : rawOp;
+            const key = `${sid}|${mode}|${radiusMi}|${rule.length}|${toggleState['terrain.colLow']}|${toggleState['terrain.colMid']}|${toggleState['terrain.colHigh']}`;
+            if (_terrainLayer && _terrainKey === key && _terrainMap === map) {
+                if (typeof _terrainLayer.setOpacity === 'function' && _terrainLayer.options.opacity !== opacity) _terrainLayer.setOpacity(opacity);
+                if (typeof map.hasLayer === 'function' && !map.hasLayer(_terrainLayer)) map.addLayer(_terrainLayer);
+                return;
+            }
             const merc = (lng, lat) => {
                 const x = lng * 20037508.342789244 / 180;
                 const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180) * 20037508.342789244 / 180;
                 return [x, y];
             };
-            const [x1, y1] = merc(b.getWest(), b.getSouth());
-            const [x2, y2] = merc(b.getEast(), b.getNorth());
-            let w = 1024, h = 768;
-            try { const sz = map.getSize(); w = Math.min(1600, Math.max(256, Math.round(sz.x))); h = Math.min(1600, Math.max(256, Math.round(sz.y))); } catch (e) {}
+            const [x1, y1] = merc(west, south);
+            const [x2, y2] = merc(east, north);
+            // Fixed-area render sized for pad-level detail (~1600 px max dim).
+            const aspect = Math.abs((x2 - x1) / Math.max(1, (y2 - y1)));
+            let w = 1600, h = 1600;
+            if (aspect >= 1) h = Math.max(256, Math.round(1600 / aspect));
+            else w = Math.max(256, Math.round(1600 * aspect));
             const params = new URLSearchParams({
                 bbox: `${x1},${y1},${x2},${y2}`, bboxSR: '3857', imageSR: '3857',
                 size: `${w},${h}`, format: 'png32', transparent: 'true',
                 renderingRule: rule, f: 'image',
             });
-            const url = `${TERRAIN_URL}?${params.toString()}`;
-            const fresh = L.imageOverlay(url, b, { opacity, pane: 'tilePane', zIndex: 9992, interactive: false });
+            const fresh = L.imageOverlay(`${TERRAIN_URL}?${params.toString()}`,
+                [[south, west], [north, east]],
+                { opacity, pane: 'tilePane', zIndex: 9992, interactive: false });
             fresh.addTo(map);
-            // Swap after add so pans don't flash to blank.
             const stale = _terrainLayer;
             _terrainLayer = fresh;
             _terrainKey = key;
             _terrainMap = map;
             if (stale) setTimeout(() => { try { map.removeLayer(stale); } catch (e) {} }, 800);
+            if (mode === 'local-color') terrainFetchLegendStats(x1, y1, x2, y2, radiusMi, key);
+            else removeTerrainLegend();
+            console.log(`${TAG} terrain: site-locked render (${mode}, ${radiusMi} mi around site, ${w}×${h})`);
         } catch (e) {
             console.warn(`${TAG} applyTerrainLayer failed:`, e);
         }
@@ -1642,6 +1751,7 @@
         _terrainLayer = null;
         _terrainKey = '';
         _terrainMap = null;
+        removeTerrainLegend();
         console.log(`${TAG} terrain overlay removed`);
     }
     const _FAA_CHART_SOURCES = {
