@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.165
+// @version      4.166
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.165';
+    const SCRIPT_VERSION = '4.166';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -61,6 +61,7 @@
 
     let controlChannel = null;
     let masterEnabled = true;
+    let aglHoverTipEnabled = true; // add an AGL line to Percepto's native hover ALT tooltip (MSL sites)
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
@@ -4392,6 +4393,82 @@
     }
 
     // ============================================================
+    // AGL on the native hover ALT tooltip (ported from AIM Map Editor v0.50).
+    // Percepto shows "ALT(ft) 2799 - 2828" (MSL) when you hover an FFZ/FP
+    // line — its OWN tooltip, not ours, so we match it by CONTENT (regex on
+    // text), not selector, and prepend "X – Y ft AGL" using the DEM ground at
+    // the cursor. MSL (mountain-terrain) sites only — AGL sites already
+    // display AGL. Best-effort + fully guarded: a miss does nothing; a cold
+    // DEM spot warms the cache un-marked so the next hover succeeds.
+    // ============================================================
+    const AGL_TIP_RE = /ALT\s*\(ft\)\s*([\d,]+)\s*[-–]\s*([\d,]+)/i;
+    const AGL_TIP_NEAREST_M = 30; // accept the nearest cached DEM point within this many metres
+    let aglTipLastLL = null;      // cursor position in map lat/lng (tooltips carry no coords)
+    let aglTipWarned = false;
+    function aglTipWarnOnce(e) {
+        if (aglTipWarned) return;
+        aglTipWarned = true;
+        console.warn(`${TAG} AGL hover tooltip augment failed (further errors muted):`, e);
+    }
+    function augmentAglHoverTip(el) {
+        try {
+            if (!aglHoverTipEnabled || !el || el.nodeType !== 1) return;
+            // ONE augment per tooltip: skip if this element, an ancestor, OR a
+            // descendant is already done (the wrapper AND an inner span both
+            // match the text → dup).
+            if ((el.getAttribute && el.getAttribute('data-aim-agl'))
+                || (el.closest && el.closest('[data-aim-agl]'))
+                || (el.querySelector && el.querySelector('[data-aim-agl]'))) return;
+            const txt = el.textContent || '';
+            if (txt.length > 80 || txt.indexOf('ALT') < 0) return;
+            const m = txt.match(AGL_TIP_RE);
+            if (!m) return;
+            const sid = getCurrentSiteID();
+            if (!sid) return;
+            const am = siteAltModeCache[sid];
+            if (!am) { siteAltMode(sid).catch(aglTipWarnOnce); return; } // warm; NOT marked → re-hover retries
+            if (am.mode !== 'msl') return; // AGL sites already display AGL
+            if (!aglTipLastLL) return;
+            let g = getElevationFromCache(aglTipLastLL.lat, aglTipLastLL.lng);
+            if (g == null) g = elevNearest(aglTipLastLL.lat, aglTipLastLL.lng, AGL_TIP_NEAREST_M);
+            if (g == null) { fetchElevation(aglTipLastLL.lat, aglTipLastLL.lng).catch(aglTipWarnOnce); return; } // warm; NOT marked → re-hover retries
+            el.setAttribute('data-aim-agl', '1'); // mark only once we actually augment (so a cold spot stays retryable)
+            const gFt = g * 3.28084;
+            const lo = Math.round(parseFloat(m[1].replace(/,/g, '')) - gFt);
+            const hi = Math.round(parseFloat(m[2].replace(/,/g, '')) - gFt);
+            // AGL on TOP and bigger (what the user cares about); Percepto's MSL line stays below.
+            const add = document.createElement('div');
+            add.style.cssText = 'color:#7fd1ff;font-size:15px;font-weight:700;margin-bottom:3px';
+            add.textContent = `${lo} – ${hi} ft AGL`;
+            el.insertBefore(add, el.firstChild);
+        } catch (e) { aglTipWarnOnce(e); }
+    }
+    function watchAglHoverTips() {
+        try {
+            const map = getLeafletMap();
+            // Tooltips render inside the map container; body fallback still
+            // catches them (subtree) if the map hasn't mounted yet.
+            const root = (map && map.getContainer && map.getContainer()) || document.body;
+            document.addEventListener('mousemove', (e) => {
+                try {
+                    const mp = getLeafletMap();
+                    if (mp && mp.mouseEventToLatLng) aglTipLastLL = mp.mouseEventToLatLng(e);
+                } catch (er) { aglTipWarnOnce(er); }
+            }, true);
+            const obs = new MutationObserver(muts => {
+                if (!aglHoverTipEnabled) return;
+                for (const mu of muts) for (const n of mu.addedNodes) {
+                    if (!n || n.nodeType !== 1) continue;
+                    augmentAglHoverTip(n);
+                    if (n.children && n.children.length && n.children.length < 12 && n.querySelectorAll) n.querySelectorAll('*').forEach(augmentAglHoverTip);
+                }
+            });
+            obs.observe(root, { childList: true, subtree: true });
+            console.log(`${TAG} AGL hover-tooltip watcher active (MSL sites: native ALT(ft) tooltip gains an AGL line)`);
+        } catch (e) { console.warn(`${TAG} AGL hover-tooltip watcher failed:`, e); }
+    }
+
+    // ============================================================
     // Control Panel integration
     // ============================================================
     function setupControlPanel() {
@@ -4419,6 +4496,8 @@
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.toggleId === 'agl-hover-tip') {
+                    aglHoverTipEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SOP_SCRIPT_ID) {
@@ -4518,6 +4597,7 @@
             version: SCRIPT_VERSION, group: 'Hotkeys', priority: 40,
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
+                { id: 'agl-hover-tip', label: 'Hover ALT tooltip: add AGL line (MSL sites)', type: 'boolean', default: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
             ],
             hotkeys: [],
@@ -4600,6 +4680,10 @@
     }
     setupControlPanel();
     registerWithControlPanel();
+    // AGL hover tooltip: map + native tooltips live in the iframe; give the
+    // map time to mount, then watch. (siteAltModeCache/elev helpers are
+    // consts defined later in the IIFE — fine, the timeout fires long after.)
+    if (CONTEXT === 'IFRAME') setTimeout(watchAglHoverTips, 2500);
     // Ask Control Panel to replay the GitHub PAT — covers the case
     // where we loaded after the panel's initial TOKEN_VALUE broadcast.
     if (controlChannel) controlChannel.postMessage({ type: 'REQUEST_TOKEN' });

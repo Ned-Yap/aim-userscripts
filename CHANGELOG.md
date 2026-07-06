@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-05 — Asset Inspector v4.166: AGL on the hover altitude tooltip (dev/latest)
+
+Ported from the (personal) Map Editor as a standalone feature. On **MSL (mountain-terrain) sites**, hovering an FFZ or flight-path line shows Percepto's native "ALT(ft) 2799 – 2828" tooltip in MSL only — now a bold cyan **"X – Y ft AGL"** line is added on top, computed from the DEM ground at your cursor. AGL-datum sites are untouched (they already display AGL). Uses the Inspector's warm elevation cache; a cold spot silently warms the cache so the next hover shows the number. Toggle: Control Panel → Site Setup Tools → "Hover ALT tooltip: add AGL line (MSL sites)" (on by default).
+
+---
+
 ## 2026-07-03 — Site Diff v0.40: Migration Planner, read-only (dev/latest)
 
 Phase 3a. New **Migration (CSM only)** section: **🧭 Plan migration** builds the full Offline→Live change plan without writing anything — entities matched by type+name, every difference classified as **UPDATE** (with reasons: moved vertices/arcs, altitude bands, description…), **CREATE**, **DELETE**, or **REVIEW** (duplicate-name ambiguities, and Live-only assets — assets are never auto-deleted since flight/image/issue history hangs off their IDs). Base Stations and Safe Zones are always skipped (hardware-bound). Copyable plan report, and **💾 Backup Live JSON** downloads the target site's full setup as a rollback reference (works standalone too — it's the same file you'd re-upload as a shadow). The write executor is Phase 3b, gated on two recon checks.
