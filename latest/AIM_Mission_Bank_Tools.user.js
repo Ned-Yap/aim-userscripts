@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.66
+// @version      1.67
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.66';
+    const SCRIPT_VERSION = '1.67';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -7338,6 +7338,21 @@ ${snapPlacemarks}
         if (typeof groundM !== 'number') return '';
         return ` · AGL ${Math.round((s.value1 - groundM) * 3.28084)} ft`;
     }
+    // Structured altitude fields for a floor/ceiling violation — feed the
+    // sortable columns in the Sheets export. AGL values are relative to
+    // the DEM ground at the NAVIGATE point (null when ground is uncached).
+    function sopBandFields(s, ffz) {
+        const groundM = s.location ? getElevationFromCache(s.location.lat, s.location.lng) : null;
+        const gFt = (typeof groundM === 'number') ? groundM * 3.28084 : null;
+        const msl = m => (typeof m === 'number') ? Math.round(m * 3.28084) : null;
+        const agl = m => (typeof m === 'number' && gFt !== null) ? Math.round(m * 3.28084 - gFt) : null;
+        return {
+            navMsl: msl(s.value1), navAgl: agl(s.value1),
+            ffzName: ffz.name || '',
+            ffzMinMsl: msl(ffz.minAltM), ffzMinAgl: agl(ffz.minAltM),
+            ffzMaxMsl: msl(ffz.maxAltM), ffzMaxAgl: agl(ffz.maxAltM),
+        };
+    }
 
     // Fetch the site's FFZs (type 16) → [{ring, minAltM, maxAltM}]. Cookie auth,
     // same endpoint the Asset Inspector uses. Cached per site for the
@@ -7402,7 +7417,8 @@ ${snapPlacemarks}
                     if (sopEnabled.navAboveFfz && containing && typeof containing.minAltM === 'number' && typeof s.value1 === 'number') {
                         const navFt = Math.round(s.value1 * 3.28084), floorFt = Math.round(containing.minAltM * 3.28084);
                         if (navFt < floorFt - th.navFloorTolFt) {
-                            violations.push({ ...ctx, check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
+                            violations.push({ ...ctx, ...sopBandFields(s, containing), deltaFt: navFt - floorFt,
+                                check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
                                 detail: `Navigate ${navFt} ft${sopAglStr(s)} < FFZ floor ${floorFt} ft — ${floorFt - navFt} ft under${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
                         }
                     }
@@ -7410,7 +7426,8 @@ ${snapPlacemarks}
                     if (sopEnabled.navUnderCeil && containing && typeof containing.maxAltM === 'number' && typeof s.value1 === 'number') {
                         const navFt = Math.round(s.value1 * 3.28084), ceilFt = Math.round(containing.maxAltM * 3.28084);
                         if (navFt > ceilFt + th.navCeilTolFt) {
-                            violations.push({ ...ctx, check: 'Navigate above FFZ ceiling', stepIndex: s.index_in_app,
+                            violations.push({ ...ctx, ...sopBandFields(s, containing), deltaFt: navFt - ceilFt,
+                                check: 'Navigate above FFZ ceiling', stepIndex: s.index_in_app,
                                 detail: `Navigate ${navFt} ft${sopAglStr(s)} > FFZ ceiling ${ceilFt} ft — ${navFt - ceilFt} ft over${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
                         }
                     }
@@ -7483,10 +7500,6 @@ ${snapPlacemarks}
     // Escape a violation detail and colorize the "N ft under/over" delta
     // (under = red, over = blue) so it pops in the report + Sheets copy.
     const SOP_UNDER_COLOR = '#ff5252', SOP_OVER_COLOR = '#4dc3ff';
-    function sopParseDelta(detail) {
-        const m = /— (\d+ ft (under|over))/.exec(detail);
-        return m ? { text: m[1], color: m[2] === 'under' ? SOP_UNDER_COLOR : SOP_OVER_COLOR } : null;
-    }
     function sopDetailHtml(detail) {
         return escapeHtml(detail).replace(/— (\d+ ft (under|over))/g, (m, d, dir) =>
             `— <strong style="color:${dir === 'under' ? SOP_UNDER_COLOR : SOP_OVER_COLOR}">${d}</strong>`);
@@ -7509,30 +7522,49 @@ ${snapPlacemarks}
             `${res.missionCount - missionsWith} clean · ${res.ffzCount} FFZs · preset ${MISSION_SOP_PRESETS[sopPreset].label} · ${new Date().toLocaleString()}`;
         const th = 'background:#263238;color:#ffffff;font-weight:bold;border:1px solid #90a4ae;padding:4px 8px;text-align:left';
         const td = 'border:1px solid #cfd8dc;padding:4px 8px;vertical-align:top';
+        const tdNum = `${td};text-align:right`;
+        const numCell = n => (typeof n === 'number') ? n : '';
+        // One row per violation. Floor/ceiling checks fill the structured
+        // altitude columns (numbers → sortable/filterable in Sheets); other
+        // checks keep their sentence in Detail.
+        const cols = ['Mission', 'Check', 'Step', 'Navigate MSL ft', 'Navigate AGL ft', 'FFZ Name',
+            'FFZ Min MSL ft', 'FFZ Min AGL ft', 'FFZ Max MSL ft', 'FFZ Max AGL ft', 'Ft Over (+) / Under (−)', 'Severity', 'Detail'];
+        const rowVals = x => {
+            const structured = typeof x.deltaFt === 'number';
+            return [x.name, x.check, x.stepIndex != null ? x.stepIndex : '',
+                numCell(x.navMsl), numCell(x.navAgl), x.ffzName || '',
+                numCell(x.ffzMinMsl), numCell(x.ffzMinAgl), numCell(x.ffzMaxMsl), numCell(x.ffzMaxAgl),
+                structured ? x.deltaFt : '', x.severity === 'high' ? 'HARD' : 'WARN', structured ? '' : x.detail];
+        };
         const rowsHtml = v.map(x => {
-            const delta = sopParseDelta(x.detail);
+            const r = rowVals(x);
+            const deltaColor = (typeof x.deltaFt === 'number') ? (x.deltaFt > 0 ? SOP_OVER_COLOR : SOP_UNDER_COLOR) : '#000000';
             const sevColor = x.severity === 'high' ? '#c62828' : '#b8860b';
             return `<tr>
-                <td style="${td}">${escapeHtml(x.name)}</td>
-                <td style="${td}">${escapeHtml(x.check)}</td>
-                <td style="${td};text-align:right">${x.stepIndex != null ? x.stepIndex : ''}</td>
-                <td style="${td}">${escapeHtml(x.detail)}</td>
-                <td style="${td};font-weight:bold;color:${delta ? delta.color : '#000000'}">${delta ? escapeHtml(delta.text) : ''}</td>
-                <td style="${td};font-weight:bold;color:${sevColor}">${x.severity === 'high' ? 'HARD' : 'WARN'}</td>
+                <td style="${td}">${escapeHtml(r[0])}</td>
+                <td style="${td}">${escapeHtml(r[1])}</td>
+                <td style="${tdNum}">${r[2]}</td>
+                <td style="${tdNum}">${r[3]}</td>
+                <td style="${tdNum}">${r[4]}</td>
+                <td style="${td}">${escapeHtml(r[5])}</td>
+                <td style="${tdNum}">${r[6]}</td>
+                <td style="${tdNum}">${r[7]}</td>
+                <td style="${tdNum}">${r[8]}</td>
+                <td style="${tdNum}">${r[9]}</td>
+                <td style="${tdNum};font-weight:bold;color:${deltaColor}">${r[10]}</td>
+                <td style="${td};font-weight:bold;color:${sevColor}">${r[11]}</td>
+                <td style="${td}">${escapeHtml(r[12])}</td>
             </tr>`;
         }).join('');
         const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">
-            <tr><td colspan="6" style="font-weight:bold;font-size:14px;padding:4px 8px">${escapeHtml(title)}</td></tr>
-            <tr><td colspan="6" style="color:#555555;padding:2px 8px">${escapeHtml(summary)}</td></tr>
-            <tr><th style="${th}">Mission</th><th style="${th}">Check</th><th style="${th}">Step</th><th style="${th}">Detail</th><th style="${th}">Δ</th><th style="${th}">Severity</th></tr>
-            ${rowsHtml || `<tr><td colspan="6" style="${td};color:#2e7d32">No violations — all ${res.missionCount} missions pass.</td></tr>`}
+            <tr><td colspan="${cols.length}" style="font-weight:bold;font-size:14px;padding:4px 8px">${escapeHtml(title)}</td></tr>
+            <tr><td colspan="${cols.length}" style="color:#555555;padding:2px 8px">${escapeHtml(summary)}</td></tr>
+            <tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>
+            ${rowsHtml || `<tr><td colspan="${cols.length}" style="${td};color:#2e7d32">No violations — all ${res.missionCount} missions pass.</td></tr>`}
         </table>`;
-        const tsv = [title, summary, ['Mission', 'Check', 'Step', 'Detail', 'Delta', 'Severity'].join('\t')]
-            .concat(v.map(x => {
-                const delta = sopParseDelta(x.detail);
-                return [x.name, x.check, x.stepIndex != null ? x.stepIndex : '', x.detail, delta ? delta.text : '', x.severity === 'high' ? 'HARD' : 'WARN']
-                    .map(c => String(c).replace(/[\t\n]/g, ' ')).join('\t');
-            })).join('\n');
+        const tsv = [title, summary, cols.join('\t')]
+            .concat(v.map(x => rowVals(x).map(c => String(c).replace(/[\t\n]/g, ' ')).join('\t')))
+            .join('\n');
         try {
             const item = new ClipboardItem({
                 'text/html': new Blob([html], { type: 'text/html' }),

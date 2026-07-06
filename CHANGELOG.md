@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.67: SOP Sheets export → sortable columns (dev/latest)
+
+The 📋 Sheets copy is now a fully structured table instead of a sentence per row: **Mission / Check / Step / Navigate MSL / Navigate AGL / FFZ Name / FFZ Min MSL / FFZ Min AGL / FFZ Max MSL / FFZ Max AGL / Ft Over (+) / Under (−) / Severity / Detail**. The over/under column is a signed **number** (+21 blue = over ceiling, −4 red = under floor) so the sheet sorts and filters properly; FFZ AGL values are relative to the ground at the navigate point. Non-altitude checks (scan-block, distance, etc.) keep their sentence in the Detail column. The on-screen report popup is unchanged.
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.66: SOP report colored deltas + Copy → Sheets (dev/latest)
 
 The ft-under/over deltas in the Mission SOP report are now color-coded — **red for under the floor, blue for over the ceiling** — so violations pop at a glance. New **📋 Sheets** button in the report header copies the whole report as a rich formatted table (Mission / Check / Step / Detail / Δ / Severity, with a title + summary line and the same red/blue delta coloring): paste straight into Google Sheets or Excel. Falls back to plain TSV if the browser blocks rich clipboard.
