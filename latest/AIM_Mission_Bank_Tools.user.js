@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.81
+// @version      1.82
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.81';
+    const SCRIPT_VERSION = '1.82';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1809,12 +1809,19 @@
     function caInitKeyFlags() {
         if (caKeyFlagsBound || CONTEXT !== 'IFRAME') return;
         caKeyFlagsBound = true;
-        const upd = (down) => {
-            if (caModeOn) return; // sticky toggle owns the flag
-            try { if (down && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        // Recompute the flag from the LIVE Ctrl state on EVERY key event, so releasing
+        // Shift while Ctrl is still held keeps it set (the old per-key toggle cleared it
+        // on Shift-up, letting the Asset Inspector reclaim the right-click). Clears when
+        // Ctrl is actually released. (The sticky toggle sets the flag in caSetMode.)
+        const sync = (e) => {
+            if (caModeOn) return; // toggle owns the flag
+            try {
+                if (e.ctrlKey && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1');
+                else document.documentElement.removeAttribute('data-aim-clickadd');
+            } catch (err) {}
         };
         window.addEventListener('keydown', e => {
-            if (e.ctrlKey) upd(true);
+            sync(e);
             // Ctrl+Z → undo the last Click-to-Add step. Only hijack when we actually
             // have one to undo, while editing, and not typing in a field (so native
             // text-undo and Percepto's own shortcuts are untouched otherwise).
@@ -1823,8 +1830,7 @@
                 caUndoLast();
             }
         }, true);
-        window.addEventListener('keyup', e => { if (!e.ctrlKey || e.key === 'Control') upd(false); }, true);
-        window.addEventListener('blur', () => upd(false), true);
+        window.addEventListener('keyup', e => sync(e), true);
     }
     function caSetMode(on) {
         if (CONTEXT !== 'IFRAME') return;
@@ -2097,10 +2103,14 @@
         const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]') : null;
         window.addEventListener('contextmenu', (e) => {
             const m = badge(e); if (!m) return;
-            // Shift while Click-to-Add is armed = IGNORE this marker so a step can be
-            // stacked here (let the container handler add it). Stand down without
-            // stopping the event.
-            if (e.shiftKey && caArmed(e)) return;
+            // Shift while armed = stack a NAV here, IGNORING this marker. Own the event
+            // at window-capture (before Leaflet's interactive-marker handler — the flag
+            // pole is a Leaflet-interactive marker) and add here, so nothing else fires.
+            if (e.shiftKey && caArmed(e)) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                try { const ll = caClickToLatLng(e); if (ll) caAddStep('nav', ll); } catch (err) { console.warn(`${TAG} [click-add] shift-stack nav failed`, err); }
+                return;
+            }
             e.preventDefault(); e.stopImmediatePropagation();
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
             // Alt + right-click = DELETE this step (Ctrl+Z restores it). Otherwise
@@ -2144,7 +2154,13 @@
         window.addEventListener('mousedown', blockSwitchDown, true);
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
-            if (e.shiftKey && caArmed(e)) return; // stacking — let Click-to-Add add here instead of selecting this marker
+            // Shift while armed = stack a SNAPSHOT here, ignoring this marker. Own the
+            // event so the marker (esp. the Leaflet-interactive flag pole) can't grab it.
+            if (e.shiftKey && caArmed(e)) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                try { const ll = caClickToLatLng(e); if (ll) caAddStep('snap', ll); } catch (err) { console.warn(`${TAG} [click-add] shift-stack snap failed`, err); }
+                return;
+            }
             const id = m.getAttribute('data-aim-id');
             const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
             if (editorOpen) {

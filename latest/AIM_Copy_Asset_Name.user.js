@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.168
+// @version      4.169
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.168';
+    const SCRIPT_VERSION = '4.169';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4261,7 +4261,13 @@
             // wins instead of popping the inspector over the asset the click landed
             // inside. Synchronous DOM flag = order-independent (MBT's map-container
             // handler is deeper than this window one, so it can't otherwise win).
-            try { if (document.documentElement.getAttribute('data-aim-clickadd') === '1') { dbg('bail: MBT click-add mode'); return; } } catch (_) {}
+            try {
+                if (document.documentElement.getAttribute('data-aim-clickadd') === '1') { dbg('bail: MBT click-add mode'); return; }
+                // Belt-and-suspenders for the hold-Ctrl add path: Ctrl held while a
+                // mission editor is open = a Click-to-Add gesture, regardless of the
+                // flag's key-event timing. Scoped to the editor so Site Setup is unaffected.
+                if (e.ctrlKey && document.querySelector('.mission-edit__content')) { dbg('bail: Ctrl+editor (MBT click-add)'); return; }
+            } catch (_) {}
             dbg('handler fired');
             const target = e.target;
             // Don't intercept inputs / editable areas — preserve native context menu there
