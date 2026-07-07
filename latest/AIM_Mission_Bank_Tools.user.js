@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.80
+// @version      1.81
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.80';
+    const SCRIPT_VERSION = '1.81';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2022,14 +2022,21 @@
         let matched = 0, seen = 0;
         map.eachLayer(layer => {
             const el = layer && layer._icon;
-            if (!el || !el.classList || !el.classList.contains('instruction-marker')) return;
-            seen++;
+            if (!el || !el.classList) return;
             const ll = layer._latlng;
             if (!ll) return;
             const info = lookup[K(ll.lat, ll.lng)];
-            if (!info) return;
-            matched++;
-            composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+            if (el.classList.contains('instruction-marker')) {
+                // Percepto's nav/snap markers.
+                seen++;
+                if (info && info.kind !== 'flag') { matched++; composerStyleOneMarker(el, info, [ll.lat, ll.lng]); }
+            } else if (el.classList.contains('leaflet-marker-icon')) {
+                // The Flag Pole renders as a GENERIC location-marker (not an
+                // instruction-marker), so match it to the flag-pole instruction by
+                // lat/lng and tag it selectable. Other generic markers (GMs) sit at
+                // different coords → no lookup hit → left alone.
+                if (info && info.kind === 'flag') composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+            }
         });
         if (!matched && seen && !loggedNoMarkers) {
             loggedNoMarkers = true;
@@ -2084,7 +2091,10 @@
     function installComposerMarkerEvents() {
         if (composerMarkerEventsInstalled) return;
         composerMarkerEventsInstalled = true;
-        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id]') : null;
+        // nav/snap are .instruction-marker; the flag-pole is a generic
+        // .leaflet-marker-icon we tag with data-aim-id. Only MBT sets data-aim-id, so
+        // scoping to these two marker classes can't catch another script's markers.
+        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]') : null;
         window.addEventListener('contextmenu', (e) => {
             const m = badge(e); if (!m) return;
             // Shift while Click-to-Add is armed = IGNORE this marker so a step can be

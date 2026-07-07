@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.81 (dev/latest) — Flag Pole selectable (for real this time)
+
+Follow-up to v1.80: the Flag Pole marker isn't one of Percepto's `instruction-marker`s — it's a generic location-marker — so v1.80's tagging missed it. Now it's matched to the flag-pole step **by lat/lng** and the click/right-click handlers recognize it, so **click to open its editor, drag to move, Alt+right-click to delete** actually work. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.80 (dev/latest) — stack steps in place (Shift) + selectable Flag Pole
 
 Two Click-to-Add improvements. **Hold Shift** while adding to **ignore the icons underneath** — so **Shift+Ctrl+left-click** drops a new Snapshot right on top of an existing one (for multiple angles at the same spot) instead of grabbing the existing marker. And the **Flag Pole** marker is now **selectable and movable** like Navs/Snapshots — click it to open its editor, drag to move, Alt+right-click to delete (its native icon stays as-is). Dev-only (latest/).
