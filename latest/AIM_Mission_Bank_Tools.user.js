@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.84
+// @version      1.85
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.84';
+    const SCRIPT_VERSION = '1.85';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1740,7 +1740,21 @@
     let caBoundContainer = null;
     let caIdBump = 0;
     let caUndoStack = [];          // {id, kind, prevInsertAt, appId} for Ctrl+Z undo of click-added steps
+    let caCtrlHeld = false;        // live Ctrl state (for box-zoom gating)
     function caMapContainer() { const m = getLeafletMap(); return (m && typeof m.getContainer === 'function') ? m.getContainer() : null; }
+    // Turn Leaflet's Shift+drag box-zoom OFF while Click-to-Add is ARMED during editing
+    // (toggle on OR Ctrl held), so a small drag while placing a Snap/Nav can't zoom the
+    // map instead. When not armed, box-zoom works normally.
+    function caUpdateBoxZoom() {
+        if (CONTEXT !== 'IFRAME') return;
+        try {
+            const map = getLeafletMap();
+            if (!map || !map.boxZoom || typeof map.boxZoom.enabled !== 'function') return;
+            const armed = caModeOn || caCtrlHeld;
+            if (armed && caEditing()) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
+            else if (!map.boxZoom.enabled()) map.boxZoom.enable();
+        } catch (e) {}
+    }
     function caArmed(e) { return caModeOn || !!(e && e.ctrlKey); }
     function caIsTypingTarget(t) {
         if (!t || !t.tagName) return false;
@@ -1837,7 +1851,7 @@
             } catch (err) {}
         };
         window.addEventListener('keydown', e => {
-            sync(e);
+            caCtrlHeld = e.ctrlKey; sync(e); caUpdateBoxZoom();
             if (e.shiftKey) caApplyShiftIgnore(true);   // Shift → let events fall through overlapping markers
             // Ctrl+Z → undo the last Click-to-Add step. Only hijack when we actually
             // have one to undo, while editing, and not typing in a field (so native
@@ -1847,8 +1861,8 @@
                 caUndoLast();
             }
         }, true);
-        window.addEventListener('keyup', e => { sync(e); if (!e.shiftKey) caApplyShiftIgnore(false); }, true);
-        window.addEventListener('blur', () => caApplyShiftIgnore(false), true);
+        window.addEventListener('keyup', e => { caCtrlHeld = e.ctrlKey; sync(e); if (!e.shiftKey) caApplyShiftIgnore(false); caUpdateBoxZoom(); }, true);
+        window.addEventListener('blur', () => { caCtrlHeld = false; caApplyShiftIgnore(false); caUpdateBoxZoom(); }, true);
     }
     function caSetMode(on) {
         if (CONTEXT !== 'IFRAME') return;
@@ -1859,6 +1873,7 @@
         // map-container handler) stand down while Click-to-Add owns empty-space
         // right-clicks. They check document.documentElement[data-aim-clickadd].
         try { if (caModeOn) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        caUpdateBoxZoom();   // toggle disables Shift+drag box-zoom while armed
         updateCaUI();
         if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. Hold SHIFT to ignore icons underneath (stack in the same spot). Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
         else showToast('Click-to-Add OFF.', '#888', 1800);

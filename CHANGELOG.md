@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.85 (dev/latest) — no accidental box-zoom while placing steps
+
+Fix: Leaflet's Shift+drag box-zoom no longer fires when you're placing a Snap/Nav. Box-zoom is now **disabled only while Click-to-Add is armed** (the ➕ toggle is on, or you're holding Ctrl) during editing — so a small drag while stacking can't zoom the map. Plain Shift+drag still box-zooms normally when you're *not* in placement mode. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.84 (dev/latest) — Shift lets you drag the step you're editing through overlapping icons
 
 While editing a step (e.g. a Flag Pole), **holding Shift now makes the *other* markers non-interactive** so you can **drag the step you're editing even when another marker (a Nav) sits on top of it** — no more nudging off the icon first. The marker you're editing stays grabbable; other icons let the press fall through (to drag the edited one, or to stack a step). Dev-only (latest/).
