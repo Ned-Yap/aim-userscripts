@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.77 (dev/latest) — Flag Pole scan overlay no longer fights Click-to-Add
+
+Two things for the blue Flag-Pole scan cone. **(1)** Click-to-Add now **clicks through it** — dropping a Nav/Snapshot on the blue area works (it only bails on actual step markers now, not on any map polygon). **(2)** New Control Panel toggle **"Hide Flag Pole scan overlay (blue cone)"** (Mission Bank Tools section, default off) removes the blue layer entirely when you don't want to see it. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.76 + Asset Inspector v4.168 (dev/latest) — Click-to-Add now wins the right-click
 
 Fix: while **Click-to-Add** is armed, a right-click inside an asset no longer pops the Asset Inspector instead of dropping a Nav. MBT sets a shared `data-aim-clickadd` flag on the page (both the sticky toggle and hold-Ctrl), and the Asset Inspector's right-click handler now stands down while it's set — so the Nav lands where you clicked. Dev-only (latest/).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.76
+// @version      1.77
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.76';
+    const SCRIPT_VERSION = '1.77';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -212,6 +212,8 @@
     // the editor button row. Persisted.
     const CACHE_KEY_AGL_VIEW = 'aim-mb-editor-agl-view';
     let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
+    const CACHE_KEY_HIDE_FLAGPOLE = 'aim-mb-hide-flagpole';
+    let hideFlagPoleOverlay = gmGet(CACHE_KEY_HIDE_FLAGPOLE, false);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -296,6 +298,13 @@
                             try { updateEditorCollapseBtn(); } catch (e) {}
                         }
                     }
+                } else if (msg.toggleId === 'hide-flagpole-overlay') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== hideFlagPoleOverlay) {
+                        hideFlagPoleOverlay = v;
+                        gmSet(CACHE_KEY_HIDE_FLAGPOLE, hideFlagPoleOverlay);
+                        if (CONTEXT === 'IFRAME') try { applyFlagPoleOverlayHide(); } catch (e) {}
+                    }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
                     if (isFinite(v) && v !== defaultSnapAglFt) {
@@ -340,6 +349,7 @@
                 { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
                 { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
+                { id: 'hide-flagpole-overlay', label: 'Hide Flag Pole scan overlay (blue cone)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
@@ -1482,6 +1492,7 @@
         try { injectSumButton(document); } catch (e) {}
         try { injectLogSumButton(document); } catch (e) {}
         try { applyMapIconDeclutter(document); } catch (e) {}
+        try { applyFlagPoleOverlayHide(); } catch (e) {}
         try { applyNativeEditorCollapse(); } catch (e) {}
         try { injectEditorCollapseButton(); } catch (e) {}
         try { injectComposerButton(); } catch (e) {}
@@ -1733,8 +1744,28 @@
     function caIsEmptySpace(e) {
         const el = document.elementFromPoint(e.clientX, e.clientY);
         if (!el) return true;
-        // bail if the click is on a marker icon / interactive vector / popup / our UI
-        return !el.closest('.leaflet-marker-icon, [class*="map-marker__"], .leaflet-interactive, .leaflet-popup, .leaflet-control, [id^="aim-"], button, input, select, textarea, a');
+        // Only bail on an existing STEP MARKER (so clicking it edits that step) or our
+        // own UI. Polygons/overlays are click-THROUGH — the flag-pole scan cone (a
+        // default-blue leaflet-interactive path), FFZ/asset fills and FP lines must
+        // NOT block dropping a step. Step markers live in the marker pane, ABOVE the
+        // overlay pane, so elementFromPoint still returns the icon when you click one.
+        return !el.closest('.leaflet-marker-icon, [class*="map-marker__"], .leaflet-popup, .leaflet-control, [id^="aim-"], button, input, select, textarea, a');
+    }
+    // Percepto draws a Flag Pole step's scan cone as a default-Leaflet-blue polygon
+    // (#3388ff, fill-opacity 0.2) that covers a big area. Optional hide (GM pref via
+    // Control Panel) drops it with CSS so it stops obscuring the map. Independent of
+    // Click-to-Add's click-through (which works whether it's hidden or not).
+    function applyFlagPoleOverlayHide() {
+        if (CONTEXT !== 'IFRAME') return;
+        const ID = 'aim-mb-flagpole-hide-style';
+        let st = document.getElementById(ID);
+        if (hideFlagPoleOverlay) {
+            if (!st) {
+                st = document.createElement('style'); st.id = ID;
+                st.textContent = 'svg.leaflet-zoom-animated path.leaflet-interactive[stroke="#3388ff"][fill="#3388ff"]{display:none !important;}';
+                (document.head || document.documentElement).appendChild(st);
+            }
+        } else if (st) { st.remove(); }
     }
     function caClickToLatLng(e) {
         const m = getLeafletMap(); if (!m) return null;
