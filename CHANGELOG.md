@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.74 (dev/latest) — single-asset generate can use a template too
+
+The **right-click (M2) → ⊕ Generate mission** popup now has the same **Template** dropdown as the bulk panel — so you can spin up **one** mission for a single asset straight from a saved template (Basic still the default). Same presets, same per-asset placement. Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.73 (dev/latest) — template-driven mission generator (Flag Pole + multi-nav, non-stacked)
 
 The **Generate Missions** panel gains a **Template** picker. Build ONE mission by hand exactly how you want it — any pattern of **Navigates, Flag Poles, and Snapshots** (snaps-per-nav, altitudes, scan wraps, whatever) — then hit **📋** to capture it as a reusable, named template. Every generated mission now replays that pattern per asset instead of the basic "1 nav + snapshot": **navs are spread along the FFZ edge**, and **each nav's snapshots/flag-poles are clustered around it (never stacked in one pile)**, with altitudes re-derived per asset (nav = FFZ-min, snapshot = ground+AGL) and flag-pole camera settings carried over verbatim. Templates are **saved presets** — pick an old one anytime; **🗑** deletes one. Leave the picker on **Basic** for the original behavior. Dev-only (latest/).

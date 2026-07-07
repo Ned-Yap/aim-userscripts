@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.73
+// @version      1.74
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.73';
+    const SCRIPT_VERSION = '1.74';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2483,7 +2483,7 @@
         if (!generatorUnlocked) return;   // generator locked off on this install
         const ctx = findMissionAppCtx();
         if (!ctx) { showToast('Mission context not found — make sure you\'re on the Mission Bank page.', '#ff5252', 4000); return; }
-        const built = buildMissionForAsset(asset, ffzs, opts);
+        const built = genBuild(asset, ffzs, opts);
         if (!built) { showToast('Could not build mission (no FFZ near asset, or ground elevation still loading — try again).', '#ff9800', 4000); return; }
         showToast(`Creating "${built.name}"…`, '#9ad', 2500);
         try {
@@ -2539,6 +2539,8 @@
                 <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
                 <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
                 ${genSkipReason(asset) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset))}</b> — bulk would SKIP this one.</div>` : ''}
+                <div style="display:flex;align-items:center;gap:6px;margin-top:9px;"><label style="white-space:nowrap;color:#cfe;">Template</label><select data-gp-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select></div>
+                <div data-gp-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
                 <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
                 <div style="display:flex;gap:6px;justify-content:flex-end;">
                     <button class="aim-mb-tbtn" data-gp-cancel>Cancel</button>
@@ -2555,10 +2557,25 @@
         if (r.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, (oe.clientY || 100) - r.height - 8) + 'px';
         pop.querySelector('[data-gp-close]').onclick = genCloseGenPopup;
         pop.querySelector('[data-gp-cancel]').onclick = genCloseGenPopup;
+        // Template picker (same presets as the bulk panel). Basic = the popup's
+        // built-in preview; a template replays a captured pattern for THIS asset.
+        const gpTpl = pop.querySelector('[data-gp-tpl]');
+        const gpSum = pop.querySelector('[data-gp-tpl-sum]');
+        const gpScan = pop.querySelector('[data-gp-scan]');
+        const gpUpdateSum = () => {
+            const t = tplLoadAll()[gpTpl.value];
+            if (gpScan) { gpScan.disabled = !!t; gpScan.parentElement.style.opacity = t ? '0.5' : ''; }
+            gpSum.textContent = t ? `${tplSummary(t)} — navs on FFZ edge, snaps clustered per nav (scan from template).` : 'Basic: 1 nav + snapshot at asset center.';
+        };
+        (() => { const all = tplLoadAll(), names = Object.keys(all).sort();
+            gpTpl.innerHTML = '<option value="">Basic — 1 nav + snapshot</option>' + names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)} · ${escapeHtml(tplSummary(all[n]))}</option>`).join('');
+            gpUpdateSum(); })();
+        gpTpl.onchange = gpUpdateSum;
         pop.querySelector('[data-gp-go]').onclick = () => {
-            const scan = pop.querySelector('[data-gp-scan]').checked;
+            const scan = gpScan.checked;
+            const template = gpTpl.value ? (tplLoadAll()[gpTpl.value] || null) : null;
             genCloseGenPopup();
-            genGenerateForAsset(asset, ffzs, { inspectionScan: scan });
+            genGenerateForAsset(asset, ffzs, { inspectionScan: scan, template });
         };
         setTimeout(() => document.addEventListener('mousedown', genPopupOutside, true), 0);
     }
