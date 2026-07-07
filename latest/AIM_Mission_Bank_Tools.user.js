@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.86
+// @version      1.87
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.86';
+    const SCRIPT_VERSION = '1.87';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1742,16 +1742,17 @@
     let caUndoStack = [];          // {id, kind, prevInsertAt, appId} for Ctrl+Z undo of click-added steps
     let caCtrlHeld = false;        // live Ctrl state (for box-zoom gating)
     function caMapContainer() { const m = getLeafletMap(); return (m && typeof m.getContainer === 'function') ? m.getContainer() : null; }
-    // Turn Leaflet's Shift+drag box-zoom OFF while Click-to-Add is ARMED during editing
-    // (toggle on OR Ctrl held), so a small drag while placing a Snap/Nav can't zoom the
-    // map instead. When not armed, box-zoom works normally.
+    // Turn Leaflet's Shift+drag box-zoom OFF whenever a mission is open in the editor —
+    // it fights Shift-to-stack / Shift-drag placement and kept zooming instead of
+    // placing. Scroll-wheel + the +/- buttons still zoom. Re-asserted every marker tick
+    // so Leaflet can't re-enable it; restored when you leave the editor.
     function caUpdateBoxZoom() {
         if (CONTEXT !== 'IFRAME') return;
         try {
             const map = getLeafletMap();
             if (!map || !map.boxZoom || typeof map.boxZoom.enabled !== 'function') return;
-            const armed = caModeOn || caCtrlHeld;
-            if (armed) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
+            const editing = !!document.querySelector('.mission-edit__content');
+            if (editing) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
             else if (!map.boxZoom.enabled()) map.boxZoom.enable();
         } catch (e) {}
     }
@@ -2035,6 +2036,7 @@
         composerBindMapEvents();
         caBindMap();          // (re)attach Click-to-Add handlers to the current map container
         updateCaBanner();     // keep the armed banner present if the container rebuilt
+        caUpdateBoxZoom();    // keep Shift+drag box-zoom OFF while the editor is open
         installComposerMarkerEvents();
         composerEnsureBadgeCSS();
         // Number from the LIVE editor instruction order when available — it includes

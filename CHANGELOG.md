@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.87 (dev/latest) — box-zoom off while editing a mission
+
+Simpler, reliable take: **Shift+drag box-zoom is now disabled whenever a mission is open in the editor** (re-asserted continuously so Leaflet can't turn it back on), instead of trying to gate it on whether you're mid-placement. Scroll-wheel and the +/- buttons still zoom; box-zoom comes back when you leave the editor. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.86 (dev/latest) — actually stop the box-zoom while placing
 
 v1.85's key-based box-zoom disable was unreliable (key events can go to a different frame, so it didn't always know Ctrl was down). Now the Shift+drag press is blocked **at the mousedown**, reading the modifier straight off the mouse event — so an armed Shift+Ctrl placement can't start a box-zoom at all, regardless of focus. Plain Shift+drag still zooms when you're not placing. Dev-only (latest/).
