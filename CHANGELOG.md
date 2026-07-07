@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.78 (dev/latest) — Ctrl+Z undo for Click-to-Add
+
+**Ctrl+Z** now undoes the last Nav/Snapshot you dropped with Click-to-Add — press it repeatedly to peel them back off one at a time (and it restores the "Insert at" target the add moved). Only kicks in while editing and only for steps *you* added, so native text-undo elsewhere is untouched. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.77 (dev/latest) — Flag Pole scan overlay no longer fights Click-to-Add
 
 Two things for the blue Flag-Pole scan cone. **(1)** Click-to-Add now **clicks through it** — dropping a Nav/Snapshot on the blue area works (it only bails on actual step markers now, not on any map polygon). **(2)** New Control Panel toggle **"Hide Flag Pole scan overlay (blue cone)"** (Mission Bank Tools section, default off) removes the blue layer entirely when you don't want to see it. Dev-only (latest/).

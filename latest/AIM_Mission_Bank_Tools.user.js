@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.77
+// @version      1.78
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.77';
+    const SCRIPT_VERSION = '1.78';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1637,7 +1637,7 @@
         const row3 = document.createElement('div');
         row3.id = CA_BAR_ID;
         row3.style.cssText = 'display:none;align-items:center;gap:6px;margin:0 0 4px;font-size:11px;color:#cfe;';
-        row3.innerHTML = '<span>Empty-space <b style="color:#7dff7d">L=Snapshot</b> · <b style="color:#14d2dc">R=Nav</b></span>' +
+        row3.innerHTML = '<span>Empty-space <b style="color:#7dff7d">L=Snapshot</b> · <b style="color:#14d2dc">R=Nav</b> · <b style="color:#cfe">Ctrl+Z</b> undo</span>' +
             '<label style="margin-left:auto;white-space:nowrap;">Insert at N</label>' +
             '<input type="number" min="1" data-ca-at placeholder="end" title="Target group: snapshots append to the end of this group; a nav inserts right after it (rest shifts down). Blank = end of mission." style="width:52px;background:#0f1216;border:1px solid #5fff5f;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;">';
         row3.querySelector('[data-ca-at]').onchange = (ev) => { const v = parseInt(ev.target.value, 10); caInsertAtNav = (isFinite(v) && v >= 1) ? v : null; updateCaBanner(); };
@@ -1739,8 +1739,14 @@
     let caInsertAtNav = null;      // 1-based target group, or null = end of mission
     let caBoundContainer = null;
     let caIdBump = 0;
+    let caUndoStack = [];          // {id, kind, prevInsertAt, appId} for Ctrl+Z undo of click-added steps
     function caMapContainer() { const m = getLeafletMap(); return (m && typeof m.getContainer === 'function') ? m.getContainer() : null; }
     function caArmed(e) { return caModeOn || !!(e && e.ctrlKey); }
+    function caIsTypingTarget(t) {
+        if (!t || !t.tagName) return false;
+        const tn = t.tagName;
+        return tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || t.isContentEditable || (t.closest && !!t.closest('.ant-input, .ant-select, [role="textbox"]'));
+    }
     function caIsEmptySpace(e) {
         const el = document.elementFromPoint(e.clientX, e.clientY);
         if (!el) return true;
@@ -1806,7 +1812,16 @@
             if (caModeOn) return; // sticky toggle owns the flag
             try { if (down && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
         };
-        window.addEventListener('keydown', e => { if (e.ctrlKey) upd(true); }, true);
+        window.addEventListener('keydown', e => {
+            if (e.ctrlKey) upd(true);
+            // Ctrl+Z → undo the last Click-to-Add step. Only hijack when we actually
+            // have one to undo, while editing, and not typing in a field (so native
+            // text-undo and Percepto's own shortcuts are untouched otherwise).
+            if (e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z') && caUndoStack.length && caEditing() && !caIsTypingTarget(e.target)) {
+                e.preventDefault(); e.stopPropagation();
+                caUndoLast();
+            }
+        }, true);
         window.addEventListener('keyup', e => { if (!e.ctrlKey || e.key === 'Control') upd(false); }, true);
         window.addEventListener('blur', () => upd(false), true);
     }
@@ -1890,9 +1905,37 @@
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
             updateCaBanner();
+            // Record for Ctrl+Z undo. Reset the stack if we've switched missions.
+            if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+            caUndoStack.push({ id: c.id, kind, prevInsertAt: g, appId: app.id });
             const where = kind === 'nav' ? `N${addedNavGroup}` : (g ? `end of N${g}` : 'end');
-            showToast(`➕ ${kind === 'nav' ? 'Nav' : 'Snapshot'} added (${where}).${kind === 'nav' ? ' Left-click to drop its snapshots.' : ''} SAVE when done.`, '#7dff7d', 2600);
+            showToast(`➕ ${kind === 'nav' ? 'Nav' : 'Snapshot'} added (${where}).${kind === 'nav' ? ' Left-click to drop its snapshots.' : ''} Ctrl+Z to undo · SAVE when done.`, '#7dff7d', 2600);
         } catch (e) { console.warn(`${TAG} [click-add] setCurrentApp failed`, e); showToast('Click-to-Add failed — see console.', '#ff5252', 3500); }
+    }
+    // Undo the most recent Click-to-Add step: pull it back out of the working copy by
+    // id and restore the insert target that add moved. Only touches steps WE added.
+    function caUndoLast() {
+        if (!caUndoStack.length) { showToast('Nothing to undo.', '#888', 1500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return; }
+        const app = ctx.currentApp;
+        const rec = caUndoStack[caUndoStack.length - 1];
+        if (rec.appId !== app.id) { caUndoStack = []; showToast('Undo cleared — different mission is open.', '#9ad', 2500); return; }
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const idx = instrs.findIndex(s => s && String(s.id) === String(rec.id));
+        caUndoStack.pop();
+        if (idx < 0) { showToast('That step is no longer here (saved or already removed).', '#9ad', 2500); return; }
+        const newInstrs = instrs.slice(0, idx).concat(instrs.slice(idx + 1)).map(s => Object.assign({}, s));
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        caInsertAtNav = (rec.prevInsertAt != null && rec.prevInsertAt >= 1) ? rec.prevInsertAt : null;
+        const inp = document.querySelector('#' + CA_BAR_ID + ' [data-ca-at]'); if (inp) inp.value = caInsertAtNav || '';
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            updateCaBanner();
+            showToast(`↩ Undid ${rec.kind === 'nav' ? 'Nav' : 'Snapshot'}.${caUndoStack.length ? ' Ctrl+Z again for more.' : ''}`, '#7dff7d', 1800);
+        } catch (e) { console.warn(`${TAG} [click-add] undo failed`, e); showToast('Undo failed — see console.', '#ff5252', 3000); }
     }
 
     function composerBindMapEvents() {
