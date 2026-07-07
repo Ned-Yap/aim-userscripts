@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.82
+// @version      1.83
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.82';
+    const SCRIPT_VERSION = '1.83';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2112,6 +2112,8 @@
                 return;
             }
             e.preventDefault(); e.stopImmediatePropagation();
+            // Shift held but NOT armed → ignore this marker (no reorder/open).
+            if (e.shiftKey) return;
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
             // Alt + right-click = DELETE this step (Ctrl+Z restores it). Otherwise
             // the plain right-click opens the reorder editor as before.
@@ -2144,9 +2146,10 @@
             return id;
         };
         const blockSwitchDown = (e) => {
-            // Shift while armed → block the marker/Leaflet from grabbing this press so
-            // Click-to-Add can stack a step in place (the following click adds it).
-            if (e.shiftKey && caArmed(e)) { e.stopImmediatePropagation(); return; }
+            // Shift ON A MARKER → block the native grab (no switch/drag) so it never
+            // swaps and Click-to-Add can stack in place. Off-marker shift (e.g. Leaflet
+            // box-zoom) is left alone.
+            if (e.shiftKey) { if (badge(e)) e.stopImmediatePropagation(); return; }
             if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
             if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
         };
@@ -2161,6 +2164,9 @@
                 try { const ll = caClickToLatLng(e); if (ll) caAddStep('snap', ll); } catch (err) { console.warn(`${TAG} [click-add] shift-stack snap failed`, err); }
                 return;
             }
+            // Shift held but NOT armed → still IGNORE this marker (don't switch/select it).
+            // This guarantees Shift never swaps steps, even if arming wasn't detected.
+            if (e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); return; }
             const id = m.getAttribute('data-aim-id');
             const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
             if (editorOpen) {

@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.83 (dev/latest) — Shift never swaps steps
+
+Follow-up: while editing a step, **Shift-clicking another marker no longer switches to edit it**. Shift on a marker now always suppresses the swap — if Click-to-Add is armed it stacks a step there, and if it isn't, it simply does nothing (rather than selecting the marker). Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.82 + Asset Inspector v4.169 (dev/latest) — Shift-stack works on flag poles + no more "stuck" after releasing Shift
 
 Two Click-to-Add fixes. **(1)** Shift-stacking now works when you're on top of a **Flag Pole** (or any Leaflet-interactive marker) — the add is taken at the earliest point so the marker can't grab it first. **(2)** After releasing **Shift** while still holding **Ctrl**, adding another Nav no longer gets "stuck" — the shared hand-off flag now tracks the live Ctrl state (instead of clearing on Shift-up), and the Asset Inspector also stands down whenever Ctrl is held with a mission editor open. Dev-only (latest/).
