@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.72
+// @version      1.73
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.72';
+    const SCRIPT_VERSION = '1.73';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2260,6 +2260,156 @@
         const name = tpl.split('{section}').join(genSection(aC)).split('{asset}').join(assetName);
         return { instructions: instrs, name, navStandoffFt: nav.standoffFt };
     }
+
+    // ── TEMPLATE-DRIVEN GENERATION (Model B) ────────────────────────────────
+    // Capture an OPEN mission's step pattern once, save it as a named preset, then
+    // generate every asset's mission from it. The template stores the step SEQUENCE
+    // + per-step SETTINGS (type/value1/value2/extra_options) minus absolute coords;
+    // coordinates are re-derived per asset at build time (navs along the FFZ edge,
+    // each nav's snapshots/flag-poles clustered around it — never stacked).
+    const CACHE_KEY_MISSION_TEMPLATES = 'aim-mb-mission-templates';
+    // Flag pole = type 16 (verified 2026-07-06 on a real mission JSON); altitude +
+    // camera params live in extra_options (value1/value2 are null). saveApp rebuilds
+    // setmission_dict server-side, so we only carry type/location/extra_options.
+    const TPL_TYPE_BY_NAME = { takeoff: 0, navigate: 1, wait: 5, snapshot: 6, cameraselect: 7, camera: 7, gemmode: 24, gem: 24, 'flag pole': 16, flagpole: 16, flag_pole: 16, returnhome: 99 };
+    function tplLoadAll() { const o = gmGet(CACHE_KEY_MISSION_TEMPLATES, {}); return (o && typeof o === 'object') ? o : {}; }
+    function tplSaveAll(o) { try { gmSet(CACHE_KEY_MISSION_TEMPLATES, o || {}); } catch (e) { console.warn(`${TAG} [tpl] save failed`, e); } }
+    function tplTypeNum(s) {
+        if (typeof s.type === 'number') return s.type;
+        if (s.type && typeof s.type.id === 'number') return s.type.id;
+        const n = (s.type_name || '').toLowerCase();
+        return TPL_TYPE_BY_NAME[n] != null ? TPL_TYPE_BY_NAME[n] : null;
+    }
+    function tplNormStep(s) {
+        return { type: tplTypeNum(s), type_name: s.type_name || null, value1: (s.value1 === undefined ? null : s.value1), value2: (s.value2 === undefined ? null : s.value2), extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {} };
+    }
+    function tplCaptureOpenMission(name) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || !ctx.currentApp) { showToast('Open the mission you want to use as a template first.', '#ff9800', 4500); return null; }
+        let src = ctx.currentApp.instructions || [];
+        if (!src.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) src = lc.instrs; } catch (e) {} }
+        const body = src.map(tplNormStep).filter(s => s.type != null && s.type !== 0 && s.type !== 99); // drop takeoff + returnHome (builder re-wraps)
+        if (!body.length) { showToast('That mission has no navigate/snapshot steps to capture.', '#ff9800', 4500); return null; }
+        const tpl = { name: name, savedAt: Date.now(), srcName: (ctx.currentApp.name || ''), body: body };
+        const all = tplLoadAll(); all[name] = tpl; tplSaveAll(all);
+        console.log(`${TAG} [tpl] captured "${name}" — ${tplSummary(tpl)} (${body.length} steps)`);
+        return tpl;
+    }
+    function tplSummary(tpl) {
+        if (!tpl || !tpl.body) return '';
+        let nav = 0, snap = 0, flag = 0, other = 0;
+        tpl.body.forEach(s => { if (s.type === 1) nav++; else if (s.type === 6) snap++; else if (s.type === 16) flag++; else other++; });
+        const bits = [];
+        if (nav) bits.push(`${nav} nav`); if (flag) bits.push(`${flag} flag pole`); if (snap) bits.push(`${snap} snap`); if (other) bits.push(`${other} scan`);
+        return bits.join(' · ') || 'empty';
+    }
+    // K nav points spread along the FFZ edge (inside), fanned by bearing around the
+    // asset so multi-nav templates ring the asset instead of stacking. Falls back to
+    // a ring around the centroid when the FFZ has no valid inside-edge points.
+    function genNavPointsSpread(assetC, ffz, K) {
+        const ring = ffz.ring;
+        const lat0 = (assetC.lat || ring[0].lat) * Math.PI / 180;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0);
+        const toXY = p => ({ x: p.lng * mLng, y: p.lat * mLat });
+        const toLL = q => ({ lng: q.x / mLng, lat: q.y / mLat });
+        const cands = [];
+        for (let i = 0; i < ring.length; i++) {
+            const ax = toXY(ring[i]), bx = toXY(ring[(i + 1) % ring.length]);
+            let nx = -(bx.y - ax.y), ny = (bx.x - ax.x); const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+            for (let k = 0; k <= 6; k++) {
+                const t = k / 6, px = ax.x + (bx.x - ax.x) * t, py = ax.y + (bx.y - ax.y) * t;
+                [1, -1].forEach(sgn => {
+                    const ll = toLL({ x: px + sgn * nx * GEN_FFZ_INSET_M, y: py + sgn * ny * GEN_FFZ_INSET_M });
+                    if (!genPointInPoly(ll, ring)) return;
+                    let brg = Math.atan2(ll.lng - assetC.lng, ll.lat - assetC.lat) * 180 / Math.PI; if (brg < 0) brg += 360;
+                    cands.push({ ll, d: sopHaversineFt(assetC, ll), brg });
+                });
+            }
+        }
+        if (!cands.length) {
+            const out = [], rM = GEN_TARGET_STANDOFF_FT / 3.28084, cl = 110540, cg = 111320 * Math.cos(assetC.lat * Math.PI / 180);
+            for (let k = 0; k < K; k++) { const a = (k / K) * 2 * Math.PI; out.push({ lat: assetC.lat + (rM * Math.cos(a)) / cl, lng: assetC.lng + (rM * Math.sin(a)) / cg }); }
+            return out;
+        }
+        const pts = [], used = new Set();
+        for (let k = 0; k < K; k++) {
+            const target = (k / K) * 360; let best = -1, bestScore = Infinity;
+            for (let ci = 0; ci < cands.length; ci++) {
+                if (used.has(ci)) continue;
+                let da = Math.abs(cands[ci].brg - target); if (da > 180) da = 360 - da;
+                const score = da + Math.abs(cands[ci].d - GEN_TARGET_STANDOFF_FT) * 0.2;
+                if (score < bestScore) { bestScore = score; best = ci; }
+            }
+            if (best < 0) best = 0;
+            used.add(best); pts.push(cands[best].ll);
+        }
+        return pts;
+    }
+    // A child step's map position: fanned ~12 m out from its nav, toward the asset,
+    // 30° apart so a nav's snapshots ring it without stacking.
+    function genClusterPoint(anchor, i, count, aimAt) {
+        const R = 12, mLat = 110540, mLng = 111320 * Math.cos(anchor.lat * Math.PI / 180);
+        let base = 0;
+        if (aimAt) { const bx = (aimAt.lng - anchor.lng) * mLng, by = (aimAt.lat - anchor.lat) * mLat; base = Math.atan2(by, bx); }
+        const spread = count > 1 ? (i - (count - 1) / 2) * (Math.PI / 6) : 0;
+        const ang = base + spread;
+        return { lat: anchor.lat + (R * Math.sin(ang)) / mLat, lng: anchor.lng + (R * Math.cos(ang)) / mLng };
+    }
+    // Build one asset's mission from a captured template. navs → FFZ edge, each
+    // nav's snapshots/flag-poles clustered around it, altitudes re-derived per asset
+    // (nav = FFZ-min, snapshot = ground+AGL); flag-pole + scan-wrap steps carry the
+    // template's own settings verbatim.
+    function buildMissionFromTemplate(asset, ffzs, tpl, opts) {
+        opts = opts || {};
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) return null;
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { if (aC.lat != null) try { fetchElevation(aC.lat, aC.lng); } catch (e) {} return null; }
+        const navAltM = ffz.minAltM != null ? ffz.minAltM : (groundM + 40);
+        const snapAltM = groundM + (defaultSnapAglFt / 3.28084);
+        const body = (tpl && tpl.body) || [];
+        const groups = []; let cur = null;
+        body.forEach(st => {
+            if (st.type === 1) { cur = { nav: st, children: [] }; groups.push(cur); }
+            else { if (!cur) { cur = { nav: null, children: [] }; groups.push(cur); } cur.children.push(st); }
+        });
+        const navGroups = groups.filter(g => g.nav);
+        const K = Math.max(1, navGroups.length);
+        const navPts = genNavPointsSpread(aC, ffz, K);
+        const mkStep = (norm, loc) => {
+            const type = norm.type, eo = norm.extra_options ? JSON.parse(JSON.stringify(norm.extra_options)) : {};
+            let v1 = norm.value1, v2 = norm.value2;
+            if (type === 1) { v1 = navAltM; if (v2 == null) v2 = 12; if (eo.shouldUseFreezoneMinAlt === undefined) eo.shouldUseFreezoneMinAlt = true; }
+            else if (type === 6) { v1 = snapAltM; v2 = 1; if (eo.pitch === undefined) eo.pitch = 1001; }
+            // flag pole (16) + scan wrap (5/7/24): keep the template's value1/value2/extra_options
+            return { type, value1: v1 == null ? null : v1, value2: v2 == null ? null : v2, location: loc || null, extra_options: eo, polygon_points: null, snapshot_points: null };
+        };
+        const instrs = [];
+        instrs.push({ type: 0, value1: 20, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }); // takeoff
+        let ni = 0;
+        groups.forEach(g => {
+            let anchor;
+            if (g.nav) { anchor = navPts[ni] || navPts[navPts.length - 1] || aC; ni++; instrs.push(mkStep(g.nav, { lat: anchor.lat, lng: anchor.lng })); }
+            else anchor = navPts[0] || aC;
+            const locKids = g.children.filter(c => c.type === 6 || c.type === 16).length;
+            let li = 0;
+            g.children.forEach(ch => {
+                const loc = (ch.type === 6 || ch.type === 16) ? genClusterPoint(anchor, li++, locKids, aC) : null;
+                instrs.push(mkStep(ch, loc));
+            });
+        });
+        instrs.push({ type: 99, value1: null, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }); // returnHome
+        const assetName = asset.name || ('Asset ' + asset.id);
+        const t = (opts.nameTemplate && opts.nameTemplate.trim()) || '{section} - {asset}';
+        const name = t.split('{section}').join(genSection(aC)).split('{asset}').join(assetName);
+        return { instructions: instrs, name };
+    }
+    // Dispatch: use a captured template if one was chosen, else the basic builder.
+    function genBuild(asset, ffzs, opts) {
+        if (opts && opts.template) return buildMissionFromTemplate(asset, ffzs, opts.template, opts);
+        return buildMissionForAsset(asset, ffzs, opts);
+    }
     // Find the mission editor's app context (saveApp + setCurrentApp). Anchors on
     // stable Mission Bank DOM (works even with NO mission open in the editor).
     function findMissionAppCtx() {
@@ -2514,6 +2664,13 @@
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
                 <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
+                    <label style="color:#cfe;white-space:nowrap;">Template</label>
+                    <select data-gen-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select>
+                    <button data-gen-tpl-capture class="aim-mb-tbtn" title="Capture the mission currently open in the editor as a reusable template" style="padding:2px 7px;font-size:11px;">📋</button>
+                    <button data-gen-tpl-del class="aim-mb-tbtn" title="Delete the selected template" style="padding:2px 7px;font-size:11px;">🗑</button>
+                </div>
+                <div data-gen-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-builtonly> Built areas only — assets with an FFZ inside or ≤${GEN_BUILT_FT} ft</label>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
                     <button data-gen-selall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Select all</button>
@@ -2563,12 +2720,45 @@
         };
         p.querySelector('[data-gen-deselall]').onclick = () => { p.querySelectorAll('[data-gen-row]').forEach(cb => cb.checked = false); updateGo(); };
         updateGo();
+        // Template picker: "Basic" (existing 1-nav builder) + saved presets. Capture
+        // 📋 grabs the mission open in the editor; 🗑 deletes the selected preset.
+        const tplSel = p.querySelector('[data-gen-tpl]');
+        const tplSum = p.querySelector('[data-gen-tpl-sum]');
+        const scanCb = p.querySelector('[data-gen-bulk-scan]');
+        const updateTplSum = () => {
+            const t = tplLoadAll()[tplSel.value];
+            if (scanCb) { scanCb.disabled = !!t; scanCb.parentElement.style.opacity = t ? '0.5' : ''; }
+            tplSum.textContent = t
+                ? `${tplSummary(t)}${t.srcName ? ' · from "' + t.srcName + '"' : ''} — navs along FFZ edge, snapshots clustered per nav (scan wrap comes from the template).`
+                : 'Basic: 1 nav at the FFZ edge + snapshot(s) at the asset center.';
+        };
+        const refreshTpls = (selectName) => {
+            const all = tplLoadAll(); const names = Object.keys(all).sort();
+            tplSel.innerHTML = '<option value="">Basic — 1 nav + snapshot</option>' + names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)} · ${escapeHtml(tplSummary(all[n]))}</option>`).join('');
+            if (selectName && all[selectName]) tplSel.value = selectName;
+            updateTplSum();
+        };
+        tplSel.onchange = updateTplSum;
+        p.querySelector('[data-gen-tpl-capture]').onclick = () => {
+            const nm = (prompt('Name this template (captures the mission currently OPEN in the editor):', '') || '').trim();
+            if (!nm) return;
+            const t = tplCaptureOpenMission(nm);
+            if (t) { refreshTpls(nm); showToast(`✓ Template "${nm}" saved — ${tplSummary(t)}.`, '#5fff5f', 5000); }
+        };
+        p.querySelector('[data-gen-tpl-del]').onclick = () => {
+            const nm = tplSel.value;
+            if (!nm) { showToast('Pick a saved template to delete (Basic can\'t be deleted).', '#9ad', 3000); return; }
+            if (!confirm(`Delete template "${nm}"?`)) return;
+            const all = tplLoadAll(); delete all[nm]; tplSaveAll(all); refreshTpls(''); showToast(`Template "${nm}" deleted.`, '#888', 2500);
+        };
+        refreshTpls('');
         goBtn.onclick = () => {
             if (genBulkBusy) return;
             const picked = [...p.querySelectorAll('[data-gen-row]:checked')].map(cb => valid[Number(cb.getAttribute('data-gen-row'))]).filter(Boolean);
-            const scan = p.querySelector('[data-gen-bulk-scan]').checked;
+            const scan = scanCb.checked;
             const nameTemplate = (p.querySelector('[data-gen-bulk-name]').value || '').trim() || '{section} - {asset}';
-            genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate }, p.querySelector('[data-gen-bulk-status]'), goBtn);
+            const template = tplSel.value ? (tplLoadAll()[tplSel.value] || null) : null;
+            genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
     }
     async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
@@ -2580,7 +2770,7 @@
         const setStatus = t => { if (statusEl) statusEl.textContent = t; };
         for (let i = 0; i < assets.length; i++) {
             setStatus(`Creating ${i + 1}/${assets.length}…`);
-            const built = buildMissionForAsset(assets[i], ffzs, opts);
+            const built = genBuild(assets[i], ffzs, opts);
             if (!built) { fail++; continue; }
             try { await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; }
             catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); }
