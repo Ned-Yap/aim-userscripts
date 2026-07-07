@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.75
+// @version      1.76
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.75';
+    const SCRIPT_VERSION = '1.76';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1756,16 +1756,38 @@
         caAddStep('nav', ll);
     }
     function caBindMap() {
+        caInitKeyFlags();
         const c = caMapContainer(); if (!c || caBoundContainer === c) return;
         if (caBoundContainer) { try { caBoundContainer.removeEventListener('click', caOnClick, true); caBoundContainer.removeEventListener('contextmenu', caOnContextMenu, true); } catch (_) {} }
         c.addEventListener('click', caOnClick, true);
         c.addEventListener('contextmenu', caOnContextMenu, true);
         caBoundContainer = c;
     }
+    // Mirror the shared data-aim-clickadd flag while Ctrl is held during editing, so
+    // the momentary hold-Ctrl path also makes other scripts' M2 handlers stand down
+    // (the sticky toggle sets it in caSetMode). IFRAME-only so we never suppress the
+    // inspector on the top-window Site Setup page.
+    let caKeyFlagsBound = false;
+    function caInitKeyFlags() {
+        if (caKeyFlagsBound || CONTEXT !== 'IFRAME') return;
+        caKeyFlagsBound = true;
+        const upd = (down) => {
+            if (caModeOn) return; // sticky toggle owns the flag
+            try { if (down && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        };
+        window.addEventListener('keydown', e => { if (e.ctrlKey) upd(true); }, true);
+        window.addEventListener('keyup', e => { if (!e.ctrlKey || e.key === 'Control') upd(false); }, true);
+        window.addEventListener('blur', () => upd(false), true);
+    }
     function caSetMode(on) {
         if (CONTEXT !== 'IFRAME') return;
         caModeOn = !!on;
         caBindMap();
+        // Shared synchronous signal so other scripts' right-click handlers (e.g.
+        // the Asset Inspector, whose window-level M2 fires before our deeper
+        // map-container handler) stand down while Click-to-Add owns empty-space
+        // right-clicks. They check document.documentElement[data-aim-clickadd].
+        try { if (caModeOn) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
         updateCaUI();
         if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. (Hold Ctrl to add without the toggle.) Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
         else showToast('Click-to-Add OFF.', '#888', 1800);

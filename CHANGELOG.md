@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.76 + Asset Inspector v4.168 (dev/latest) — Click-to-Add now wins the right-click
+
+Fix: while **Click-to-Add** is armed, a right-click inside an asset no longer pops the Asset Inspector instead of dropping a Nav. MBT sets a shared `data-aim-clickadd` flag on the page (both the sticky toggle and hold-Ctrl), and the Asset Inspector's right-click handler now stands down while it's set — so the Nav lands where you clicked. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.75 (dev/latest) — Click-to-Add: drop Navs/Snapshots by clicking the map
 
 New **➕ Click-add** toggle in the mission editor toolbar (next to ➕ Stage). Turn it on and **left-click empty map = Snapshot, right-click empty map = Nav** — each new step copies the last nav/snap's settings, lands where you clicked, and stays **staged** (Save when done). An **"Insert at N#"** field targets a group: snapshots append to the end of that group, a nav inserts right after it (rest shifts down); blank = end. A right-click **auto-advances the target to the new nav**, so the workflow is *right-click a nav → left-click to drop its snapshots → repeat*. Also armable **momentarily by holding Ctrl** (no toggle needed), and there's a bindable **hotkey** (Control Panel → Mission Bank Macros) to flip the mode. Dev-only (latest/).
