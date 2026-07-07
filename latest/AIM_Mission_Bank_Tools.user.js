@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.67
+// @version      1.68
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.67';
+    const SCRIPT_VERSION = '1.68';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2425,6 +2425,21 @@
         };
     }
     function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    // Edge-to-edge distance (ft) from an asset pad to its NEAREST FFZ — 0 if the FFZ
+    // overlaps/contains the pad (or vice-versa). Used by the "built areas only"
+    // filter: an asset counts as built if it has an FFZ inside or ≤ GEN_BUILT_FT of
+    // it. Reuses the merge routing core's point-to-polygon distance.
+    const GEN_BUILT_FT = 50;
+    function genAssetNearestFFZFt(asset, ffzs) {
+        if (!asset || !Array.isArray(asset.ring) || !asset.ring.length || !ffzs || !ffzs.length) return Infinity;
+        let best = Infinity;
+        for (const f of ffzs) {
+            if (!f || !Array.isArray(f.ring) || f.ring.length < 3) continue;
+            for (const c of asset.ring) { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring) * 3.28084; if (d < best) best = d; if (best === 0) return 0; }
+            for (const p of f.ring) { const d = mbPointToPolygonMeters(p.lat, p.lng, asset.ring) * 3.28084; if (d < best) best = d; if (best === 0) return 0; }
+        }
+        return best;
+    }
     // Existing mission names (lowercased) for the site — so bulk skips assets
     // that already have a mission. Always a FRESH fetch (catches ones you just made).
     function genFetchMissionNames(siteID) {
@@ -2462,11 +2477,13 @@
         genCloseBulkPanel();
         const rows = valid.map((a, i) => {
             const info = genPreviewInfo(a, ffzs);
+            const nearFt = genAssetNearestFFZFt(a, ffzs);
+            const hasFFZ = nearFt <= GEN_BUILT_FT; // built = FFZ inside or ≤50 ft
             const dis = info.buildable ? '' : 'opacity:0.5;';
             const detail = info.buildable
                 ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
                 : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
-            return `<label class="aim-gen-row" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
+            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
                 <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'}>
                 <span style="flex:1;color:#e6e6e6;font-weight:700;">${escapeHtml(info.name)}</span>
                 <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
@@ -2487,6 +2504,12 @@
             <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
                 <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
+                <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-builtonly> Built areas only — assets with an FFZ inside or ≤${GEN_BUILT_FT} ft</label>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
+                    <button data-gen-selall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Select all</button>
+                    <button data-gen-deselall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Deselect all</button>
+                    <span data-gen-shown style="flex:1;text-align:right;color:#789;font-size:10px;"></span>
+                </div>
             </div>
             <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
                 ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have missions</div>${existRows}` : ''}
@@ -2502,8 +2525,33 @@
         p.querySelector('[data-gen-bulk-close]').onclick = close;
         p.querySelector('[data-gen-bulk-cancel]').onclick = close;
         const goBtn = p.querySelector('[data-gen-bulk-go]');
-        const updateGo = () => { const n = p.querySelectorAll('[data-gen-row]:checked').length; goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy; };
+        const shownEl = p.querySelector('[data-gen-shown]');
+        const updateGo = () => {
+            const n = p.querySelectorAll('[data-gen-row]:checked').length;
+            goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy;
+            const vis = [...p.querySelectorAll('.aim-gen-row')].filter(r => r.style.display !== 'none').length;
+            if (shownEl) shownEl.textContent = `${vis} shown`;
+        };
         p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
+        // "Built areas only" filter — hide (and uncheck) assets with no FFZ within
+        // GEN_BUILT_FT. Off by default.
+        const builtOnly = p.querySelector('[data-gen-bulk-builtonly]');
+        const applyBuiltFilter = () => {
+            const on = builtOnly.checked;
+            p.querySelectorAll('.aim-gen-row').forEach(row => {
+                const has = row.getAttribute('data-has-ffz') === '1';
+                if (on && !has) { row.style.display = 'none'; const cb = row.querySelector('[data-gen-row]'); if (cb) cb.checked = false; }
+                else row.style.display = '';
+            });
+            updateGo();
+        };
+        builtOnly.onchange = applyBuiltFilter;
+        // Select all (visible + buildable only) / Deselect all.
+        p.querySelector('[data-gen-selall]').onclick = () => {
+            p.querySelectorAll('.aim-gen-row').forEach(row => { if (row.style.display === 'none') return; const cb = row.querySelector('[data-gen-row]:not(:disabled)'); if (cb) cb.checked = true; });
+            updateGo();
+        };
+        p.querySelector('[data-gen-deselall]').onclick = () => { p.querySelectorAll('[data-gen-row]').forEach(cb => cb.checked = false); updateGo(); };
         updateGo();
         goBtn.onclick = () => {
             if (genBulkBusy) return;

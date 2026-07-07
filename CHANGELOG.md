@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.68 (dev/latest) — Generate Missions: "built areas only" filter + Select/Deselect All
+
+Two additions to the **▣ Generate Missions** (bulk) list before you commit: a **"Built areas only"** checkbox (off by default) that shows only assets with an **FFZ inside or ≤50 ft** of the pad — so you can focus on areas that are actually built out — and **Select all / Deselect all** buttons for the list (Select all respects the filter + only picks buildable rows). Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Asset Inspector v4.167: hover AGL tooltip actually fires (dev/latest)
 
 v4.166 field test: no AGL line appeared. Three fixes: (1) Percepto **reuses one tooltip element** (show/hide + text swap), so the watcher now also reacts to text changes and re-augments the same element — including replacing a stale AGL line when you move to a different FFZ/FP; (2) on a cold cache (first hover on a site) the deferred alt-mode/DEM fetch now **re-augments the still-open tooltip when it lands** instead of waiting for a next-appearance that never comes, and the site's MSL/AGL mode is pre-fetched at load; (3) the observer watches the whole document, not just the map container, in case the tooltip portals outside it. Also new: run `__aimAglTipStatus()` in the map-iframe console to see every gate (version, watcher, site mode, cursor, ground) when reporting problems.
