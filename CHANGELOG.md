@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.71 (dev/latest) — bulk rename selected missions (find & replace)
+
+New **✎ Rename ▾** button in the Summary toolbar: with missions **selected** (row checkboxes / shift-select), it does a **find → replace** across all their names at once — with a live before→after preview and a "N of M will change" count — so you can flip `N - ` → `NNE - ` on all 42 in one shot. Applies through the same serialized/auto-AGL-suppressed rename path. Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.70 (dev/latest) — inline rename missions in the Summary (click name, Tab to next)
 
 Click a mission's **name** in the Summary table to edit it in place; **Enter** commits, **Tab** commits and jumps to the next mission's name (**Shift+Tab** = previous), **Esc** cancels — so you can rip through a prefix change like `N -` → `NNE -` without leaving the keyboard. Renames persist via Percepto's own save (name only; app_id preserved), are **serialized** in the background so rapid Tabbing doesn't fire a flood of saves, and **suppress the auto-AGL pass** so a rename can never re-float snapshots. Dev-only (latest/).

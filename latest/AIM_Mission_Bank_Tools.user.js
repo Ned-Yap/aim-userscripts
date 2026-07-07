@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.70
+// @version      1.71
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.70';
+    const SCRIPT_VERSION = '1.71';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -4371,6 +4371,7 @@
             <div class="aim-mb-toolbar">
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
+                <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -4501,6 +4502,67 @@
         input.onblur = () => { setTimeout(() => finish(true), 100); };
     }
 
+    // Bulk rename — find & replace text across the SELECTED missions' names, with a
+    // live before→after preview. Reuses the serialized rename queue.
+    function openBulkRenamePopover(anchor) {
+        try { closeOpenMenus(); } catch (e) {}
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
+        if (!selected.length) { showToast('Select missions first (row checkboxes), then ✎ Rename.', '#ff9800', 3500); return; }
+        const menu = document.createElement('div');
+        menu.className = 'aim-mb-bulk-rename-pop';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:370px;max-height:72vh;display:flex;flex-direction:column;background:#161a20;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.innerHTML = `
+            <div style="padding:9px 12px;background:rgba(20,210,220,0.08);border-bottom:1px solid rgba(20,210,220,0.3);font-weight:800;color:#7adfe6;font-size:13px;">✎ Bulk rename · ${selected.length} selected</div>
+            <div style="padding:9px 12px;border-bottom:1px solid #2a2f38;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><label style="width:56px;color:#9ad;font-size:12px;">Find</label><input data-br-find placeholder="N - " style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:4px 6px;border-radius:3px;font:inherit;"></div>
+                <div style="display:flex;align-items:center;gap:8px;"><label style="width:56px;color:#9ad;font-size:12px;">Replace</label><input data-br-replace placeholder="NNE - " style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:4px 6px;border-radius:3px;font:inherit;"></div>
+                <div style="margin-top:5px;color:#789;font-size:10px;">Replaces that text everywhere it appears in each selected name.</div>
+            </div>
+            <div data-br-preview style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;"></div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-br-count style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-br-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-br-apply style="padding:5px 12px;background:#14d2dc;border:none;color:#04222a;border-radius:6px;cursor:pointer;font-weight:800;" disabled>Apply</button>
+            </div>`;
+        document.body.appendChild(menu);
+        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const findI = menu.querySelector('[data-br-find]');
+        const replI = menu.querySelector('[data-br-replace]');
+        const prev = menu.querySelector('[data-br-preview]');
+        const countEl = menu.querySelector('[data-br-count]');
+        const applyBtn = menu.querySelector('[data-br-apply]');
+        let changes = [];
+        const recompute = () => {
+            const find = findI.value;
+            const repl = replI.value;
+            changes = [];
+            if (find) selected.forEach(m => {
+                const oldN = m.name || '';
+                if (oldN.includes(find)) { const newN = oldN.split(find).join(repl); if (newN !== oldN) changes.push({ id: m.id, oldN, newN }); }
+            });
+            prev.innerHTML = changes.length
+                ? changes.slice(0, 300).map(c => `<div style="padding:2px 0;border-bottom:1px solid #20262e;"><span style="color:#a99;">${escapeHtml(c.oldN)}</span><br><span style="color:#7dff7d;">→ ${escapeHtml(c.newN)}</span></div>`).join('')
+                : `<div style="padding:10px;color:#888;">${find ? 'No selected names contain that text.' : 'Type the text to find (e.g. "N - ").'}</div>`;
+            countEl.textContent = `${changes.length} of ${selected.length} will change`;
+            applyBtn.disabled = !changes.length;
+        };
+        findI.oninput = recompute; replI.oninput = recompute;
+        recompute(); findI.focus();
+        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+        menu.querySelector('[data-br-cancel]').onclick = close;
+        applyBtn.onclick = () => {
+            const n = changes.length;
+            changes.forEach(c => { const m = ms.find(x => x.id === c.id); if (m) m.name = c.newN; queueRename(c.id, c.newN, c.oldN); });
+            close();
+            renderTableView();
+            showToast(`✎ Renaming ${n} mission${n === 1 ? '' : 's'} — saving in the background. Reload to see them in native Mission Bank.`, '#5fff5f', 6000);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    }
+
     function wireTableEvents(rows, visibleCols) {
         // Search — DEBOUNCED 250ms. Full table re-render on every
         // keystroke was the main mid-session perf hit (98 missions × 13
@@ -4536,6 +4598,9 @@
         // Columns menu
         const colsBtn = panelEl.querySelector('[data-cols]');
         if (colsBtn) colsBtn.onclick = () => openColumnsMenu(colsBtn);
+        // Bulk rename (find & replace on selected)
+        const brBtn = panelEl.querySelector('[data-bulk-rename]');
+        if (brBtn) brBtn.onclick = () => openBulkRenamePopover(brBtn);
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
