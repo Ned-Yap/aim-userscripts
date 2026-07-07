@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.69 (dev/latest) — Generate Missions list readable (two-line rows)
+
+The Generate Missions list rows were wrapping into an unreadable mess when the asset names were long. Each row is now a clean two-line layout: checkbox + **asset name** on top, the muted **nav/snap detail** below. Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.68 (dev/latest) — Generate Missions: "built areas only" filter + Select/Deselect All
 
 Two additions to the **▣ Generate Missions** (bulk) list before you commit: a **"Built areas only"** checkbox (off by default) that shows only assets with an **FFZ inside or ≤50 ft** of the pad — so you can focus on areas that are actually built out — and **Select all / Deselect all** buttons for the list (Select all respects the filter + only picks buildable rows). Dev-only (latest/).

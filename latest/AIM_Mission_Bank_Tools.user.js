@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.68
+// @version      1.69
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.68';
+    const SCRIPT_VERSION = '1.69';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2483,10 +2483,12 @@
             const detail = info.buildable
                 ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
                 : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
-            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
-                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'}>
-                <span style="flex:1;color:#e6e6e6;font-weight:700;">${escapeHtml(info.name)}</span>
-                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
+            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
+                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'} style="flex:0 0 auto;margin-top:2px;">
+                <div style="flex:1;min-width:0;">
+                    <div style="color:#e6e6e6;font-weight:700;font-size:12px;line-height:1.25;">${escapeHtml(info.name)}</div>
+                    <div style="color:#9ad;font-size:10px;line-height:1.2;margin-top:1px;">${escapeHtml(detail)}</div>
+                </div>
             </label>`;
         }).join('');
         const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
