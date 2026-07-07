@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.69
+// @version      1.70
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.69';
+    const SCRIPT_VERSION = '1.70';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -204,6 +204,7 @@
     // on-map banner + a warning toast while it's ON. The default AGL itself is
     // persisted (Control Panel "Default snapshot AGL").
     let autoSnapAglEnabled = false;
+    let renameSuppressAutoAgl = 0; // >0 while an inline rename saves — handleMissionSave skips the auto-AGL pass so a rename never re-floats snapshots
     const CACHE_KEY_DEFAULT_SNAP_AGL = 'aim-mb-default-snap-agl';
     let defaultSnapAglFt = gmGet(CACHE_KEY_DEFAULT_SNAP_AGL, 10);
     // Editor compact-card altitude view: AGL (ground-relative) vs MSL (stored).
@@ -4413,12 +4414,17 @@
     function renderRow(row, visibleCols, thresholds) {
         const checked = panelState.selectedIds.has(row.id) ? 'checked' : '';
         const selectedCls = panelState.selectedIds.has(row.id) ? 'selected' : '';
+        const editableName = panelState.mode !== 'log'; // rename only makes sense for missions
         const cells = visibleCols.map(col => {
             if (col.kind === 'dot') {
                 const cls = row[col.key] ? 'active' : 'inactive';
                 return `<td><span class="aim-mb-dot ${cls}" title="${row[col.key] ? 'Active' : 'Inactive'}"></span></td>`;
             }
             const v = formatCellValue(row, col, panelState.distanceUnit, thresholds);
+            if (col.id === 'name' && editableName) {
+                // Click to rename · Tab → next mission's name (server rename via saveApp).
+                return `<td class="aim-mb-name-cell" data-name-edit="${row.id}" title="Click to rename · Tab to next" style="cursor:text;">${escapeHtml(String(v))}</td>`;
+            }
             return `<td>${escapeHtml(String(v))}</td>`;
         }).join('');
         return `<tr class="${selectedCls}" data-id="${row.id}"><td><input type="checkbox" data-row="${row.id}" ${checked} /></td>${cells}</tr>`;
@@ -4428,6 +4434,71 @@
         if (rows.length === 0) return '';
         const allSelected = rows.every(r => panelState.selectedIds.has(r.id));
         return allSelected ? 'checked' : '';
+    }
+
+    // ── Inline mission rename — click a Name cell, edit, Tab to the next ───────
+    // Rename persists via saveApp (Percepto's own save; app_id preserved). Renames
+    // are SERIALIZED (one saveApp at a time) so rapid Tabbing doesn't fire dozens of
+    // concurrent POSTs, and the auto-AGL pass is suppressed so a rename never
+    // re-floats snapshots. NOTE: saveApp re-saves the whole mission (server recomputes
+    // route) — cheap + lossless for a name change.
+    let renameQueue = Promise.resolve();
+    async function renameMissionNow(missionId, newName, oldName) {
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const m = ms.find(x => String(x.id) === String(missionId));
+        if (!m) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Rename: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); m.name = oldName; return; }
+        renameSuppressAutoAgl++;
+        try {
+            await ctx.saveApp(m, newName);
+            m.name = newName;
+            console.log(`${TAG} [rename] "${oldName}" → "${newName}"`);
+        } catch (e) {
+            console.warn(`${TAG} [rename] failed for ${missionId}`, e);
+            m.name = oldName;
+            showToast(`Rename failed for "${oldName}" — see console.`, '#ff5252', 4000);
+        } finally { renameSuppressAutoAgl--; }
+    }
+    function queueRename(missionId, newName, oldName) {
+        renameQueue = renameQueue.then(() => renameMissionNow(missionId, newName, oldName)).catch(() => {});
+    }
+    function startNameEdit(td, missionId) {
+        if (!td || td.querySelector('input')) return;
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const m = ms.find(x => String(x.id) === String(missionId));
+        const cur = m ? (m.name || '') : (td.textContent || '');
+        const input = document.createElement('input');
+        input.type = 'text'; input.value = cur;
+        input.style.cssText = 'width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #14d2dc;color:#fff;font:inherit;padding:2px 4px;border-radius:3px;';
+        td.textContent = ''; td.appendChild(input);
+        input.focus(); input.select();
+        let done = false;
+        const finish = (commit) => {
+            if (done) return; done = true;
+            const nv = input.value.trim();
+            if (commit && nv && nv !== cur) {
+                td.textContent = nv;
+                if (m) m.name = nv;               // optimistic UI + cache
+                queueRename(missionId, nv, cur);  // serialized background saveApp
+            } else {
+                td.textContent = cur;
+            }
+        };
+        const gotoSibling = (dir) => {
+            const cells = [...panelEl.querySelectorAll('[data-name-edit]')];
+            const idx = cells.findIndex(c => c.getAttribute('data-name-edit') === String(missionId));
+            const nxt = cells[idx + dir];
+            if (nxt) { try { nxt.scrollIntoView({ block: 'nearest' }); } catch (e) {} startNameEdit(nxt, nxt.getAttribute('data-name-edit')); }
+        };
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+            else if (e.key === 'Tab') { e.preventDefault(); finish(true); gotoSibling(e.shiftKey ? -1 : 1); }
+        };
+        input.onblur = () => { setTimeout(() => finish(true), 100); };
     }
 
     function wireTableEvents(rows, visibleCols) {
@@ -4490,6 +4561,9 @@
         panelEl.querySelectorAll('tbody tr[data-id]').forEach(tr => {
             tr.onclick = (e) => {
                 if (e.target.matches('input[type="checkbox"]')) return;
+                // Clicking the Name cell starts an inline rename — don't drill into detail.
+                const nameCell = e.target.closest && e.target.closest('[data-name-edit]');
+                if (nameCell) { e.stopPropagation(); startNameEdit(nameCell, nameCell.getAttribute('data-name-edit')); return; }
                 const id = Number(tr.dataset.id);
                 const tw = panelEl.querySelector('#aim-mb-table-wrap');
                 if (tw) panelState.tableScrollY = tw.scrollTop;
@@ -6626,7 +6700,7 @@ ${snapPlacemarks}
         let working = bodyStr;
         // 1. Snapshot auto-AGL pass (independent of fast-save; armed via the
         //    editor-row toggle, default OFF).
-        if (autoSnapAglEnabled) {
+        if (autoSnapAglEnabled && renameSuppressAutoAgl === 0) {
             try { const s = applySnapAglToBodyStr(working); if (s) working = s; }
             catch (e) { console.warn(`${TAG} [auto-agl] pass error — leaving snapshots unchanged:`, e); }
         }

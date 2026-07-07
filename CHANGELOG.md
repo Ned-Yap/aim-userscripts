@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.70 (dev/latest) — inline rename missions in the Summary (click name, Tab to next)
+
+Click a mission's **name** in the Summary table to edit it in place; **Enter** commits, **Tab** commits and jumps to the next mission's name (**Shift+Tab** = previous), **Esc** cancels — so you can rip through a prefix change like `N -` → `NNE -` without leaving the keyboard. Renames persist via Percepto's own save (name only; app_id preserved), are **serialized** in the background so rapid Tabbing doesn't fire a flood of saves, and **suppress the auto-AGL pass** so a rename can never re-float snapshots. Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.69 (dev/latest) — Generate Missions list readable (two-line rows)
 
 The Generate Missions list rows were wrapping into an unreadable mess when the asset names were long. Each row is now a clean two-line layout: checkbox + **asset name** on top, the muted **nav/snap detail** below. Dev-only (latest/).
