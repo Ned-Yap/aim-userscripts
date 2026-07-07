@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-06 — Mission Bank Tools v1.72 (dev/latest) — bulk delete selected missions + customizable generator naming
+
+Two additions. **🗑 Delete** button in the Summary toolbar: permanently deletes the **selected** missions from the server (via `deleteApp`), behind a clear confirmation that lists exactly what will be removed — handy when you need to scrap a batch and remake it. And the **Generate Missions** panel now has a **Name** template field (tokens **{section}** = N/E/S/W, **{asset}** = asset name; default `{section} - {asset}`) so you can name every generated mission up front — e.g. `NNE - {asset}` — instead of renaming afterward. Dev-only (latest/).
+
+---
+
 ## 2026-07-06 — Mission Bank Tools v1.71 (dev/latest) — bulk rename selected missions (find & replace)
 
 New **✎ Rename ▾** button in the Summary toolbar: with missions **selected** (row checkboxes / shift-select), it does a **find → replace** across all their names at once — with a live before→after preview and a "N of M will change" count — so you can flip `N - ` → `NNE - ` on all 42 in one shot. Applies through the same serialized/auto-AGL-suppressed rename path. Dev-only (latest/).

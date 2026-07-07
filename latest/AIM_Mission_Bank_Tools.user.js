@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.71
+// @version      1.72
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.71';
+    const SCRIPT_VERSION = '1.72';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -2252,7 +2252,12 @@
             }
         }
         instrs.push(I(99, null, null, null, {}));                                           // returnHome
-        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        // Name from a template (customizable in the bulk panel). Tokens: {section}
+        // = N/E/S/W from base, {asset} = the asset's name. Default keeps the old
+        // "<section> - <asset>" format.
+        const assetName = asset.name || ('Asset ' + asset.id);
+        const tpl = (opts.nameTemplate && opts.nameTemplate.trim()) || '{section} - {asset}';
+        const name = tpl.split('{section}').join(genSection(aC)).split('{asset}').join(assetName);
         return { instructions: instrs, name, navStandoffFt: nav.standoffFt };
     }
     // Find the mission editor's app context (saveApp + setCurrentApp). Anchors on
@@ -2507,6 +2512,8 @@
             <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
                 <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
+                <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
                 <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-builtonly> Built areas only — assets with an FFZ inside or ≤${GEN_BUILT_FT} ft</label>
                 <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
                     <button data-gen-selall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Select all</button>
@@ -2560,7 +2567,8 @@
             if (genBulkBusy) return;
             const picked = [...p.querySelectorAll('[data-gen-row]:checked')].map(cb => valid[Number(cb.getAttribute('data-gen-row'))]).filter(Boolean);
             const scan = p.querySelector('[data-gen-bulk-scan]').checked;
-            genBulkCommit(picked, ffzs, { inspectionScan: scan }, p.querySelector('[data-gen-bulk-status]'), goBtn);
+            const nameTemplate = (p.querySelector('[data-gen-bulk-name]').value || '').trim() || '{section} - {asset}';
+            genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
     }
     async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
@@ -4372,6 +4380,7 @@
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
                 <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
+                <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -4563,6 +4572,55 @@
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
+    // Bulk DELETE the selected missions (permanent — via ctx.deleteApp). Serialized,
+    // with a clear confirmation listing what will be removed.
+    function openBulkDeletePopover(anchor) {
+        try { closeOpenMenus(); } catch (e) {}
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
+        if (!selected.length) { showToast('Select missions first (row checkboxes), then 🗑 Delete.', '#ff9800', 3500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.deleteApp !== 'function') { showToast('Delete: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const menu = document.createElement('div');
+        menu.className = 'aim-mb-bulk-del-pop';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:360px;max-height:72vh;display:flex;flex-direction:column;background:#1a1113;border:1px solid #ff5252;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.innerHTML = `
+            <div style="padding:9px 12px;background:rgba(255,82,82,0.12);border-bottom:1px solid rgba(255,82,82,0.35);font-weight:800;color:#ff9a9a;font-size:13px;">🗑 Delete missions · ${selected.length} selected</div>
+            <div style="padding:8px 12px;font-size:11px;color:#f2b8b8;border-bottom:1px solid #3a2a2a;"><b>Permanently deletes</b> these from the server — can’t be undone.</div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;">${selected.slice(0, 400).map(m => `<div style="padding:2px 0;border-bottom:1px solid #2a1e1e;color:#e6c8c8;">${escapeHtml(m.name || ('#' + m.id))}</div>`).join('')}</div>
+            <div style="padding:9px 12px;border-top:1px solid #3a2a2a;display:flex;align-items:center;gap:8px;">
+                <span data-del-status style="flex:1;font-size:11px;color:#f2b8b8;"></span>
+                <button data-del-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-del-go style="padding:5px 12px;background:#ff5252;border:none;color:#2a0a0a;border-radius:6px;cursor:pointer;font-weight:800;">Delete ${selected.length}</button>
+            </div>`;
+        document.body.appendChild(menu);
+        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+        menu.querySelector('[data-del-cancel]').onclick = close;
+        const statusEl = menu.querySelector('[data-del-status]');
+        const goBtn = menu.querySelector('[data-del-go]');
+        goBtn.onclick = async () => {
+            goBtn.disabled = true; menu.querySelector('[data-del-cancel]').disabled = true;
+            const deleted = [];
+            for (let i = 0; i < selected.length; i++) {
+                statusEl.textContent = `Deleting ${i + 1}/${selected.length}…`;
+                try { await ctx.deleteApp(selected[i].id); deleted.push(selected[i].id); panelState.selectedIds.delete(selected[i].id); }
+                catch (e) { console.warn(`${TAG} [delete] failed "${selected[i].name}"`, e); }
+            }
+            const delSet = new Set(deleted);
+            if (missionsBySite[sid]) missionsBySite[sid].missions = missionsBySite[sid].missions.filter(m => !delSet.has(m.id));
+            close();
+            renderTableView();
+            try { refreshMissionList(); } catch (e) {}
+            const fail = selected.length - deleted.length;
+            showToast(`🗑 Deleted ${deleted.length}${fail ? ` · ${fail} failed (see console)` : ''}. Reload to refresh native Mission Bank.`, deleted.length ? '#5fff5f' : '#ff5252', 6000);
+            console.log(`${TAG} [delete] removed ${deleted.length}, failed ${fail}`);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    }
+
     function wireTableEvents(rows, visibleCols) {
         // Search — DEBOUNCED 250ms. Full table re-render on every
         // keystroke was the main mid-session perf hit (98 missions × 13
@@ -4601,6 +4659,9 @@
         // Bulk rename (find & replace on selected)
         const brBtn = panelEl.querySelector('[data-bulk-rename]');
         if (brBtn) brBtn.onclick = () => openBulkRenamePopover(brBtn);
+        // Bulk delete (selected)
+        const bdBtn = panelEl.querySelector('[data-bulk-delete]');
+        if (bdBtn) bdBtn.onclick = () => openBulkDeletePopover(bdBtn);
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
