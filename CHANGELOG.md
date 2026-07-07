@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.79 (dev/latest) — Alt + right-click to delete a Nav/Snapshot
+
+**Alt + right-click** a Nav or Snapshot marker on the map to **delete that step** (a snapshot also removes its trailing Thermal/GEM/Wait scan block so nothing's orphaned). Plain right-click still opens the reorder editor as before. Deletes go on the same undo stack, so **Ctrl+Z restores** a deleted step right where it was. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.78 (dev/latest) — Ctrl+Z undo for Click-to-Add
 
 **Ctrl+Z** now undoes the last Nav/Snapshot you dropped with Click-to-Add — press it repeatedly to peel them back off one at a time (and it restores the "Insert at" target the add moved). Only kicks in while editing and only for steps *you* added, so native text-undo elsewhere is untouched. Dev-only (latest/).
