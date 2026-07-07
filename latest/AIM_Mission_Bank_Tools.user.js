@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.85
+// @version      1.86
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.85';
+    const SCRIPT_VERSION = '1.86';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1751,7 +1751,7 @@
             const map = getLeafletMap();
             if (!map || !map.boxZoom || typeof map.boxZoom.enabled !== 'function') return;
             const armed = caModeOn || caCtrlHeld;
-            if (armed && caEditing()) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
+            if (armed) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
             else if (!map.boxZoom.enabled()) map.boxZoom.enable();
         } catch (e) {}
     }
@@ -2184,10 +2184,18 @@
             return id;
         };
         const blockSwitchDown = (e) => {
-            // Shift on a NON-edited marker → block its native grab (no switch/drag) so
-            // it never swaps and events fall through. The EDITED marker is left native
-            // so it can be dragged; off-marker shift (Leaflet box-zoom) untouched.
-            if (e.shiftKey) { const m = badge(e); if (m && !isEditedMarker(m)) e.stopImmediatePropagation(); return; }
+            if (e.shiftKey) {
+                const m = badge(e);
+                if (m && isEditedMarker(m)) return;   // edited marker → native (drag it)
+                // When ARMED (Ctrl held / toggle on — read live from THIS mouse event,
+                // so it's right even if key events went to another frame), block the
+                // press so Leaflet's Shift+drag box-zoom / map-drag can't start; the
+                // following click/contextmenu does the add. Also block a non-edited
+                // marker even when not armed (so it never swaps). Plain Shift on empty
+                // map when NOT armed is left alone (box-zoom still works).
+                if (caArmed(e) || m) e.stopImmediatePropagation();
+                return;
+            }
             if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
             if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
         };

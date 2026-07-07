@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.86 (dev/latest) — actually stop the box-zoom while placing
+
+v1.85's key-based box-zoom disable was unreliable (key events can go to a different frame, so it didn't always know Ctrl was down). Now the Shift+drag press is blocked **at the mousedown**, reading the modifier straight off the mouse event — so an armed Shift+Ctrl placement can't start a box-zoom at all, regardless of focus. Plain Shift+drag still zooms when you're not placing. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.85 (dev/latest) — no accidental box-zoom while placing steps
 
 Fix: Leaflet's Shift+drag box-zoom no longer fires when you're placing a Snap/Nav. Box-zoom is now **disabled only while Click-to-Add is armed** (the ➕ toggle is on, or you're holding Ctrl) during editing — so a small drag while stacking can't zoom the map. Plain Shift+drag still box-zooms normally when you're *not* in placement mode. Dev-only (latest/).
