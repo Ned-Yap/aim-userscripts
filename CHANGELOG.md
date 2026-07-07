@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.80 (dev/latest) — stack steps in place (Shift) + selectable Flag Pole
+
+Two Click-to-Add improvements. **Hold Shift** while adding to **ignore the icons underneath** — so **Shift+Ctrl+left-click** drops a new Snapshot right on top of an existing one (for multiple angles at the same spot) instead of grabbing the existing marker. And the **Flag Pole** marker is now **selectable and movable** like Navs/Snapshots — click it to open its editor, drag to move, Alt+right-click to delete (its native icon stays as-is). Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.79 (dev/latest) — Alt + right-click to delete a Nav/Snapshot
 
 **Alt + right-click** a Nav or Snapshot marker on the map to **delete that step** (a snapshot also removes its trailing Thermal/GEM/Wait scan block so nothing's orphaned). Plain right-click still opens the reorder editor as before. Deletes go on the same undo stack, so **Ctrl+Z restores** a deleted step right where it was. Dev-only (latest/).

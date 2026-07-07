@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.79
+// @version      1.80
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.79';
+    const SCRIPT_VERSION = '1.80';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1748,6 +1748,7 @@
         return tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || t.isContentEditable || (t.closest && !!t.closest('.ant-input, .ant-select, [role="textbox"]'));
     }
     function caIsEmptySpace(e) {
+        if (e && e.shiftKey) return true;   // Shift = ignore whatever icon is under the cursor → stack a step in place
         const el = document.elementFromPoint(e.clientX, e.clientY);
         if (!el) return true;
         // Only bail on an existing STEP MARKER (so clicking it edits that step) or our
@@ -1835,7 +1836,7 @@
         // right-clicks. They check document.documentElement[data-aim-clickadd].
         try { if (caModeOn) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
         updateCaUI();
-        if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. (Hold Ctrl to add without the toggle.) Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
+        if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. Hold SHIFT to ignore icons underneath (stack in the same spot). Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
         else showToast('Click-to-Add OFF.', '#888', 1800);
     }
     function updateCaUI() {
@@ -1925,18 +1926,19 @@
         let instrs = app.instructions || [];
         if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
         caUndoStack.pop();
+        const kl = rec.kind === 'nav' ? 'Nav' : rec.kind === 'flag' ? 'Flag Pole' : 'Snapshot';
         let newInstrs, msg;
         if (rec.op === 'del') {
             const at = Math.max(0, Math.min(rec.index, instrs.length));
             newInstrs = instrs.slice(0, at).concat(rec.steps.map(s => Object.assign({}, s)), instrs.slice(at)).map(s => Object.assign({}, s));
-            msg = `↩ Restored ${rec.kind === 'nav' ? 'Nav' : 'Snapshot'}${rec.steps.length > 1 ? ' + scan' : ''}.`;
+            msg = `↩ Restored ${kl}${rec.steps.length > 1 ? ' + scan' : ''}.`;
         } else {
             const idx = instrs.findIndex(s => s && String(s.id) === String(rec.id));
             if (idx < 0) { showToast('That step is no longer here (saved or already removed).', '#9ad', 2500); return; }
             newInstrs = instrs.slice(0, idx).concat(instrs.slice(idx + 1)).map(s => Object.assign({}, s));
             caInsertAtNav = (rec.prevInsertAt != null && rec.prevInsertAt >= 1) ? rec.prevInsertAt : null;
             const inp = document.querySelector('#' + CA_BAR_ID + ' [data-ca-at]'); if (inp) inp.value = caInsertAtNav || '';
-            msg = `↩ Undid ${rec.kind === 'nav' ? 'Nav' : 'Snapshot'}.`;
+            msg = `↩ Undid ${kl}.`;
         }
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
         try {
@@ -1957,10 +1959,11 @@
         if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
         const isNavT = s => s && (s.type_name === 'navigate' || s.type === 1);
         const isSnapT = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isFlagT = s => s && (s.type_name === 'flag pole' || s.type === 16);
         const isWrapT = s => s && (s.type_name === 'cameraSelect' || s.type === 7 || s.type_name === 'gemMode' || s.type === 24 || s.type_name === 'wait' || s.type === 5);
         const idx = instrs.findIndex(s => s && String(s.id) === String(id));
         if (idx < 0) { showToast('Could not find that step to delete.', '#ff9800', 3000); return; }
-        const kind = isNavT(instrs[idx]) ? 'nav' : 'snap';
+        const kind = isNavT(instrs[idx]) ? 'nav' : isFlagT(instrs[idx]) ? 'flag' : 'snap';
         let end = idx + 1;
         if (isSnapT(instrs[idx])) { while (end < instrs.length && isWrapT(instrs[end])) end++; } // take the scan block too
         const removed = instrs.slice(idx, end).map(s => Object.assign({}, s));
@@ -1972,7 +1975,8 @@
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
             const extra = removed.length > 1 ? ` (+${removed.length - 1} scan step${removed.length - 1 === 1 ? '' : 's'})` : '';
-            showToast(`🗑 Deleted ${kind === 'nav' ? 'Nav' : 'Snapshot'}${extra}. Ctrl+Z to restore · SAVE when done.`, '#ff9d3a', 3200);
+            const kl = kind === 'nav' ? 'Nav' : kind === 'flag' ? 'Flag Pole' : 'Snapshot';
+            showToast(`🗑 Deleted ${kl}${extra}. Ctrl+Z to restore · SAVE when done.`, '#ff9d3a', 3200);
         } catch (e) { console.warn(`${TAG} [click-add] delete failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); }
     }
 
@@ -2008,8 +2012,12 @@
         const lookup = {}; let navN = 0, snapN = 0;
         ordered.forEach(s => {
             if (!s || !s.location || s.location.lat == null) return;
-            if (s.type_name === 'navigate') { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
-            else if (s.type_name === 'snapshot') { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+            if (s.type_name === 'navigate' || s.type === 1) { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
+            else if (s.type_name === 'snapshot' || s.type === 6) { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+            // Flag Pole (type 16) — tag its native marker so it's selectable + movable
+            // + Alt-deletable like nav/snap. We DON'T restyle/number it, so its native
+            // flag-pole icon stays as-is (the user wants that icon to remain).
+            else if (s.type_name === 'flag pole' || s.type === 16) { lookup[K(s.location.lat, s.location.lng)] = { kind: 'flag', id: String(s.id) }; }
         });
         let matched = 0, seen = 0;
         map.eachLayer(layer => {
@@ -2055,10 +2063,12 @@
         `;
     }
     function composerStyleOneMarker(el, info, ll) {
-        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         el.setAttribute('data-aim-id', info.id);
         el.setAttribute('data-aim-kind', info.kind);
         el.__aimLL = ll;
+        // Flag Pole: just tag it selectable — leave the native icon + no number badge.
+        if (info.kind === 'flag') { el.removeAttribute('data-aim-num'); return; }
+        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         // Color + icon-hide is CSS (:has). Number is a CSS ::after from this
         // attr on the MARKER el — survives Percepto's hover re-render of the
         // inner icon. Click/right-click handled by the window-capture listeners.
@@ -2077,11 +2087,17 @@
         const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id]') : null;
         window.addEventListener('contextmenu', (e) => {
             const m = badge(e); if (!m) return;
+            // Shift while Click-to-Add is armed = IGNORE this marker so a step can be
+            // stacked here (let the container handler add it). Stand down without
+            // stopping the event.
+            if (e.shiftKey && caArmed(e)) return;
             e.preventDefault(); e.stopImmediatePropagation();
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
             // Alt + right-click = DELETE this step (Ctrl+Z restores it). Otherwise
             // the plain right-click opens the reorder editor as before.
             if (e.altKey) { composerDeleteStep(id); return; }
+            // Flag Pole: M2 opens its editor (the nav/snap reorder popup doesn't apply).
+            if (kind === 'flag') { composerOpenStepEdit(id); return; }
             // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
             // the v0.99 hover fix moved it here from the inner icon's old
             // data-aim-label, so read it from `m`, not a child.
@@ -2108,6 +2124,9 @@
             return id;
         };
         const blockSwitchDown = (e) => {
+            // Shift while armed → block the marker/Leaflet from grabbing this press so
+            // Click-to-Add can stack a step in place (the following click adds it).
+            if (e.shiftKey && caArmed(e)) { e.stopImmediatePropagation(); return; }
             if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
             if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
         };
@@ -2115,6 +2134,7 @@
         window.addEventListener('mousedown', blockSwitchDown, true);
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
+            if (e.shiftKey && caArmed(e)) return; // stacking — let Click-to-Add add here instead of selecting this marker
             const id = m.getAttribute('data-aim-id');
             const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
             if (editorOpen) {
