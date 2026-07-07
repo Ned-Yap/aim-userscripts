@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.75 (dev/latest) — Click-to-Add: drop Navs/Snapshots by clicking the map
+
+New **➕ Click-add** toggle in the mission editor toolbar (next to ➕ Stage). Turn it on and **left-click empty map = Snapshot, right-click empty map = Nav** — each new step copies the last nav/snap's settings, lands where you clicked, and stays **staged** (Save when done). An **"Insert at N#"** field targets a group: snapshots append to the end of that group, a nav inserts right after it (rest shifts down); blank = end. A right-click **auto-advances the target to the new nav**, so the workflow is *right-click a nav → left-click to drop its snapshots → repeat*. Also armable **momentarily by holding Ctrl** (no toggle needed), and there's a bindable **hotkey** (Control Panel → Mission Bank Macros) to flip the mode. Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.74 (dev/latest) — single-asset generate can use a template too
 
 The **right-click (M2) → ⊕ Generate mission** popup now has the same **Template** dropdown as the bulk panel — so you can spin up **one** mission for a single asset straight from a saved template (Basic still the default). Same presets, same per-asset placement. Dev-only (latest/).

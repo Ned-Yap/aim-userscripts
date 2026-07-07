@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.74
+// @version      1.75
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.74';
+    const SCRIPT_VERSION = '1.75';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -314,6 +314,9 @@
                         }
                     }
                 }
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
+                // Editor lives in the IFRAME — toggle Click-to-Add there only.
+                if (CONTEXT === 'IFRAME' && msg.hotkeyId === 'toggle-click-add') { try { caSetMode(!caModeOn); } catch (e) {} }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
@@ -347,7 +350,9 @@
                 { id: 'color-gemOff', label: 'GEM Off', type: 'color', default: STEP_COLOR_DEFAULTS.gemOff },
                 { id: 'color-wait', label: 'Wait', type: 'color', default: STEP_COLOR_DEFAULTS.wait },
             ],
-            hotkeys: [],
+            hotkeys: [
+                { id: 'toggle-click-add', label: 'Toggle Click-to-Add mode (mission editor)', default: '' },
+            ],
         });
     }
 
@@ -1611,13 +1616,27 @@
         stageBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
             'background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);color:#9cf;';
         stageBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); genStagePopup(stageBtn); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn);
+        const caBtn = document.createElement('button');
+        caBtn.id = CA_BTN_ID;
+        caBtn.type = 'button';
+        caBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        caBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); caSetMode(!caModeOn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn);
+        // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
+        const row3 = document.createElement('div');
+        row3.id = CA_BAR_ID;
+        row3.style.cssText = 'display:none;align-items:center;gap:6px;margin:0 0 4px;font-size:11px;color:#cfe;';
+        row3.innerHTML = '<span>Empty-space <b style="color:#7dff7d">L=Snapshot</b> · <b style="color:#14d2dc">R=Nav</b></span>' +
+            '<label style="margin-left:auto;white-space:nowrap;">Insert at N</label>' +
+            '<input type="number" min="1" data-ca-at placeholder="end" title="Target group: snapshots append to the end of this group; a nav inserts right after it (rest shifts down). Blank = end of mission." style="width:52px;background:#0f1216;border:1px solid #5fff5f;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;">';
+        row3.querySelector('[data-ca-at]').onchange = (ev) => { const v = parseInt(ev.target.value, 10); caInsertAtNav = (isFinite(v) && v >= 1) ? v : null; updateCaBanner(); };
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
-        if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); }
-        else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
+        if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); row2.parentNode.insertBefore(row3, row2.nextSibling); }
+        else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); content.insertBefore(row3, row2.nextSibling); }
         updateEditorCollapseBtn();
         updateAutoSnapAglUI();
         updateAglViewBtn();
+        updateCaUI();
         composerEnsureMapMode(true);
     }
 
@@ -1693,6 +1712,136 @@
         banner.textContent = `⚠ SNAPSHOT AUTO-AGL ON — saves set all snapshots to ground + ${defaultSnapAglFt} ft`;
     }
 
+    // ── Click-to-Add: rapid map-click step builder ───────────────────────────
+    // While editing a mission, ARM the mode (sticky ➕ toggle / hotkey, OR hold Ctrl
+    // momentarily) and click empty map: LEFT = Snapshot, RIGHT = Nav. New steps copy
+    // the last nav/snap's settings, land at the clicked point, and stay STAGED (Save
+    // when done) — same working-copy path as ➕ Stage. "Insert at N#" targets a group
+    // (blank = end); a right-click nav auto-advances the target to itself so the
+    // following left-clicks drop its snapshots. Robust empty-space detection via
+    // elementFromPoint (bail if a marker/UI is under the cursor), not Leaflet layer
+    // click semantics.
+    const CA_BTN_ID = 'aim-mb-clickadd-btn';
+    const CA_BAR_ID = 'aim-mb-clickadd-bar';
+    const CA_BANNER_ID = 'aim-mb-clickadd-banner';
+    let caModeOn = false;
+    let caInsertAtNav = null;      // 1-based target group, or null = end of mission
+    let caBoundContainer = null;
+    let caIdBump = 0;
+    function caMapContainer() { const m = getLeafletMap(); return (m && typeof m.getContainer === 'function') ? m.getContainer() : null; }
+    function caArmed(e) { return caModeOn || !!(e && e.ctrlKey); }
+    function caIsEmptySpace(e) {
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el) return true;
+        // bail if the click is on a marker icon / interactive vector / popup / our UI
+        return !el.closest('.leaflet-marker-icon, [class*="map-marker__"], .leaflet-interactive, .leaflet-popup, .leaflet-control, [id^="aim-"], button, input, select, textarea, a');
+    }
+    function caClickToLatLng(e) {
+        const m = getLeafletMap(); if (!m) return null;
+        try { if (typeof m.mouseEventToLatLng === 'function') return m.mouseEventToLatLng(e); } catch (_) {}
+        try { const c = caMapContainer(), r = c.getBoundingClientRect(); return m.containerPointToLatLng([e.clientX - r.left, e.clientY - r.top]); } catch (_) {}
+        return null;
+    }
+    function caEditing() { return CONTEXT === 'IFRAME' && composerMapMode && !!composerMission; }
+    function caOnClick(e) {
+        if (!caEditing() || !caArmed(e) || !caIsEmptySpace(e)) return;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        e.preventDefault(); e.stopPropagation();
+        caAddStep('snap', ll);
+    }
+    function caOnContextMenu(e) {
+        if (!caEditing() || !caArmed(e) || !caIsEmptySpace(e)) return;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        e.preventDefault(); e.stopPropagation();
+        caAddStep('nav', ll);
+    }
+    function caBindMap() {
+        const c = caMapContainer(); if (!c || caBoundContainer === c) return;
+        if (caBoundContainer) { try { caBoundContainer.removeEventListener('click', caOnClick, true); caBoundContainer.removeEventListener('contextmenu', caOnContextMenu, true); } catch (_) {} }
+        c.addEventListener('click', caOnClick, true);
+        c.addEventListener('contextmenu', caOnContextMenu, true);
+        caBoundContainer = c;
+    }
+    function caSetMode(on) {
+        if (CONTEXT !== 'IFRAME') return;
+        caModeOn = !!on;
+        caBindMap();
+        updateCaUI();
+        if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. (Hold Ctrl to add without the toggle.) Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
+        else showToast('Click-to-Add OFF.', '#888', 1800);
+    }
+    function updateCaUI() {
+        const btn = document.getElementById(CA_BTN_ID);
+        if (btn) {
+            btn.textContent = caModeOn ? '➕ Adding: ON' : '➕ Click-add';
+            btn.title = 'Click-to-Add: when ON, LEFT-click empty map = Snapshot, RIGHT-click = Nav — placed at the "Insert at" group (blank = end). Hold Ctrl to add momentarily without toggling. Steps stay staged; SAVE when done.';
+            btn.style.background = caModeOn ? 'rgba(95,255,95,0.22)' : 'transparent';
+            btn.style.border = caModeOn ? '1px solid #5fff5f' : '1px solid rgba(95,255,95,0.45)';
+            btn.style.color = caModeOn ? '#7dff7d' : '#7bbf7b';
+        }
+        const bar = document.getElementById(CA_BAR_ID);
+        if (bar) bar.style.display = caModeOn ? 'flex' : 'none';
+        updateCaBanner();
+    }
+    function updateCaBanner() {
+        if (CONTEXT !== 'IFRAME') return;
+        let b = document.getElementById(CA_BANNER_ID);
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!caModeOn || !mapC) { if (b) b.remove(); return; }
+        if (!b) {
+            b = document.createElement('div');
+            b.id = CA_BANNER_ID;
+            b.style.cssText = 'position:absolute;top:34px;left:50%;transform:translateX(-50%);z-index:1200;' +
+                'background:rgba(95,255,95,0.92);color:#04220a;font:700 12px/1.3 "Lato",sans-serif;' +
+                'padding:5px 12px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);pointer-events:none;white-space:nowrap;';
+            if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+            mapC.appendChild(b);
+        }
+        b.textContent = `➕ CLICK-TO-ADD ON — L-click = Snapshot · R-click = Nav · into ${caInsertAtNav ? 'N' + caInsertAtNav : 'end'}`;
+    }
+    function caAddStep(kind, latlng) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3500); return; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const pickRef = (pred) => { const list = instrs.filter(pred); if (!list.length) return null; for (let i = list.length - 1; i >= 0; i--) { if (list[i].location && list[i].location.lat != null) return list[i]; } return list[list.length - 1]; };
+        const ref = kind === 'nav' ? pickRef(isNav) : pickRef(isSnap);
+        if (!ref) { showToast(`Need an existing ${kind === 'nav' ? 'Navigate' : 'Snapshot'} in this mission to copy settings from.`, '#ff9800', 4000); return; }
+        const c = Object.assign({}, ref);
+        c.id = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options);
+        c.location = { lat: latlng.lat, lng: latlng.lng };
+        if (kind === 'snap') {
+            c.value2 = 1; // "To GPS"
+            c.extra_options = Object.assign({}, c.extra_options || {}, { pitch: (c.extra_options && c.extra_options.pitch != null) ? c.extra_options.pitch : 1001 });
+            const g = getElevationFromCache(latlng.lat, latlng.lng);
+            if (g != null) c.value1 = g + (defaultSnapAglFt / 3.28084);
+            else { try { fetchElevation(latlng.lat, latlng.lng); } catch (e) {} } // keep ref alt; Auto-AGL/Save corrects once cached
+        }
+        const newInstrs = instrs.map(s => Object.assign({}, s));
+        const navIdxs = []; newInstrs.forEach((s, k) => { if (isNav(s)) navIdxs.push(k); });
+        const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
+        // Insert at the END of the target group N# (before the next nav) — a nav there
+        // becomes N#+1 (rest shifts down); a snapshot lands after N#'s children.
+        const g = caInsertAtNav;
+        let insertIdx = (g && g >= 1 && g <= navIdxs.length) ? ((g < navIdxs.length) ? navIdxs[g] : endIdx()) : endIdx();
+        newInstrs.splice(insertIdx, 0, c);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        let addedNavGroup = null;
+        if (kind === 'nav') { let cnt = 0; for (let k = 0; k < newInstrs.length; k++) { if (isNav(newInstrs[k])) { cnt++; if (newInstrs[k].id === c.id) { addedNavGroup = cnt; break; } } } caInsertAtNav = addedNavGroup; const inp = document.querySelector('#' + CA_BAR_ID + ' [data-ca-at]'); if (inp) inp.value = addedNavGroup || ''; }
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            updateCaBanner();
+            const where = kind === 'nav' ? `N${addedNavGroup}` : (g ? `end of N${g}` : 'end');
+            showToast(`➕ ${kind === 'nav' ? 'Nav' : 'Snapshot'} added (${where}).${kind === 'nav' ? ' Left-click to drop its snapshots.' : ''} SAVE when done.`, '#7dff7d', 2600);
+        } catch (e) { console.warn(`${TAG} [click-add] setCurrentApp failed`, e); showToast('Click-to-Add failed — see console.', '#ff5252', 3500); }
+    }
+
     function composerBindMapEvents() {
         if (composerMapEventsBound) return;
         const map = getLeafletMap();
@@ -1707,6 +1856,8 @@
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         composerBindMapEvents();
+        caBindMap();          // (re)attach Click-to-Add handlers to the current map container
+        updateCaBanner();     // keep the armed banner present if the container rebuilt
         installComposerMarkerEvents();
         composerEnsureBadgeCSS();
         // Number from the LIVE editor instruction order when available — it includes
