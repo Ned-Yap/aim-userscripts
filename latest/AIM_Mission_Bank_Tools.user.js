@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.83
+// @version      1.84
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.83';
+    const SCRIPT_VERSION = '1.84';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1774,6 +1774,22 @@
             }
         } else if (st) { st.remove(); }
     }
+    // While Shift is held during editing, make OTHER step markers non-interactive so a
+    // press falls THROUGH to the map (stack in place) or to the marker of the step
+    // you're editing (drag it even when another icon overlaps). The edited step's own
+    // marker stays interactive so it can be dragged.
+    function caApplyShiftIgnore(on) {
+        if (CONTEXT !== 'IFRAME') return;
+        const ID = 'aim-mb-shift-ignore-style';
+        let st = document.getElementById(ID);
+        if (on && caEditing()) {
+            const editedId = getOpenStepId();
+            const esc = (v) => (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v);
+            if (!st) { st = document.createElement('style'); st.id = ID; (document.head || document.documentElement).appendChild(st); }
+            st.textContent = '.instruction-marker[data-aim-id],.leaflet-marker-icon[data-aim-id]{pointer-events:none !important;}' +
+                (editedId != null ? `[data-aim-id="${esc(editedId)}"]{pointer-events:auto !important;}` : '');
+        } else if (st) { st.remove(); }
+    }
     function caClickToLatLng(e) {
         const m = getLeafletMap(); if (!m) return null;
         try { if (typeof m.mouseEventToLatLng === 'function') return m.mouseEventToLatLng(e); } catch (_) {}
@@ -1822,6 +1838,7 @@
         };
         window.addEventListener('keydown', e => {
             sync(e);
+            if (e.shiftKey) caApplyShiftIgnore(true);   // Shift → let events fall through overlapping markers
             // Ctrl+Z → undo the last Click-to-Add step. Only hijack when we actually
             // have one to undo, while editing, and not typing in a field (so native
             // text-undo and Percepto's own shortcuts are untouched otherwise).
@@ -1830,7 +1847,8 @@
                 caUndoLast();
             }
         }, true);
-        window.addEventListener('keyup', e => sync(e), true);
+        window.addEventListener('keyup', e => { sync(e); if (!e.shiftKey) caApplyShiftIgnore(false); }, true);
+        window.addEventListener('blur', () => caApplyShiftIgnore(false), true);
     }
     function caSetMode(on) {
         if (CONTEXT !== 'IFRAME') return;
@@ -2101,8 +2119,13 @@
         // .leaflet-marker-icon we tag with data-aim-id. Only MBT sets data-aim-id, so
         // scoping to these two marker classes can't catch another script's markers.
         const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]') : null;
+        // Is this the marker of the step currently open in the editor? That one stays
+        // fully native under Shift so you can DRAG it (e.g. move the flag pole) even
+        // when another marker overlaps.
+        const isEditedMarker = (m) => m && String(m.getAttribute('data-aim-id')) === String(getOpenStepId());
         window.addEventListener('contextmenu', (e) => {
             const m = badge(e); if (!m) return;
+            if (e.shiftKey && isEditedMarker(m)) return; // edited marker: leave native
             // Shift while armed = stack a NAV here, IGNORING this marker. Own the event
             // at window-capture (before Leaflet's interactive-marker handler — the flag
             // pole is a Leaflet-interactive marker) and add here, so nothing else fires.
@@ -2146,10 +2169,10 @@
             return id;
         };
         const blockSwitchDown = (e) => {
-            // Shift ON A MARKER → block the native grab (no switch/drag) so it never
-            // swaps and Click-to-Add can stack in place. Off-marker shift (e.g. Leaflet
-            // box-zoom) is left alone.
-            if (e.shiftKey) { if (badge(e)) e.stopImmediatePropagation(); return; }
+            // Shift on a NON-edited marker → block its native grab (no switch/drag) so
+            // it never swaps and events fall through. The EDITED marker is left native
+            // so it can be dragged; off-marker shift (Leaflet box-zoom) untouched.
+            if (e.shiftKey) { const m = badge(e); if (m && !isEditedMarker(m)) e.stopImmediatePropagation(); return; }
             if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
             if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
         };
@@ -2157,6 +2180,7 @@
         window.addEventListener('mousedown', blockSwitchDown, true);
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
+            if (e.shiftKey && isEditedMarker(m)) return; // edited marker: leave native (drag/click)
             // Shift while armed = stack a SNAPSHOT here, ignoring this marker. Own the
             // event so the marker (esp. the Leaflet-interactive flag pole) can't grab it.
             if (e.shiftKey && caArmed(e)) {

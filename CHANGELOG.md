@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-07 — Mission Bank Tools v1.84 (dev/latest) — Shift lets you drag the step you're editing through overlapping icons
+
+While editing a step (e.g. a Flag Pole), **holding Shift now makes the *other* markers non-interactive** so you can **drag the step you're editing even when another marker (a Nav) sits on top of it** — no more nudging off the icon first. The marker you're editing stays grabbable; other icons let the press fall through (to drag the edited one, or to stack a step). Dev-only (latest/).
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.83 (dev/latest) — Shift never swaps steps
 
 Follow-up: while editing a step, **Shift-clicking another marker no longer switches to edit it**. Shift on a marker now always suppresses the swap — if Click-to-Add is armed it stacks a step there, and if it isn't, it simply does nothing (rather than selecting the marker). Dev-only (latest/).
