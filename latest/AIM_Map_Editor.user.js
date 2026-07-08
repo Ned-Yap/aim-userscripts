@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.50
+// @version      0.51
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -75,7 +75,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.50';
+    const SCRIPT_VERSION = '0.51';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -297,6 +297,7 @@
     // auto-revert every click on heavily-edited paths). Declared here so both writers can see it.
     let smartBusy = false;
     function editingFP() { return !!document.querySelector(ARC_BADGE_SEL) || findFpWorkingCopies().length > 0; }
+    function editingFfz() { return findFfzWorkingCopies().length > 0; }
     function onDownTrack(e) {
         mouseDown = true;
         lastDown = { x: e.clientX, y: e.clientY, onVertex: !!(e.target && e.target.closest && e.target.closest(VERTEX_SEL)) };
@@ -306,6 +307,7 @@
     function onUpTrack() {
         mouseDown = false;
         if (editingFP()) scheduleSmartPass();
+        if (editingFfz()) scheduleFfzSmartPass();
     }
     let blockedCount = 0;       // exposed on unsafeWindow.__aim_fpe_blocked
     function debugOn() { try { return !!unsafeWindow.__aim_fpe_debug; } catch (e) { return false; } }
@@ -1079,6 +1081,52 @@
                 }
             }
             break; // one path per pass — the next drop re-checks
+        }
+    }
+
+    // ---- AUTO mode for FFZs: a newly-drawn FFZ gets a terrain-following band ----
+    // Mirrors the flight-path auto-fill: when you draw a NEW FFZ, set its single
+    // altitude band to (max ground under the polygon) + floor/band ft, the same
+    // ground+100/+130 ft the path segments use. An EXISTING FFZ (opened to edit)
+    // already has a real band (max>min) → we baseline it and NEVER auto-touch it;
+    // only a fresh FFZ with no valid band yet is filled. Re-do an existing FFZ on
+    // purpose via the Shift+G AGL view. Same autoDraw toggle as the FP auto-fill.
+    const ffzProcSeen = new Set();  // FFZ ids already evaluated this session (filled or baselined)
+    let ffzAutoBusy = false, ffzSmartTimer = null;
+    function scheduleFfzSmartPass() { if (ffzSmartTimer) clearTimeout(ffzSmartTimer); ffzSmartTimer = setTimeout(() => { ffzSmartTimer = null; ffzSmartAutoPass().catch(e => warn('ffzSmartAutoPass threw', e)); }, SMART_SETTLE_MS); }
+    async function ffzSmartAutoPass() {
+        if (!settings.master || !settings.autoDraw || mouseDown || autoBusy || smartBusy || ffzAutoBusy) return;
+        elevRateLimited = false;
+        const wcs = findFfzWorkingCopies();
+        for (const wc of wcs) {
+            if (ffzProcSeen.has(wc.id)) continue;
+            const r = (wc.state && wc.state.restrictions) || {};
+            // "Already set" = a real MSL band: max>min AND floor ≥ 1 m. A fresh
+            // FFZ is either empty {} , 0–0, or a Percepto default like 0–400 ft
+            // (minAlt 0) — all caught by minAlt<1 since a genuine MSL floor here
+            // is hundreds of metres. So we fill those and never touch a real band.
+            const minA = r.minAlt, maxA = r.maxAlt;
+            const hasRealBand = num(minA) && num(maxA) && maxA > minA && minA >= 1;
+            ffzProcSeen.add(wc.id);
+            if (hasRealBand) continue; // existing FFZ opened for edit — leave its band alone
+            ffzAutoBusy = true;
+            try {
+                const g = await ensureFfzGround(wc); // MSL meters — max ground under the polygon
+                if (g == null) {
+                    // No elevation yet (quota breaker / not cached) — let the sweep retry.
+                    ffzProcSeen.delete(wc.id);
+                    if (elevRateLimited) {
+                        toast('⛰ Percepto’s elevation quota is exhausted — paused ~60s. The new FFZ’s band will auto-fill once it recovers.', '#ffb14e');
+                    }
+                    continue;
+                }
+                const groundFt = g * FT;
+                const minFt = groundFt + settings.floorFt;
+                const maxFt = groundFt + settings.floorFt + settings.bandFt;
+                await applyFfzBandEdit(wc.id, minFt, maxFt);
+                log(`FFZ auto-band: ground ${g.toFixed(1)}m → ${Math.round(minFt)}–${Math.round(maxFt)} ft MSL (+${settings.floorFt}/${settings.floorFt + settings.bandFt} ft AGL)`);
+            } finally { ffzAutoBusy = false; }
+            break; // one FFZ per pass — the next drop/sweep re-checks
         }
     }
 
@@ -2165,6 +2213,10 @@
     // its one drop-triggered pass and you never dropped near it again). Idle when you're
     // holding a vertex or there's nothing unfilled; the pass itself no-ops if all clean.
     setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && !smartBusy && editingFP()) scheduleSmartPass(); }, SMART_SWEEP_MS);
+    // Same background sweep for a freshly-drawn FFZ whose ground wasn't ready on
+    // its drop pass (baselined existing FFZs are already skipped, so this is safe
+    // to run whenever an FFZ editor is open).
+    setInterval(() => { if (settings.master && settings.autoDraw && !mouseDown && !autoBusy && !smartBusy && !ffzAutoBusy && editingFfz()) scheduleFfzSmartPass(); }, SMART_SWEEP_MS);
     // AGL HUD: keep it in sync while editing (cheap — skips rebuild when nothing changed).
     setInterval(() => { try { renderAglHud(); const el = document.getElementById(AGL_HUD_ID); if (el) positionAglHud(el); } catch (e) {} }, 900);
     setTimeout(watchAltTooltips, 2500); // give the map time to mount, then watch native ALT tooltips
