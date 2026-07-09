@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.179 (dev/latest) — asset writes now mirror the native editor's `new_poi_type_str`
+
+Recon of a native asset save (thanks to the KEMPER 16 1 capture) showed Percepto's editor always sends `custom.new_poi_type_str` — empty when picking an existing type, the new string when creating one. Our Direct-API asset bodies omitted it, which is the best explanation for both remaining failure modes: the server forcing some pads' base type back to "well-cluster" and the `400 Could not create object` rejections. Asset write bodies now carry it exactly like the native editor (existing type → `""`, NEW type → the value). Also: any server-rejected write now dumps the exact request body + full server response to the console, so the next mystery failure diagnoses itself. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.178 (dev/latest) — ⚡ Direct API runs 5 writes at a time
 
 Direct-API applies were strictly one-at-a-time with a 250ms pause — most of the wall clock was just waiting on server round-trips (~1s per asset, so ~2–3 min for a big subtype run). Live Direct-API runs now push **5 concurrent writes** through a worker pool: a ~150-asset run should land in ~30–40 seconds. All rails preserved: the rollback snapshot still happens first, every write still echo-verifies, the first asset write of a run still runs **alone** behind a gate so the fresh-fetch geometry probe can halt everything before a second asset is touched, and a structural anomaly (or the Abort button) stops new launches while in-flight writes finish and report. The editor path (Direct API off) stays sequential — it drives one shared editor UI. Also: the progress sublabel now says "edits written" (it was counting subtype edits as "altitude values"). Dev-only (latest/).

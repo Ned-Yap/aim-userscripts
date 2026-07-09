@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.178
+// @version      4.179
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.178';
+    const SCRIPT_VERSION = '4.179';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6743,6 +6743,17 @@
         delete b.polygon;
         delete b.asset_waypoints;
         b.mountain_terrain_site = !!(siteCfg && siteCfg.mountain_terrain);
+        // v4.179: the native asset save ALWAYS includes
+        // custom.new_poi_type_str ("" when picking an existing type) —
+        // recon 2026-07-09 on KEMPER 16 1. Without it, the server
+        // second-guesses poi_type_str on some pads (forces base type back
+        // to "well-cluster") or 400s ("Could not create object"). Mirror
+        // it; applyEditsToBody overwrites it with the new value when the
+        // queued subtype is a NEW type (the "Enter new type" path).
+        if (b.type === 3) {
+            if (!b.custom || typeof b.custom !== 'object') b.custom = {};
+            b.custom.new_poi_type_str = '';
+        }
         if (Array.isArray(b.arcs)) {
             b.arcs.forEach(a => {
                 if (a && a.point_a && a.point_b && !Array.isArray(a.points)) {
@@ -6773,10 +6784,14 @@
             // v4.176: asset subtype rides the same upsert — it's just
             // custom.poi_type_str. The rest of `custom` (equipment, state,
             // …) was cloned wholesale by buildWriteBody, so only the
-            // subtype string changes.
+            // subtype string changes. v4.179: mirror the native editor's
+            // two paths — existing type keeps new_poi_type_str: "" (set by
+            // buildWriteBody), a NEW type carries it in new_poi_type_str
+            // too (the "Enter new type" channel).
             if (e.field === 'subtype') {
                 if (!body.custom || typeof body.custom !== 'object') body.custom = {};
                 body.custom.poi_type_str = e.newValue;
+                body.custom.new_poi_type_str = e.isNewSubtype ? e.newValue : '';
                 return;
             }
             if (e.isFfz) {
@@ -7003,6 +7018,11 @@
                 };
                 console.warn(`${TAG}   share-vertex? [${n1},${n2}]=${share(n1, n2)} [${n1 - 1},${n2 - 1}]=${share(n1 - 1, n2 - 1)} [${n1},${n2 - 1}]=${share(n1, n2 - 1)} [${n1 - 1},${n2}]=${share(n1 - 1, n2)}`);
             }
+            // v4.179: self-diagnosing failures — dump the exact body we
+            // sent + the full server response so a failing entity can be
+            // diffed against a native-editor capture without a re-run.
+            console.warn(`${TAG} ⚡ ${label} — server ${resp.status}. REQUEST BODY:`, JSON.stringify(body));
+            console.warn(`${TAG} ⚡ ${label} — FULL RESPONSE:`, resp.raw);
             applyState.errors.push({ entityName: label, reason: `server ${resp.status}: ${snippet}` });
             return { ok: false, reason: `server ${resp.status}`, appliedCount: 0 };
         }
