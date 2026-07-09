@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.175 (dev/latest) — 👁 Subtypes: show/hide MAP assets by subtype
+
+New **👁 Subtypes** button in the SUM panel's bulk row. Pick which asset subtypes stay visible **on the map** (checkbox list with counts, plus a per-row "only" shortcut for the show-just-batteries workflow) and hit **Apply to map**. Under the hood it batch-drives Percepto's own sidebar checkboxes — the visibility source of truth — so the map, sidebar, and the SUM eye column all stay in sync. It automatically picks the cheapest route: either clicking just the assets that need to change, or one click to hide the whole Assets section and re-checking only the ones that should stay visible (also self-heals if Percepto reset visibility behind our back). Live progress on the button, ~4 clicks/sec, **Show all** restores everything with a single section click. Built for ordering multi-missions by proximity per subtype — pair it with the Route column sorted descending for a furthest-to-closest list. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.174 (dev/latest) — 📥 Paste Subtypes: spreadsheet-driven bulk subtype updates
 
 New **📥 Paste Subtypes** button next to Bulk → Subtype in the SUM panel. Copy two columns (asset **Name** + target **Subtype**) straight out of Sheets/Excel, paste into the popover, and it matches each row to an asset by name (case/extra-whitespace insensitive, "Name / Type" header row auto-skipped) and queues one subtype edit per match — then commit with the normal **Apply** button. The live preview shows exactly what will happen before you queue: how many edits, how many assets are already at the target, NEW subtype values, **unmatched names** (📋 Copy unmatched puts them back on the clipboard for spreadsheet reconciliation), names pasted twice with conflicting types (skipped), and unparseable lines. Built for the "hundreds of subtype fixes prepared outside AIM" workflow. Dev-only (latest/).

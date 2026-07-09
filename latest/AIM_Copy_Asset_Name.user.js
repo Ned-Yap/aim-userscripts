@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.174
+// @version      4.175
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.174';
+    const SCRIPT_VERSION = '4.175';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -4348,6 +4348,111 @@
         sumPanelState.visibility = new Map();
         showToast('All entities visible');
         if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+    }
+
+    // ============================================================
+    // v4.175: subtype-level asset visibility (👁 Subtypes)
+    //
+    // Batch-drives the sidebar checkboxes to show/hide MAP assets by
+    // subtype. Two plans, cheapest wins (computed by the popover):
+    //   delta      — click only the assets whose state must change
+    //   sectionOff — one click hides the whole Assets section, then
+    //                re-check just the assets that should stay visible
+    //                (state-independent baseline; wins when hiding most)
+    // Same sidebar-driving rails as solo/unsolo — Percepto stays the
+    // source of truth, so the map, sidebar and our eye column agree.
+    // ============================================================
+
+    let assetVisBatchBusy = false;
+
+    // Force the Assets SECTION checkbox to on/off. Handles the
+    // virtualized sidebar (collapse visible sections until the Assets
+    // header is in DOM) and Ant's indeterminate state (indeterminate →
+    // click lands on ALL-ON, so "off" may need two clicks).
+    async function setAssetSectionChecked(doc, on) {
+        for (let pass = 0; pass < 6; pass++) {
+            scrollSidebarToTop(doc);
+            await sleep(40);
+            const sections = getSidebarSections(doc);
+            const sec = sections.find(s => /asset/i.test(s.title));
+            if (sec && sec.checkbox) {
+                const wrap = sec.checkbox.closest('.ant-checkbox');
+                const indet = !!(wrap && wrap.classList.contains('ant-checkbox-indeterminate'));
+                if (on) {
+                    if (indet || !sec.checkbox.checked) { try { sec.checkbox.click(); } catch (e) {} await sleep(120); }
+                } else {
+                    if (indet) { try { sec.checkbox.click(); } catch (e) {} await sleep(150); } // indeterminate → all on
+                    if (sec.checkbox.checked) { try { sec.checkbox.click(); } catch (e) {} await sleep(120); }
+                }
+                return true;
+            }
+            // Assets header not in the virtualized DOM — collapse what IS
+            // visible so the remaining sections scroll into view.
+            let didWork = false;
+            for (const s of sections) {
+                if (s.toggleBtn && s.toggleBtn.getAttribute('aria-label') === 'Collapse') {
+                    try { s.toggleBtn.click(); didWork = true; } catch (e) {}
+                    await sleep(25);
+                }
+            }
+            if (!didWork) break;
+            await sleep(120);
+        }
+        return false;
+    }
+
+    // plan = { sectionOff: bool, check: [entities], uncheck: [entities],
+    //          allAssetIds: [ids] (required when sectionOff) }
+    async function applyAssetVisibilityPlan(plan, onProgress) {
+        if (assetVisBatchBusy) { showToast('A visibility batch is already running — wait for it to finish', 'rgba(255,180,0,0.55)'); return; }
+        assetVisBatchBusy = true;
+        try {
+            const doc = getSidebarDoc();
+            if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+            if (plan.sectionOff) {
+                pasteSidebarSearch(doc, '');
+                await sleep(150);
+                const ok = await setAssetSectionChecked(doc, false);
+                if (!ok) { showToast('Assets section not found in sidebar — is the entity panel open?', 'rgba(255,96,96,0.55)'); return; }
+                (plan.allAssetIds || []).forEach(id => setEntityVisible(id, false));
+            }
+            const steps = [
+                ...(plan.uncheck || []).map(en => ({ en, want: false })),
+                ...(plan.check || []).map(en => ({ en, want: true })),
+            ];
+            // Duplicate asset names break the search+first-match click (the
+            // second twin is unreachable) — do what we can, but say so.
+            const nameCounts = {};
+            steps.forEach(s => { const k = (s.en.name || '').trim().toLowerCase(); nameCounts[k] = (nameCounts[k] || 0) + 1; });
+            const dupNames = Object.keys(nameCounts).filter(k => nameCounts[k] > 1);
+            if (dupNames.length) console.warn(`${TAG} subtype visibility: duplicate asset names — only the first sidebar match is clickable:`, dupNames);
+            let done = 0;
+            const missed = [];
+            for (const s of steps) {
+                pasteSidebarSearch(doc, s.en.name);
+                await sleep(200);
+                const item = findSidebarItemByName(doc, s.en.name);
+                const cb = getEntityCheckboxFromItem(item);
+                if (!cb) { missed.push(s.en.name); continue; }
+                if (cb.checked !== s.want) {
+                    try { cb.click(); } catch (e) { missed.push(s.en.name); continue; }
+                    await sleep(60);
+                }
+                setEntityVisible(s.en.id, s.want);
+                done++;
+                if (onProgress) { try { onProgress(done, steps.length); } catch (e) {} }
+            }
+            pasteSidebarSearch(doc, '');
+            if (missed.length) {
+                console.warn(`${TAG} subtype visibility: ${missed.length} asset(s) not found in sidebar:`, missed);
+                showToast(`Visibility updated — ${missed.length} not found in sidebar (see console)`, 'rgba(255,180,0,0.55)');
+            } else {
+                showToast(`Map asset visibility updated (${done + (plan.sectionOff ? 1 : 0)} change${done === 1 && !plan.sectionOff ? '' : 's'})`);
+            }
+            if (window.__aim_ai_redrawTable) window.__aim_ai_redrawTable();
+        } finally {
+            assetVisBatchBusy = false;
+        }
     }
 
     // ============================================================
@@ -15056,6 +15161,17 @@
         attachBulkPopover(pasteSubBtn, (anchor, onClose) => buildBulkSubtypePastePopover(anchor, onClose));
         optsRow.appendChild(pasteSubBtn);
 
+        // --- v4.175: 👁 Subtypes button — MAP-level asset visibility by
+        // subtype. Batch-drives Percepto's sidebar checkboxes (the map
+        // visibility source of truth) via applyAssetVisibilityPlan.
+        const subVisBtn = document.createElement('button');
+        subVisBtn.type = 'button';
+        subVisBtn.textContent = '👁 Subtypes';
+        subVisBtn.title = 'Show/hide assets ON THE MAP by subtype (drives the sidebar checkboxes)';
+        subVisBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(subVisBtn, (anchor, onClose) => buildSubtypeVisibilityPopover(subVisBtn, onClose));
+        optsRow.appendChild(subVisBtn);
+
         // --- v4.70: Bulk → Valid button ---
         // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
         // across FFZs + FPs in scope. This flag = a pilot's post-flight
@@ -15496,6 +15612,158 @@
             btnRow.appendChild(copyUnBtn);
             btnRow.appendChild(cancelBtn);
             btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
+        // v4.175: 👁 Subtypes popover — checklist of observed subtypes
+        // (checked = visible on the map). "only" per row for the common
+        // one-subtype workflow. Apply computes the cheapest sidebar plan
+        // (per-asset delta clicks vs hide-Assets-section + re-check the
+        // visible ones) and hands it to applyAssetVisibilityPlan, with
+        // live progress on the button.
+        function buildSubtypeVisibilityPopover(anchorBtn, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;width:360px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '👁 Asset Visibility by Subtype';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Checked subtypes stay visible ON THE MAP; unchecked get hidden. Runs through Percepto\'s sidebar checkboxes (a few per second) so the map, sidebar and eye column stay in sync.';
+            pop.appendChild(help);
+
+            // Subtype → asset entities (dedupe by id). '(no subtype)'
+            // bucket keeps untyped assets controllable too.
+            const buckets = new Map();
+            allRows.forEach(r => {
+                if (r.type !== 3 || !r.entity || r._isSegment) return;
+                const st = ((r.entity.custom && r.entity.custom.poi_type_str) || '').trim() || '(no subtype)';
+                if (!buckets.has(st)) buckets.set(st, []);
+                const arr = buckets.get(st);
+                if (!arr.some(en => en.id === r.entity.id)) arr.push(r.entity);
+            });
+            const subtypeNames = Array.from(buckets.keys()).sort((a, b) => a.localeCompare(b));
+            if (subtypeNames.length === 0) {
+                help.textContent = 'No assets loaded for this site.';
+                return pop;
+            }
+
+            const listWrap = document.createElement('div');
+            listWrap.style.cssText = 'max-height:220px;overflow-y:auto;margin-bottom:10px;display:flex;flex-direction:column;gap:4px';
+            const rowChecks = new Map();  // subtype -> checkbox input
+            subtypeNames.forEach(st => {
+                const ents = buckets.get(st);
+                // Row starts at the CURRENT believed state: checked if any
+                // member is visible (all-hidden subtype starts unchecked).
+                const anyVisible = ents.some(en => isEntityVisible(en.id));
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer;color:#cfd6dc';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = anyVisible;
+                cb.style.cssText = 'accent-color:rgb(255,213,79);cursor:pointer';
+                rowChecks.set(st, cb);
+                row.appendChild(cb);
+                const txt = document.createElement('span');
+                txt.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+                txt.textContent = `${st} (${ents.length})`;
+                txt.title = `${st} — ${ents.length} asset${ents.length === 1 ? '' : 's'}`;
+                row.appendChild(txt);
+                const only = document.createElement('span');
+                only.textContent = 'only';
+                only.title = `Show ONLY ${st}`;
+                only.style.cssText = 'color:#5fb8ff;font-size:10px;cursor:pointer;padding:0 4px';
+                only.onclick = (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    rowChecks.forEach((c, k) => { c.checked = (k === st); });
+                    refreshPreview();
+                };
+                row.appendChild(only);
+                cb.onchange = () => refreshPreview();
+                listWrap.appendChild(row);
+            });
+            pop.appendChild(listWrap);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:18px;line-height:1.5';
+            pop.appendChild(preview);
+
+            const computePlan = () => {
+                const showEnts = [];
+                const hideEnts = [];
+                subtypeNames.forEach(st => {
+                    (rowChecks.get(st).checked ? showEnts : hideEnts).push(...buckets.get(st));
+                });
+                // Delta plan: only touch assets whose believed state differs.
+                const check = showEnts.filter(en => !isEntityVisible(en.id));
+                const uncheck = hideEnts.filter(en => isEntityVisible(en.id));
+                const deltaSteps = check.length + uncheck.length;
+                // Section plan: 1 section click + re-check every visible
+                // asset. State-independent, so it also self-heals if our
+                // believed state drifted from Percepto (editor closes reset
+                // Percepto's visibility without telling us).
+                const sectionSteps = 1 + showEnts.length;
+                if (deltaSteps <= sectionSteps) {
+                    return { plan: { sectionOff: false, check, uncheck }, steps: deltaSteps, showN: showEnts.length, hideN: hideEnts.length };
+                }
+                const allAssetIds = [];
+                buckets.forEach(arr => arr.forEach(en => allAssetIds.push(en.id)));
+                return { plan: { sectionOff: true, check: showEnts, uncheck: [], allAssetIds }, steps: sectionSteps, showN: showEnts.length, hideN: hideEnts.length };
+            };
+            const refreshPreview = () => {
+                const p = computePlan();
+                if (p.showN + p.hideN === 0) { preview.textContent = '—'; return; }
+                if (p.steps === 0) { preview.textContent = 'Already matches — nothing to do'; return; }
+                const secs = Math.max(1, Math.round(p.steps * 0.28));
+                preview.innerHTML = `Show <strong style="color:#ffd54f">${p.showN}</strong> · hide <strong style="color:#ffd54f">${p.hideN}</strong> assets — ${p.steps} sidebar click${p.steps === 1 ? '' : 's'}, ~${secs}s${p.plan.sectionOff ? ' <span style="color:#888">(via section off + re-check)</span>' : ''}`;
+            };
+            refreshPreview();
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;align-items:center';
+            const allBtn = document.createElement('button');
+            allBtn.type = 'button';
+            allBtn.textContent = 'Show all';
+            allBtn.title = 'Re-check the whole Assets section (single click) — everything visible';
+            allBtn.style.cssText = 'margin-right:auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 10px;cursor:pointer;font:inherit;font-size:11px';
+            allBtn.onclick = async () => {
+                onClose();
+                const doc = getSidebarDoc();
+                if (!doc) { showToast('Sidebar not found — open the entity panel?', 'rgba(255,96,96,0.55)'); return; }
+                pasteSidebarSearch(doc, '');
+                await sleep(150);
+                const ok = await setAssetSectionChecked(doc, true);
+                if (!ok) { showToast('Assets section not found in sidebar', 'rgba(255,96,96,0.55)'); return; }
+                const bucketsAll = [];
+                buckets.forEach(arr => arr.forEach(en => bucketsAll.push(en.id)));
+                bucketsAll.forEach(id => setEntityVisible(id, true));
+                showToast('All assets visible');
+                redrawTable();
+            };
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const applyBtn = document.createElement('button');
+            applyBtn.type = 'button';
+            applyBtn.textContent = 'Apply to map';
+            applyBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            applyBtn.onclick = () => {
+                const p = computePlan();
+                if (p.steps === 0) { showToast('Already matches — nothing to do'); onClose(); return; }
+                onClose();
+                const origLabel = anchorBtn.textContent;
+                applyAssetVisibilityPlan(p.plan, (done, total) => {
+                    anchorBtn.textContent = `👁 ${done}/${total}…`;
+                }).finally(() => { anchorBtn.textContent = origLabel; });
+            };
+            btnRow.appendChild(allBtn);
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(applyBtn);
             pop.appendChild(btnRow);
             return pop;
         }
