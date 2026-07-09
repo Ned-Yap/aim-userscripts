@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.173 (dev/latest) — fix: "Open in Google Maps" now actually opens a tab
+
+The 🗺 Maps button (and the empty-map menu's "Open in Google Maps") did nothing — Percepto's map iframe silently swallows `window.open` (returns null, no error), so the code thought it succeeded. Now uses Tampermonkey's `GM_openInTab`, which opens at the browser level and bypasses the iframe sandbox, with top-window/current-window fallbacks and a copy-the-link last resort if a popup blocker is in the way. **Note:** because this adds a new `@grant GM_openInTab`, Tampermonkey may show a one-time permission prompt after the update. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.172 (dev/latest) — entity GPS = the exact point you right-clicked
 
 Right-clicking an entity now shows the **GPS of the exact spot you clicked**, not the entity's center — so the coordinate (and 🗺 Maps) point at the well head / vertex / segment location you were actually pointing at. Opening the inspector from a SUM row-click (no click point) still falls back to the centroid, labeled **"GPS (center)"** so it's clear which one you're looking at. Dev-only (latest/).

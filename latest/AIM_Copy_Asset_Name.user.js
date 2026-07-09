@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.172
+// @version      4.173
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
@@ -50,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.172';
+    const SCRIPT_VERSION = '4.173';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3704,10 +3705,26 @@
     }
     function openInGoogleMaps(lat, lng) {
         const url = googleMapsUrl(lat, lng);
-        try { window.open(url, '_blank', 'noopener'); return; }
-        catch (e) {}
-        try { window.top.open(url, '_blank', 'noopener'); }
-        catch (e2) { console.warn(`${TAG} openInGoogleMaps failed`, e2); showToast('Could not open Google Maps', 'rgba(255,82,82,0.6)'); }
+        // The Percepto map IFRAME silently swallows window.open — it returns
+        // null WITHOUT throwing, so a try/return "succeeds" but no tab opens
+        // (this is why the button looked dead). GM_openInTab opens at the
+        // browser level and bypasses the iframe sandbox — prefer it. Then fall
+        // back to top-window / current-window open, checking the RETURN value
+        // (null = blocked). Last resort: copy the link + tell the user.
+        try {
+            if (typeof GM_openInTab === 'function') {
+                GM_openInTab(url, { active: true, insert: true, setParent: true });
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} GM_openInTab threw`, e); }
+        let w = null;
+        try { w = window.top.open(url, '_blank', 'noopener'); } catch (e) {}
+        if (w) return;
+        try { w = window.open(url, '_blank', 'noopener'); } catch (e) {}
+        if (w) return;
+        console.warn(`${TAG} openInGoogleMaps: all open paths blocked — copying link instead`);
+        try { copyToClipboard(url, 'Popup blocked — copied Google Maps link'); }
+        catch (e) { showToast('Could not open Google Maps', 'rgba(255,82,82,0.6)'); }
     }
 
     // Small floating menu offering the two copy actions + open. Reused by
