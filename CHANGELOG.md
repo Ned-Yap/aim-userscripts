@@ -6,6 +6,23 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Control Panel v1.35 (dev/latest) — gear now available on the Live Drone view
+
+The live-drone page (`#/site/<id>/live_drone/<id>`) has no `.map-tools` bar, so the Control Panel gear never appeared there. The TOP frame now injects a self-styled floating gear (top-right, below the drone-info bar) on live-drone URLs — it appears/disappears with SPA navigation and works in both Lite and Full modes. New URL scope `live-drone` added to the page-awareness system. Also synced the internal `VERSION` const (was stuck at 1.33 while `@version` said 1.34). Dev-only (latest/).
+
+---
+
+## 2026-07-09 — Asset Inspector v4.180 + Map Styler v34.116 (dev/latest) — Diamondback subtype taxonomy support
+
+Diamondback's subtypes lead with wellhead orientation (`V - PUMPING ROD - Empty`) instead of EXXON's `equipment - state` shape, which scrambled every parser that assumed "first segment = equipment, rest = state" — the 📊 Site Summary showed "Pumping Rod" as a *state* with V/H as *equipment*, and Map Styler's color-by-state painted freshly-updated `v - pumping rod` assets gray instead of Normal-pink. New shared rule in both scripts: **only trailing segments that are known state words (empty / unshielded / unreachable / inactive / hy) count as the state; everything before them is the type.** EXXON's taxonomy parses identically to before.
+
+- **Site Summary**: Equipment card now lists full types (`V - Pumping Rod`, `H - Gas Lift`, `Battery`, …), the States card is back to a clean Normal/Empty/Unshielded distribution, the Health-by-Equipment matrix keys on full types with semantic state colors, and a new **Asset · V vs H** card breaks down wellhead orientation (only appears when the taxonomy has V/H leads — EXXON sites are unchanged). SUM table Equipment/State columns and both Copy exports follow the same parse.
+- **Map Styler**: `v - pumping rod` classifies as **Normal → pink** again; state suffixes color correctly (`- unshielded` → orange-red, etc.), and the per-equipment show/hide checkboxes in the Control Panel now list full types — which doubles as a map-level filter per subtype when color-by-state is on.
+
+Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.179 (dev/latest) — asset writes now mirror the native editor's `new_poi_type_str`
 
 Recon of a native asset save (thanks to the KEMPER 16 1 capture) showed Percepto's editor always sends `custom.new_poi_type_str` — empty when picking an existing type, the new string when creating one. Our Direct-API asset bodies omitted it, which is the best explanation for both remaining failure modes: the server forcing some pads' base type back to "well-cluster" and the `400 Could not create object` rejections. Asset write bodies now carry it exactly like the native editor (existing type → `""`, NEW type → the value). Also: any server-rejected write now dumps the exact request body + full server response to the console, so the next mystery failure diagnoses itself. Dev-only (latest/).

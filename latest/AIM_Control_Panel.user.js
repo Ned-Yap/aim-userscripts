@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Control Panel
 // @namespace    http://tampermonkey.net/
-// @version      1.34
+// @version      1.35
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Control_Panel.user.js
 // @description  Native-style control panel injected into the map-tools bar. Hosts toggles + hotkey rebinding for all AIM scripts. Click the gear icon next to the layer menu.
@@ -55,7 +55,7 @@
     // ============================================================
     // 1. CONSTANTS
     // ============================================================
-    const VERSION = '1.33';
+    const VERSION = '1.35';
     const IS_TOP = window === window.top;
     const TAG = `[AIM CONTROL ${IS_TOP ? 'TOP' : 'IF'}]`;
     const CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
@@ -133,6 +133,10 @@
         }
         if (/#\/site\/\d+\/control-panel\/site-setup/.test(hash)) return 'site-setup';
         if (/#\/site\/\d+\/control-panel\/mission-bank/.test(hash)) return 'mission-bank';
+        // v1.35 — live drone view (video + telemetry page). No .map-tools
+        // exists here, so the TOP frame injects a floating gear instead
+        // (see syncFloatingButton).
+        if (/#\/site\/\d+\/live_drone\//.test(hash)) return 'live-drone';
         return 'other';
     }
 
@@ -637,6 +641,7 @@
             const next = getUrlScope();
             if (next !== state.urlScope) {
                 state.urlScope = next;
+                syncFloatingButton();
                 if (state.panelOpen) renderPanel();
             }
         };
@@ -776,6 +781,57 @@
         });
         console.log(`${TAG} button injected into .map-tools`);
         return true;
+    }
+
+    // ------------------------------------------------------------
+    // v1.35 — floating gear for pages with no .map-tools bar (live
+    // drone view). TOP frame only. Self-styled because the map
+    // iframe's .map-tools__button CSS doesn't exist in this document.
+    // ------------------------------------------------------------
+    function injectFloatingButton() {
+        if (!document.body) return false;
+        if (state.buttonEl && document.body.contains(state.buttonEl)) return true;
+        ensureGearStyles(document);
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = `
+            <div class="aim-control-button aim-control-button--floating"
+                 title="AIM Controls"
+                 style="cursor:pointer;display:flex;align-items:center;justify-content:center;
+                        position:fixed;top:130px;right:12px;width:34px;height:34px;
+                        background:rgba(40,40,40,0.92);border:1px solid rgba(255,255,255,0.18);
+                        border-radius:6px;z-index:100000;user-select:none">
+                <span style="font-size:18px;line-height:1;color:#39ff14">⚙</span>
+            </div>
+        `;
+        const btn = wrapper.firstElementChild;
+        document.body.appendChild(btn);
+        state.buttonEl = btn;
+        swallowMouseEvents(btn);
+        btn.addEventListener('click', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            togglePanel();
+        });
+        console.log(`${TAG} floating button injected (${state.urlScope} page)`);
+        return true;
+    }
+
+    function removeFloatingButton() {
+        if (state.buttonEl && state.buttonEl.classList.contains('aim-control-button--floating')) {
+            try { state.buttonEl.remove(); } catch (e) { /* already detached */ }
+            // The panel lives inside the button — reset both so a later
+            // page gets a fresh build.
+            state.buttonEl = null;
+            state.panelEl = null;
+            state.panelOpen = false;
+        }
+    }
+
+    // Called at start, on every scope change, and on a slow interval
+    // (Angular can rebuild large chunks of the live page under us).
+    function syncFloatingButton() {
+        if (!IS_TOP) return;
+        if (state.urlScope === 'live-drone') injectFloatingButton();
+        else removeFloatingButton();
     }
 
     function watchToolsBar() {
@@ -1885,7 +1941,11 @@
             // to inject the gear button there (was spamming the console
             // with 60 retry stack traces over 30s, all guaranteed to fail).
             if (IS_TOP) {
-                console.log(`${TAG} skipping button injection in TOP frame (map is in iframe)`);
+                console.log(`${TAG} skipping .map-tools injection in TOP frame (map is in iframe)`);
+                // v1.35 — but pages with no map iframe toolbar (live drone
+                // view) get a floating gear in the TOP frame instead.
+                syncFloatingButton();
+                setInterval(syncFloatingButton, 2000);
             } else {
                 ensureButton();
             }
