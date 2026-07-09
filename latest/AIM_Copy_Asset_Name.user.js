@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.177
+// @version      4.178
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.177';
+    const SCRIPT_VERSION = '4.178';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6467,7 +6467,7 @@
             else statsEl.textContent = `Item ${idx} of ${total}${failed ? ` · ${failed} need a look` : ''}`;
         }
         // Quiet secondary line with the raw edit count for the curious.
-        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} altitude values written)` : '';
+        if (subEl) subEl.textContent = st.total ? `(${st.done} of ${st.total} edits written)` : '';
 
         if (errEl) {
             errEl.innerHTML = '';
@@ -7303,13 +7303,19 @@
                     console.error(`${TAG} ⚡ rollback snapshot failed — aborting before writes:`, e);
                 }
             }
-            for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
-                if (applyState.aborted) break;
-                const g = groups[gi];
+            // v4.178: process one group end-to-end (write + audit + queue
+            // cleanup + structural halt). Extracted from the old sequential
+            // loop so direct-API runs can execute several groups CONCURRENTLY
+            // — each POST is an independent per-entity upsert, and the old
+            // one-at-a-time loop spent most of its wall clock waiting on
+            // server round-trips (~1s/asset → 17 min editor / 3 min serial).
+            let startedCount = 0;
+            const processOneGroup = async (g) => {
+                startedCount++;
                 applyState.phase = 'writing';
-                applyState.entityIndex = gi + 1;
+                applyState.entityIndex = Math.min(startedCount, groups.length);
                 applyState.currentEntity = g.entityName;
-                applyState.currentLabel = `${gi + 1} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
+                applyState.currentLabel = `${applyState.entityIndex} of ${groups.length}: ${g.entityName} (${g.edits.length} edit${g.edits.length === 1 ? '' : 's'})${dryRun ? ' [DRY RUN]' : ''}`;
                 onProgress(applyState);
                 const entityStart = Date.now();
                 let outcome;
@@ -7357,14 +7363,55 @@
                 }
                 // A STRUCTURAL verify failure means we sent a malformed
                 // body (coord/arc count changed) — stop immediately so a
-                // body-shape bug can't damage entity after entity.
+                // body-shape bug can't damage entity after entity. In
+                // pooled mode this stops NEW launches; in-flight writes
+                // finish and report normally.
                 if (outcome.structural) {
                     applyState.aborted = true;
                     applyState.errors.push({ entityName: '(safety abort)', reason: `structural anomaly on ${g.entityName} — run halted; rollback available` });
                     console.error(`${TAG} ⚡ STRUCTURAL anomaly on ${g.entityName} — halting run. Use window.__aim_ai_rollback() or the report button.`);
                 }
                 onProgress(applyState);
-                await sleep(directApi && !dryRun ? 250 : 600);
+            };
+
+            // Direct-API live runs use a small worker pool; the editor path
+            // stays strictly sequential (it drives ONE shared editor UI).
+            // Pool rules: abort/structural-halt stops new launches; the
+            // FIRST asset group runs alone behind a gate so the fresh-GET
+            // geometry probe (in applyOneEntityDirect) can halt the run
+            // before any other asset is written.
+            const POOL = (directApi && !dryRun) ? 5 : 1;
+            if (POOL > 1 && !snapshotFailed) {
+                let nextIdx = 0;
+                let firstAssetGate = null;
+                const worker = async () => {
+                    while (true) {
+                        if (applyState.aborted) return;
+                        const gi = nextIdx++;
+                        if (gi >= groups.length) return;
+                        const g = groups[gi];
+                        if (g.isAsset && !applyState.assetProbeDone) {
+                            if (!firstAssetGate) {
+                                // This worker claims the probe write; others
+                                // queue up behind the gate.
+                                firstAssetGate = processOneGroup(g);
+                                await firstAssetGate;
+                                continue;
+                            }
+                            try { await firstAssetGate; } catch (e) {}
+                            if (applyState.aborted) return;
+                        }
+                        await processOneGroup(g);
+                        await sleep(60); // polite stagger between launches
+                    }
+                };
+                await Promise.all(Array.from({ length: POOL }, () => worker()));
+            } else {
+                for (let gi = 0; gi < groups.length && !snapshotFailed; gi++) {
+                    if (applyState.aborted) break;
+                    await processOneGroup(groups[gi]);
+                    await sleep(directApi && !dryRun ? 250 : 600);
+                }
             }
         } catch (err) {
             console.error(`${TAG} apply pipeline unhandled exception:`, err);

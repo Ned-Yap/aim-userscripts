@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.178 (dev/latest) — ⚡ Direct API runs 5 writes at a time
+
+Direct-API applies were strictly one-at-a-time with a 250ms pause — most of the wall clock was just waiting on server round-trips (~1s per asset, so ~2–3 min for a big subtype run). Live Direct-API runs now push **5 concurrent writes** through a worker pool: a ~150-asset run should land in ~30–40 seconds. All rails preserved: the rollback snapshot still happens first, every write still echo-verifies, the first asset write of a run still runs **alone** behind a gate so the fresh-fetch geometry probe can halt everything before a second asset is touched, and a structural anomaly (or the Abort button) stops new launches while in-flight writes finish and report. The editor path (Direct API off) stays sequential — it drives one shared editor UI. Also: the progress sublabel now says "edits written" (it was counting subtype edits as "altitude values"). Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.177 (dev/latest) — fix: subtype verify no longer fails on the server's lowercasing
 
 The v4.176 asset writes were all **actually persisting** — the "verify failed / server didn't persist it" errors were the verify rail being too strict. Percepto's server normalizes asset subtypes to lowercase (`"H - GAS LIFT"` is stored as `"h - gas lift"`), and the verify demanded an exact-case round-trip. Now: queued subtypes are normalized to lowercase up front (what the server will keep, so the yellow pending chips show truth), and every subtype comparison — verify, the fresh-fetch probe, "already at target" skips in both Bulk → Subtype and 📥 Paste Subtypes, NEW-type detection, and paste-conflict detection — is case-insensitive. Re-running a paste after a v4.176 run correctly skips everything that already landed. Dev-only (latest/).
