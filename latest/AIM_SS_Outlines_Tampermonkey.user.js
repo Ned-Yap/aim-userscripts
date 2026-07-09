@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Styler
 // @namespace    http://tampermonkey.net/
-// @version      34.115
+// @version      34.116
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_SS_Outlines_Tampermonkey.user.js
 // @description  Adds buffers/outlines to map lines and enforces line thicknesses. Toggle with Shift+O. Loads per-site shielding KMLs from a private GitHub repo.
@@ -40,7 +40,7 @@
     // referenced from init must be declared at top of IIFE.
     // Bump this whenever the @version header changes — it's what the
     // control panel displays so you can verify which version is loaded.
-    const SCRIPT_VERSION = '34.115';
+    const SCRIPT_VERSION = '34.116';
 
     console.log(`${TAG} 🎨 Initializing v${SCRIPT_VERSION}...`);
 
@@ -3314,32 +3314,49 @@
         return inside;
     }
 
+    // v34.116: shared taxonomy split — only TRAILING " - " segments that
+    // are known STATE words count as the health state; everything before
+    // them is the equipment/type. Handles BOTH taxonomies:
+    //   EXXON:       "battery - empty"           → equip "battery",         state Empty
+    //   Diamondback: "v - pumping rod - empty"   → equip "v - pumping rod", state Empty
+    // Before this, Diamondback's "v - pumping rod" classified as unknown
+    // state "Pumping rod" → gray fallback instead of Normal-pink.
+    const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
+    function splitSubtypeTaxonomy(sub) {
+        const parts = String(sub || '').trim().split(' - ').map(s => s.trim()).filter(Boolean);
+        const mods = [];
+        while (parts.length > 1 && ASSET_STATE_WORDS.indexOf(parts[parts.length - 1].toLowerCase()) !== -1) {
+            mods.push(parts.pop().toLowerCase());
+        }
+        return { equipParts: parts, mods };
+    }
+
     // Derive a single state for a type-3 asset. Precedence is safety-first so
     // a glance surfaces the worst problem: Unreachable > Unshielded > Empty >
-    // Inactive > HY > Normal. State text lives in custom.poi_type_str as
-    // " - "-separated modifiers ("battery - empty"); is_unshielded is also an
-    // independent boolean flag, honored even when the subtype omits it.
+    // Inactive > HY > Normal. State = trailing known STATE word(s) in
+    // custom.poi_type_str; is_unshielded is also an independent boolean
+    // flag, honored even when the subtype omits it.
     function classifyAssetState(e) {
         const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
-        const mods = sub.split(' - ').slice(1).map(s => s.trim().toLowerCase()).filter(Boolean);
+        const { mods } = splitSubtypeTaxonomy(sub);
         const has = (k) => mods.indexOf(k) !== -1;
         if (has('unreachable')) return 'Unreachable';
         if ((e && e.is_unshielded) || has('unshielded')) return 'Unshielded';
         if (has('empty')) return 'Empty';
         if (has('inactive')) return 'Inactive';
         if (has('hy')) return 'HY';
-        if (mods.length) return prettyState(mods[0]); // unknown modifier — best effort
         return 'Normal';
     }
 
-    // Equipment type = the HEAD of the subtype before " - " (e.g.
-    // "battery - empty" → "battery", "v-well" → "v-well"). Hyphens inside the
-    // equipment name are preserved because we split on " - " (space-dash-space)
-    // only. Assets with no subtype bucket as "Other". Returns { name, slug }.
+    // Equipment type = the subtype minus any trailing state word(s):
+    // "battery - empty" → "battery", "v - pumping rod - empty" →
+    // "v - pumping rod". Hyphens inside names are preserved (split on
+    // " - " only). Assets with no subtype bucket as "Other".
+    // Returns { name, slug }.
     function classifyAssetEquipment(e) {
         const sub = (e && e.custom && e.custom.poi_type_str) ? String(e.custom.poi_type_str) : '';
-        const head = sub.split(' - ')[0].trim();
-        const name = head ? prettyState(head) : 'Other';
+        const { equipParts } = splitSubtypeTaxonomy(sub);
+        const name = equipParts.length ? equipParts.map(prettyState).join(' - ') : 'Other';
         return { name, slug: stateSlug(name) };
     }
 

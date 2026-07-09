@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.179
+// @version      4.180
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.179';
+    const SCRIPT_VERSION = '4.180';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -8406,15 +8406,16 @@
             if (e.type === 19) row.subtype = e.general_marker_type || '';
             // v3.82: parse Equipment + State from the asset subtype, and
             // GM Group from the marker name — mirrors computeSiteStats so the
-            // columns read identically to the 📊 Stats popup. Equipment = head
-            // before " - "; State = first modifier after " - " (no modifier =
-            // "Normal", the baseline-good state). GM Group = name with trailing
+            // columns read identically to the 📊 Stats popup. v4.180: uses
+            // the shared taxonomy parser — state = trailing known STATE
+            // word(s) only, equipment = everything before them (so
+            // Diamondback's "v - pumping rod - empty" → Equipment
+            // "V - Pumping Rod", State "Empty"). GM Group = name with trailing
             // numeric tokens stripped ("Elevator 1"/"Elevator 2" → "Elevator").
             if (e.type === 3 && row.subtype) {
-                const parts = row.subtype.split(' - ');
-                row.equipment = prettyKey((parts[0] || '').trim());
-                const mods = parts.slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
-                row.state = mods.length ? mods.join(' + ') : 'Normal';
+                const parsed = parseAssetSubtype(row.subtype);
+                row.equipment = parsed.typeKey;
+                row.state = parsed.state;
             }
             if (e.type === 19) row.gmGroup = gmBaseName(e.name || '');
             // v3.96: Base Station (type 8) — relative_alt + allocated drone.
@@ -17548,7 +17549,7 @@
                                 : col.key === 'droneName' ? 'Drone applies to Base Stations only'
                                 : col.key === 'poleFeeder' ? 'Pole feeder (custom.pole_feeder) — assets only'
                                 : col.key === 'poleUsage' ? 'Pole usage (custom.pole_usage) — assets only'
-                                : 'Equipment is parsed from asset subtype (before " - ")';
+                                : 'Equipment = asset subtype minus any trailing state word (empty/unshielded/…)';
                         }
                     } else if (col.key === 'poleIsSimple') {
                         // Asset boolean custom.pole_is_simple → Yes / No / — (N/A).
@@ -18326,46 +18327,29 @@
         // like "TEXAS", "PU", "ARICK" (asset name prefixes, not
         // equipment types). Per user feedback, subtype is the only
         // source of truth here.
-        const SPLIT = ' - ';
+        // v4.180: all three asset breakdowns share parseAssetSubtype —
+        // equipment = the full type (orientation + equipment, e.g.
+        // "V - Pumping Rod"), state = trailing known STATE word(s) only,
+        // plus a V-vs-H orientation rollup for taxonomies (Diamondback)
+        // whose types lead with the wellhead orientation. EXXON's
+        // "battery - empty" style parses identically to before.
         const equipMap = {};
-        byType[3].forEach(r => {
-            const sub = (r.subtype || '').trim();
-            if (!sub) return;
-            const head = sub.split(SPLIT)[0].trim();
-            if (!head) return;
-            const key = prettyKey(head);
-            equipMap[key] = (equipMap[key] || 0) + 1;
-        });
-        const assetEquipment = sortAndCap(equipMap, 12);
-
-        // States = parts AFTER " - " in subtype, plus an implicit
-        // "Normal" bucket for assets that have NO modifier (the
-        // baseline-good state — per Percepto's classification, no
-        // modifier means the asset is healthy). Each asset counts
-        // toward exactly one state so the percentages add to 100%
-        // and the card gives a true distribution.
-        // "battery - empty" → state = "Empty"
-        // "v-well"          → state = "Normal"
-        // Multi-modifier subtypes are rare in practice; if seen, we
-        // bucket on the FIRST modifier to preserve the 100%-sum.
         const stateMap = {};
+        const orientMap = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
             if (!sub) return;
-            const parts = sub.split(SPLIT).slice(1);
-            if (parts.length === 0) {
-                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
-                return;
-            }
-            const firstMod = (parts[0] || '').trim();
-            if (!firstMod) {
-                stateMap['Normal'] = (stateMap['Normal'] || 0) + 1;
-                return;
-            }
-            const key = prettyKey(firstMod);
-            stateMap[key] = (stateMap[key] || 0) + 1;
+            const p = parseAssetSubtype(sub);
+            if (p.typeKey) equipMap[p.typeKey] = (equipMap[p.typeKey] || 0) + 1;
+            stateMap[p.state] = (stateMap[p.state] || 0) + 1;
+            const o = p.orientation || 'Other';
+            orientMap[o] = (orientMap[o] || 0) + 1;
         });
+        const assetEquipment = sortAndCap(equipMap, 16);
         const assetStates = sortAndCap(stateMap, 10);
+        // Only meaningful when the taxonomy actually has V/H leads —
+        // EXXON sites get no orientation card.
+        const assetOrientation = (orientMap['V'] || orientMap['H']) ? sortAndCap(orientMap, 4) : null;
 
         // Auto-detect GM groups from names. Strategy:
         //   1. tokenize on whitespace / underscore / dash
@@ -18381,20 +18365,17 @@
         });
         const gmGroups = sortAndCap(gmMap, 12);
 
-        // Equipment × State matrix — for each equipment kind, count
-        // how many are in each state. "Normal" means no state suffix
-        // on the subtype = the asset is in good operating condition
-        // (per Percepto's convention: no modifier = baseline-good).
-        // Splits use " - " (with spaces) so "v-well" stays intact.
+        // Equipment × State matrix — for each equipment kind (full type,
+        // via parseAssetSubtype), count how many are in each state.
+        // "Normal" = no trailing state word = good operating condition.
         const equipStateMatrix = {};
         byType[3].forEach(r => {
             const sub = (r.subtype || '').trim();
-            const head = prettyKey((sub.split(SPLIT)[0] || '').trim());
-            if (!head) return;
-            const states = sub.split(SPLIT).slice(1).map(s => prettyKey(s.trim())).filter(Boolean);
-            const stateKey = states.length ? states.join(' + ') : 'Normal';
-            if (!equipStateMatrix[head]) equipStateMatrix[head] = {};
-            equipStateMatrix[head][stateKey] = (equipStateMatrix[head][stateKey] || 0) + 1;
+            if (!sub) return;
+            const p = parseAssetSubtype(sub);
+            if (!p.typeKey) return;
+            if (!equipStateMatrix[p.typeKey]) equipStateMatrix[p.typeKey] = {};
+            equipStateMatrix[p.typeKey][p.state] = (equipStateMatrix[p.typeKey][p.state] || 0) + 1;
         });
         // Other rolled-up stats — useful at a glance.
         const other = {
@@ -18411,9 +18392,37 @@
             },
             validationByType,
             flightPaths: { entities: byType[15].length, segments: fpSegments, distanceM: fpDistanceM },
-            assetStates, assetEquipment, equipStateMatrix,
+            assetStates, assetEquipment, assetOrientation, equipStateMatrix,
             gmGroups, other,
         };
+    }
+
+    // v4.180: taxonomy-aware subtype parser — shared by the SUM
+    // Equipment/State columns and the 📊 Stats popup so they always
+    // agree. Subtypes are " - "-separated; only TRAILING segments that
+    // are known STATE words count as the health state, everything
+    // before them is the TYPE (which may itself contain " - "):
+    //   EXXON:       "battery - empty"            → type "Battery", state Empty
+    //   Diamondback: "v - pumping rod - empty"    → type "V - Pumping Rod", state Empty, orientation V
+    //   Diamondback: "h - pumping - submersible"  → type "H - Pumping - Submersible", state Normal
+    // Multiple trailing state words resolve by safety-first precedence
+    // (worst wins), mirroring Map Styler's classifyAssetState.
+    const ASSET_STATE_WORDS = ['unreachable', 'unshielded', 'empty', 'inactive', 'hy'];
+    const ASSET_STATE_WORDSET = new Set(ASSET_STATE_WORDS);
+    function parseAssetSubtype(sub) {
+        const parts = String(sub || '').trim().split(' - ').map(s => s.trim()).filter(Boolean);
+        const stateMods = [];
+        while (parts.length > 1 && ASSET_STATE_WORDSET.has(parts[parts.length - 1].toLowerCase())) {
+            stateMods.push(parts.pop().toLowerCase());
+        }
+        let state = 'Normal';
+        for (const w of ASSET_STATE_WORDS) {
+            if (stateMods.indexOf(w) !== -1) { state = (w === 'hy') ? 'HY' : prettyKey(w); break; }
+        }
+        const typeKey = parts.length ? prettyKey(parts.join(' - ')) : '';
+        const first = (parts[0] || '').toLowerCase();
+        const orientation = first === 'v' ? 'V' : (first === 'h' ? 'H' : null);
+        return { typeKey, state, orientation };
     }
 
     // Title-case-ish key normalizer: turn "h-well" → "H-Well",
@@ -18960,6 +18969,11 @@
         // both equipment and state cards.
         const totalAssets = stats.counts[3];
         const totalGMs = stats.counts[19];
+        // v4.180: V vs H orientation rollup — only for taxonomies whose
+        // types lead with the wellhead orientation (e.g. Diamondback).
+        if (stats.assetOrientation) {
+            body.appendChild(kwCard('Asset · V vs H (auto)', stats.assetOrientation, '#7adfe6', totalAssets, 'Orientation'));
+        }
         body.appendChild(kwCard('Asset · Equipment (auto)', stats.assetEquipment, typeReg(3).color, totalAssets, 'Subtype'));
         body.appendChild(kwCard('Asset · States (auto)', stats.assetStates, '#ffb74d', totalAssets, 'State'));
         // Equipment Health matrix — stacked horizontal bars per
@@ -19083,6 +19097,11 @@
         lines.push(pad('Total length (m)',  Math.round(stats.flightPaths.distanceM)));
         lines.push(pad('Total length (mi)', distMi.toFixed(2)));
         lines.push('');
+        if (stats.assetOrientation) {
+            lines.push('ASSET · V vs H (auto-detected)');
+            Object.entries(stats.assetOrientation).forEach(([k, v]) => lines.push(pad(k, v)));
+            lines.push('');
+        }
         lines.push('ASSET · EQUIPMENT (auto-detected)');
         Object.entries(stats.assetEquipment).forEach(([k, v]) => lines.push(pad(k, v)));
         lines.push('');
@@ -19160,6 +19179,10 @@
         out.push(dataTr('Total length (mi)', (stats.flightPaths.distanceM / 1609.34).toFixed(2)));
 
         // Asset equipment / states / matrix
+        if (stats.assetOrientation) {
+            out.push(sectionTr('ASSET — V vs H'));
+            Object.entries(stats.assetOrientation).forEach(([k, v]) => out.push(dataTr(k, v)));
+        }
         out.push(sectionTr('ASSET — EQUIPMENT'));
         Object.entries(stats.assetEquipment).forEach(([k, v]) => out.push(dataTr(k, v)));
         out.push(sectionTr('ASSET — STATES'));
