@@ -6,6 +6,15 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.171 (dev/latest) — GPS coordinates + Google Maps
+
+Two additions for grabbing a location fast:
+
+- **GPS on every entity.** The right-click inspector popup now shows a **GPS** row (the entity's centroid as `lat, lng`) — click it to copy coordinates you can paste straight into Google Maps. A new **🗺 Maps** button in the popup footer opens that spot in Google Maps in a new tab. (Replaces the old per-type "Coords" rows with one universal row.)
+- **Right-click the empty map → GPS menu.** Right-clicking a spot with no entity under it now pops a small menu: **📋 Copy coordinates**, **🔗 Copy Google Maps link**, **↗ Open in Google Maps**. Toggle it off in Control Panel → Site Setup Tools → "Right-click empty map → GPS / Google Maps menu" if you'd rather keep the browser's native right-click there. Dev-only (latest/).
+
+---
+
 ## 2026-07-08 — Asset Inspector v4.164.1 (prod) + v4.170 (dev/latest) — ⊕ Generator button stays put, now yellow
 
 The **⊕ Site Setup Generator** button and the **⚙ Control Panel gear** were racing on injection order, so they swapped toolbar spots between page loads. Fixed: the gear is always first and the ⊕ sits right after it (self-heals within ~2s if the gear loads late). The ⊕ is also now **yellow** so it's easy to tell apart from the green gear at a glance.
