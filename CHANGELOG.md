@@ -192,6 +192,12 @@ Phase 1 of the site-comparison suite: overlay another site's Site Setup on the c
 
 ---
 
+## 2026-07-03 — 🚀 PROMOTED TO PROD: ⛰ Terrain overlay — Map Styler v34.115
+
+Coworkers jump v34.110 → **v34.115**: the **Terrain (USGS 3DEP)** section — color-coded elevation normalized to the site's own high/low (site + 1 mi, editable), custom low/mid/high colors, 2/5/10 ft contour presets, slope and hillshade modes, and an on-map altitude legend with real min/mid/max feet (bottom-right, above the GPS readout). Note: Tampermonkey may prompt once to allow `elevation.nationalmap.gov` — approve it for the legend numbers.
+
+---
+
 ## 2026-07-03 — Terrain legend clear of the GPS box — Map Styler v34.115 (dev/latest)
 
 Legend nudged up so it sits fully above Percepto's GPS coordinate readout instead of behind it.
