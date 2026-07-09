@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.174 (dev/latest) — 📥 Paste Subtypes: spreadsheet-driven bulk subtype updates
+
+New **📥 Paste Subtypes** button next to Bulk → Subtype in the SUM panel. Copy two columns (asset **Name** + target **Subtype**) straight out of Sheets/Excel, paste into the popover, and it matches each row to an asset by name (case/extra-whitespace insensitive, "Name / Type" header row auto-skipped) and queues one subtype edit per match — then commit with the normal **Apply** button. The live preview shows exactly what will happen before you queue: how many edits, how many assets are already at the target, NEW subtype values, **unmatched names** (📋 Copy unmatched puts them back on the clipboard for spreadsheet reconciliation), names pasted twice with conflicting types (skipped), and unparseable lines. Built for the "hundreds of subtype fixes prepared outside AIM" workflow. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.173 (dev/latest) — fix: "Open in Google Maps" now actually opens a tab
 
 The 🗺 Maps button (and the empty-map menu's "Open in Google Maps") did nothing — Percepto's map iframe silently swallows `window.open` (returns null, no error), so the code thought it succeeded. Now uses Tampermonkey's `GM_openInTab`, which opens at the browser level and bypasses the iframe sandbox, with top-window/current-window fallbacks and a copy-the-link last resort if a popup blocker is in the way. **Note:** because this adds a new `@grant GM_openInTab`, Tampermonkey may show a one-time permission prompt after the update. Dev-only (latest/).

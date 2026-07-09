@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.173
+// @version      4.174
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.173';
+    const SCRIPT_VERSION = '4.174';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -15041,6 +15041,21 @@
         };
         optsRow.appendChild(subBtn);
 
+        // --- v4.174: 📥 Paste Subtypes button ---
+        // Spreadsheet-driven subtype updates: paste two columns
+        // (Name ⇥ Subtype) copied straight out of Sheets/Excel, match
+        // each row to an asset by name, and queue one subtype edit per
+        // match through the same pipeline as Bulk → Subtype. Commits
+        // via the normal Apply flow (new type strings still take the
+        // "Enter new type" path).
+        const pasteSubBtn = document.createElement('button');
+        pasteSubBtn.type = 'button';
+        pasteSubBtn.textContent = '📥 Paste Subtypes';
+        pasteSubBtn.title = 'Paste Name + Subtype columns from a spreadsheet; matches assets by name and queues subtype edits';
+        pasteSubBtn.style.cssText = bulkBtnStyle;
+        attachBulkPopover(pasteSubBtn, (anchor, onClose) => buildBulkSubtypePastePopover(anchor, onClose));
+        optsRow.appendChild(pasteSubBtn);
+
         // --- v4.70: Bulk → Valid button ---
         // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
         // across FFZs + FPs in scope. This flag = a pilot's post-flight
@@ -15304,6 +15319,181 @@
                 onClose();
                 redrawTable();
             };
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(queueBtn);
+            pop.appendChild(btnRow);
+            return pop;
+        }
+
+        // v4.174: paste-driven bulk subtype updates. Parses tab-separated
+        // (spreadsheet paste) or comma-separated Name/Subtype pairs,
+        // matches each name to an asset (trim + collapse whitespace +
+        // case-insensitive), and queues subtype edits via queueSubtypeEdit.
+        // Loud about everything it can't act on: unparseable lines,
+        // unmatched names (copyable back to the spreadsheet), and names
+        // pasted twice with CONFLICTING types (those are skipped —
+        // ambiguous intent). A name matching multiple assets queues all
+        // of them (same name → same subtype is the sane reading).
+        function buildBulkSubtypePastePopover(anchor, onClose) {
+            const pop = document.createElement('div');
+            pop.style.cssText = 'position:fixed;background:#1f2228;border:1px solid rgba(255,213,79,0.55);border-radius:5px;box-shadow:0 4px 16px rgba(0,0,0,0.5);padding:12px 14px;z-index:99999;font-size:12px;color:#e6e6e6;width:440px';
+            const title = document.createElement('div');
+            title.style.cssText = 'color:#ffd54f;font-weight:700;font-size:13px;margin-bottom:8px';
+            title.textContent = '📥 Paste Subtype Data';
+            pop.appendChild(title);
+            const help = document.createElement('div');
+            help.style.cssText = 'color:#888;font-size:10px;margin-bottom:10px;line-height:1.4';
+            help.textContent = 'Paste two columns — asset Name and target Subtype — straight from Sheets/Excel. A "Name / Type" header row is skipped automatically. Matched assets get a queued subtype edit; commit with Apply as usual.';
+            pop.appendChild(help);
+
+            const ta = document.createElement('textarea');
+            ta.rows = 8;
+            ta.placeholder = 'FRYAR 2 BATTERY\tBattery\nELIAS 16-9 1\tBATTERY\nHYDRA 45-4_1\tBATTERY';
+            ta.style.cssText = 'width:100%;box-sizing:border-box;background:#1a1d23;border:1px solid rgba(255,255,255,0.20);color:#fff;padding:6px 8px;border-radius:3px;font-family:monospace;font-size:11px;resize:vertical;margin-bottom:8px';
+            pop.appendChild(ta);
+
+            const preview = document.createElement('div');
+            preview.style.cssText = 'color:#9ad;font-size:11px;margin-bottom:10px;padding:6px 8px;background:rgba(255,213,79,0.08);border-radius:3px;min-height:20px;max-height:160px;overflow-y:auto;line-height:1.5';
+            pop.appendChild(preview);
+
+            const siteIDLocal = getCurrentSiteID();
+            const norm = (s) => String(s || '').trim().replace(/\s+/g, ' ').toUpperCase();
+
+            // Asset lookup by normalized name. Dedupe by entity id — a
+            // name CAN legitimately map to multiple distinct assets.
+            const assetsByName = new Map();
+            allRows.forEach(r => {
+                if (r.type !== 3 || !r.entity || r._isSegment) return;
+                const k = norm(r.entity.name);
+                if (!k) return;
+                if (!assetsByName.has(k)) assetsByName.set(k, []);
+                const arr = assetsByName.get(k);
+                if (!arr.some(en => en.id === r.entity.id)) arr.push(r.entity);
+            });
+
+            const parsePaste = () => {
+                const lines = String(ta.value || '').split(/\r?\n/);
+                const pairs = [];
+                const badLines = [];
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    let name, type;
+                    if (line.includes('\t')) {
+                        const cells = line.split('\t');
+                        name = cells[0];
+                        type = cells[1];
+                    } else {
+                        // CSV fallback — split on the LAST comma so asset
+                        // names containing commas survive.
+                        const idx = line.lastIndexOf(',');
+                        if (idx === -1) { badLines.push(line.trim()); continue; }
+                        name = line.slice(0, idx);
+                        type = line.slice(idx + 1);
+                    }
+                    name = String(name || '').trim();
+                    type = String(type || '').trim();
+                    if (!name || !type) { badLines.push(line.trim()); continue; }
+                    pairs.push({ name, type });
+                }
+                // Header row: skip a leading "Name / Type|Subtype" pair.
+                if (pairs.length) {
+                    const h = pairs[0].name.toLowerCase();
+                    const t = pairs[0].type.toLowerCase();
+                    if (h === 'name' && (t === 'type' || t === 'subtype')) pairs.shift();
+                }
+                return { pairs, badLines };
+            };
+
+            const analyze = () => {
+                const { pairs, badLines } = parsePaste();
+                // Detect names pasted more than once with DIFFERENT types.
+                const typeByName = new Map();     // normName -> type
+                const displayByName = new Map();  // normName -> as-pasted name
+                const conflictNames = new Set();
+                pairs.forEach(p => {
+                    const k = norm(p.name);
+                    if (typeByName.has(k) && typeByName.get(k) !== p.type) conflictNames.add(k);
+                    typeByName.set(k, p.type);
+                    displayByName.set(k, p.name);
+                });
+                const observed = new Set(observedSubtypesForSite(siteIDLocal));
+                const toQueue = [];      // { entity, type }
+                const unmatched = [];
+                const newTypes = new Set();
+                let already = 0;
+                let multiMatch = 0;
+                for (const [k, type] of typeByName) {
+                    if (conflictNames.has(k)) continue;
+                    const ents = assetsByName.get(k);
+                    if (!ents) { unmatched.push(displayByName.get(k)); continue; }
+                    if (ents.length > 1) multiMatch++;
+                    ents.forEach(en => {
+                        const cur = (en.custom && en.custom.poi_type_str) || '';
+                        if (cur === type) { already++; return; }
+                        toQueue.push({ entity: en, type });
+                        if (!observed.has(type)) newTypes.add(type);
+                    });
+                }
+                const conflicts = Array.from(conflictNames).map(k => displayByName.get(k));
+                return { rowCount: pairs.length, badLines, toQueue, unmatched, conflicts, newTypes, already, multiMatch };
+            };
+
+            let lastAnalysis = null;
+            const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const listPreview = (arr, max) => {
+                const shown = arr.slice(0, max).map(esc).join(', ');
+                return arr.length > max ? `${shown} … +${arr.length - max} more` : shown;
+            };
+            const refreshPreview = () => {
+                lastAnalysis = analyze();
+                const a = lastAnalysis;
+                if (!String(ta.value || '').trim()) { preview.textContent = '⚠️ Paste Name + Subtype rows above'; return; }
+                const bits = [];
+                bits.push(`Parsed <strong style="color:#ffd54f">${a.rowCount}</strong> row${a.rowCount === 1 ? '' : 's'} → will queue <strong style="color:#ffd54f">${a.toQueue.length}</strong> edit${a.toQueue.length === 1 ? '' : 's'}${a.already ? ` · ${a.already} already at target` : ''}${a.multiMatch ? ` · ${a.multiMatch} name${a.multiMatch === 1 ? '' : 's'} matched multiple assets (all queued)` : ''}`);
+                if (a.newTypes.size) bits.push(`<span style="color:#c4b5fd">NEW type${a.newTypes.size === 1 ? '' : 's'}:</span> ${listPreview(Array.from(a.newTypes), 8)}`);
+                if (a.unmatched.length) bits.push(`<span style="color:#ff8a80">⚠️ ${a.unmatched.length} unmatched name${a.unmatched.length === 1 ? '' : 's'}:</span> ${listPreview(a.unmatched, 10)}`);
+                if (a.conflicts.length) bits.push(`<span style="color:#ff8a80">⚠️ Skipped — pasted twice with different types:</span> ${listPreview(a.conflicts, 10)}`);
+                if (a.badLines.length) bits.push(`<span style="color:#ff8a80">⚠️ ${a.badLines.length} unparseable line${a.badLines.length === 1 ? '' : 's'}:</span> ${listPreview(a.badLines, 5)}`);
+                preview.innerHTML = bits.join('<br>');
+            };
+            refreshPreview();
+            ta.oninput = refreshPreview;
+
+            const btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;align-items:center';
+            const copyUnBtn = document.createElement('button');
+            copyUnBtn.type = 'button';
+            copyUnBtn.textContent = '📋 Copy unmatched';
+            copyUnBtn.title = 'Copy the unmatched names back to the clipboard for spreadsheet reconciliation';
+            copyUnBtn.style.cssText = 'margin-right:auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 10px;cursor:pointer;font:inherit;font-size:11px';
+            copyUnBtn.onclick = () => {
+                const un = (lastAnalysis && lastAnalysis.unmatched) || [];
+                if (!un.length) { showToast('No unmatched names'); return; }
+                navigator.clipboard.writeText(un.join('\n')).then(
+                    () => showToast(`Copied ${un.length} unmatched name${un.length === 1 ? '' : 's'}`),
+                    (e) => { console.warn(`${TAG} clipboard write failed`, e); showToast('Clipboard write failed', 'rgba(255,82,82,0.6)'); }
+                );
+            };
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 12px;cursor:pointer;font:inherit;font-size:11px';
+            cancelBtn.onclick = onClose;
+            const queueBtn = document.createElement('button');
+            queueBtn.type = 'button';
+            queueBtn.textContent = 'Queue edits';
+            queueBtn.style.cssText = 'background:rgba(255,213,79,0.18);color:#ffd54f;border:1px solid rgba(255,213,79,0.55);border-radius:3px;padding:5px 14px;cursor:pointer;font:inherit;font-size:11px;font-weight:600';
+            queueBtn.onclick = () => {
+                const a = analyze();
+                if (a.toQueue.length === 0) { showToast('Nothing to queue — check the preview', 'rgba(255,82,82,0.6)'); return; }
+                let queued = 0;
+                a.toQueue.forEach(q => { if (queueSubtypeEdit(q.entity, q.type)) queued++; });
+                console.log(`${TAG} paste-subtypes: queued ${queued}/${a.toQueue.length} · ${a.unmatched.length} unmatched · ${a.conflicts.length} conflicts · ${a.badLines.length} bad lines`);
+                showToast(`Queued ${queued} subtype edit${queued === 1 ? '' : 's'} — hit Apply to commit`, 'rgba(255,213,79,0.7)');
+                onClose();
+                redrawTable();
+            };
+            btnRow.appendChild(copyUnBtn);
             btnRow.appendChild(cancelBtn);
             btnRow.appendChild(queueBtn);
             pop.appendChild(btnRow);
