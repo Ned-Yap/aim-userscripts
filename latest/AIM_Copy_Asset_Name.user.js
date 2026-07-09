@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.169
+// @version      4.170
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.169';
+    const SCRIPT_VERSION = '4.170';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -7794,18 +7794,30 @@
     // Inject a ⊕ Generate button straight into the map toolbar (next to the gear / flag /
     // lightning), so the Site Setup Generator is one click away instead of via SUM → Generate.
     const GEN_MAP_BTN_ID = 'aim-gen-maptools-btn';
+    // The Control Panel gear and this button race on injection order, so they used to
+    // swap toolbar slots between page loads. Enforce a fixed order: gear first, ⊕ right
+    // after it. Runs on every 2s injection pass, so a late-arriving gear self-heals.
+    function placeGenMapButton(tools, btn) {
+        const gear = tools.querySelector('.aim-control-button');
+        if (gear) {
+            if (btn.previousElementSibling !== gear) gear.after(btn);
+        } else if (!tools.contains(btn)) {
+            tools.appendChild(btn);
+        }
+    }
     function injectGenMapButton(doc) {
         try {
             const tools = doc.querySelector('.map-tools');
             if (!tools) return;
-            if (doc.getElementById(GEN_MAP_BTN_ID)) { doc.getElementById(GEN_MAP_BTN_ID).style.display = ''; return; }
+            const existing = doc.getElementById(GEN_MAP_BTN_ID);
+            if (existing) { existing.style.display = ''; placeGenMapButton(tools, existing); return; }
             const ref = tools.querySelector('.map-tools__button, button');
             const btn = doc.createElement('button');
             btn.id = GEN_MAP_BTN_ID;
             btn.type = 'button';
             btn.className = ref ? ref.className : 'map-tools__button';
             btn.title = 'Site Setup Generator (AIM) — build FFZs / Advanced Draw';
-            btn.style.setProperty('color', '#39ff14', 'important');
+            btn.style.setProperty('color', '#ffd24d', 'important');
             btn.innerHTML = '<span style="font-size:16px;font-weight:800;line-height:1">⊕</span>';
             btn.onclick = async (e) => {
                 e.preventDefault(); e.stopPropagation();
@@ -7817,7 +7829,7 @@
                 }
                 openSiteGenerator(sid);
             };
-            tools.appendChild(btn);
+            placeGenMapButton(tools, btn);
         } catch (e) {}
     }
     function recursiveSumInject(win) {

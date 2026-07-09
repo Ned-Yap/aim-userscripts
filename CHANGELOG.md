@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-08 — Asset Inspector v4.164.1 (prod) + v4.170 (dev/latest) — ⊕ Generator button stays put, now yellow
+
+The **⊕ Site Setup Generator** button and the **⚙ Control Panel gear** were racing on injection order, so they swapped toolbar spots between page loads. Fixed: the gear is always first and the ⊕ sits right after it (self-heals within ~2s if the gear loads late). The ⊕ is also now **yellow** so it's easy to tell apart from the green gear at a glance.
+
+---
+
 ## 2026-07-07 — Mission Bank Tools v1.87 (dev/latest) — box-zoom off while editing a mission
 
 Simpler, reliable take: **Shift+drag box-zoom is now disabled whenever a mission is open in the editor** (re-asserted continuously so Leaflet can't turn it back on), instead of trying to gate it on whether you're mid-placement. Scroll-wheel and the +/- buttons still zoom; box-zoom comes back when you leave the editor. Dev-only (latest/).
