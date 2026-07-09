@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.177 (dev/latest) — fix: subtype verify no longer fails on the server's lowercasing
+
+The v4.176 asset writes were all **actually persisting** — the "verify failed / server didn't persist it" errors were the verify rail being too strict. Percepto's server normalizes asset subtypes to lowercase (`"H - GAS LIFT"` is stored as `"h - gas lift"`), and the verify demanded an exact-case round-trip. Now: queued subtypes are normalized to lowercase up front (what the server will keep, so the yellow pending chips show truth), and every subtype comparison — verify, the fresh-fetch probe, "already at target" skips in both Bulk → Subtype and 📥 Paste Subtypes, NEW-type detection, and paste-conflict detection — is case-insensitive. Re-running a paste after a v4.176 run correctly skips everything that already landed. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.176 (dev/latest) — ⚡ Direct API now covers ASSET subtype/name edits
 
 Bulk subtype runs were taking ~10s per asset even with ⚡ Direct API checked — the fast path only ever covered FFZs + FPs, so asset edits silently fell back to driving Percepto's editor one asset at a time (that was your 17 minutes). Asset subtype and name edits now ride the same `POST /map_objects/` upsert: expect a few hundred milliseconds per asset instead of ten seconds. Safety rails extended to match: assets are included in the pre-run rollback snapshot, every write's echo is verified (subtype must round-trip exactly), and the **first asset write of each run gets an extra fresh-fetch probe** confirming the server kept the asset's geometry (polygon + coordinate ring + waypoints) — a mismatch halts the whole run before any other asset is touched. Unchecking Direct API still uses the old editor path. Dev-only (latest/).

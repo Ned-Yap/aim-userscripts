@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.176
+// @version      4.177
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.176';
+    const SCRIPT_VERSION = '4.177';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -5686,10 +5686,15 @@
     }
     function queueSubtypeEdit(entity, newValueRaw) {
         if (!entity || entity.type !== 3) return false;
-        const newValue = String(newValueRaw || '').trim();
+        // v4.177: the server normalizes poi_type_str to LOWERCASE (live-
+        // verified 2026-07-09: sent "H - GAS LIFT", stored "h - gas lift").
+        // Queue the value the server will actually keep, so the pending
+        // chip, verify, and cache all show truth — and case-only
+        // "changes" are correctly treated as no-ops.
+        const newValue = String(newValueRaw || '').trim().toLowerCase();
         if (!newValue) return false;
         const current = (entity.custom && entity.custom.poi_type_str) || '';
-        if (newValue === current) {
+        if (newValue === current.toLowerCase()) {
             // No-op — if there was a pending edit for this entity,
             // clear it (user typed back to original).
             if (getPendingSubtype(entity.id)) {
@@ -5699,7 +5704,7 @@
             return false;
         }
         const siteID = getCurrentSiteID();
-        const observed = new Set(observedSubtypesForSite(siteID));
+        const observed = new Set(observedSubtypesForSite(siteID).map(s => s.toLowerCase()));
         queuePendingEdit({
             entityId: entity.id,
             arcId: null,
@@ -6895,9 +6900,12 @@
             return { ok: false, reason: `validated: sent ${!!expectValidated}, got ${!!saved.validated} (server didn't persist the flag)`, structural: false };
         }
         // v4.176: asset subtype — only when this group queued one.
+        // v4.177: CASE-INSENSITIVE — the server normalizes poi_type_str
+        // to lowercase, so an exact-case compare failed every asset write
+        // that actually persisted fine.
         if (expectSubtype != null) {
             const got = (saved.custom && saved.custom.poi_type_str) || '';
-            if (got !== expectSubtype) {
+            if (got.trim().toLowerCase() !== String(expectSubtype).trim().toLowerCase()) {
                 return { ok: false, reason: `subtype: sent "${expectSubtype}", got "${got}" (server didn't persist it)`, structural: false };
             }
         }
@@ -7056,7 +7064,8 @@
                 }
                 if (subEdit) {
                     const freshSub = (fresh.custom && fresh.custom.poi_type_str) || '';
-                    if (freshSub !== subEdit.newValue) {
+                    // Case-insensitive — server lowercases poi_type_str.
+                    if (freshSub.trim().toLowerCase() !== String(subEdit.newValue).trim().toLowerCase()) {
                         applyState.errors.push({ entityName: label, reason: `asset probe: fresh subtype "${freshSub}" ≠ sent "${subEdit.newValue}"` });
                         return { ok: false, reason: 'asset probe: subtype not persisted', appliedCount: 0, verified: false, structural: false, bridges };
                     }
@@ -15463,7 +15472,9 @@
                 });
                 const eligible = candidates.filter(r => {
                     const cur = (r.entity.custom && r.entity.custom.poi_type_str) || '';
-                    return cur !== target;
+                    // Case-insensitive — the server lowercases poi_type_str,
+                    // so "BATTERY" vs stored "battery" is NOT a change.
+                    return cur.toLowerCase() !== target.toLowerCase();
                 });
                 return { eligible, target, candidates };
             };
@@ -15471,8 +15482,8 @@
                 const { eligible, target, candidates } = computeEligible();
                 if (!target) { preview.textContent = '⚠️ Type or pick a target subtype'; return; }
                 if (candidates.length === 0) { preview.textContent = '⚠️ No eligible assets in scope'; return; }
-                const observed = new Set(observedSubtypesForSite(siteIDLocal));
-                const isNew = !observed.has(target);
+                const observed = new Set(observedSubtypesForSite(siteIDLocal).map(s => s.toLowerCase()));
+                const isNew = !observed.has(target.toLowerCase());
                 preview.innerHTML = `Will queue <strong style="color:#ffd54f">${eligible.length}</strong> edit${eligible.length === 1 ? '' : 's'} · skipping ${candidates.length - eligible.length} already at "${target}"${isNew ? ' · <span style="color:#c4b5fd">NEW type</span>' : ''}`;
             };
             refreshPreview();
@@ -15594,11 +15605,13 @@
                 const conflictNames = new Set();
                 pairs.forEach(p => {
                     const k = norm(p.name);
-                    if (typeByName.has(k) && typeByName.get(k) !== p.type) conflictNames.add(k);
+                    // Case-insensitive — the server lowercases subtypes, so
+                    // "Battery" vs "BATTERY" is the same value, not a conflict.
+                    if (typeByName.has(k) && typeByName.get(k).toLowerCase() !== p.type.toLowerCase()) conflictNames.add(k);
                     typeByName.set(k, p.type);
                     displayByName.set(k, p.name);
                 });
-                const observed = new Set(observedSubtypesForSite(siteIDLocal));
+                const observed = new Set(observedSubtypesForSite(siteIDLocal).map(s => s.toLowerCase()));
                 const toQueue = [];      // { entity, type }
                 const unmatched = [];
                 const newTypes = new Set();
@@ -15611,9 +15624,9 @@
                     if (ents.length > 1) multiMatch++;
                     ents.forEach(en => {
                         const cur = (en.custom && en.custom.poi_type_str) || '';
-                        if (cur === type) { already++; return; }
+                        if (cur.toLowerCase() === type.toLowerCase()) { already++; return; }
                         toQueue.push({ entity: en, type });
-                        if (!observed.has(type)) newTypes.add(type);
+                        if (!observed.has(type.toLowerCase())) newTypes.add(type.toLowerCase());
                     });
                 }
                 const conflicts = Array.from(conflictNames).map(k => displayByName.get(k));
