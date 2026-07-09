@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.176 (dev/latest) — ⚡ Direct API now covers ASSET subtype/name edits
+
+Bulk subtype runs were taking ~10s per asset even with ⚡ Direct API checked — the fast path only ever covered FFZs + FPs, so asset edits silently fell back to driving Percepto's editor one asset at a time (that was your 17 minutes). Asset subtype and name edits now ride the same `POST /map_objects/` upsert: expect a few hundred milliseconds per asset instead of ten seconds. Safety rails extended to match: assets are included in the pre-run rollback snapshot, every write's echo is verified (subtype must round-trip exactly), and the **first asset write of each run gets an extra fresh-fetch probe** confirming the server kept the asset's geometry (polygon + coordinate ring + waypoints) — a mismatch halts the whole run before any other asset is touched. Unchecking Direct API still uses the old editor path. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.175 (dev/latest) — 👁 Subtypes: show/hide MAP assets by subtype
 
 New **👁 Subtypes** button in the SUM panel's bulk row. Pick which asset subtypes stay visible **on the map** (checkbox list with counts, plus a per-row "only" shortcut for the show-just-batteries workflow) and hit **Apply to map**. Under the hood it batch-drives Percepto's own sidebar checkboxes — the visibility source of truth — so the map, sidebar, and the SUM eye column all stay in sync. It automatically picks the cheapest route: either clicking just the assets that need to change, or one click to hide the whole Assets section and re-checking only the ones that should stay visible (also self-heals if Percepto reset visibility behind our back). Live progress on the button, ~4 clicks/sec, **Show all** restores everything with a single section click. Built for ordering multi-missions by proximity per subtype — pair it with the Route column sorted descending for a furthest-to-closest list. Dev-only (latest/).

@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.175
+// @version      4.176
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.175';
+    const SCRIPT_VERSION = '4.176';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -6332,7 +6332,7 @@
             <label style="margin-top:12px;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:rgba(255,193,71,0.08);border:1px solid rgba(255,193,71,0.35);border-radius:4px;cursor:pointer">
                 <input type="checkbox" id="aim-ai-launch-directapi" style="margin-top:2px">
                 <span style="color:#ffd479;font-size:11px;line-height:1.5">
-                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. FFZs + FPs only (assets still use the editor).
+                    <strong>⚡ Direct API (fast)</strong> — POST each entity to the server instead of driving the editor. Skips the per-entity dialog <em>and</em> the "Mismatched Altitude Ranges" block, so bulk AGL/DELTA shifts go through. Auto-downloads a rollback file first, verifies every write, and runs a final FP↔FFZ overlap check. Covers FFZs, FPs and assets (subtype/name — the first asset write of a run gets an extra fresh-fetch geometry probe).
                 </span>
             </label>
             <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
@@ -6765,6 +6765,15 @@
             // boolean on the entity — set it and the same upsert POST carries
             // it. The verify rail confirms the server actually persisted it.
             if (e.field === 'validated') { body.validated = !!e.newValue; return; }
+            // v4.176: asset subtype rides the same upsert — it's just
+            // custom.poi_type_str. The rest of `custom` (equipment, state,
+            // …) was cloned wholesale by buildWriteBody, so only the
+            // subtype string changes.
+            if (e.field === 'subtype') {
+                if (!body.custom || typeof body.custom !== 'object') body.custom = {};
+                body.custom.poi_type_str = e.newValue;
+                return;
+            }
             if (e.isFfz) {
                 if (!body.restrictions || typeof body.restrictions !== 'object') body.restrictions = {};
                 if (e.field === 'min_alt') body.restrictions.minAlt = e.newValueM;
@@ -6851,7 +6860,7 @@
     // flag — Percepto might recompute/ignore it. Left null for every other
     // run so an altitude-only save isn't failed by a server-side
     // validated side-effect (e.g. an edit clearing pilot sign-off).
-    function verifyDirectSave(saved, sentBody, original, expectValidated) {
+    function verifyDirectSave(saved, sentBody, original, expectValidated, expectSubtype) {
         if (!saved) return { ok: false, reason: 'no saved object in response', structural: true };
         const oc = (original.coords || []).length, sc = (saved.coords || []).length;
         if (oc !== sc) return { ok: false, reason: `coord count changed ${oc}→${sc}`, structural: true };
@@ -6884,6 +6893,13 @@
         // Pilot validation flag — only when this group flipped it.
         if (expectValidated != null && !!saved.validated !== !!expectValidated) {
             return { ok: false, reason: `validated: sent ${!!expectValidated}, got ${!!saved.validated} (server didn't persist the flag)`, structural: false };
+        }
+        // v4.176: asset subtype — only when this group queued one.
+        if (expectSubtype != null) {
+            const got = (saved.custom && saved.custom.poi_type_str) || '';
+            if (got !== expectSubtype) {
+                return { ok: false, reason: `subtype: sent "${expectSubtype}", got "${got}" (server didn't persist it)`, structural: false };
+            }
         }
         return { ok: true };
     }
@@ -6984,7 +7000,8 @@
         }
         const saved = resp.json && resp.json.map_objects;
         const valEdit = group.edits.find(e => e.field === 'validated');
-        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null);
+        const subEdit = group.edits.find(e => e.field === 'subtype');
+        const verify = verifyDirectSave(saved, body, entity, valEdit ? !!valEdit.newValue : null, subEdit ? subEdit.newValue : null);
         // Refresh the in-memory bucket with the server's echoed object so
         // downstream reads (and the overlap check) see truth, not stale.
         if (saved && bucket) {
@@ -7004,6 +7021,53 @@
             applyState.errors.push({ entityName: label, reason: `verify ${verify.structural ? 'STRUCTURAL ' : ''}failed: ${verify.reason}` });
             return { ok: false, reason: `verify: ${verify.reason}`, appliedCount: 0, verified: false, structural: !!verify.structural, bridges };
         }
+        // v4.176: FIRST asset write of each run gets a fresh-GET probe.
+        // The POST echo proves the response shape, not what the server
+        // actually stored — and asset (type 3) geometry (polygon WKT +
+        // coords ring) is new to this POST path. One extra GET per run:
+        // refetch the site list, confirm this asset's ring survived and
+        // the subtype landed. A geometry mismatch is STRUCTURAL → the
+        // existing rail halts the whole run before more assets are hit.
+        if (group.isAsset && !applyState.assetProbeDone) {
+            applyState.assetProbeDone = true;
+            try {
+                const r2 = await fetch(MAP_OBJECTS_URL + encodeURIComponent(siteID) + `&_t=${Date.now()}`, { credentials: 'same-origin', cache: 'no-store' });
+                if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+                const list = await r2.json();
+                const fresh = Array.isArray(list) ? list.find(en => en && en.id === entity.id) : null;
+                if (!fresh) throw new Error('entity missing from fresh site fetch');
+                const oc2 = (entity.coords || []).length;
+                const fc2 = (fresh.coords || fresh.points || []).length;
+                if (oc2 !== fc2) {
+                    applyState.errors.push({ entityName: label, reason: `asset probe: coord count ${oc2}→${fc2} on fresh fetch — geometry damaged` });
+                    return { ok: false, reason: 'asset probe: geometry mismatch', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                if (entity.polygon && !fresh.polygon) {
+                    applyState.errors.push({ entityName: label, reason: 'asset probe: polygon WKT gone on fresh fetch — geometry damaged' });
+                    return { ok: false, reason: 'asset probe: polygon lost', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                // asset_waypoints is stripped from the write body (editor
+                // shape) — confirm the server kept the stored ones.
+                const ow = Array.isArray(entity.asset_waypoints) ? entity.asset_waypoints.length : 0;
+                const fw = Array.isArray(fresh.asset_waypoints) ? fresh.asset_waypoints.length : 0;
+                if (ow > 0 && fw === 0) {
+                    applyState.errors.push({ entityName: label, reason: `asset probe: asset_waypoints ${ow}→0 on fresh fetch — server dropped them` });
+                    return { ok: false, reason: 'asset probe: waypoints lost', appliedCount: 0, verified: false, structural: true, bridges };
+                }
+                if (subEdit) {
+                    const freshSub = (fresh.custom && fresh.custom.poi_type_str) || '';
+                    if (freshSub !== subEdit.newValue) {
+                        applyState.errors.push({ entityName: label, reason: `asset probe: fresh subtype "${freshSub}" ≠ sent "${subEdit.newValue}"` });
+                        return { ok: false, reason: 'asset probe: subtype not persisted', appliedCount: 0, verified: false, structural: false, bridges };
+                    }
+                }
+                console.log(`${TAG} ⚡ ${label} — asset probe ✓ (fresh GET: geometry intact${subEdit ? ', subtype persisted' : ''}) — trusting echo verify for the rest of this run`);
+            } catch (e) {
+                // Probe infrastructure failure (network) ≠ bad write — the
+                // echo verify already passed. Warn loudly and continue.
+                console.warn(`${TAG} ⚡ ${label} — asset probe could not run (${e && e.message || e}); echo verify passed, continuing`);
+            }
+        }
         console.log(`${TAG} ⚡ ${label} — POSTed + verified ✓ (${group.edits.length} edit${group.edits.length === 1 ? '' : 's'}${bridges.length ? `, ${bridges.length} seam(s) bridged` : ''})`);
         return { ok: true, appliedCount: group.edits.length, verified: true, bridges };
     }
@@ -7015,7 +7079,6 @@
         const bucket = siteID ? mapObjectsBySite[siteID] : null;
         const entities = [];
         for (const g of groups) {
-            if (g.isAsset) continue; // asset edits still go the editor path
             const ent = bucket ? (bucket.entities || []).find(en => en.id === g.entityId) : null;
             if (!ent) throw new Error(`snapshot: entity ${g.entityId} (${g.entityName}) not in fetched data`);
             entities.push({ id: ent.id, name: ent.name, type: ent.type, body: buildWriteBody(ent, siteCfg) });
@@ -7197,6 +7260,7 @@
         applyState.directApi = !!directApi;
         applyState.overlapBroken = undefined;
         applyState.bridges = [];
+        applyState.assetProbeDone = false;
         applyState.entityTotal = groups.length;
         applyState.entityIndex = 0;
         applyState.currentEntity = '';
@@ -7677,9 +7741,11 @@
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
         // v3.67: ⚡ direct-API path — POST /map_objects/ instead of
-        // driving the editor. FFZ + FP only; assets keep the editor
-        // path (subtype edit is an Ant Select, not an altitude POST).
-        if (opts && opts.directApi && !group.isAsset) {
+        // driving the editor. v4.176: assets included — subtype/name land
+        // in the same full-entity upsert (custom.poi_type_str), with a
+        // fresh-GET probe on the first asset write of each run to confirm
+        // the server round-trips asset geometry (polygon/coords) intact.
+        if (opts && opts.directApi) {
             return applyOneEntityDirect(group, opts);
         }
         // v3.41: branch to the asset path for subtype-only edits. The
