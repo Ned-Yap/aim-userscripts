@@ -6,6 +6,12 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-09 — Asset Inspector v4.172 (dev/latest) — entity GPS = the exact point you right-clicked
+
+Right-clicking an entity now shows the **GPS of the exact spot you clicked**, not the entity's center — so the coordinate (and 🗺 Maps) point at the well head / vertex / segment location you were actually pointing at. Opening the inspector from a SUM row-click (no click point) still falls back to the centroid, labeled **"GPS (center)"** so it's clear which one you're looking at. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.171 (dev/latest) — GPS coordinates + Google Maps
 
 Two additions for grabbing a location fast:

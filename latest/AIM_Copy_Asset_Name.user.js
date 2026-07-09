@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.171
+// @version      4.172
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -50,7 +50,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.171';
+    const SCRIPT_VERSION = '4.172';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3553,17 +3553,20 @@
         };
     }
 
-    function buildEntityFields(e) {
+    function buildEntityFields(e, gpsPoint) {
         const out = [];
         out.push({ label: 'Name', value: e.name });
         out.push({ label: 'ID', value: e.id });
-        // v4.88: universal GPS row for every entity — its centroid, click to
-        // copy "lat, lng" (paste straight into Google Maps). Replaces the
-        // old per-type "Coords" rows below. Point types (GM/Base/Safe) have a
-        // single coord so centroid == that exact point.
+        // v4.88: universal GPS row for every entity, click to copy "lat, lng"
+        // (paste straight into Google Maps). Replaces the old per-type "Coords"
+        // rows below. v4.172: prefer the EXACT right-click point (gpsPoint) so
+        // M2 gives the spot you clicked; fall back to the centroid for
+        // programmatic opens (SUM row-click). Labeled "GPS (center)" then so
+        // it's clear the value isn't a specific clicked point.
         {
-            const c = getEntityCentroid(e);
-            if (c) out.push({ label: 'GPS', value: fmtLatLng(c.lat, c.lng) });
+            const exact = gpsPoint && typeof gpsPoint.lat === 'number' ? gpsPoint : null;
+            const c = exact || getEntityCentroid(e);
+            if (c) out.push({ label: exact ? 'GPS' : 'GPS (center)', value: fmtLatLng(c.lat, c.lng) });
         }
         if (e.type === 3 && e.custom) {
             if (e.custom.poi_type_str) out.push({ label: 'Subtype', value: e.custom.poi_type_str });
@@ -3761,7 +3764,10 @@
         }, 0);
     }
 
-    function showInspectorPopup(x, y, entity) {
+    // clickLatLng (optional {lat,lng}): the EXACT point the user right-clicked.
+    // When present the GPS row + 🗺 Maps use it; otherwise (programmatic opens
+    // like a SUM row-click) they fall back to the entity centroid.
+    function showInspectorPopup(x, y, entity, clickLatLng) {
         closeInspector();
         closeCoordMenu();
         const popup = document.createElement('div');
@@ -3795,7 +3801,7 @@
         header.appendChild(xBtn);
         popup.appendChild(header);
 
-        const rows = buildEntityFields(entity);
+        const rows = buildEntityFields(entity, clickLatLng);
         rows.forEach(rowSpec => {
             if (!rowSpec) return;
             const { label, value, parts } = rowSpec;
@@ -3905,9 +3911,11 @@
         };
         footer.appendChild(findBtn);
 
-        // v4.88: 🗺 Maps — opens the entity's GPS (centroid) in Google Maps.
+        // v4.88: 🗺 Maps — opens the GPS point in Google Maps. v4.172: uses the
+        // exact right-click point when available, else the entity centroid.
         // Copy-the-coords is the GPS row above; this is the one-click open.
-        const mapsCenter = getEntityCentroid(entity);
+        const mapsCenter = (clickLatLng && typeof clickLatLng.lat === 'number')
+            ? clickLatLng : getEntityCentroid(entity);
         if (mapsCenter) {
             const mapsBtn = document.createElement('button');
             mapsBtn.textContent = '🗺 Maps';
@@ -4503,7 +4511,9 @@
             e.preventDefault();
             e.stopPropagation();
             try {
-                showInspectorPopup(e.clientX, e.clientY, entity);
+                // v4.172: pass the EXACT click point so the popup's GPS row +
+                // 🗺 Maps use where the user right-clicked, not the centroid.
+                showInspectorPopup(e.clientX, e.clientY, entity, { lat: latlng.lat, lng: latlng.lng });
             } catch (err) {
                 dbg('showInspectorPopup threw', err);
             }
