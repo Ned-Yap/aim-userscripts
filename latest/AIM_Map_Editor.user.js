@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.51
-// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.52
+// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there (transient two-piece state: delete the unwanted piece vertex-by-vertex, then Save; a guard warns if you try to Save while still disconnected). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -67,6 +67,7 @@
     const POPUP_ITEM_CLASS = 'flight-path-vertex-popup__menu-item';
     const OPEN_ITEM_CLASS = 'aim-fpe-open-path';                 // our injected "OPEN PATH" item
     const UNSNAP_OFFSET_PX = 50;  // how far (screen px) the freed vertex lands off the junction
+    const DISCONNECT_ISSUE = 'path is split into disconnected pieces'; // checkFlightPath's wording — sever mode expects + tolerates exactly this
 
     // ---- smart-altitude (terrain-following auto band + auto-step) ----
     // As you draw an under-vertexed path, on each drop/snap we sample the ground under
@@ -75,7 +76,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.51';
+    const SCRIPT_VERSION = '0.52';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -406,7 +407,7 @@
             if (num(a.min_alt) && num(a.max_alt) && a.max_alt < a.min_alt) issues.push(`arc ${i + 1} altitude band inverted (max < min)`);
         });
         coords.forEach((c, i) => { if (!finitePt(c)) issues.push(`coord ${i} is non-finite`); });
-        if (arcs.length && !graphConnected(arcs)) issues.push('path is split into disconnected pieces');
+        if (arcs.length && !graphConnected(arcs)) issues.push(DISCONNECT_ISSUE);
         // coords set must equal the arc-endpoint set (no orphan coords, no missing waypoints)
         const arcNodes = new Set(), coordNodes = new Set();
         arcs.forEach(a => { if (finitePt(a.point_a)) arcNodes.add(nodeKey(a.point_a)); if (finitePt(a.point_b)) arcNodes.add(nodeKey(a.point_b)); });
@@ -439,7 +440,7 @@
 
     // ---- post-edit verification: confirm the edit applied AND introduced no NEW
     //      integrity problem vs the pre-edit snapshot; auto-revert if it did. ----
-    function verifyEdit(fpId, preIssues, expectedArcCount, label) {
+    function verifyEdit(fpId, preIssues, expectedArcCount, label, allowedFresh) {
         setTimeout(() => {
             try {
                 const wc = findFpWorkingCopies().find(w => w.id === fpId);
@@ -458,7 +459,7 @@
                 };
                 if (arcs.length !== expectedArcCount) { revert(`edit didn't apply cleanly (expected ${expectedArcCount} arcs, got ${arcs.length})`); return; }
                 const post = checkFlightPath(wc.state);
-                const fresh = post.filter(p => !preIssues.includes(p));
+                const fresh = post.filter(p => !preIssues.includes(p) && !(allowedFresh || []).includes(p));
                 if (fresh.length) { revert(`integrity check failed: ${fresh[0]}`); return; }
                 log(`${label}: verified clean${post.length ? ' (' + post.length + ' pre-existing issue(s), unchanged)' : ''}`);
             } catch (e) { warn(`${label} post-edit verify threw`, e); }
@@ -575,6 +576,24 @@
         while (stack.length) { const n = stack.pop(); for (const m of (adj.get(n) || [])) if (!seen.has(m)) { seen.add(m); stack.push(m); } }
         return seen.size === nodes.size;
     }
+    // How many disconnected pieces does this arc set form? (1 = healthy connected path)
+    function componentCount(arcs) {
+        if (!arcs.length) return 0;
+        const adj = new Map(); const nodes = new Set();
+        arcs.forEach(a => {
+            const ka = nodeKey(a.point_a), kb = nodeKey(a.point_b);
+            nodes.add(ka); nodes.add(kb);
+            if (!adj.has(ka)) adj.set(ka, []); if (!adj.has(kb)) adj.set(kb, []);
+            adj.get(ka).push(kb); adj.get(kb).push(ka);
+        });
+        let comps = 0; const seen = new Set();
+        for (const start of nodes) {
+            if (seen.has(start)) continue;
+            comps++; seen.add(start); const stack = [start];
+            while (stack.length) { const n = stack.pop(); for (const m of (adj.get(n) || [])) if (!seen.has(m)) { seen.add(m); stack.push(m); } }
+        }
+        return comps;
+    }
     // At vertex V, the loop-closer = the most-recently-added incident arc that is
     // part of a cycle (NOT a bridge). Returns {arcIdx, endpoint} or null. Because we
     // only ever pick a non-bridge, opening the loop can never sever the path.
@@ -587,23 +606,52 @@
         return cycleEdges[0];
     }
 
-    function validateUnsnap(st, V, Vprime, newArcs, newCoords) {
+    function validateUnsnap(st, V, Vprime, newArcs, newCoords, mode) {
         if (newArcs.length !== st.arcs.length) return { ok: false, reason: 'arc count changed' };
         if (newCoords.length !== (st.coords || []).length + 1) return { ok: false, reason: 'coord count delta ≠ +1' };
         if (!finitePt(Vprime)) return { ok: false, reason: 'freed vertex is non-finite' };
         if (ptSame(Vprime, V)) return { ok: false, reason: 'freed vertex did not move' };
         for (const arc of newArcs) if (!finitePt(arc.point_a) || !finitePt(arc.point_b)) return { ok: false, reason: 'non-finite arc endpoint' };
-        if (!graphConnected(newArcs)) return { ok: false, reason: 'edit would disconnect the flight path' };
+        if (mode === 'sever') {
+            // Severing a non-loop vertex MUST split exactly one piece into two — no
+            // more (multi-shatter = we picked the wrong arc), no fewer (still joined).
+            const before = componentCount(st.arcs), after = componentCount(newArcs);
+            if (after !== before + 1) return { ok: false, reason: `expected ${before + 1} pieces after sever, got ${after}` };
+        } else {
+            if (!graphConnected(newArcs)) return { ok: false, reason: 'edit would disconnect the flight path' };
+        }
         return { ok: true };
     }
 
-    function doUnsnap(fpId, V) {
+    // forceArcIdx: sever exactly this incident arc (used by the per-segment popup
+    // items on junction vertices, degree ≥ 3). Otherwise: a vertex on a loop opens
+    // the loop (original CLOSE PATH reversal, provably connectivity-safe); any other
+    // mid-path vertex is SEVERED there — the path transiently becomes two pieces so
+    // the user can delete the unwanted piece from its new free end, then Save.
+    function doUnsnap(fpId, V, forceArcIdx) {
         try {
-            const wc = findFpWorkingCopies().find(w => w.id === fpId);
+            const wc = findFpWorkingCopies().find(w => String(w.id) === String(fpId));
             if (!wc || !wc.dispatch) { toast('Open the flight path editor first.', '#ff8a80'); return; }
             const st = wc.state;
-            const closer = findCloserAt(st.arcs, V);
-            if (!closer) { toast('No closed loop to open at this vertex.', '#ffb14e'); return; }
+            let closer = null, mode = 'loop';
+            if (forceArcIdx != null) {
+                const inc = arcsIncidentTo(st.arcs, V).find(i => i.arcIdx === forceArcIdx);
+                if (!inc) { toast('That segment just changed — reopen the vertex menu.', '#ffb14e'); return; }
+                closer = inc;
+                mode = isBridge(st.arcs, inc.arcIdx) ? 'sever' : 'loop';
+            } else {
+                closer = findCloserAt(st.arcs, V);
+                if (!closer) {
+                    // No cycle edge here → not a loop vertex. SEVER instead: detach the
+                    // most-recently-added incident arc (topologically the cut is the same
+                    // whichever side detaches at a degree-2 vertex).
+                    const incident = arcsIncidentTo(st.arcs, V);
+                    if (incident.length < 2) { toast('This vertex is already a free end — nothing to open.', '#ffb14e'); return; }
+                    incident.sort((x, y) => y.arcIdx - x.arcIdx);
+                    closer = incident[0];
+                    mode = 'sever';
+                }
+            }
             const map = getLeafletMap();
             if (!map) { toast('Map not ready.', '#ff8a80'); return; }
             const arc = st.arcs[closer.arcIdx];
@@ -630,17 +678,22 @@
             const vIdx = newCoords.findIndex(c => ptEq(c, V));
             if (vIdx >= 0) newCoords.splice(vIdx + 1, 0, clone(Vprime)); else newCoords.push(clone(Vprime));
 
-            const v = validateUnsnap(st, V, Vprime, newArcs, newCoords);
+            const v = validateUnsnap(st, V, Vprime, newArcs, newCoords, mode);
             if (!v.ok) { warn('OPEN PATH aborted —', v.reason); toast(`⛔ Open Path blocked: ${v.reason}. Nothing changed.`, '#ff8a80'); return; }
 
             const preIssues = checkFlightPath(st); // health BEFORE the edit
             undoStack.push({ id: fpId, name: st.name, kind: 'open', arcs: origArcs, coords: origCoords });
             wc.dispatch({ ...st, arcs: newArcs, coords: newCoords });
             state.inserts++;
-            log(`opened loop on "${st.name}" — detached arc ${closer.arcIdx + 1} from the junction (coords ${origCoords.length} → ${newCoords.length}, validated)`);
+            log(`${mode === 'sever' ? 'SEVERED' : 'opened loop on'} "${st.name}" — detached arc ${closer.arcIdx + 1} from the vertex (coords ${origCoords.length} → ${newCoords.length}, validated, mode=${mode})`);
             renderPanel();
-            toast(`✂ Loop opened on ${st.name}. ⚠ SAVE now, then REFRESH before editing this path again — the freed vertex only drags cleanly after a refresh.`, '#ffd479');
-            verifyEdit(fpId, preIssues, st.arcs.length, 'Open Path');
+            if (mode === 'sever') {
+                const pieces = componentCount(newArcs);
+                toast(`✂ Path SEVERED at this vertex (seg ${closer.arcIdx + 1} detached) — now ${pieces} pieces. Delete the unwanted piece from its free end (right-click its vertices), then SAVE. ⚠ Do NOT save while it's still in pieces — the Save button will warn you.`, '#ffb14e', 9000);
+            } else {
+                toast(`✂ Loop opened on ${st.name}. ⚠ SAVE now, then REFRESH before editing this path again — the freed vertex only drags cleanly after a refresh.`, '#ffd479');
+            }
+            verifyEdit(fpId, preIssues, st.arcs.length, mode === 'sever' ? 'Sever Path' : 'Open Path', mode === 'sever' ? [DISCONNECT_ISSUE] : []);
         } catch (e) {
             warn('doUnsnap threw — path left as-is', e);
             toast('⛔ Open Path errored — see console. Path left as-is.', '#ff8a80');
@@ -664,17 +717,33 @@
     function injectOpenPathItem(popupEl, fpId, V, popup) {
         const menu = popupEl.querySelector(POPUP_MENU_SEL);
         if (!menu || menu.querySelector('.' + OPEN_ITEM_CLASS)) return;
-        const item = document.createElement('div');
-        item.className = POPUP_ITEM_CLASS + ' ' + OPEN_ITEM_CLASS;
-        item.textContent = 'OPEN PATH';
-        item.style.color = '#5fff5f';
-        item.addEventListener('click', (ev) => {
-            ev.preventDefault(); ev.stopPropagation();
-            try { const m = getLeafletMap(); if (m && popup) m.closePopup(popup); } catch (e) {}
-            doUnsnap(fpId, V);
-        });
-        menu.appendChild(item);
-        log('injected OPEN PATH into the vertex popup');
+        const wc = findFpWorkingCopies().find(w => String(w.id) === String(fpId));
+        if (!wc) return;
+        const incident = arcsIncidentTo(wc.state.arcs || [], V);
+        const onLoop = !!findCloserAt(wc.state.arcs || [], V);
+        if (!onLoop && incident.length < 2) return; // a free end already — nothing to open
+        const addItem = (label, color, arcIdx) => {
+            const item = document.createElement('div');
+            item.className = POPUP_ITEM_CLASS + ' ' + OPEN_ITEM_CLASS;
+            item.textContent = label;
+            item.style.color = color;
+            item.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                try { const m = getLeafletMap(); if (m && popup) m.closePopup(popup); } catch (e) {}
+                doUnsnap(fpId, V, arcIdx);
+            });
+            menu.appendChild(item);
+        };
+        if (onLoop) {
+            addItem('OPEN PATH', '#5fff5f', null);               // loop reversal — connectivity-safe
+        } else if (incident.length === 2) {
+            addItem('OPEN PATH ✂', '#ffb14e', null);             // sever a plain mid-path vertex
+        } else {
+            // junction (3+ segments meet here): one item per segment so the user
+            // chooses WHICH branch detaches from this vertex.
+            incident.forEach(inc => addItem(`OPEN PATH ✂ SEG ${inc.arcIdx + 1}`, '#ffb14e', inc.arcIdx));
+        }
+        log(`injected OPEN PATH into the vertex popup (${onLoop ? 'loop' : 'sever'}, ${incident.length} incident)`);
     }
     function handlePopupOpen(e) {
         try {
@@ -685,7 +754,8 @@
             if (!ll) return;
             const hit = nearestVertexToLatLng({ lat: ll.lat, lng: ll.lng });
             if (!hit) return;
-            if (!findCloserAt(hit.wc.state.arcs, hit.V)) return; // only when there's a loop to open here
+            // v0.52: no loop gate — ANY vertex with ≥2 incident segments gets the item
+            // (loop vertices open the loop; everything else severs the path there).
             const tryInject = () => injectOpenPathItem(el, hit.wc.id, hit.V, popup);
             tryInject();
             // Percepto renders the menu via React and may render AFTER popupopen (or
@@ -1703,13 +1773,13 @@
     function onPeekKeyUp(e) { if (e.key === 'Alt') exitPeek(); }
 
     // ---- UI ----
-    function toast(msg, color) {
+    function toast(msg, color, ms) {
         try {
             const t = document.createElement('div');
             t.textContent = msg;
             t.style.cssText = `position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2228;color:${color || '#e6e6e6'};border:1px solid ${color || '#5fff5f'}88;border-radius:6px;padding:10px 16px;font:13px -apple-system,sans-serif;z-index:100002;box-shadow:0 6px 20px rgba(0,0,0,0.6);max-width:80vw;text-align:center`;
             document.body.appendChild(t);
-            setTimeout(() => t.remove(), 5000);
+            setTimeout(() => t.remove(), ms || 5000);
         } catch (e) {}
     }
 
@@ -2199,6 +2269,54 @@
         } catch (e) { warn('tooltip watcher failed', e); }
     }
 
+    // ==================================================================
+    // SEVERED-PATH SAFETY NET (v0.52). After OPEN PATH severs a mid-path
+    // vertex the FP is legitimately in 2 pieces INSIDE THE EDITOR — the user
+    // deletes the unwanted piece, then saves a connected path. Two rails keep
+    // that transient state from leaking into a save:
+    //   1. a persistent red chip while any open FP is disconnected (polled,
+    //      so native right-click deletes clear it the moment the path heals);
+    //   2. a capture-phase confirm() on the native SAVE button — we have
+    //      never tested whether Percepto's server accepts a disconnected FP,
+    //      and a production site is not the place to find out by accident.
+    // ==================================================================
+    const SEVER_CHIP_ID = 'aim-fpe-sever-chip';
+    function disconnectedWcs() {
+        try {
+            return findFpWorkingCopies().filter(wc => {
+                const arcs = wc.state && wc.state.arcs || [];
+                return arcs.length && !graphConnected(arcs);
+            });
+        } catch (e) { return []; }
+    }
+    function updateSeverChip() {
+        let c = document.getElementById(SEVER_CHIP_ID);
+        if (!editingFP()) { if (c) c.remove(); return; }
+        const bad = disconnectedWcs();
+        if (!bad.length) { if (c) c.remove(); return; }
+        if (!c) {
+            c = document.createElement('div');
+            c.id = SEVER_CHIP_ID;
+            c.style.cssText = 'position:fixed;bottom:60px;right:18px;background:#2a1518;border:1px solid rgba(255,90,90,0.75);border-radius:6px;padding:8px 12px;color:#ff8a80;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);max-width:300px;user-select:none';
+            ['mousedown', 'click'].forEach(t => c.addEventListener(t, e => e.stopPropagation()));
+            document.body.appendChild(c);
+        }
+        const w = bad[0];
+        c.textContent = `⚠ ${w.state.name || 'flight path'} is in ${componentCount(w.state.arcs)} pieces — delete the unwanted piece, then SAVE`;
+    }
+    function onSaveClickGuard(e) {
+        try {
+            const btn = e.target && e.target.closest && e.target.closest('button, [role="button"]');
+            if (!btn || (btn.textContent || '').trim().toUpperCase() !== 'SAVE') return;
+            const bad = disconnectedWcs();
+            if (!bad.length) return;
+            const w = bad[0];
+            const ok = window.confirm(`⚠ AIM Map Editor: "${w.state.name || 'this flight path'}" is still in ${componentCount(w.state.arcs)} DISCONNECTED pieces.\n\nSaving a disconnected flight path has never been tested against Percepto — it may be rejected or corrupt the path.\n\nDelete the unwanted piece first (right-click its vertices), then save.\n\nSave anyway?`);
+            if (!ok) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); toast('Save blocked — path is still in pieces. Finish deleting the unwanted piece first.', '#ff8a80'); }
+            else warn(`user confirmed saving "${w.state.name}" while disconnected (${componentCount(w.state.arcs)} pieces)`);
+        } catch (err) { warn('save guard threw (save allowed)', err); }
+    }
+
     // ---- boot ----
     loadSettings();
     loadElevCache();
@@ -2228,7 +2346,10 @@
         e.preventDefault(); e.stopPropagation();
         setAglHud(!settings.aglHud);
     }, true);
+    // Severed-path safety net: warning chip poll + capture-phase SAVE confirm.
+    setInterval(() => { try { updateSeverChip(); } catch (e) {} }, 1200);
+    document.addEventListener('click', onSaveClickGuard, true);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
+    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup: opens a loop, or SEVERS any mid-path vertex — delete the freed piece, then Save; SAVE guard + red chip while the path is in pieces) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
 })();

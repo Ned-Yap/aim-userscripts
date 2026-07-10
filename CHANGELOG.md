@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-10 — Map Editor: OPEN PATH now severs ANY vertex — Map Editor v0.52 (dev/latest, personal)
+
+**OPEN PATH is no longer loop-only.** Double-click any mid-path flight-path vertex → the popup now always offers OPEN PATH: on a loop vertex it opens the loop as before; on a normal vertex it **severs the path right there**, giving you a free end so you can delete an unwanted middle stretch vertex-by-vertex without chewing in from a far-away end (the "remove the segments near the airport" problem). On a junction (3+ segments), one item per segment (`OPEN PATH ✂ SEG N`) so you choose which branch detaches. The severed state is editor-only and intentionally temporary — delete the unwanted piece, then Save a connected path. Two rails guard the transient state: a red **"path is in N pieces"** chip while any open flight path is disconnected (clears itself the moment the path heals), and a confirm() on the native SAVE button if you try to save while still in pieces (a disconnected save has never been tested against Percepto). Same pre/post integrity gate + undo as every Map Editor edit.
+
 ## 2026-07-10 — Asset Inspector v4.164.2 (PROD) — GPS coordinates + Google Maps
 
 Grab a location fast, now for everyone:
