@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.53
+// @version      0.54
 // @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
@@ -76,7 +76,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.53';
+    const SCRIPT_VERSION = '0.54';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -2431,7 +2431,7 @@
         wrap.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:450px;z-index:2147483000;background:#15181d;border:1px solid rgba(255,177,78,0.6);border-radius:10px;color:#e8e6e3;font:13px/1.5 -apple-system,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,0.7)';
         const rows = [
             `<div style="margin:4px 0"><span style="color:#5fff5f">●</span> <strong>${xmlEsc(st.name)}</strong> — keeps its identity (id ${xmlEsc(String(st.id))}) — ${fmtPiece(plan.keep)}</div>`,
-            ...plan.news.map(p => `<div style="margin:4px 0"><span style="color:#7adfe6">＋</span> <strong>${xmlEsc(p.name)}</strong> — NEW path — ${fmtPiece(p.arcs)}</div>`),
+            ...plan.news.map(p => `<div style="margin:4px 0"><span style="color:#7adfe6">＋</span> <strong>${xmlEsc(p.name)}</strong> — NEW path — ${fmtPiece(p.arcs)}${p.arcs.length <= 2 ? ' <span style="color:#ffd479">⚠ tiny stub — Cancel and delete it instead?</span>' : ''}</div>`),
         ].join('');
         wrap.innerHTML = `
             <div style="padding:10px 14px;border-bottom:1px solid rgba(255,177,78,0.3);font-weight:700;color:#ffb14e">💾 Save as ${plan.news.length + 1} separate flight paths</div>
