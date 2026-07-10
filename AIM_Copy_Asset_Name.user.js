@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164.1
+// @version      4.164.2
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
 // @require      https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/vendor/polygon-clipping-0.15.7.umd.js
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
@@ -50,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164.1';
+    const SCRIPT_VERSION = '4.164.2';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -61,6 +62,7 @@
 
     let controlChannel = null;
     let masterEnabled = true;
+    let emptyMapMenuEnabled = true; // right-click empty map → GPS / Google Maps menu (v4.164.2)
     // mapObjectsBySite: { [siteID]: { entities: [...], fetchedAt: ms } }
     const mapObjectsBySite = {};
     const fetchingSites = new Set();
@@ -3522,10 +3524,20 @@
         };
     }
 
-    function buildEntityFields(e) {
+    function buildEntityFields(e, gpsPoint) {
         const out = [];
         out.push({ label: 'Name', value: e.name });
         out.push({ label: 'ID', value: e.id });
+        // v4.164.2: universal GPS row for every entity, click to copy "lat, lng"
+        // (paste straight into Google Maps). Replaces the old per-type "Coords"
+        // rows below. Prefer the EXACT right-click point (gpsPoint) so M2 gives
+        // the spot you clicked; fall back to the centroid for programmatic opens
+        // (SUM row-click), labeled "GPS (center)" so the difference is clear.
+        {
+            const exact = gpsPoint && typeof gpsPoint.lat === 'number' ? gpsPoint : null;
+            const c = exact || getEntityCentroid(e);
+            if (c) out.push({ label: exact ? 'GPS' : 'GPS (center)', value: fmtLatLng(c.lat, c.lng) });
+        }
         if (e.type === 3 && e.custom) {
             if (e.custom.poi_type_str) out.push({ label: 'Subtype', value: e.custom.poi_type_str });
             // Elevation ASL is in meters in the JSON despite Percepto's
@@ -3589,9 +3601,7 @@
         }
         if (e.type === 19) {
             if (e.general_marker_type) out.push({ label: 'Marker type', value: e.general_marker_type });
-            if (Array.isArray(e.coords) && e.coords[0]) {
-                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
-            }
+            // Coords now covered by the universal GPS row above.
         }
         if (e.type === 8 && e.custom) {
             if (typeof e.custom.relative_alt === 'number') {
@@ -3606,18 +3616,14 @@
                 if (dr.robot_type_name) out.push({ label: 'Drone type', value: dr.robot_type_name });
             }
             if (typeof e.custom.ground_station_id === 'number') out.push({ label: 'Ground station', value: e.custom.ground_station_id });
-            if (Array.isArray(e.coords) && e.coords[0]) {
-                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
-            }
+            // Coords now covered by the universal GPS row above.
         }
         if (e.type === 98 && e.custom) {
             if (typeof e.custom.altitude === 'number') {
                 const row = meterRow('Altitude', e.custom.altitude);
                 if (row) out.push(row);
             }
-            if (Array.isArray(e.coords) && e.coords[0]) {
-                out.push({ label: 'Coords', value: `${e.coords[0].lat.toFixed(6)}, ${e.coords[0].lng.toFixed(6)}` });
-            }
+            // Coords now covered by the universal GPS row above.
         }
         // v3.97: Base / Safe Zone — compare the MANUALLY-entered altitude
         // against the DEM ground at the same GPS. A large mismatch means the
@@ -3652,8 +3658,104 @@
         return out;
     }
 
-    function showInspectorPopup(x, y, entity) {
+    // ============================================================
+    // GPS coordinate helpers (v4.164.2)
+    // Copy a point's lat/lng (pasteable straight into Google Maps'
+    // search box) or a ready-made Google Maps URL. Representative point
+    // for an entity = its centroid (getEntityCentroid): the single coord
+    // for markers, the polygon centroid for FFZ/NFZ/Asset, the first-arc
+    // midpoint for flight paths.
+    // ============================================================
+    function fmtLatLng(lat, lng) {
+        return `${Number(lat).toFixed(6)}, ${Number(lng).toFixed(6)}`;
+    }
+    function googleMapsUrl(lat, lng) {
+        return `https://www.google.com/maps/search/?api=1&query=${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+    }
+    function openInGoogleMaps(lat, lng) {
+        const url = googleMapsUrl(lat, lng);
+        // The Percepto map IFRAME silently swallows window.open — it returns
+        // null WITHOUT throwing, so a try/return "succeeds" but no tab opens.
+        // GM_openInTab opens at the browser level and bypasses the iframe
+        // sandbox — prefer it. Then fall back to top-window / current-window
+        // open, checking the RETURN value (null = blocked). Last resort: copy
+        // the link + tell the user.
+        try {
+            if (typeof GM_openInTab === 'function') {
+                GM_openInTab(url, { active: true, insert: true, setParent: true });
+                return;
+            }
+        } catch (e) { console.warn(`${TAG} GM_openInTab threw`, e); }
+        let w = null;
+        try { w = window.top.open(url, '_blank', 'noopener'); } catch (e) {}
+        if (w) return;
+        try { w = window.open(url, '_blank', 'noopener'); } catch (e) {}
+        if (w) return;
+        console.warn(`${TAG} openInGoogleMaps: all open paths blocked — copying link instead`);
+        try { copyToClipboard(url, 'Popup blocked — copied Google Maps link'); }
+        catch (e) { showToast('Could not open Google Maps', 'rgba(255,82,82,0.6)'); }
+    }
+
+    // Small floating menu offering the two copy actions + open. Reused by
+    // the empty-map right-click (no entity under the cursor) and any other
+    // caller that has a lat/lng. Dismisses on outside-click or Esc.
+    const COORD_MENU_ID = 'aim-coord-menu';
+    function closeCoordMenu() {
+        const m = document.getElementById(COORD_MENU_ID);
+        if (m) m.remove();
+        document.removeEventListener('mousedown', coordMenuOutside, true);
+        document.removeEventListener('keydown', coordMenuEsc, true);
+    }
+    function coordMenuOutside(ev) {
+        const m = document.getElementById(COORD_MENU_ID);
+        if (m && !m.contains(ev.target)) closeCoordMenu();
+    }
+    function coordMenuEsc(ev) { if (ev.key === 'Escape') { closeCoordMenu(); } }
+    function showCoordMenu(x, y, lat, lng, titleText) {
+        closeCoordMenu();
         closeInspector();
+        const coords = fmtLatLng(lat, lng);
+        const url = googleMapsUrl(lat, lng);
+        const menu = document.createElement('div');
+        menu.id = COORD_MENU_ID;
+        menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:99999;background:#1f2228;border:1px solid rgba(20,210,220,0.55);border-radius:6px;box-shadow:0 4px 18px rgba(0,0,0,0.6);min-width:230px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e6e6e6;padding:4px 0;overflow:hidden`;
+        const hd = document.createElement('div');
+        hd.style.cssText = 'padding:6px 12px;color:#7adfe6;font-weight:600;border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;letter-spacing:0.3px';
+        hd.textContent = titleText || 'Map point';
+        const sub = document.createElement('div');
+        sub.style.cssText = 'font-size:11px;color:#888;font-weight:normal;margin-top:2px';
+        sub.textContent = coords;
+        hd.appendChild(sub);
+        menu.appendChild(hd);
+        const addItem = (label, onClick) => {
+            const it = document.createElement('div');
+            it.style.cssText = 'padding:7px 12px;cursor:pointer;font-size:12px';
+            it.textContent = label;
+            it.onmouseenter = () => { it.style.background = 'rgba(20,210,220,0.15)'; };
+            it.onmouseleave = () => { it.style.background = 'transparent'; };
+            it.onclick = (ev) => { ev.stopPropagation(); ev.preventDefault(); try { onClick(); } finally { closeCoordMenu(); } };
+            menu.appendChild(it);
+        };
+        addItem('📋 Copy coordinates', () => copyToClipboard(coords, 'Copied coordinates'));
+        addItem('🔗 Copy Google Maps link', () => copyToClipboard(url, 'Copied Google Maps link'));
+        addItem('↗ Open in Google Maps', () => openInGoogleMaps(lat, lng));
+        document.body.appendChild(menu);
+        // Keep on-screen.
+        const r = menu.getBoundingClientRect();
+        if (r.right > window.innerWidth) menu.style.left = `${Math.max(4, window.innerWidth - r.width - 6)}px`;
+        if (r.bottom > window.innerHeight) menu.style.top = `${Math.max(4, window.innerHeight - r.height - 6)}px`;
+        setTimeout(() => {
+            document.addEventListener('mousedown', coordMenuOutside, true);
+            document.addEventListener('keydown', coordMenuEsc, true);
+        }, 0);
+    }
+
+    // clickLatLng (optional {lat,lng}): the EXACT point the user right-clicked.
+    // When present the GPS row + 🗺 Maps use it; otherwise (programmatic opens
+    // like a SUM row-click) they fall back to the entity centroid.
+    function showInspectorPopup(x, y, entity, clickLatLng) {
+        closeInspector();
+        closeCoordMenu();
         const popup = document.createElement('div');
         popup.id = POPUP_ID;
         const typeColor = entityTypeColor(entity);
@@ -3685,7 +3787,7 @@
         header.appendChild(xBtn);
         popup.appendChild(header);
 
-        const rows = buildEntityFields(entity);
+        const rows = buildEntityFields(entity, clickLatLng);
         rows.forEach(rowSpec => {
             if (!rowSpec) return;
             const { label, value, parts } = rowSpec;
@@ -3794,6 +3896,23 @@
             closeInspector();
         };
         footer.appendChild(findBtn);
+
+        // v4.164.2: 🗺 Maps — opens the GPS point in Google Maps. Uses the exact
+        // right-click point when available, else the entity centroid. Copy-the-
+        // coords is the GPS row above; this is the one-click open.
+        const mapsCenter = (clickLatLng && typeof clickLatLng.lat === 'number')
+            ? clickLatLng : getEntityCentroid(entity);
+        if (mapsCenter) {
+            const mapsBtn = document.createElement('button');
+            mapsBtn.textContent = '🗺 Maps';
+            mapsBtn.title = 'Open this location in Google Maps (new tab)';
+            mapsBtn.style.cssText = 'flex:0 0 auto;background:transparent;color:#bbb;border:1px solid rgba(255,255,255,0.20);border-radius:3px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px';
+            mapsBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                openInGoogleMaps(mapsCenter.lat, mapsCenter.lng);
+            };
+            footer.appendChild(mapsBtn);
+        }
 
         const jsonBtn = document.createElement('button');
         jsonBtn.textContent = 'Copy JSON';
@@ -4345,9 +4464,19 @@
             }
             if (!entity) entity = findEntityAtLatLng(latlng.lat, latlng.lng, siteID);
             if (!entity) {
+                // v4.164.2: empty map → GPS / Google Maps menu (copy coords,
+                // copy Maps link, open in Maps). Only when enabled; otherwise
+                // fall through to the native context menu as before.
+                if (emptyMapMenuEnabled) {
+                    dbg('empty map → GPS menu at', latlng.lat.toFixed(6), latlng.lng.toFixed(6));
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try { showCoordMenu(e.clientX, e.clientY, latlng.lat, latlng.lng, 'Map point'); }
+                    catch (err) { dbg('showCoordMenu threw', err); }
+                    return;
+                }
                 // Don't intercept — let native context menu show (user
-                // right-clicked on empty map). Could toast "no entity here"
-                // but that would be annoying for normal map right-clicks.
+                // right-clicked on empty map).
                 dbg('bail: no entity at', latlng.lat.toFixed(6), latlng.lng.toFixed(6), '— bucket has', bucketSize);
                 return;
             }
@@ -4355,7 +4484,9 @@
             e.preventDefault();
             e.stopPropagation();
             try {
-                showInspectorPopup(e.clientX, e.clientY, entity);
+                // v4.164.2: pass the EXACT click point so the popup's GPS row +
+                // 🗺 Maps use where the user right-clicked, not the centroid.
+                showInspectorPopup(e.clientX, e.clientY, entity, { lat: latlng.lat, lng: latlng.lng });
             } catch (err) {
                 dbg('showInspectorPopup threw', err);
             }
@@ -4390,6 +4521,9 @@
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SCRIPT_ID) {
                 if (msg.toggleId === 'master') {
                     masterEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                } else if (msg.toggleId === 'empty-map-menu') {
+                    emptyMapMenuEnabled = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (!emptyMapMenuEnabled) closeCoordMenu();
                 }
             }
             else if (msg.type === 'SET_TOGGLE' && msg.scriptId === SOP_SCRIPT_ID) {
@@ -4489,6 +4623,7 @@
             version: SCRIPT_VERSION, group: 'Hotkeys', priority: 40,
             toggles: [
                 { id: 'master', label: 'Enable (right-click any entity)', type: 'boolean', default: true, master: true },
+                { id: 'empty-map-menu', label: 'Right-click empty map → GPS / Google Maps menu', type: 'boolean', default: true },
                 { id: 'refresh-action', label: 'Refresh entity data for this site', type: 'button', action: 'refresh-entities' },
             ],
             hotkeys: [],

@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-10 — Asset Inspector v4.164.2 (PROD) — GPS coordinates + Google Maps
+
+Grab a location fast, now for everyone:
+
+- **GPS on every entity.** Right-click an entity → the inspector popup shows a **GPS** row for the **exact spot you clicked** (the well head / vertex / segment point you were pointing at, not the entity's center). Click it to copy `lat, lng` — paste straight into Google Maps. A **🗺 Maps** button in the popup footer opens that spot in Google Maps in a new tab. (Opening the inspector from a SUM row-click instead shows the centroid, labeled "GPS (center)".)
+- **Right-click the empty map → GPS menu.** Right-clicking a spot with no entity under it pops a small menu: **📋 Copy coordinates**, **🔗 Copy Google Maps link**, **↗ Open in Google Maps**. Turn it off in Control Panel → Site Setup Tools → "Right-click empty map → GPS / Google Maps menu" if you'd rather keep the browser's native right-click there.
+
+**Note:** this adds a new `@grant GM_openInTab`, so Tampermonkey may show a one-time permission prompt after the update — approve it and the 🗺 Maps / Open actions work. Surgical backport from latest ahead of the larger held dev bundle.
+
+---
+
 ## 2026-07-09 — Control Panel v1.35 (dev/latest) — gear now available on the Live Drone view
 
 The live-drone page (`#/site/<id>/live_drone/<id>`) has no `.map-tools` bar, so the Control Panel gear never appeared there. The TOP frame now injects a self-styled floating gear (top-right, below the drone-info bar) on live-drone URLs — it appears/disappears with SPA navigation and works in both Lite and Full modes. New URL scope `live-drone` added to the page-awareness system. Also synced the internal `VERSION` const (was stuck at 1.33 while `@version` said 1.34). Dev-only (latest/).
