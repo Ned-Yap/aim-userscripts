@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.52
-// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there (transient two-piece state: delete the unwanted piece vertex-by-vertex, then Save; a guard warns if you try to Save while still disconnected). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.53
+// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -76,7 +76,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.52';
+    const SCRIPT_VERSION = '0.53';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -689,7 +689,7 @@
             renderPanel();
             if (mode === 'sever') {
                 const pieces = componentCount(newArcs);
-                toast(`✂ Path SEVERED at this vertex (seg ${closer.arcIdx + 1} detached) — now ${pieces} pieces. Delete the unwanted piece from its free end (right-click its vertices), then SAVE. ⚠ Do NOT save while it's still in pieces — the Save button will warn you.`, '#ffb14e', 9000);
+                toast(`✂ Path SEVERED at this vertex (seg ${closer.arcIdx + 1} detached) — now ${pieces} pieces. Delete the unwanted piece then SAVE, or use the red chip's 💾 button to save the pieces as SEPARATE flight paths.`, '#ffb14e', 9000);
             } else {
                 toast(`✂ Loop opened on ${st.name}. ⚠ SAVE now, then REFRESH before editing this path again — the freed vertex only drags cleanly after a refresh.`, '#ffd479');
             }
@@ -2294,15 +2294,22 @@
         if (!editingFP()) { if (c) c.remove(); return; }
         const bad = disconnectedWcs();
         if (!bad.length) { if (c) c.remove(); return; }
+        const w = bad[0];
+        const pieces = componentCount(w.state.arcs);
+        const sig = `${w.id}|${pieces}|${(w.state.arcs || []).length}`;
+        if (c && c.dataset.sig === sig) return; // unchanged — don't rebuild (would kill a mid-press button click)
         if (!c) {
             c = document.createElement('div');
             c.id = SEVER_CHIP_ID;
-            c.style.cssText = 'position:fixed;bottom:60px;right:18px;background:#2a1518;border:1px solid rgba(255,90,90,0.75);border-radius:6px;padding:8px 12px;color:#ff8a80;font:12px -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);max-width:300px;user-select:none';
+            c.style.cssText = 'position:fixed;bottom:60px;right:18px;background:#2a1518;border:1px solid rgba(255,90,90,0.75);border-radius:6px;padding:8px 12px;color:#ff8a80;font:12px/1.5 -apple-system,sans-serif;font-weight:600;z-index:100001;box-shadow:0 6px 20px rgba(0,0,0,0.6);max-width:300px;user-select:none';
             ['mousedown', 'click'].forEach(t => c.addEventListener(t, e => e.stopPropagation()));
             document.body.appendChild(c);
         }
-        const w = bad[0];
-        c.textContent = `⚠ ${w.state.name || 'flight path'} is in ${componentCount(w.state.arcs)} pieces — delete the unwanted piece, then SAVE`;
+        c.dataset.sig = sig;
+        c.innerHTML = `⚠ <strong>${xmlEsc(w.state.name || 'flight path')}</strong> is in ${pieces} pieces — delete the unwanted piece then SAVE, or:`
+            + `<br><button id="aim-fpe-splitsave-btn" style="margin-top:6px;background:#ffb14e;color:#241a08;border:0;border-radius:5px;padding:6px 12px;font-weight:700;cursor:pointer;font:12px -apple-system,sans-serif">💾 Save as ${pieces} separate paths</button>`;
+        const btn = c.querySelector('#aim-fpe-splitsave-btn');
+        if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); doSplitSave(w.id); });
     }
     function onSaveClickGuard(e) {
         try {
@@ -2311,10 +2318,246 @@
             const bad = disconnectedWcs();
             if (!bad.length) return;
             const w = bad[0];
-            const ok = window.confirm(`⚠ AIM Map Editor: "${w.state.name || 'this flight path'}" is still in ${componentCount(w.state.arcs)} DISCONNECTED pieces.\n\nSaving a disconnected flight path has never been tested against Percepto — it may be rejected or corrupt the path.\n\nDelete the unwanted piece first (right-click its vertices), then save.\n\nSave anyway?`);
+            const ok = window.confirm(`⚠ AIM Map Editor: "${w.state.name || 'this flight path'}" is still in ${componentCount(w.state.arcs)} DISCONNECTED pieces.\n\nSaving a disconnected flight path has never been tested against Percepto — it may be rejected or corrupt the path.\n\nEither delete the unwanted piece first (right-click its vertices) and save — or Cancel this and use the red chip's "💾 Save as separate paths" button to keep BOTH pieces as independent flight paths.\n\nSave anyway?`);
             if (!ok) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); toast('Save blocked — path is still in pieces. Finish deleting the unwanted piece first.', '#ff8a80'); }
             else warn(`user confirmed saving "${w.state.name}" while disconnected (${componentCount(w.state.arcs)} pieces)`);
         } catch (err) { warn('save guard threw (save allowed)', err); }
+    }
+
+    // ==================================================================
+    // SPLIT-SAVE (v0.53) — save a severed flight path as SEPARATE FP entities.
+    // The user's real ask: cut a 100+ segment path and KEEP both sides. One
+    // Percepto FP must be a connected graph, so the disconnected working copy
+    // is saved as N paths via direct POST /map_objects/ (the proven Site
+    // Setup save — see reference_map_objects_save_endpoint):
+    //   · the LARGEST piece keeps the original entity id + name (mission
+    //     references point at FP ids — keep the id on the bulk of the path);
+    //   · every other piece is CREATED as "<name>_splitN" (name uniqued
+    //     against the site's entities; arc id/mapobject stripped so the
+    //     server assigns fresh ones).
+    // Write order is deliberate: CREATE the new pieces FIRST, then trim the
+    // original — a failure mid-run can leave a duplicate piece (harmless,
+    // deletable) but can never lose geometry. Rails: JSON backup download +
+    // in-memory copy before any write, per-write response check, fresh-fetch
+    // verify after, and a blocking refresh overlay (the open native editor
+    // still holds the OLD path — a native Save would overwrite the split).
+    // ==================================================================
+    const SPLIT_MODAL_ID = 'aim-fpe-split-modal';
+    let splitBusy = false;
+    function csrfToken() { const m = (document.cookie || '').match(/(?:^|;\s*)csrftoken=([^;]+)/); return m ? decodeURIComponent(m[1]) : null; }
+    function topSiteId() { try { const m = ((window.top.location.hash || '')).match(/#\/site\/(\d+)\//); return m ? Number(m[1]) : null; } catch (e) { return null; } }
+    async function fetchSiteCfg(siteId) {
+        try { const r = await fetch(`https://percepto.app/sites/${siteId}/`, { credentials: 'include' }); return r.ok ? await r.json() : null; }
+        catch (e) { warn('site cfg fetch failed (assuming mountain_terrain=false)', e); return null; }
+    }
+    async function fetchSiteEntities(siteId) {
+        const r = await fetch(`https://percepto.app/map_objects/?getPoiMapObjectsAsList=true&site_id=${encodeURIComponent(siteId)}&_t=${Date.now()}`, { credentials: 'include', cache: 'no-store' });
+        if (!r.ok) throw new Error(`entity list fetch: HTTP ${r.status}`);
+        const j = await r.json();
+        return Array.isArray(j) ? j : [];
+    }
+    // Group arcs into connected components (shared-vertex adjacency), arc order preserved.
+    function splitComponents(arcs) {
+        const compOf = new Array(arcs.length).fill(-1);
+        const byVert = new Map();
+        arcs.forEach((a, i) => {
+            for (const k of [nodeKey(a.point_a), nodeKey(a.point_b)]) {
+                if (!byVert.has(k)) byVert.set(k, []);
+                byVert.get(k).push(i);
+            }
+        });
+        let comp = 0;
+        for (let i = 0; i < arcs.length; i++) {
+            if (compOf[i] !== -1) continue;
+            compOf[i] = comp; const stack = [i];
+            while (stack.length) {
+                const j = stack.pop(); const a = arcs[j];
+                for (const k of [nodeKey(a.point_a), nodeKey(a.point_b)])
+                    for (const m of byVert.get(k)) if (compOf[m] === -1) { compOf[m] = comp; stack.push(m); }
+            }
+            comp++;
+        }
+        const groups = Array.from({ length: comp }, () => []);
+        arcs.forEach((a, i) => groups[compOf[i]].push(a));
+        return groups;
+    }
+    // points for a piece = the FP's coords filtered to that piece's vertices
+    // (preserves branch-encoding duplicates); arcs are the geometry source of
+    // truth server-side, so this only needs to be reasonable.
+    function pointsForArcs(st, arcs) {
+        const verts = new Set();
+        arcs.forEach(a => { verts.add(nodeKey(a.point_a)); verts.add(nodeKey(a.point_b)); });
+        const pts = (st.coords || []).filter(c => finitePt(c) && verts.has(nodeKey(c))).map(clone);
+        if (pts.length >= 2) return pts;
+        const seen = new Set(); const out = [];
+        arcs.forEach(a => { for (const p of [a.point_a, a.point_b]) { const k = nodeKey(p); if (!seen.has(k)) { seen.add(k); out.push(clone(p)); } } });
+        return out;
+    }
+    function fmtPiece(arcs) {
+        const ft = Math.round(arcs.reduce((s, a) => s + (hav(a.point_a, a.point_b) || 0), 0) * 3.28084);
+        return `${arcs.length} segment${arcs.length === 1 ? '' : 's'} · ~${ft.toLocaleString()} ft`;
+    }
+    async function doSplitSave(wcId) {
+        if (splitBusy) { toast('Split-save already running…', '#ffd479'); return; }
+        const wc = findFpWorkingCopies().find(w => String(w.id) === String(wcId));
+        if (!wc) { toast('Editor closed — reopen the flight path.', '#ff8a80'); return; }
+        const st = wc.state;
+        const groups = splitComponents(st.arcs || []);
+        if (groups.length < 2) { toast('Path is one connected piece — just SAVE natively.', '#5fff5f'); return; }
+        const siteId = st.site != null ? st.site : topSiteId();
+        if (siteId == null) { toast('⛔ Cannot determine the site id — split aborted, nothing written.', '#ff8a80'); return; }
+        splitBusy = true;
+        try {
+            const ents = await fetchSiteEntities(siteId);
+            const used = new Set(ents.map(e => e && e.name).filter(Boolean));
+            const uniqueName = (base) => { let n = base, i = 2; while (used.has(n)) n = `${base}-${i++}`; used.add(n); return n; };
+            const ordered = groups.slice().sort((a, b) => b.length - a.length);
+            const plan = {
+                siteId, st: clone(st), keep: clone(ordered[0]),
+                news: ordered.slice(1).map((arcs, i) => ({ arcs: clone(arcs), name: uniqueName(`${st.name}_split${i + 1}`) })),
+            };
+            showSplitModal(plan, wcId);
+        } catch (e) {
+            warn('split-save prep failed', e);
+            toast(`⛔ Split prep failed (${e && e.message || e}) — nothing written.`, '#ff8a80');
+        } finally { splitBusy = false; }
+    }
+    function closeSplitModal() { const el = document.getElementById(SPLIT_MODAL_ID); if (el) el.remove(); }
+    function showSplitModal(plan, wcId) {
+        closeSplitModal();
+        const st = plan.st;
+        const wrap = document.createElement('div');
+        wrap.id = SPLIT_MODAL_ID;
+        wrap.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:450px;z-index:2147483000;background:#15181d;border:1px solid rgba(255,177,78,0.6);border-radius:10px;color:#e8e6e3;font:13px/1.5 -apple-system,sans-serif;box-shadow:0 10px 40px rgba(0,0,0,0.7)';
+        const rows = [
+            `<div style="margin:4px 0"><span style="color:#5fff5f">●</span> <strong>${xmlEsc(st.name)}</strong> — keeps its identity (id ${xmlEsc(String(st.id))}) — ${fmtPiece(plan.keep)}</div>`,
+            ...plan.news.map(p => `<div style="margin:4px 0"><span style="color:#7adfe6">＋</span> <strong>${xmlEsc(p.name)}</strong> — NEW path — ${fmtPiece(p.arcs)}</div>`),
+        ].join('');
+        wrap.innerHTML = `
+            <div style="padding:10px 14px;border-bottom:1px solid rgba(255,177,78,0.3);font-weight:700;color:#ffb14e">💾 Save as ${plan.news.length + 1} separate flight paths</div>
+            <div style="padding:10px 14px">
+                <div style="margin-bottom:8px">Each disconnected piece becomes an independent flight path. The largest keeps the original name + id (mission references survive on it):</div>
+                ${rows}
+                <div style="margin-top:10px;color:#ffb14e">A JSON backup of the original downloads first. New pieces are created BEFORE the original is trimmed, so a failure can duplicate but never lose geometry. You MUST refresh after.</div>
+                <div id="aim-fpe-split-status" style="margin-top:8px;color:#7adfe6;font-weight:600"></div>
+            </div>
+            <div style="padding:10px 14px;border-top:1px solid rgba(255,177,78,0.2);display:flex;gap:10px;justify-content:flex-end">
+                <button id="aim-fpe-split-cancel" style="background:#2a2e35;color:#e8e6e3;border:0;border-radius:6px;padding:8px 16px;cursor:pointer;font:13px -apple-system,sans-serif">Cancel</button>
+                <button id="aim-fpe-split-commit" style="background:#ffb14e;color:#241a08;border:0;border-radius:6px;padding:8px 16px;font-weight:700;cursor:pointer;font:13px -apple-system,sans-serif">💾 Split &amp; save</button>
+            </div>`;
+        ['mousedown', 'click', 'dblclick', 'pointerdown'].forEach(t => wrap.addEventListener(t, e => e.stopPropagation()));
+        document.body.appendChild(wrap);
+        const status = wrap.querySelector('#aim-fpe-split-status');
+        wrap.querySelector('#aim-fpe-split-cancel').addEventListener('click', closeSplitModal);
+        wrap.querySelector('#aim-fpe-split-commit').addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            // staleness guard — if the path changed since the preview, re-plan instead of writing a stale snapshot
+            const live = findFpWorkingCopies().find(w => String(w.id) === String(wcId));
+            if (live && ((live.state.arcs || []).length !== (plan.st.arcs || []).length)) {
+                closeSplitModal();
+                toast('Path changed since the preview — reopening the plan.', '#ffd479');
+                doSplitSave(wcId);
+                return;
+            }
+            btn.disabled = true; btn.style.opacity = '0.5';
+            const setStatus = (m) => { status.textContent = m; };
+            try {
+                const res = await commitSplit(plan, setStatus);
+                closeSplitModal();
+                const lines = [
+                    `<div>● <strong>${xmlEsc(st.name)}</strong> — now ${plan.keep.length} segments</div>`,
+                    ...plan.news.map(p => `<div>＋ <strong>${xmlEsc(p.name)}</strong> — ${p.arcs.length} segments (new)</div>`),
+                ];
+                if (res.problems.length) lines.push(`<div style="color:#ff8a80;margin-top:8px">⚠ verify: ${res.problems.map(xmlEsc).join(' · ')}</div>`);
+                showRefreshOverlay(lines.join(''));
+                log(`SPLIT-SAVE done — kept "${st.name}" (${plan.keep.length} arcs) + created ${plan.news.map(p => `"${p.name}" (${p.arcs.length} arcs)`).join(', ')}${res.problems.length ? ' · VERIFY PROBLEMS: ' + res.problems.join(' | ') : ''}`);
+            } catch (err) {
+                warn('split-save FAILED', err);
+                btn.disabled = false; btn.style.opacity = '1';
+                status.innerHTML = `<span style="color:#ff8a80">⛔ ${xmlEsc(err && err.message || String(err))}<br>The original path is only modified in the LAST step — it is untouched unless the failure was in the final update. Any piece created before the failure exists on the site (duplicate geometry — delete it or retry). Backup: the downloaded JSON / __aim_fpe_split_backup.</span>`;
+            }
+        });
+    }
+    async function commitSplit(plan, setStatus) {
+        const st = plan.st;
+        // backup BEFORE any write — download + in-memory
+        try {
+            const blob = new Blob([JSON.stringify(st, null, 2)], { type: 'application/json' });
+            const u = URL.createObjectURL(blob); const a = document.createElement('a');
+            a.href = u; a.download = `fp-${st.id}-PRESPLIT-backup.json`; document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(u), 2000);
+        } catch (e) { warn('backup download failed (continuing — in-memory backup kept)', e); }
+        unsafeWindow.__aim_fpe_split_backup = clone(st);
+        const token = csrfToken();
+        if (!token) throw new Error('no csrftoken cookie — cannot authenticate');
+        const cfg = await fetchSiteCfg(plan.siteId);
+        // read-shape → write-shape (same mapping as AIM_FP_Surgery_Cut / Asset Inspector buildWriteBody)
+        const mkBody = (arcs) => {
+            const body = clone(st);
+            body.site_id = plan.siteId;
+            body.arcs = clone(arcs);
+            body.points = pointsForArcs(st, body.arcs);
+            delete body.site; delete body.coords; delete body.polygon; delete body.asset_waypoints;
+            body.mountain_terrain_site = !!(cfg && cfg.mountain_terrain);
+            body.arcs.forEach(a => { if (a && a.point_a && a.point_b && !Array.isArray(a.points)) a.points = [a.point_a, a.point_b]; });
+            return body;
+        };
+        const post = async (body, label) => {
+            const r = await fetch('https://percepto.app/map_objects/', {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json, text/plain, */*', 'X-CSRFToken': token },
+                body: JSON.stringify(body),
+            });
+            const txt = await r.text();
+            if (!r.ok) throw new Error(`${label}: server ${r.status} — ${(txt || '').slice(0, 300)}`);
+            let j = null; try { j = JSON.parse(txt); } catch (e) {}
+            if (!j || !j.map_objects) throw new Error(`${label}: unexpected server response — ${(txt || '').slice(0, 200)}`);
+            return j.map_objects;
+        };
+        // 1. CREATE the new pieces first (fail here → original untouched)
+        const created = [];
+        for (const piece of plan.news) {
+            setStatus(`creating "${piece.name}"…`);
+            const b = mkBody(piece.arcs);
+            delete b.id;
+            b.name = piece.name;
+            b.arcs.forEach(a => { delete a.id; delete a.mapobject; }); // server assigns fresh ids on create
+            created.push(await post(b, `create "${piece.name}"`));
+        }
+        // 2. UPDATE the original down to its kept piece
+        setStatus(`updating "${st.name}"…`);
+        await post(mkBody(plan.keep), `update "${st.name}"`);
+        // 3. VERIFY against a fresh fetch
+        setStatus('verifying…');
+        const problems = [];
+        try {
+            const ents = await fetchSiteEntities(plan.siteId);
+            const freshKeep = ents.find(e => e && e.id === st.id);
+            if (!freshKeep) problems.push(`original "${st.name}" missing from fresh fetch`);
+            else if ((freshKeep.arcs || []).length !== plan.keep.length) problems.push(`"${st.name}" has ${(freshKeep.arcs || []).length} arcs (expected ${plan.keep.length})`);
+            for (const piece of plan.news) {
+                const f = ents.find(e => e && e.type === 15 && e.name === piece.name);
+                if (!f) problems.push(`new path "${piece.name}" missing from fresh fetch`);
+                else if ((f.arcs || []).length !== piece.arcs.length) problems.push(`"${piece.name}" has ${(f.arcs || []).length} arcs (expected ${piece.arcs.length})`);
+            }
+        } catch (e) { problems.push(`verify fetch failed (${e && e.message || e}) — check the site after refresh`); }
+        return { created, problems };
+    }
+    function showRefreshOverlay(msgHtml) {
+        let o = document.getElementById('aim-fpe-refresh-overlay'); if (o) o.remove();
+        o = document.createElement('div'); o.id = 'aim-fpe-refresh-overlay';
+        o.style.cssText = 'position:fixed;inset:0;background:rgba(10,12,16,0.82);z-index:2147483100;display:flex;align-items:center;justify-content:center';
+        o.innerHTML = `<div style="background:#15181d;border:1px solid #5fff5f88;border-radius:10px;padding:22px 26px;max-width:470px;color:#e8e6e3;font:14px/1.5 -apple-system,sans-serif;text-align:center">
+            <div style="font-size:17px;font-weight:700;color:#5fff5f;margin-bottom:10px">✓ Path split saved</div>
+            <div style="text-align:left;margin-bottom:14px">${msgHtml}</div>
+            <div style="color:#ffb14e;margin-bottom:14px">⚠ The open editor still holds the OLD path — a native Save now would overwrite the split. Refresh before doing anything else.</div>
+            <button id="aim-fpe-refresh-now" style="background:#5fff5f;color:#10231a;border:0;border-radius:6px;padding:10px 22px;font-weight:700;cursor:pointer;font-size:14px">↻ Refresh now</button>
+            <div id="aim-fpe-refresh-skip" style="margin-top:10px;color:#8a8f98;font-size:11px;text-decoration:underline;cursor:pointer">dismiss (I understand the editor is stale)</div>
+        </div>`;
+        ['mousedown', 'click', 'dblclick', 'pointerdown'].forEach(t => o.addEventListener(t, e => e.stopPropagation()));
+        document.body.appendChild(o);
+        o.querySelector('#aim-fpe-refresh-now').addEventListener('click', () => { try { window.top.location.reload(); } catch (e) { location.reload(); } });
+        o.querySelector('#aim-fpe-refresh-skip').addEventListener('click', () => o.remove());
     }
 
     // ---- boot ----
@@ -2351,5 +2594,5 @@
     document.addEventListener('click', onSaveClickGuard, true);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
-    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup: opens a loop, or SEVERS any mid-path vertex — delete the freed piece, then Save; SAVE guard + red chip while the path is in pieces) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
+    log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup: opens a loop, or SEVERS any mid-path vertex — delete the freed piece then Save, or 💾 Save as separate paths via the red chip; SAVE guard while in pieces) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);
 })();
