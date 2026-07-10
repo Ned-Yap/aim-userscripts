@@ -12,6 +12,12 @@ The live-drone page (`#/site/<id>/live_drone/<id>`) has no `.map-tools` bar, so 
 
 ---
 
+## 2026-07-10 — Asset Inspector v4.181 (dev/latest) — 📊 Stats polish for long type names + Unshielded count fix
+
+Three refinements from the first Diamondback Site Summary: (1) cards whose type names run long (`V - Pumping Rod - …`) now **span two grid columns** with a slimmer share bar, so names stop getting ellipsis-chopped — short-name taxonomies (EXXON) keep the original compact layout, and hovering any truncated name has always shown the full text; (2) the **V vs H card** buckets non-V/H assets under their real base type (`Battery`, `Well-Cluster`) instead of an opaque "Other"; (3) **"Unshielded (all types)" was reading 0** on Diamondback because it only counted Percepto's `is_unshielded` boolean flag — Diamondback marks unshielded in the subtype string with the flag left false. It now counts both sources, so it agrees with the States card. Dev-only (latest/).
+
+---
+
 ## 2026-07-09 — Asset Inspector v4.180 + Map Styler v34.116 (dev/latest) — Diamondback subtype taxonomy support
 
 Diamondback's subtypes lead with wellhead orientation (`V - PUMPING ROD - Empty`) instead of EXXON's `equipment - state` shape, which scrambled every parser that assumed "first segment = equipment, rest = state" — the 📊 Site Summary showed "Pumping Rod" as a *state* with V/H as *equipment*, and Map Styler's color-by-state painted freshly-updated `v - pumping rod` assets gray instead of Normal-pink. New shared rule in both scripts: **only trailing segments that are known state words (empty / unshielded / unreachable / inactive / hy) count as the state; everything before them is the type.** EXXON's taxonomy parses identically to before.

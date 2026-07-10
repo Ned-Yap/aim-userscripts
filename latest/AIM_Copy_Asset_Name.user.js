@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.180
+// @version      4.181
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.180';
+    const SCRIPT_VERSION = '4.181';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -18342,14 +18342,16 @@
             const p = parseAssetSubtype(sub);
             if (p.typeKey) equipMap[p.typeKey] = (equipMap[p.typeKey] || 0) + 1;
             stateMap[p.state] = (stateMap[p.state] || 0) + 1;
-            const o = p.orientation || 'Other';
+            // v4.181: non-V/H assets bucket under their own base type
+            // ("Battery", "Well-Cluster") instead of an opaque "Other".
+            const o = p.orientation || ((p.typeKey.split(' - ')[0]) || 'Other');
             orientMap[o] = (orientMap[o] || 0) + 1;
         });
         const assetEquipment = sortAndCap(equipMap, 16);
         const assetStates = sortAndCap(stateMap, 10);
         // Only meaningful when the taxonomy actually has V/H leads —
         // EXXON sites get no orientation card.
-        const assetOrientation = (orientMap['V'] || orientMap['H']) ? sortAndCap(orientMap, 4) : null;
+        const assetOrientation = (orientMap['V'] || orientMap['H']) ? sortAndCap(orientMap, 5) : null;
 
         // Auto-detect GM groups from names. Strategy:
         //   1. tokenize on whitespace / underscore / dash
@@ -18380,7 +18382,12 @@
         // Other rolled-up stats — useful at a glance.
         const other = {
             'With notes': allRows.filter(r => r.hasNotes).length,
-            'Unshielded (all types)': allRows.filter(r => r.unshielded).length,
+            // v4.181: count BOTH unshielded sources — the is_unshielded
+            // boolean flag (any entity type) AND the parsed asset subtype
+            // state. Diamondback marks unshielded in the subtype string
+            // ("… - unshielded") with the flag left false, so the old
+            // flag-only count read 0 while States showed 101.
+            'Unshielded (all types)': allRows.filter(r => r.unshielded || r.state === 'Unshielded').length,
         };
         return {
             siteID,
@@ -18571,6 +18578,10 @@
             return { eq, states, total };
         }).sort((a, b) => b.total - a.total);
         const globalMax = Math.max(0, ...equipTotals.map(x => x.total));
+        // v4.181: same wide-card rule as kwCard — long equipment names
+        // get a two-column card + a narrower stacked bar.
+        const wideMatrix = equipTotals.some(x => x.eq.length > 14);
+        if (wideMatrix) c.style.gridColumn = 'span 2';
         // Legend at top — known states first (in canonical order),
         // any unrecognized states appended alphabetically.
         const legend = document.createElement('div');
@@ -18607,7 +18618,7 @@
         const table = document.createElement('table');
         table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
         const cg = document.createElement('colgroup');
-        cg.innerHTML = '<col><col style="width:50px"><col style="width:55%">';
+        cg.innerHTML = `<col><col style="width:50px"><col style="width:${wideMatrix ? '45%' : '55%'}">`;
         table.appendChild(cg);
         const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
         const thead = document.createElement('thead');
@@ -18906,6 +18917,13 @@
         //   "Type" — but "Subtype" or "Group" reads better in context).
         const kwCard = (titleText, dict, color, denominator, labelHeader) => {
             const c = card(titleText);
+            // v4.181: long type names (Diamondback's "V - Pumping Rod")
+            // were ellipsis-truncated in a single-column card. When any
+            // label runs long, span TWO grid columns and shrink the Share
+            // bar (38% → 28%) so the label column gets the room. Short
+            // taxonomies (EXXON) keep the original one-column layout.
+            const wide = Object.keys(dict).some(k => k.length > 14);
+            if (wide) c.style.gridColumn = 'span 2';
             const maxVal = Math.max(0, ...Object.values(dict));
             const denom = denominator != null ? denominator : Object.values(dict).reduce((a, b) => a + b, 0);
             const table = document.createElement('table');
@@ -18913,7 +18931,7 @@
             // have predictable widths even with mixed label lengths.
             table.style.cssText = 'width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed';
             const cg = document.createElement('colgroup');
-            cg.innerHTML = '<col><col style="width:52px"><col style="width:46px"><col style="width:38%">';
+            cg.innerHTML = `<col><col style="width:52px"><col style="width:46px"><col style="width:${wide ? '28%' : '38%'}">`;
             table.appendChild(cg);
 
             const HEADER_CSS = 'color:#888;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.4px;padding:0 6px 5px;border-bottom:1px solid rgba(255,255,255,0.08)';
