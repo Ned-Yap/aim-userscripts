@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Latest - AIM Map Editor
 // @namespace    http://tampermonkey.net/
-// @version      0.54
-// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
+// @version      0.55
+// @description  Edit Percepto map entities (flight paths + FFZs) from the map. AGL VIEW (Shift+G): on Mountain-terrain (MSL) sites, an overlay over the native editor shows + edits altitudes as height-above-ground (AGL/Δ/MSL columns, color-coded, live-linked) — backend stays MSL; works for flight-path segments AND FFZ bands; also augments Percepto's hover ALT tooltip with AGL. Edit Percepto flight paths from the map while natively editing one: HOLD ALT to peek terrain — yellow elevation-check dots reveal near the cursor (paths can be hundreds of segments, so only nearby dots draw); hover one for live ground + AGL. (0) SMART ALTITUDE — as you draw an under-vertexed path, each new segment auto-gets a terrain-following band (highest ground under it +100/+30 ft, controllable) and, where the ground varies more than 30 ft, the tool inserts the fewest step vertices needed; a continuity bridge keeps connected segments overlapping by the 2 m the server requires. Auto-on-draw + a ⛰ Smart-fill button / Control Panel section to (re)analyze an existing path with a preview. (1) click any segment number to insert a vertex in the MIDDLE of that segment; (2) an "OPEN PATH" item in the double-click vertex popup un-closes a snapped/closed loop (reverses CLOSE PATH) — and on ANY other mid-path vertex it SEVERS the path there; then either delete the unwanted piece and Save, or use the red chip's "💾 Save as N separate paths" to keep BOTH pieces as independent flight paths (direct POST /map_objects/: largest piece keeps the original id+name, others created as <name>_splitN; JSON backup + create-before-trim ordering + fresh-fetch verify + mandatory refresh overlay; a validated path's pieces stay validated). After the refresh an AUTO-VERIFY re-audits the saved paths against a fresh server fetch and toasts the verdict (structure, counts, shape parity, validated flag). SEAMLESS (Path B): edits are spliced straight into the flight path's live React editor working copy, so they appear instantly as real draggable/branchable waypoints, coexist with native drags, and a native Save persists them — NO page refresh. Every edit passes a validation gate (abort + visible error on any malformed result) so we can never push a bad flight path into Percepto's state. Also auto-blocks Percepto's native "phantom vertex on drop" bug. DEV/personal.
 // @match        *://percepto.app/*
 // @match        https://percepto.app/static/dist/react-pages/*
 // @grant        GM_setValue
@@ -76,7 +76,7 @@
     // fewest possible) so each sub-segment stays within maxVar. A final continuity bridge
     // keeps connected segments overlapping by the 2 m the server demands. See the smart
     // block below + reference_map_objects_save_endpoint / feedback_percepto_location_altitude_endpoint.
-    const SCRIPT_VERSION = '0.54';
+    const SCRIPT_VERSION = '0.55';
     const SMART_SAMPLE_SPACING_FT = 100;  // terrain sampling along a segment (for split detection) — coarser = fewer rate-limited DEM calls
     const SMART_MAX_SAMPLES = 60;         // cap DEM calls per segment
     const SMART_MIN_STEP_FT = 60;         // never place auto-steps closer than this (avoid over-splitting)
@@ -2521,6 +2521,7 @@
             const b = mkBody(piece.arcs);
             delete b.id;
             b.name = piece.name;
+            b.validated = !!st.validated; // a split of a validated path starts validated (the auto-verify confirms the server kept it)
             b.arcs.forEach(a => { delete a.id; delete a.mapobject; }); // server assigns fresh ids on create
             created.push(await post(b, `create "${piece.name}"`));
         }
@@ -2541,6 +2542,14 @@
                 else if ((f.arcs || []).length !== piece.arcs.length) problems.push(`"${piece.name}" has ${(f.arcs || []).length} arcs (expected ${piece.arcs.length})`);
             }
         } catch (e) { problems.push(`verify fetch failed (${e && e.message || e}) — check the site after refresh`); }
+        // stash expectations so the post-refresh boot re-audits everything and toasts the verdict
+        try {
+            GM_setValue(SPLIT_VERIFY_KEY, JSON.stringify({
+                ts: Date.now(), siteId: plan.siteId, baseId: st.id, baseName: st.name,
+                keepArcs: plan.keep.length, validated: !!st.validated,
+                news: plan.news.map(p => ({ name: p.name, arcs: p.arcs.length })),
+            }));
+        } catch (e) { warn('could not stash the post-refresh verify record', e); }
         return { created, problems };
     }
     function showRefreshOverlay(msgHtml) {
@@ -2558,6 +2567,108 @@
         document.body.appendChild(o);
         o.querySelector('#aim-fpe-refresh-now').addEventListener('click', () => { try { window.top.location.reload(); } catch (e) { location.reload(); } });
         o.querySelector('#aim-fpe-refresh-skip').addEventListener('click', () => o.remove());
+    }
+
+    // ==================================================================
+    // SPLIT AUTO-VERIFY (v0.55) — after the post-split refresh, re-audit the
+    // saved paths automatically and toast the verdict. commitSplit stashes an
+    // expectation record (site, ids, names, arc counts, original validated
+    // flag) in GM storage; on boot we pick it up, fetch the site FRESH from
+    // the server, and run the full corruption battery (the same checks as
+    // ShortKeys/AIM_Split_Verify.js): checkFlightPath structural battery +
+    // duplicate segments, arc ownership/ids, distance drift, field-shape
+    // parity vs the native-born original, cross-piece disjointness, and the
+    // validated flag (a split of a validated path should stay validated —
+    // if the server reset it, the toast says to re-validate).
+    // ==================================================================
+    const SPLIT_VERIFY_KEY = 'aim_fpe_pending_split_verify';
+    const SPLIT_VERIFY_TTL_MS = 30 * 60 * 1000; // stale records die quietly
+    const arcKeyU = (a) => [nodeKey(a.point_a), nodeKey(a.point_b)].sort().join('|');
+    function auditSavedPath(fp) {
+        const errors = checkFlightPath(fp).slice(); // connectivity, coords↔arcs, zero-length, bands, overlap rule
+        const warns = [];
+        const seen = new Map(), ids = new Set();
+        (fp.arcs || []).forEach((a, i) => {
+            if (finitePt(a.point_a) && finitePt(a.point_b)) {
+                const k = arcKeyU(a);
+                if (seen.has(k)) errors.push(`segs ${seen.get(k) + 1} & ${i + 1} are duplicates`);
+                seen.set(k, i);
+            }
+            if (a.mapobject != null && String(a.mapobject) !== String(fp.id)) errors.push(`seg ${i + 1} owned by entity ${a.mapobject}, not ${fp.id} (cross-wired)`);
+            if (a.id != null) { if (ids.has(a.id)) errors.push(`duplicate arc id ${a.id}`); else ids.add(a.id); }
+            if (typeof a.distance === 'number' && finitePt(a.point_a) && finitePt(a.point_b)) {
+                const h = hav(a.point_a, a.point_b);
+                if (Math.abs(a.distance - h) > Math.max(2, h * 0.05)) warns.push(`seg ${i + 1} distance drift (stored ${a.distance.toFixed(1)} vs ${h.toFixed(1)} m)`);
+            }
+        });
+        return { errors, warns };
+    }
+    function shapeParityErrors(base, piece) {
+        const errs = [];
+        Object.keys(base).forEach(k => { if (!(k in piece)) errs.push(`"${piece.name}" missing entity field "${k}"`); });
+        const ba = (base.arcs || [])[0], pa = (piece.arcs || [])[0];
+        if (ba && pa) Object.keys(ba).forEach(k => { if (!(k in pa)) errs.push(`"${piece.name}" arcs missing field "${k}"`); });
+        return errs;
+    }
+    async function runPendingSplitVerify() {
+        let rec = null;
+        try { const raw = GM_getValue(SPLIT_VERIFY_KEY, null); if (raw) rec = JSON.parse(raw); } catch (e) {}
+        if (!rec) return;
+        if (Date.now() - rec.ts > SPLIT_VERIFY_TTL_MS) { try { GM_setValue(SPLIT_VERIFY_KEY, ''); } catch (e) {} return; }
+        const sid = topSiteId();
+        if (sid == null || String(sid) !== String(rec.siteId)) return; // wrong page — keep the record until they return (or TTL)
+        try { GM_setValue(SPLIT_VERIFY_KEY, ''); } catch (e) {} // one shot
+        try {
+            log(`post-split auto-verify: checking "${rec.baseName}" + ${rec.news.length} split piece(s) on site ${rec.siteId}…`);
+            const ents = await fetchSiteEntities(rec.siteId);
+            const errors = [], warns = [];
+            const base = ents.find(e => e && String(e.id) === String(rec.baseId));
+            if (!base) errors.push(`original "${rec.baseName}" missing from the site`);
+            else {
+                if ((base.arcs || []).length !== rec.keepArcs) errors.push(`"${rec.baseName}" has ${(base.arcs || []).length} segs (expected ${rec.keepArcs})`);
+                const r = auditSavedPath(base);
+                errors.push(...r.errors.map(m => `"${rec.baseName}": ${m}`));
+                warns.push(...r.warns.map(m => `"${rec.baseName}": ${m}`));
+            }
+            const baseVerts = new Set(); if (base) (base.arcs || []).forEach(a => { baseVerts.add(nodeKey(a.point_a)); baseVerts.add(nodeKey(a.point_b)); });
+            const baseArcKeys = new Set(); if (base) (base.arcs || []).forEach(a => baseArcKeys.add(arcKeyU(a)));
+            const found = [];
+            for (const n of rec.news) {
+                const e = ents.find(x => x && x.type === 15 && x.name === n.name);
+                if (!e) { errors.push(`new path "${n.name}" missing from the site`); continue; }
+                found.push(e);
+                if ((e.arcs || []).length !== n.arcs) errors.push(`"${n.name}" has ${(e.arcs || []).length} segs (expected ${n.arcs})`);
+                const r = auditSavedPath(e);
+                errors.push(...r.errors.map(m => `"${n.name}": ${m}`));
+                warns.push(...r.warns.map(m => `"${n.name}": ${m}`));
+                if (base) {
+                    errors.push(...shapeParityErrors(base, e));
+                    const dup = (e.arcs || []).filter(a => baseArcKeys.has(arcKeyU(a))).length;
+                    if (dup) errors.push(`${dup} segment(s) exist in BOTH "${rec.baseName}" and "${n.name}"`);
+                    let sharedV = 0; (e.arcs || []).forEach(a => { if (baseVerts.has(nodeKey(a.point_a))) sharedV++; if (baseVerts.has(nodeKey(a.point_b))) sharedV++; });
+                    if (sharedV) warns.push(`"${n.name}" shares ${sharedV} vertex position(s) with the original (0 expected after a sever)`);
+                }
+            }
+            // validated flag: a split of a validated path should stay validated on every piece
+            if (rec.validated) {
+                const lost = [base, ...found].filter(Boolean).filter(e => !e.validated).map(e => e.name);
+                if (lost.length) warns.push(`validated flag LOST on: ${lost.join(', ')} — re-validate (SUM → Bulk → Valid)`);
+            }
+            const desc = `${rec.baseName} (${rec.keepArcs} segs) + ${rec.news.map(n => `${n.name} (${n.arcs})`).join(' + ')}`;
+            if (errors.length) {
+                warn('SPLIT AUTO-VERIFY ERRORS:', errors, 'warnings:', warns);
+                toast(`⛔ Split verify: ${errors.length} ERROR(S) — ${errors[0]} · full list in console [AIM FPE]. Do NOT fly until resolved.`, '#ff8a80', 20000);
+            } else if (warns.length) {
+                warn('SPLIT AUTO-VERIFY warnings (no errors):', warns);
+                toast(`✓ Split healthy — ${desc} · ⚠ ${warns[0]}${warns.length > 1 ? ` (+${warns.length - 1} more in console)` : ''}`, '#ffd479', 15000);
+            } else {
+                log(`SPLIT AUTO-VERIFY clean — ${desc}`);
+                toast(`✓ Split verified healthy — ${desc}. All structural checks passed.`, '#5fff5f', 12000);
+            }
+        } catch (e) {
+            warn('post-refresh split verify failed to run', e);
+            toast('⚠ Split auto-verify could not run — paste ShortKeys/AIM_Split_Verify.js in the console to check manually.', '#ffd479', 10000);
+        }
     }
 
     // ---- boot ----
@@ -2592,6 +2703,10 @@
     // Severed-path safety net: warning chip poll + capture-phase SAVE confirm.
     setInterval(() => { try { updateSeverChip(); } catch (e) {} }, 1200);
     document.addEventListener('click', onSaveClickGuard, true);
+    // Post-split auto-verify: if the last session split-saved a path, re-audit
+    // it against a fresh server fetch and toast the verdict (small settle delay
+    // so the page is mounted; the fetch itself doesn't need the map).
+    setTimeout(() => { runPendingSplitVerify(); }, 3500);
     let bootTries = 0;
     const bootIv = setInterval(() => { bootTries++; hookPopups(); if (popupHooked || bootTries > 80) clearInterval(bootIv); }, 700);
     log(`v${SCRIPT_VERSION} ready (iframe) — SMART ALTITUDE (terrain-following auto band + greedy auto-step: ground +${settings.floorFt}/${settings.floorFt + settings.bandFt} ft, steps where ground varies >${settings.maxVarFt} ft; auto-on-draw=${settings.autoDraw}, master=${settings.master}) · HOLD ALT while editing = elevation peek (yellow terrain dots near the cursor, hover for ground/AGL) · ⛰ Smart-fill button / Control Panel for an existing path · split (click a segment number) + OPEN PATH (vertex popup: opens a loop, or SEVERS any mid-path vertex — delete the freed piece then Save, or 💾 Save as separate paths via the red chip; SAVE guard while in pieces) · every edit runs a pre-write gate AND a post-write integrity check (auto-reverts on any new problem) · window.__aim_fpe_check() reports path health · auto-blocks the native phantom-vertex-on-drop bug`);

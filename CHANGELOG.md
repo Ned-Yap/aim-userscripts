@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-10 — Map Editor: split auto-verify after refresh + validated carries over — Map Editor v0.55 (dev/latest, personal)
+
+After a split-save + refresh, the editor now **re-audits the saved paths automatically** against a fresh server fetch and toasts the verdict — green "✓ Split verified healthy" when every check passes, amber with the first warning, or a long red toast on any error (full list under `[AIM FPE]` in the console). Checks are the same battery as the manual `AIM_Split_Verify.js` snippet: connectivity, coords↔segments consistency, zero-length/duplicate segments, altitude-band rules, segment ownership + fresh ids, distance sanity, field-shape parity vs the original, cross-piece disjointness, and expected segment counts. Also: a **validated** path's pieces are now explicitly saved validated (and the auto-verify confirms the server kept the flag — if Percepto reset it, the toast says to re-validate).
+
 ## 2026-07-10 — Map Editor: 💾 Save a severed path as SEPARATE flight paths — Map Editor v0.53 (dev/latest, personal)
 
 Completes the airport cut-out workflow: after OPEN PATH ✂ severs a path into pieces, the red "in N pieces" chip now offers **💾 Save as N separate paths**. A preview modal shows every piece (segments + length); the **largest piece keeps the original name + id** (so mission references survive), each other piece is created as a brand-new flight path named `<name>_split1`, `_split2`, … (uniqued against the site's existing entity names). Saves go through the proven direct site-setup API with full rails: a JSON backup of the original downloads before any write, **new pieces are created BEFORE the original is trimmed** (a mid-run failure can leave a harmless duplicate but can never lose geometry), every write's response is checked, a fresh fetch verifies final segment counts, and a blocking overlay forces a refresh at the end (the still-open native editor holds the old path and must not be saved). Per-arc altitude bands ride along untouched.
