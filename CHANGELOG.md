@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-11 — Advanced Draw: ↩ Unmerge no longer eats earlier pads — Asset Inspector v4.182 (dev/latest)
+
+**Critical data-loss fix.** With multiple 🔗 Merge presses in one session, ↩ Unmerge dropped every merged shape but only restored the pieces from the *most recent* merge — silently discarding every pad merged earlier — and the autosave then overwrote the recovery backup with the wiped state (lost a 43-pad drawing session on site 1591; recovered forensically from Chrome's LevelDB history). Three fixes: (1) the Unmerge stash is now **cumulative** across merges, so Unmerge always restores every piece that went into the current merged shapes; (2) a **shrink guard** — any autosave that drops more than half the drafts preserves the bigger prior backup in a `aim_adv_ffzs_prewipe:<site>` key before overwriting; (3) `__aimAdvRestoreBackup()` now restores whichever backup (regular or prewipe) holds more drafts and names its source. Also includes in-progress Lite-mode read-only gating (parallel work, inert while `aim-mode=full`).
+
 ## 2026-07-10 — Map Editor: split auto-verify after refresh + validated carries over — Map Editor v0.55 (dev/latest, personal)
 
 After a split-save + refresh, the editor now **re-audits the saved paths automatically** against a fresh server fetch and toasts the verdict — green "✓ Split verified healthy" when every check passes, amber with the first warning, or a long red toast on any error (full list under `[AIM FPE]` in the console). Checks are the same battery as the manual `AIM_Split_Verify.js` snippet: connectivity, coords↔segments consistency, zero-length/duplicate segments, altitude-band rules, segment ownership + fresh ids, distance sanity, field-shape parity vs the original, cross-piece disjointness, and expected segment counts. Also: a **validated** path's pieces are now explicitly saved validated (and the auto-verify confirms the server kept the flag — if Percepto reset it, the toast says to re-validate).

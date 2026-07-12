@@ -2,7 +2,7 @@
 // @name         Latest - AIM Copy Asset Name
 // @name:en      Latest - AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.181
+// @version      4.182
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -36,22 +36,35 @@
 (function() {
     'use strict';
 
-    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
-    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
-    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
-    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
-    try {
-        if (localStorage.getItem('aim-mode') !== 'full') {
-            console.log('[AIM SITE SETUP] Lite mode — CSM tool inert, init skipped.');
-            return;
-        }
-    } catch (e) {}
+    // --- AIM Lite/Full gate. FULL (CSM) = every tool. LITE (pilots/regs) =
+    // partial init: read-only Site Setup Summary + inspector + exports +
+    // presets + SOP & Airspace validators ONLY. EVERY site-write path
+    // (inline edit, Apply queue, Bulk *, auto-AGL, ⊕ Generate, ✦ Advanced
+    // Draw, Airspace Create-GMs, delete) is gated — see the LITE guards on the
+    // write functions + the write-button hiding in renderSummaryPanel. Was a
+    // full bail; now a partial init so pilots get the read-only details. The
+    // ONLY site-writes pilots keep (Issues + Power Line Editor) live in other
+    // scripts. Toggling mode reloads the page, so this re-evaluates cleanly. ---
+    let LITE = false;
+    try { LITE = (localStorage.getItem('aim-mode') !== 'full'); } catch (e) {}
+    if (LITE) console.log('[AIM SITE SETUP] Lite mode — read-only surfaces + validators only; all site-write tools gated.');
 
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
+    // LITE backstop: called at the top of every site-write function. In Lite
+    // mode it toasts + returns true (caller must early-return). This is the
+    // defense-in-depth guarantee — even if a write UI slips through, the actual
+    // /map_objects/ POST/DELETE never runs for a pilot.
+    function liteBlockedWrite(action) {
+        if (!LITE) return false;
+        console.log(`${TAG} Lite mode — blocked site-write: ${action || 'edit'}`);
+        try { showToast('Read-only in Lite mode — CSM access needed to edit the site.', 'rgba(255,180,0,0.6)'); } catch (e) {}
+        return true;
+    }
+
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.181';
+    const SCRIPT_VERSION = '4.182';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -3120,7 +3133,7 @@
                 <span style="color:#7adfe6;font-weight:700;">🛩 Airspace Check</span>
                 <span style="opacity:0.7;">${airEsc(siteName || `site ${sid}`)}</span>
                 <span style="flex:1"></span>
-                ${(inv.obstacles || []).some(o => o.hit) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
+                ${((inv.obstacles || []).some(o => o.hit) && !LITE) ? '<button data-air-gms title="Create General Markers at the flagged obstacles" style="background:none;border:1px solid rgba(95,255,95,0.5);color:#5fff5f;border-radius:5px;padding:2px 8px;cursor:pointer;">📍 Create GMs</button>' : ''}
                 <button data-air-copy style="background:none;border:1px solid rgba(122,223,230,0.4);color:#7adfe6;border-radius:5px;padding:2px 8px;cursor:pointer;">Copy report</button>
                 <button data-air-close style="background:none;border:none;color:#dfe9f0;font-size:15px;cursor:pointer;">✕</button>
             </div>
@@ -3332,6 +3345,7 @@
         return plan;
     }
     async function airCreateGms(plan, sid) {
+        if (liteBlockedWrite('create GMs')) return { created: 0, failed: 0, errors: [] };
         const out = { created: 0, failed: 0, errors: [] };
         const csrf = getCsrfToken();
         if (!csrf) { out.errors.push('no csrftoken cookie — cannot authenticate'); return out; }
@@ -5646,6 +5660,7 @@
     // qualify; assets/NFZs/markers do not (different Percepto editor
     // surface, deferred to a future version).
     function isEditableRow(r) {
+        if (LITE) return false;                 // Lite = read-only: no editable cells
         if (!r || !r.entity) return false;
         if (r._isSegment && r.arc) return true;
         if (r.type === 16) return true;
@@ -6307,6 +6322,7 @@
     // Run; clicking either invokes opts.onLaunch({dryRun}).
     const APPLY_LAUNCHER_ID = 'aim-ai-apply-launcher';
     function openApplyLauncher(cfg) {
+        if (liteBlockedWrite('apply edits')) return;
         closeApplyLauncher();
         const { editCount, groupCount, fpCount, ffzCount, astCount = 0, warnings, onLaunch } = cfg;
         const m = document.createElement('div');
@@ -6930,6 +6946,7 @@
     // POST one entity group directly. Returns the same outcome shape as
     // applyOneEntity: { ok, reason, appliedCount, verified, structural }.
     async function applyOneEntityDirect(group, opts) {
+        if (liteBlockedWrite('apply entity')) return { ok: false, blocked: true };
         const { dryRun } = opts || {};
         const label = group.entityName || '(unnamed)';
         const siteID = getCurrentSiteID();
@@ -7136,6 +7153,7 @@
     // One-click restore: re-POST every snapshotted body verbatim. Exposed
     // as window.__aim_ai_rollback() and wired to the report modal button.
     async function rollbackDirectApiRun(snap) {
+        if (liteBlockedWrite('rollback')) return;
         snap = snap || window.__aim_ai_directApiRollback;
         if (!snap || !Array.isArray(snap.entities) || !snap.entities.length) {
             console.warn(`${TAG} ⚡ no rollback snapshot available`);
@@ -7266,6 +7284,7 @@
     // time. Calls onProgress(state) on every step so the UI can
     // update. Honors applyState.aborted between groups.
     async function runApplyPipeline(onProgress, opts) {
+        if (liteBlockedWrite('apply pipeline')) return;
         const { dryRun, directApi } = opts || {};
         const groups = groupPendingByEntity();
         // v4.70: the editor path can't toggle the pilot Validation flag —
@@ -8189,6 +8208,7 @@
         }
     }
     function injectGenMapButton(doc) {
+        if (LITE) return;   // ⊕ Generator / Advanced Draw toolbar entry = write, CSM-only
         try {
             const tools = doc.querySelector('.map-tools');
             if (!tools) return;
@@ -12325,14 +12345,26 @@
                 localStorage.setItem(advFfzKey(), json);
                 // ALSO mirror to a NEVER-cleared backup on every non-empty save, so a commit/reload can
                 // never lose your work — __aimAdvRestoreBackup() always has the last drawn state.
-                try { localStorage.setItem('aim_adv_ffzs_backup:' + (genState.siteID || '?'), json); } catch (e) {}
+                // SHRINK GUARD (2026-07-11 unmerge wipe): a save that drops more than half the drafts
+                // first preserves the bigger prior backup in a prewipe key, so a buggy bulk-vanish can
+                // never poison the only backup. __aimAdvRestoreBackup restores the larger of the two.
+                try {
+                    const sid = genState.siteID || '?';
+                    const prevRaw = localStorage.getItem('aim_adv_ffzs_backup:' + sid);
+                    if (prevRaw) {
+                        const prevN = ((JSON.parse(prevRaw) || []).length) || 0;
+                        if (prevN > 2 && slim.length <= prevN / 2) localStorage.setItem('aim_adv_ffzs_prewipe:' + sid, prevRaw);
+                    }
+                    localStorage.setItem('aim_adv_ffzs_backup:' + sid, json);
+                } catch (e) {}
             } else {
                 localStorage.removeItem(advFfzKey()); // live key only — the backup is left intact on purpose
             }
         } catch (e) {}
     }
-    // Recovery: copy the pre-commit backup back into the live autosave, then reopen the ⊕ modal.
-    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const b = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); if (!b) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } localStorage.setItem('aim_adv_ffzs:' + siteID, b); const n = (JSON.parse(b) || []).length; (uwin().console || console).log('[AIM] restored ' + n + ' draft(s) — reopen the ⊕ Generate modal to see them'); return n; }; } catch (e) {}
+    // Recovery: copy the best backup (regular or prewipe — whichever holds MORE drafts) back into
+    // the live autosave, then reopen the ⊕ modal. The prewipe key is written by the shrink guard.
+    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const cands = ['aim_adv_ffzs_backup:' + siteID, 'aim_adv_ffzs_prewipe:' + siteID].map(k => { let raw = null, n = 0; try { raw = localStorage.getItem(k); n = ((JSON.parse(raw) || []).length) || 0; } catch (e) {} return { k, raw, n }; }).filter(c => c.raw && c.n).sort((a, b) => b.n - a.n); if (!cands.length) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } const best = cands[0]; localStorage.setItem('aim_adv_ffzs:' + siteID, best.raw); (uwin().console || console).log('[AIM] restored ' + best.n + ' draft(s) from ' + best.k + ' — reopen the ⊕ Generate modal to see them'); return best.n; }; } catch (e) {}
     function advLoadFfzs(siteID) {
         try {
             // Live key first; if it was wiped, AUTO-FALL-BACK to the never-cleared backup so reopening
@@ -12436,6 +12468,7 @@
         renderGenMidMarkers();
     }
     function startGenVertEdit(f) {
+        if (liteBlockedWrite('edit points')) return false;
         if (!f || f._committed || !Array.isArray(f.points) || f.points.length < 3) return false;
         if (genVertEdit.active) exitGenVertEdit(false);
         genVertEdit.resumeAdv = !!advDraw.active;
@@ -12740,7 +12773,7 @@
                 const L2 = getLeafletL();
                 if (!L2 || !map) return;
                 const pop = L2.popup({ closeButton: true, autoClose: true, autoPan: false }).setLatLng(e.latlng).setContent(ffzTooltipHtml(poly._ffz)).openOn(map);
-                if (poly._ffz && !poly._ffz._committed) {
+                if (poly._ffz && !poly._ffz._committed && !LITE) {   // Edit points = write, CSM-only
                     const el = pop.getElement && pop.getElement();
                     const host = el && el.querySelector('.leaflet-popup-content');
                     if (host) {
@@ -12881,6 +12914,7 @@
     // POST each draft FFZ to /map_objects/ (cookie + CSRF). dryRun builds +
     // counts without writing. Returns { created, failed, skipped, ids, errors }.
     async function commitGeneratedFfzs(ffzs, opts) {
+        if (liteBlockedWrite('generate/commit FFZs')) return;
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
         const res = { created: 0, updated: 0, failed: 0, skipped: 0, invalid: 0, ids: [], errors: [], merged: [], dryRun };
@@ -13013,6 +13047,7 @@
     // body (id + every field preserved), overwrites only points + the DEM-
     // recomputed altitude band; per-edit validated prompt; rollback file first.
     async function commitExistingFfzEdits(opts) {
+        if (liteBlockedWrite('commit FFZ edits')) return;
         const dryRun = !!(opts && opts.dryRun);
         const siteID = genState.siteID;
         const res = { updated: 0, failed: 0, errors: [], dryRun, validatedCount: 0, validatedReset: 0, validatedKept: 0 };
@@ -13524,8 +13559,14 @@
                 if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
                 const writes = fuseCorridorGroups(ffzs).filter(w => w.kind === 'create' && Array.isArray(w.points) && w.points.length >= 3);
                 if (!writes.length) { showToast('Merge produced nothing', 'rgba(255,82,82,0.6)'); return; }
-                // Stash the editable (non-merged) pieces so Unmerge restores them.
-                genMergeStash = pieces.filter(p => !p._merged).map(advFfzSlim);
+                // Stash the editable (non-merged) pieces so Unmerge restores them. CUMULATIVE across
+                // merges (2026-07-11 wipe): merged shapes absorb every earlier batch, so Unmerge must
+                // restore ALL pieces ever merged this arc — stashing only the LAST batch made Unmerge
+                // silently discard every prior pad. Dedup by points; Commit clears the stash.
+                const newStash = pieces.filter(p => !p._merged).map(advFfzSlim);
+                const priorStash = Array.isArray(genMergeStash) ? genMergeStash : [];
+                const stashSeen = new Set(newStash.map(s => JSON.stringify(s.points)));
+                genMergeStash = priorStash.filter(s => s && Array.isArray(s.points) && !stashSeen.has(JSON.stringify(s.points))).concat(newStash);
                 try { if (genMergeStash.length) localStorage.setItem('aim_adv_premerge:' + genState.siteID, JSON.stringify(genMergeStash)); } catch (e) {}
                 pieces.forEach(m => {
                     if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }
@@ -14325,7 +14366,7 @@
             ev.stopPropagation();
             openSiteGenerator(siteID);
         };
-        optsRow.appendChild(generateBtn);
+        if (!LITE) optsRow.appendChild(generateBtn);   // ⊕ Generate — write, CSM-only
 
         // v3.88: 📍 Base picker — choose the basestation GM used by the Route
         // column. Auto-detected (name contains "base") unless overridden per site.
@@ -15174,7 +15215,7 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(bulkBtn);
+        if (!LITE) optsRow.appendChild(bulkBtn);        // Bulk → AGL — write, CSM-only
 
         // --- Bulk → Delta button ---
         // Queues a Max Alt = Min Alt + targetDelta edit for every
@@ -15210,7 +15251,7 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(deltaBtn);
+        if (!LITE) optsRow.appendChild(deltaBtn);       // Bulk → Delta — write, CSM-only
 
         // --- Bulk → Min / Bulk → Max buttons ---
         // Set an ABSOLUTE Min (or Max) Alt across every eligible FP segment +
@@ -15245,14 +15286,14 @@
         minBtn.title = 'Set an absolute Min Alt across FP segments + FFZs (selected, or all)';
         minBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(minBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'min_alt'));
-        optsRow.appendChild(minBtn);
+        if (!LITE) optsRow.appendChild(minBtn);         // Bulk → Min — write, CSM-only
         const maxBtn = document.createElement('button');
         maxBtn.type = 'button';
         maxBtn.textContent = 'Bulk → Max';
         maxBtn.title = 'Set an absolute Max Alt across FP segments + FFZs (selected, or all)';
         maxBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(maxBtn, (anchor, onClose) => buildBulkMinMaxPopover(anchor, onClose, 'max_alt'));
-        optsRow.appendChild(maxBtn);
+        if (!LITE) optsRow.appendChild(maxBtn);         // Bulk → Max — write, CSM-only
 
         // --- v3.53: Bulk → Subtype button ---
         // Queues a subtype edit for every selected asset row (or all asset
@@ -15287,7 +15328,7 @@
             };
             setTimeout(() => document.addEventListener('mousedown', onDocClick, true), 0);
         };
-        optsRow.appendChild(subBtn);
+        if (!LITE) optsRow.appendChild(subBtn);         // Bulk → Subtype — write, CSM-only
 
         // --- v4.174: 📥 Paste Subtypes button ---
         // Spreadsheet-driven subtype updates: paste two columns
@@ -15302,7 +15343,7 @@
         pasteSubBtn.title = 'Paste Name + Subtype columns from a spreadsheet; matches assets by name and queues subtype edits';
         pasteSubBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(pasteSubBtn, (anchor, onClose) => buildBulkSubtypePastePopover(anchor, onClose));
-        optsRow.appendChild(pasteSubBtn);
+        if (!LITE) optsRow.appendChild(pasteSubBtn);    // paste subtype — write, CSM-only
 
         // --- v4.175: 👁 Subtypes button — MAP-level asset visibility by
         // subtype. Batch-drives Percepto's sidebar checkboxes (the map
@@ -15313,7 +15354,7 @@
         subVisBtn.title = 'Show/hide assets ON THE MAP by subtype (drives the sidebar checkboxes)';
         subVisBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(subVisBtn, (anchor, onClose) => buildSubtypeVisibilityPopover(subVisBtn, onClose));
-        optsRow.appendChild(subVisBtn);
+        if (!LITE) optsRow.appendChild(subVisBtn);      // 👁 Subtypes — drives Percepto checkboxes; gated in Lite (borderline)
 
         // --- v4.70: Bulk → Valid button ---
         // Bulk-flips the PILOT VALIDATION flag (entity.validated) ON/OFF
@@ -15329,7 +15370,7 @@
         validBtn.title = 'Set the pilot Validation flag ✓/✗ across FFZs + FPs (selected, or all)';
         validBtn.style.cssText = bulkBtnStyle;
         attachBulkPopover(validBtn, (anchor, onClose) => buildBulkValidatePopover(anchor, onClose));
-        optsRow.appendChild(validBtn);
+        if (!LITE) optsRow.appendChild(validBtn);       // Bulk → Valid — write, CSM-only
 
         // Popover: pick a target (✓ Valid / ✗ Invalid), scope, and entity-
         // type filter, preview the count, then queue one validated edit per
@@ -18026,6 +18067,7 @@
     //   for the popup path so it can close itself; the SUM table path
     //   redraws via window.__aim_ai_redrawTable).
     function startInlineSubtypeEdit(td, entity, onCommit) {
+        if (LITE) return;                        // Lite = read-only
         if (!entity || entity.type !== 3) return;
         // v3.43: starting an edit implicitly means "I'm focused on this
         // asset" — pan the map to it so the user can see the entity
@@ -18139,6 +18181,7 @@
     // — names are unique-by-intent, no autocomplete needed). Same click-
     // propagation guards as subtype edit. Auto-pans to entity on edit.
     function startInlineNameEdit(td, entity, onCommit) {
+        if (LITE) return;                        // Lite = read-only
         if (!entity) return;
         try { panToEntity(entity); } catch (e) {}
         const eff = effectiveName(entity);
