@@ -2,7 +2,7 @@
 // @name         AIM Copy Asset Name
 // @name:en      AIM Site Setup Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.164.2
+// @version      4.164.3
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Copy_Asset_Name.user.js
 // @description  Site Setup toolkit: right-click any entity to inspect it, the Site Setup Summary (SUM) panel for the whole site, bulk altitude/validation edits, KML analyzer, and SOP validators. Replaces the old Shift+Ctrl+Q "Copy Asset Name" hotkey. Display name: "AIM Site Setup Tools".
@@ -51,7 +51,7 @@
     const TAG = `[AIM SITE SETUP ${CONTEXT}]`;
 
     const SCRIPT_ID = 'aim-copy-asset'; // preserved for prefs continuity
-    const SCRIPT_VERSION = '4.164.2';
+    const SCRIPT_VERSION = '4.164.3';
     // v3.58: log SCRIPT_VERSION instead of hardcoded "v2.0" so updates
     // are visible in the console (was stuck reading "v2.0 loading" for
     // ~50 versions, which made auto-update verification impossible).
@@ -11890,14 +11890,26 @@
                 localStorage.setItem(advFfzKey(), json);
                 // ALSO mirror to a NEVER-cleared backup on every non-empty save, so a commit/reload can
                 // never lose your work — __aimAdvRestoreBackup() always has the last drawn state.
-                try { localStorage.setItem('aim_adv_ffzs_backup:' + (genState.siteID || '?'), json); } catch (e) {}
+                // SHRINK GUARD (2026-07-11 unmerge wipe): a save that drops more than half the drafts
+                // first preserves the bigger prior backup in a prewipe key, so a buggy bulk-vanish can
+                // never poison the only backup. __aimAdvRestoreBackup restores the larger of the two.
+                try {
+                    const sid = genState.siteID || '?';
+                    const prevRaw = localStorage.getItem('aim_adv_ffzs_backup:' + sid);
+                    if (prevRaw) {
+                        const prevN = ((JSON.parse(prevRaw) || []).length) || 0;
+                        if (prevN > 2 && slim.length <= prevN / 2) localStorage.setItem('aim_adv_ffzs_prewipe:' + sid, prevRaw);
+                    }
+                    localStorage.setItem('aim_adv_ffzs_backup:' + sid, json);
+                } catch (e) {}
             } else {
                 localStorage.removeItem(advFfzKey()); // live key only — the backup is left intact on purpose
             }
         } catch (e) {}
     }
-    // Recovery: copy the pre-commit backup back into the live autosave, then reopen the ⊕ modal.
-    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const b = localStorage.getItem('aim_adv_ffzs_backup:' + siteID); if (!b) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } localStorage.setItem('aim_adv_ffzs:' + siteID, b); const n = (JSON.parse(b) || []).length; (uwin().console || console).log('[AIM] restored ' + n + ' draft(s) — reopen the ⊕ Generate modal to see them'); return n; }; } catch (e) {}
+    // Recovery: copy the best backup (regular or prewipe — whichever holds MORE drafts) back into
+    // the live autosave, then reopen the ⊕ modal. The prewipe key is written by the shrink guard.
+    try { uwin().__aimAdvRestoreBackup = function (siteID) { siteID = siteID || (genState && genState.siteID); const cands = ['aim_adv_ffzs_backup:' + siteID, 'aim_adv_ffzs_prewipe:' + siteID].map(k => { let raw = null, n = 0; try { raw = localStorage.getItem(k); n = ((JSON.parse(raw) || []).length) || 0; } catch (e) {} return { k, raw, n }; }).filter(c => c.raw && c.n).sort((a, b) => b.n - a.n); if (!cands.length) { (uwin().console || console).log('[AIM] no draft backup found for site ' + siteID); return 0; } const best = cands[0]; localStorage.setItem('aim_adv_ffzs:' + siteID, best.raw); (uwin().console || console).log('[AIM] restored ' + best.n + ' draft(s) from ' + best.k + ' — reopen the ⊕ Generate modal to see them'); return best.n; }; } catch (e) {}
     function advLoadFfzs(siteID) {
         try {
             // Live key first; if it was wiped, AUTO-FALL-BACK to the never-cleared backup so reopening
@@ -13089,8 +13101,14 @@
                 if (!pieces.length) { showToast('Nothing to merge — draw some corridors first', 'rgba(255,179,71,0.6)'); return; }
                 const writes = fuseCorridorGroups(ffzs).filter(w => w.kind === 'create' && Array.isArray(w.points) && w.points.length >= 3);
                 if (!writes.length) { showToast('Merge produced nothing', 'rgba(255,82,82,0.6)'); return; }
-                // Stash the editable (non-merged) pieces so Unmerge restores them.
-                genMergeStash = pieces.filter(p => !p._merged).map(advFfzSlim);
+                // Stash the editable (non-merged) pieces so Unmerge restores them. CUMULATIVE across
+                // merges (2026-07-11 wipe): merged shapes absorb every earlier batch, so Unmerge must
+                // restore ALL pieces ever merged this arc — stashing only the LAST batch made Unmerge
+                // silently discard every prior pad. Dedup by points; Commit clears the stash.
+                const newStash = pieces.filter(p => !p._merged).map(advFfzSlim);
+                const priorStash = Array.isArray(genMergeStash) ? genMergeStash : [];
+                const stashSeen = new Set(newStash.map(s => JSON.stringify(s.points)));
+                genMergeStash = priorStash.filter(s => s && Array.isArray(s.points) && !stashSeen.has(JSON.stringify(s.points))).concat(newStash);
                 try { if (genMergeStash.length) localStorage.setItem('aim_adv_premerge:' + genState.siteID, JSON.stringify(genMergeStash)); } catch (e) {}
                 pieces.forEach(m => {
                     if (m._poly) { try { if (map) map.removeLayer(m._poly); } catch (e) {} const k = genPreviewLayers.indexOf(m._poly); if (k >= 0) genPreviewLayers.splice(k, 1); }

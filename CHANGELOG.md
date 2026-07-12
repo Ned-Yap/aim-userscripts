@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-11 — Advanced Draw: ↩ Unmerge no longer eats earlier pads — Asset Inspector v4.164.3 (PROD) / v4.182 (dev/latest)
+
+**PROD hotfix — same fix as v4.182 below, applied to the prod script so coworkers get it on their next Tampermonkey update.** If you use ✦ Advanced Draw: before this fix, pressing ↩ Unmerge after more than one 🔗 Merge could silently discard every pad from the earlier merges. Update ASAP; until then, avoid ↩ Unmerge if you've pressed 🔗 Merge more than once in a session.
+
 ## 2026-07-11 — Advanced Draw: ↩ Unmerge no longer eats earlier pads — Asset Inspector v4.182 (dev/latest)
 
 **Critical data-loss fix.** With multiple 🔗 Merge presses in one session, ↩ Unmerge dropped every merged shape but only restored the pieces from the *most recent* merge — silently discarding every pad merged earlier — and the autosave then overwrote the recovery backup with the wiped state (lost a 43-pad drawing session on site 1591; recovered forensically from Chrome's LevelDB history). Three fixes: (1) the Unmerge stash is now **cumulative** across merges, so Unmerge always restores every piece that went into the current merged shapes; (2) a **shrink guard** — any autosave that drops more than half the drafts preserves the bigger prior backup in a `aim_adv_ffzs_prewipe:<site>` key before overwriting; (3) `__aimAdvRestoreBackup()` now restores whichever backup (regular or prewipe) holds more drafts and names its source. Also includes in-progress Lite-mode read-only gating (parallel work, inert while `aim-mode=full`).
