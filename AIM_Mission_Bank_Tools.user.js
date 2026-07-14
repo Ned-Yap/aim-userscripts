@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.46
+// @version      1.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -109,13 +109,45 @@
 (function () {
     'use strict';
 
+    // --- AIM Pilot mode guard: stay fully inert when a pilot/regulator has
+    // turned on Pilot mode in the Control Panel (shared localStorage flag). No
+    // observers/intervals/hotkeys/DOM injection start past this point. Toggling
+    // Pilot mode reloads the page, so this re-evaluates cleanly each load. ---
+    try {
+        if (localStorage.getItem('aim-mode') !== 'full') {
+            console.log('[AIM MB TOOLS] Lite mode — CSM tool inert, init skipped.');
+            return;
+        }
+    } catch (e) {}
+
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.46';
+    const SCRIPT_VERSION = '1.97';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
     const dlog = (...args) => { if (DEBUG()) console.log(...args); };
     const TAG = '[AIM MB TOOLS]';
+    // v1.90 perf instrumentation — counters reported to console every 5s while
+    // the mission editor is doing work, so live slowness can be attributed to a
+    // specific pathway (observer passes / tick passes / card writes / node
+    // re-creation ping-pong / elevation lookups) instead of guessed at.
+    const MB_PERF = { obs: 0, ticks: 0, collapsePasses: 0, collapseMs: 0, cardWrites: 0, cxCreates: 0, markerPasses: 0, markerMs: 0, elevLook: 0, elevKicks: 0 };
+    // Per-step ground memo (ground elevation for a fixed lat/lng never changes):
+    // stops the compact-card tick from re-hitting the shared elevation cache —
+    // whose miss path is a getNearest LINEAR SCAN — for every card every 700ms.
+    const stepElevMemo = {};
+    const stepElevMissAt = {};
+    const STEP_ELEV_MISS_COOLDOWN = 5000;
+    // Per-location cooldown for display-driven fetch kicks (the queue dedupes
+    // in-flight, but a large mission re-kicked every uncached point every tick).
+    const elevKickAt = {};
+    const ELEV_KICK_COOLDOWN = 15000;
+    // v1.91: card AGL refresh is demand-driven, not per-tick. cxAglPending is
+    // recomputed on every collapse pass (true while any card still shows the
+    // MSL placeholder because its ground elevation hasn't arrived) — the tick
+    // only re-renders while it's true, at a slow cadence, then goes idle.
+    let cxAglPending = false;
+    let liveTickN = 0;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const SUM_BTN_ID = 'aim-mb-sum-btn';
@@ -193,6 +225,7 @@
     // on-map banner + a warning toast while it's ON. The default AGL itself is
     // persisted (Control Panel "Default snapshot AGL").
     let autoSnapAglEnabled = false;
+    let renameSuppressAutoAgl = 0; // >0 while an inline rename saves — handleMissionSave skips the auto-AGL pass so a rename never re-floats snapshots
     const CACHE_KEY_DEFAULT_SNAP_AGL = 'aim-mb-default-snap-agl';
     let defaultSnapAglFt = gmGet(CACHE_KEY_DEFAULT_SNAP_AGL, 10);
     // Editor compact-card altitude view: AGL (ground-relative) vs MSL (stored).
@@ -200,6 +233,8 @@
     // the editor button row. Persisted.
     const CACHE_KEY_AGL_VIEW = 'aim-mb-editor-agl-view';
     let showAglInEditor = gmGet(CACHE_KEY_AGL_VIEW, true);
+    const CACHE_KEY_HIDE_FLAGPOLE = 'aim-mb-hide-flagpole';
+    let hideFlagPoleOverlay = gmGet(CACHE_KEY_HIDE_FLAGPOLE, false);
 
     // Battery → flights mapping. User's IFS formula:
     //   > 560 → 7, > 480 → 6, > 360 → 5, > 270 → 4, > 180 → 3, >= 90 → 2, else 1
@@ -284,6 +319,23 @@
                             try { updateEditorCollapseBtn(); } catch (e) {}
                         }
                     }
+                } else if (msg.toggleId === 'map-step-badges') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== composerMapMode) {
+                        composerMapMode = v;
+                        gmSet(CACHE_KEY_MAP_BADGES, composerMapMode);
+                        if (CONTEXT === 'IFRAME') {
+                            if (composerMapMode) { try { composerEnsureMapModeIfNeeded(); } catch (e) {} }
+                            else { try { composerBadgesTeardown(); } catch (e) {} }
+                        }
+                    }
+                } else if (msg.toggleId === 'hide-flagpole-overlay') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== hideFlagPoleOverlay) {
+                        hideFlagPoleOverlay = v;
+                        gmSet(CACHE_KEY_HIDE_FLAGPOLE, hideFlagPoleOverlay);
+                        if (CONTEXT === 'IFRAME') try { applyFlagPoleOverlayHide(); } catch (e) {}
+                    }
                 } else if (msg.toggleId === 'default-snap-agl') {
                     const v = Number(msg.value !== undefined ? msg.value : msg.enabled);
                     if (isFinite(v) && v !== defaultSnapAglFt) {
@@ -302,6 +354,9 @@
                         }
                     }
                 }
+            } else if (msg.type === 'HOTKEY_FIRED' && msg.scriptId === SCRIPT_ID) {
+                // Editor lives in the IFRAME — toggle Click-to-Add there only.
+                if (CONTEXT === 'IFRAME' && msg.hotkeyId === 'toggle-click-add') { try { caSetMode(!caModeOn); } catch (e) {} }
             } else if (msg.type === 'SET_TOGGLE' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
                 handleMissionSopToggle(msg);
             } else if (msg.type === 'TRIGGER_ACTION' && msg.scriptId === MISSION_SOP_SCRIPT_ID) {
@@ -325,6 +380,8 @@
                 { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
                 { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
+                { id: 'map-step-badges', label: 'N#/S# map step badges + Click-to-Add (OFF = perf test)', type: 'boolean', default: true },
+                { id: 'hide-flagpole-overlay', label: 'Hide Flag Pole scan overlay (blue cone)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
                 { id: 'color-nav', label: 'Navigate', type: 'color', default: STEP_COLOR_DEFAULTS.nav },
@@ -335,7 +392,9 @@
                 { id: 'color-gemOff', label: 'GEM Off', type: 'color', default: STEP_COLOR_DEFAULTS.gemOff },
                 { id: 'color-wait', label: 'Wait', type: 'color', default: STEP_COLOR_DEFAULTS.wait },
             ],
-            hotkeys: [],
+            hotkeys: [
+                { id: 'toggle-click-add', label: 'Toggle Click-to-Add mode (mission editor)', default: '' },
+            ],
         });
     }
 
@@ -476,7 +535,33 @@
         return `${Number(lat).toFixed(ELEV_KEY_PRECISION)},${Number(lng).toFixed(ELEV_KEY_PRECISION)}`;
     }
 
+    // Asset Inspector exposes its OTD-backed (Open-Topo-Data, batched, NO Percepto
+    // rate-limit) elevation service on window.__aimAIElevation for sibling scripts.
+    // When present we route MBT's DEM through it — this is what kills the bulk-
+    // generate "Elevation Not Loaded" 429 storm (Percepto's /location_altitude/
+    // throttles hard; OTD batches 100 pts/request). Falls back to MBT's own Percepto
+    // queue when the bridge isn't there (suite not fully installed).
+    function aiElev() {
+        try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; const b = w && w.__aimAIElevation; return (b && typeof b.fetch === 'function') ? b : null; }
+        catch (e) { return null; }
+    }
+
+    // Reuse an already-cached DEM point within this radius instead of re-fetching.
+    // Ground over a flat pad is constant, and OTD's ned10m is a 10 m dataset, so any
+    // sample within ~50 ft is the same ground — this is what stops the generator from
+    // re-requesting centroids we effectively already have (Asset Inspector samples
+    // every asset vertex + edge midpoints, so a nearby cached hit is almost always
+    // present).
+    const MB_ELEV_NEAR_M = 15;
     function getElevationFromCache(lat, lng) {
+        const br = aiElev();
+        if (br) {
+            try {
+                const v = br.getCached(lat, lng);
+                if (v != null) return v;
+                if (typeof br.getNearest === 'function') { const n = br.getNearest(lat, lng, MB_ELEV_NEAR_M); if (n != null) return n; }
+            } catch (e) {}
+        }
         const cache = loadElevationCache();
         return cache[elevCacheKey(lat, lng)];
     }
@@ -489,6 +574,8 @@
     //      while a batch is mid-flight create duplicate HTTP requests)
     //   3. Miss → push to queue, throttled through pumpElevQueue
     function fetchElevation(lat, lng) {
+        const br = aiElev();
+        if (br) { try { return Promise.resolve(br.fetch(lat, lng)); } catch (e) {} }
         const key = elevCacheKey(lat, lng);
         const cache = loadElevationCache();
         if (cache[key] != null) return Promise.resolve(cache[key]);
@@ -536,6 +623,9 @@
     // Returns Promise<{[id|index]: meters | null}>.
     function bulkFetchElevations(points, onProgress) {
         if (!points || points.length === 0) return Promise.resolve({});
+        // Prefer the OTD bridge — batched, no Percepto 429 (the bulk-generate fix).
+        const br = aiElev();
+        if (br && typeof br.bulk === 'function') { try { return Promise.resolve(br.bulk(points, onProgress)); } catch (e) {} }
         let done = 0;
         const total = points.length;
         const result = {};
@@ -1141,14 +1231,7 @@
                 renderLogDetail(Number(tr.dataset.id));
             };
         });
-        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
-            cb.onclick = (e) => {
-                e.stopPropagation();
-                const id = Number(cb.dataset.row);
-                if (cb.checked) panelState.selectedIds.add(id); else panelState.selectedIds.delete(id);
-                renderTableView();
-            };
-        });
+        wireRowSelectCheckboxes(rows);
         const selAll = panelEl.querySelector('[data-select-all]');
         if (selAll) selAll.onclick = (e) => {
             e.stopPropagation();
@@ -1441,6 +1524,7 @@
         try { injectSumButton(document); } catch (e) {}
         try { injectLogSumButton(document); } catch (e) {}
         try { applyMapIconDeclutter(document); } catch (e) {}
+        try { applyFlagPoleOverlayHide(); } catch (e) {}
         try { applyNativeEditorCollapse(); } catch (e) {}
         try { injectEditorCollapseButton(); } catch (e) {}
         try { injectComposerButton(); } catch (e) {}
@@ -1505,13 +1589,32 @@
     const COMPOSER_ROW_ID = 'aim-mb-composer-row';
     let composerMission = null;    // the matched mission (id→data source; order read from DOM)
     let composerBusy = false;      // guard against concurrent reorders
+    let composerEditingStepId = null; // id of the step whose editor we last opened (reliable "current step" for marker-switch)
     // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
     // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
     // same spot+size. Left-click (M1) stays native (opens the step); right-click
-    // (M2) opens our order editor. Always on; no toggle button.
-    let composerMapMode = true;
+    // (M2) opens our order editor. CP toggle 'map-step-badges' (default ON);
+    // OFF also disables Click-to-Add + the M2 order editor (they ride the same
+    // marker tagging) — primarily a perf isolation switch for large missions.
+    const CACHE_KEY_MAP_BADGES = 'aim-mb-map-step-badges';
+    let composerMapMode = gmGet(CACHE_KEY_MAP_BADGES, true);
     let composerMapEventsBound = false;
     let loggedNoMarkers = false;
+    // Full visual + interaction teardown for the badges toggle: drop the badge
+    // CSS (colors/numbers revert to native icons) and untag every marker so the
+    // window-capture M1/M2 handlers stop matching them.
+    function composerBadgesTeardown() {
+        try {
+            const st = document.getElementById('aim-mb-badge-css');
+            if (st) st.remove();
+            document.querySelectorAll('[data-aim-id]').forEach(el => {
+                el.removeAttribute('data-aim-id');
+                el.removeAttribute('data-aim-kind');
+                el.removeAttribute('data-aim-num');
+                el.classList.remove('aim-mb-nav', 'aim-mb-snap');
+            });
+        } catch (e) { console.warn(`${TAG} [map-badges] teardown failed`, e); }
+    }
 
     // ONE compact button row (Compact-view toggle + a small 🔄 Resync), side by
     // side, inserted right under "Add instruction" — keeps the top of the
@@ -1574,13 +1677,27 @@
         stageBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;' +
             'background:rgba(150,180,255,0.12);border:1px solid rgba(150,180,255,0.5);color:#9cf;';
         stageBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); genStagePopup(stageBtn); };
-        row2.appendChild(autoBtn); row2.appendChild(stageBtn);
+        const caBtn = document.createElement('button');
+        caBtn.id = CA_BTN_ID;
+        caBtn.type = 'button';
+        caBtn.style.cssText = 'flex:0 0 auto;margin-left:5px;padding:5px 9px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:700;';
+        caBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); caSetMode(!caModeOn); };
+        row2.appendChild(autoBtn); row2.appendChild(stageBtn); row2.appendChild(caBtn);
+        // Row 3: the Click-to-Add "Insert at" bar (shown only while the mode is ON).
+        const row3 = document.createElement('div');
+        row3.id = CA_BAR_ID;
+        row3.style.cssText = 'display:none;align-items:center;gap:6px;margin:0 0 4px;font-size:11px;color:#cfe;';
+        row3.innerHTML = '<span>Empty <b style="color:#7dff7d">L=Snapshot</b> · <b style="color:#14d2dc">R=Nav</b> · <b style="color:#ff9d3a">Alt+R</b>=del · <b style="color:#cfe">Ctrl+Z</b> undo</span>' +
+            '<label style="margin-left:auto;white-space:nowrap;">Insert at N</label>' +
+            '<input type="number" min="1" data-ca-at placeholder="end" title="Target group: snapshots append to the end of this group; a nav inserts right after it (rest shifts down). Blank = end of mission." style="width:52px;background:#0f1216;border:1px solid #5fff5f;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;">';
+        row3.querySelector('[data-ca-at]').onchange = (ev) => { const v = parseInt(ev.target.value, 10); caInsertAtNav = (isFinite(v) && v >= 1) ? v : null; updateCaBanner(); };
         const addBtn = Array.from(content.querySelectorAll('button')).find(b => /add instruction/i.test(b.textContent || ''));
-        if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); }
-        else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); }
+        if (addBtn && addBtn.parentNode) { addBtn.parentNode.insertBefore(row, addBtn.nextSibling); row.parentNode.insertBefore(row2, row.nextSibling); row2.parentNode.insertBefore(row3, row2.nextSibling); }
+        else { content.insertBefore(row, content.firstChild); content.insertBefore(row2, row.nextSibling); content.insertBefore(row3, row2.nextSibling); }
         updateEditorCollapseBtn();
         updateAutoSnapAglUI();
         updateAglViewBtn();
+        updateCaUI();
         composerEnsureMapMode(true);
     }
 
@@ -1656,42 +1773,378 @@
         banner.textContent = `⚠ SNAPSHOT AUTO-AGL ON — saves set all snapshots to ground + ${defaultSnapAglFt} ft`;
     }
 
+    // ── Click-to-Add: rapid map-click step builder ───────────────────────────
+    // While editing a mission, ARM the mode (sticky ➕ toggle / hotkey, OR hold Ctrl
+    // momentarily) and click empty map: LEFT = Snapshot, RIGHT = Nav. New steps copy
+    // the last nav/snap's settings, land at the clicked point, and stay STAGED (Save
+    // when done) — same working-copy path as ➕ Stage. "Insert at N#" targets a group
+    // (blank = end); a right-click nav auto-advances the target to itself so the
+    // following left-clicks drop its snapshots. Robust empty-space detection via
+    // elementFromPoint (bail if a marker/UI is under the cursor), not Leaflet layer
+    // click semantics.
+    const CA_BTN_ID = 'aim-mb-clickadd-btn';
+    const CA_BAR_ID = 'aim-mb-clickadd-bar';
+    const CA_BANNER_ID = 'aim-mb-clickadd-banner';
+    let caModeOn = false;
+    let caInsertAtNav = null;      // 1-based target group, or null = end of mission
+    let caBoundContainer = null;
+    let caIdBump = 0;
+    let caUndoStack = [];          // {id, kind, prevInsertAt, appId} for Ctrl+Z undo of click-added steps
+    let caCtrlHeld = false;        // live Ctrl state (for box-zoom gating)
+    function caMapContainer() { const m = getLeafletMap(); return (m && typeof m.getContainer === 'function') ? m.getContainer() : null; }
+    // Turn Leaflet's Shift+drag box-zoom OFF whenever a mission is open in the editor —
+    // it fights Shift-to-stack / Shift-drag placement and kept zooming instead of
+    // placing. Scroll-wheel + the +/- buttons still zoom. Re-asserted every marker tick
+    // so Leaflet can't re-enable it; restored when you leave the editor.
+    function caUpdateBoxZoom() {
+        if (CONTEXT !== 'IFRAME') return;
+        try {
+            const map = getLeafletMap();
+            if (!map || !map.boxZoom || typeof map.boxZoom.enabled !== 'function') return;
+            const editing = !!document.querySelector('.mission-edit__content');
+            if (editing) { if (map.boxZoom.enabled()) map.boxZoom.disable(); }
+            else if (!map.boxZoom.enabled()) map.boxZoom.enable();
+        } catch (e) {}
+    }
+    function caArmed(e) { return caModeOn || !!(e && e.ctrlKey); }
+    function caIsTypingTarget(t) {
+        if (!t || !t.tagName) return false;
+        const tn = t.tagName;
+        return tn === 'INPUT' || tn === 'TEXTAREA' || tn === 'SELECT' || t.isContentEditable || (t.closest && !!t.closest('.ant-input, .ant-select, [role="textbox"]'));
+    }
+    function caIsEmptySpace(e) {
+        if (e && e.shiftKey) return true;   // Shift = ignore whatever icon is under the cursor → stack a step in place
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        if (!el) return true;
+        // Only bail on an existing STEP MARKER (so clicking it edits that step) or our
+        // own UI. Polygons/overlays are click-THROUGH — the flag-pole scan cone (a
+        // default-blue leaflet-interactive path), FFZ/asset fills and FP lines must
+        // NOT block dropping a step. Step markers live in the marker pane, ABOVE the
+        // overlay pane, so elementFromPoint still returns the icon when you click one.
+        return !el.closest('.leaflet-marker-icon, [class*="map-marker__"], .leaflet-popup, .leaflet-control, [id^="aim-"], button, input, select, textarea, a');
+    }
+    // Percepto draws a Flag Pole step's scan cone as a default-Leaflet-blue polygon
+    // (#3388ff, fill-opacity 0.2) that covers a big area. Optional hide (GM pref via
+    // Control Panel) drops it with CSS so it stops obscuring the map. Independent of
+    // Click-to-Add's click-through (which works whether it's hidden or not).
+    function applyFlagPoleOverlayHide() {
+        if (CONTEXT !== 'IFRAME') return;
+        const ID = 'aim-mb-flagpole-hide-style';
+        let st = document.getElementById(ID);
+        if (hideFlagPoleOverlay) {
+            if (!st) {
+                st = document.createElement('style'); st.id = ID;
+                st.textContent = 'svg.leaflet-zoom-animated path.leaflet-interactive[stroke="#3388ff"][fill="#3388ff"]{display:none !important;}';
+                (document.head || document.documentElement).appendChild(st);
+            }
+        } else if (st) { st.remove(); }
+    }
+    // While Shift is held during editing, make OTHER step markers non-interactive so a
+    // press falls THROUGH to the map (stack in place) or to the marker of the step
+    // you're editing (drag it even when another icon overlaps). The edited step's own
+    // marker stays interactive so it can be dragged.
+    function caApplyShiftIgnore(on) {
+        if (CONTEXT !== 'IFRAME') return;
+        const ID = 'aim-mb-shift-ignore-style';
+        let st = document.getElementById(ID);
+        if (on && caEditing()) {
+            const editedId = getOpenStepId();
+            const esc = (v) => (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v);
+            if (!st) { st = document.createElement('style'); st.id = ID; (document.head || document.documentElement).appendChild(st); }
+            st.textContent = '.instruction-marker[data-aim-id],.leaflet-marker-icon[data-aim-id]{pointer-events:none !important;}' +
+                (editedId != null ? `[data-aim-id="${esc(editedId)}"]{pointer-events:auto !important;}` : '');
+        } else if (st) { st.remove(); }
+    }
+    function caClickToLatLng(e) {
+        const m = getLeafletMap(); if (!m) return null;
+        try { if (typeof m.mouseEventToLatLng === 'function') return m.mouseEventToLatLng(e); } catch (_) {}
+        try { const c = caMapContainer(), r = c.getBoundingClientRect(); return m.containerPointToLatLng([e.clientX - r.left, e.clientY - r.top]); } catch (_) {}
+        return null;
+    }
+    function caEditing() { return CONTEXT === 'IFRAME' && composerMapMode && !!composerMission; }
+    function caOnClick(e) {
+        if (!caEditing() || !caArmed(e) || !caIsEmptySpace(e)) return;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        e.preventDefault(); e.stopPropagation();
+        caAddStep('snap', ll);
+    }
+    function caOnContextMenu(e) {
+        if (!caEditing() || !caArmed(e) || !caIsEmptySpace(e)) return;
+        const ll = caClickToLatLng(e); if (!ll) return;
+        e.preventDefault(); e.stopPropagation();
+        caAddStep('nav', ll);
+    }
+    function caBindMap() {
+        caInitKeyFlags();
+        const c = caMapContainer(); if (!c || caBoundContainer === c) return;
+        if (caBoundContainer) { try { caBoundContainer.removeEventListener('click', caOnClick, true); caBoundContainer.removeEventListener('contextmenu', caOnContextMenu, true); } catch (_) {} }
+        c.addEventListener('click', caOnClick, true);
+        c.addEventListener('contextmenu', caOnContextMenu, true);
+        caBoundContainer = c;
+    }
+    // Mirror the shared data-aim-clickadd flag while Ctrl is held during editing, so
+    // the momentary hold-Ctrl path also makes other scripts' M2 handlers stand down
+    // (the sticky toggle sets it in caSetMode). IFRAME-only so we never suppress the
+    // inspector on the top-window Site Setup page.
+    let caKeyFlagsBound = false;
+    function caInitKeyFlags() {
+        if (caKeyFlagsBound || CONTEXT !== 'IFRAME') return;
+        caKeyFlagsBound = true;
+        // Recompute the flag from the LIVE Ctrl state on EVERY key event, so releasing
+        // Shift while Ctrl is still held keeps it set (the old per-key toggle cleared it
+        // on Shift-up, letting the Asset Inspector reclaim the right-click). Clears when
+        // Ctrl is actually released. (The sticky toggle sets the flag in caSetMode.)
+        const sync = (e) => {
+            if (caModeOn) return; // toggle owns the flag
+            try {
+                if (e.ctrlKey && caEditing()) document.documentElement.setAttribute('data-aim-clickadd', '1');
+                else document.documentElement.removeAttribute('data-aim-clickadd');
+            } catch (err) {}
+        };
+        window.addEventListener('keydown', e => {
+            caCtrlHeld = e.ctrlKey; sync(e); caUpdateBoxZoom();
+            if (e.shiftKey) caApplyShiftIgnore(true);   // Shift → let events fall through overlapping markers
+            // Ctrl+Z → undo the last Click-to-Add step. Only hijack when we actually
+            // have one to undo, while editing, and not typing in a field (so native
+            // text-undo and Percepto's own shortcuts are untouched otherwise).
+            if (e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z') && caUndoStack.length && caEditing() && !caIsTypingTarget(e.target)) {
+                e.preventDefault(); e.stopPropagation();
+                caUndoLast();
+            }
+        }, true);
+        window.addEventListener('keyup', e => { caCtrlHeld = e.ctrlKey; sync(e); if (!e.shiftKey) caApplyShiftIgnore(false); caUpdateBoxZoom(); }, true);
+        window.addEventListener('blur', () => { caCtrlHeld = false; caApplyShiftIgnore(false); caUpdateBoxZoom(); }, true);
+    }
+    function caSetMode(on) {
+        if (CONTEXT !== 'IFRAME') return;
+        caModeOn = !!on;
+        caBindMap();
+        // Shared synchronous signal so other scripts' right-click handlers (e.g.
+        // the Asset Inspector, whose window-level M2 fires before our deeper
+        // map-container handler) stand down while Click-to-Add owns empty-space
+        // right-clicks. They check document.documentElement[data-aim-clickadd].
+        try { if (caModeOn) document.documentElement.setAttribute('data-aim-clickadd', '1'); else document.documentElement.removeAttribute('data-aim-clickadd'); } catch (e) {}
+        caUpdateBoxZoom();   // toggle disables Shift+drag box-zoom while armed
+        updateCaUI();
+        if (caModeOn) showToast('➕ Click-to-Add ON — empty-space LEFT-click = Snapshot, RIGHT-click = Nav. Hold SHIFT to ignore icons underneath (stack in the same spot). Steps stay STAGED — SAVE when done.', '#7dff7d', 6500);
+        else showToast('Click-to-Add OFF.', '#888', 1800);
+    }
+    function updateCaUI() {
+        const btn = document.getElementById(CA_BTN_ID);
+        if (btn) {
+            btn.textContent = caModeOn ? '➕ Adding: ON' : '➕ Click-add';
+            btn.title = 'Click-to-Add: when ON, LEFT-click empty map = Snapshot, RIGHT-click = Nav — placed at the "Insert at" group (blank = end). Hold Ctrl to add momentarily without toggling. Steps stay staged; SAVE when done.';
+            btn.style.background = caModeOn ? 'rgba(95,255,95,0.22)' : 'transparent';
+            btn.style.border = caModeOn ? '1px solid #5fff5f' : '1px solid rgba(95,255,95,0.45)';
+            btn.style.color = caModeOn ? '#7dff7d' : '#7bbf7b';
+        }
+        const bar = document.getElementById(CA_BAR_ID);
+        if (bar) bar.style.display = caModeOn ? 'flex' : 'none';
+        updateCaBanner();
+    }
+    function updateCaBanner() {
+        if (CONTEXT !== 'IFRAME') return;
+        let b = document.getElementById(CA_BANNER_ID);
+        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        if (!caModeOn || !mapC) { if (b) b.remove(); return; }
+        if (!b) {
+            b = document.createElement('div');
+            b.id = CA_BANNER_ID;
+            b.style.cssText = 'position:absolute;top:34px;left:50%;transform:translateX(-50%);z-index:1200;' +
+                'background:rgba(95,255,95,0.92);color:#04220a;font:700 12px/1.3 "Lato",sans-serif;' +
+                'padding:5px 12px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);pointer-events:none;white-space:nowrap;';
+            if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
+            mapC.appendChild(b);
+        }
+        b.textContent = `➕ CLICK-TO-ADD ON — L-click = Snapshot · R-click = Nav · into ${caInsertAtNav ? 'N' + caInsertAtNav : 'end'}`;
+    }
+    function caAddStep(kind, latlng) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3500); return; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const pickRef = (pred) => { const list = instrs.filter(pred); if (!list.length) return null; for (let i = list.length - 1; i >= 0; i--) { if (list[i].location && list[i].location.lat != null) return list[i]; } return list[list.length - 1]; };
+        const ref = kind === 'nav' ? pickRef(isNav) : pickRef(isSnap);
+        if (!ref) { showToast(`Need an existing ${kind === 'nav' ? 'Navigate' : 'Snapshot'} in this mission to copy settings from.`, '#ff9800', 4000); return; }
+        const c = Object.assign({}, ref);
+        c.id = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100) + (caIdBump++);
+        if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options);
+        c.location = { lat: latlng.lat, lng: latlng.lng };
+        if (kind === 'snap') {
+            c.value2 = 1; // "To GPS"
+            c.extra_options = Object.assign({}, c.extra_options || {}, { pitch: (c.extra_options && c.extra_options.pitch != null) ? c.extra_options.pitch : 1001 });
+            const g = getElevationFromCache(latlng.lat, latlng.lng);
+            if (g != null) c.value1 = g + (defaultSnapAglFt / 3.28084);
+            else { try { fetchElevation(latlng.lat, latlng.lng); } catch (e) {} } // keep ref alt; Auto-AGL/Save corrects once cached
+        }
+        const newInstrs = instrs.map(s => Object.assign({}, s));
+        const navIdxs = []; newInstrs.forEach((s, k) => { if (isNav(s)) navIdxs.push(k); });
+        const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
+        // Insert at the END of the target group N# (before the next nav) — a nav there
+        // becomes N#+1 (rest shifts down); a snapshot lands after N#'s children.
+        const g = caInsertAtNav;
+        let insertIdx = (g && g >= 1 && g <= navIdxs.length) ? ((g < navIdxs.length) ? navIdxs[g] : endIdx()) : endIdx();
+        newInstrs.splice(insertIdx, 0, c);
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        let addedNavGroup = null;
+        if (kind === 'nav') { let cnt = 0; for (let k = 0; k < newInstrs.length; k++) { if (isNav(newInstrs[k])) { cnt++; if (newInstrs[k].id === c.id) { addedNavGroup = cnt; break; } } } caInsertAtNav = addedNavGroup; const inp = document.querySelector('#' + CA_BAR_ID + ' [data-ca-at]'); if (inp) inp.value = addedNavGroup || ''; }
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            updateCaBanner();
+            // Record for Ctrl+Z undo. Reset the stack if we've switched missions.
+            if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+            caUndoStack.push({ op: 'add', id: c.id, kind, prevInsertAt: g, appId: app.id });
+            const where = kind === 'nav' ? `N${addedNavGroup}` : (g ? `end of N${g}` : 'end');
+            showToast(`➕ ${kind === 'nav' ? 'Nav' : 'Snapshot'} added (${where}).${kind === 'nav' ? ' Left-click to drop its snapshots.' : ''} Ctrl+Z to undo · SAVE when done.`, '#7dff7d', 2600);
+        } catch (e) { console.warn(`${TAG} [click-add] setCurrentApp failed`, e); showToast('Click-to-Add failed — see console.', '#ff5252', 3500); }
+    }
+    // Undo the most recent Click-to-Add action — an 'add' (remove the step by id +
+    // restore the insert target) or a 'del' (re-insert the removed step(s) at their
+    // original index). One shared stack so Ctrl+Z peels back adds AND Alt+M2 deletes.
+    function caUndoLast() {
+        if (!caUndoStack.length) { showToast('Nothing to undo.', '#888', 1500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return; }
+        const app = ctx.currentApp;
+        const rec = caUndoStack[caUndoStack.length - 1];
+        if (rec.appId !== app.id) { caUndoStack = []; showToast('Undo cleared — different mission is open.', '#9ad', 2500); return; }
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        caUndoStack.pop();
+        const kl = rec.kind === 'nav' ? 'Nav' : rec.kind === 'flag' ? 'Flag Pole' : 'Snapshot';
+        let newInstrs, msg;
+        if (rec.op === 'del') {
+            const at = Math.max(0, Math.min(rec.index, instrs.length));
+            newInstrs = instrs.slice(0, at).concat(rec.steps.map(s => Object.assign({}, s)), instrs.slice(at)).map(s => Object.assign({}, s));
+            msg = `↩ Restored ${kl}${rec.steps.length > 1 ? ' + scan' : ''}.`;
+        } else {
+            const idx = instrs.findIndex(s => s && String(s.id) === String(rec.id));
+            if (idx < 0) { showToast('That step is no longer here (saved or already removed).', '#9ad', 2500); return; }
+            newInstrs = instrs.slice(0, idx).concat(instrs.slice(idx + 1)).map(s => Object.assign({}, s));
+            caInsertAtNav = (rec.prevInsertAt != null && rec.prevInsertAt >= 1) ? rec.prevInsertAt : null;
+            const inp = document.querySelector('#' + CA_BAR_ID + ' [data-ca-at]'); if (inp) inp.value = caInsertAtNav || '';
+            msg = `↩ Undid ${kl}.`;
+        }
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            updateCaBanner();
+            showToast(`${msg}${caUndoStack.length ? ' Ctrl+Z again for more.' : ''}`, '#7dff7d', 1800);
+        } catch (e) { console.warn(`${TAG} [click-add] undo failed`, e); showToast('Undo failed — see console.', '#ff5252', 3000); }
+    }
+    // Alt + right-click on a Nav/Snapshot marker → delete that step. A snapshot also
+    // takes its trailing scan-wrap block (contiguous camera/GEM/wait) so no orphans.
+    // Pushed to the shared undo stack, so Ctrl+Z restores it verbatim at its spot.
+    function composerDeleteStep(id) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 3000); return; }
+        const app = ctx.currentApp;
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        const isNavT = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnapT = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isFlagT = s => s && (s.type_name === 'flag pole' || s.type === 16);
+        const isWrapT = s => s && (s.type_name === 'cameraSelect' || s.type === 7 || s.type_name === 'gemMode' || s.type === 24 || s.type_name === 'wait' || s.type === 5);
+        const idx = instrs.findIndex(s => s && String(s.id) === String(id));
+        if (idx < 0) { showToast('Could not find that step to delete.', '#ff9800', 3000); return; }
+        const kind = isNavT(instrs[idx]) ? 'nav' : isFlagT(instrs[idx]) ? 'flag' : 'snap';
+        let end = idx + 1;
+        if (isSnapT(instrs[idx])) { while (end < instrs.length && isWrapT(instrs[end])) end++; } // take the scan block too
+        const removed = instrs.slice(idx, end).map(s => Object.assign({}, s));
+        const newInstrs = instrs.slice(0, idx).concat(instrs.slice(end)).map(s => Object.assign({}, s));
+        newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        if (caUndoStack.length && caUndoStack[caUndoStack.length - 1].appId !== app.id) caUndoStack = [];
+        caUndoStack.push({ op: 'del', steps: removed, index: idx, kind, appId: app.id });
+        try {
+            ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
+            try { composerStyleNativeMarkers(); } catch (e) {}
+            const extra = removed.length > 1 ? ` (+${removed.length - 1} scan step${removed.length - 1 === 1 ? '' : 's'})` : '';
+            const kl = kind === 'nav' ? 'Nav' : kind === 'flag' ? 'Flag Pole' : 'Snapshot';
+            showToast(`🗑 Deleted ${kl}${extra}. Ctrl+Z to restore · SAVE when done.`, '#ff9d3a', 3200);
+        } catch (e) { console.warn(`${TAG} [click-add] delete failed`, e); showToast('Delete failed — see console.', '#ff5252', 3000); }
+    }
+
     function composerBindMapEvents() {
         if (composerMapEventsBound) return;
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') return;
-        map.on('zoomend moveend layeradd', () => { try { composerStyleNativeMarkers(); } catch (e) {} });
+        // DEBOUNCED (v1.88): 'layeradd' fires once PER MARKER — opening a large
+        // mission added N markers and ran a full restyle (fiber walk + eachLayer
+        // over every layer) N times back-to-back, O(N²) at open and again on
+        // every pan/zoom marker churn. One trailing pass 200ms after the burst
+        // settles is visually identical.
+        let restyleT = null;
+        map.on('zoomend moveend layeradd', () => {
+            if (restyleT) return;
+            restyleT = setTimeout(() => {
+                restyleT = null;
+                try { composerStyleNativeMarkers(); } catch (e) {}
+            }, 200);
+        });
         composerMapEventsBound = true;
     }
 
     // Recolor + number Percepto's native nav/snap markers in place.
     function composerStyleNativeMarkers() {
+        const t0 = performance.now();
+        MB_PERF.markerPasses++;
+        try { composerStyleNativeMarkersCore(); } finally { MB_PERF.markerMs += performance.now() - t0; }
+    }
+    function composerStyleNativeMarkersCore() {
         if (!composerMapMode || CONTEXT !== 'IFRAME' || !composerMission) return;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
         composerBindMapEvents();
+        caBindMap();          // (re)attach Click-to-Add handlers to the current map container
+        updateCaBanner();     // keep the armed banner present if the container rebuilt
+        caUpdateBoxZoom();    // keep Shift+drag box-zoom OFF while the editor is open
         installComposerMarkerEvents();
         composerEnsureBadgeCSS();
-        const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
-        const ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        // Number from the LIVE editor instruction order when available — it includes
+        // un-saved, natively-added navs/snaps in their real position (the cached
+        // composerMission doesn't, and 🔄 refresh re-pulls the server which also
+        // lacks them, so a new nav stayed blank until save). Fall back to the cache.
+        let ordered = null;
+        try { const lctx = findMissionEditorCtx(); if (lctx && Array.isArray(lctx.instrs) && lctx.instrs.length) ordered = lctx.instrs; } catch (e) {}
+        if (!ordered) {
+            const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+            ordered = composerDomIds().map(id => byId[id]).filter(Boolean);
+        }
         const K = (lat, lng) => `${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
         const lookup = {}; let navN = 0, snapN = 0;
         ordered.forEach(s => {
-            if (!s.location || s.location.lat == null) return;
-            if (s.type_name === 'navigate') { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
-            else if (s.type_name === 'snapshot') { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+            if (!s || !s.location || s.location.lat == null) return;
+            if (s.type_name === 'navigate' || s.type === 1) { navN++; lookup[K(s.location.lat, s.location.lng)] = { num: navN, kind: 'nav', id: String(s.id) }; }
+            else if (s.type_name === 'snapshot' || s.type === 6) { snapN++; lookup[K(s.location.lat, s.location.lng)] = { num: snapN, kind: 'snap', id: String(s.id) }; }
+            // Flag Pole (type 16) — tag its native marker so it's selectable + movable
+            // + Alt-deletable like nav/snap. We DON'T restyle/number it, so its native
+            // flag-pole icon stays as-is (the user wants that icon to remain).
+            else if (s.type_name === 'flag pole' || s.type === 16) { lookup[K(s.location.lat, s.location.lng)] = { kind: 'flag', id: String(s.id) }; }
         });
         let matched = 0, seen = 0;
         map.eachLayer(layer => {
             const el = layer && layer._icon;
-            if (!el || !el.classList || !el.classList.contains('instruction-marker')) return;
-            seen++;
+            if (!el || !el.classList) return;
             const ll = layer._latlng;
             if (!ll) return;
             const info = lookup[K(ll.lat, ll.lng)];
-            if (!info) return;
-            matched++;
-            composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+            if (el.classList.contains('instruction-marker')) {
+                // Percepto's nav/snap markers.
+                seen++;
+                if (info && info.kind !== 'flag') { matched++; composerStyleOneMarker(el, info, [ll.lat, ll.lng]); }
+            } else if (el.classList.contains('leaflet-marker-icon')) {
+                // The Flag Pole renders as a GENERIC location-marker (not an
+                // instruction-marker), so match it to the flag-pole instruction by
+                // lat/lng and tag it selectable. Other generic markers (GMs) sit at
+                // different coords → no lookup hit → left alone.
+                if (info && info.kind === 'flag') composerStyleOneMarker(el, info, [ll.lat, ll.lng]);
+            }
         });
         if (!matched && seen && !loggedNoMarkers) {
             loggedNoMarkers = true;
@@ -1712,11 +2165,18 @@
             (document.head || document.documentElement).appendChild(st);
         }
         const navC = stepColor('nav'), snapC = stepColor('snap');
+        // v1.89 PERF: class-keyed, NOT :has(img[src*=…]) — :has() made Chrome
+        // re-evaluate ancestor invalidation on every DOM mutation in the iframe,
+        // scaling with marker count; the whole editor turned to sludge the
+        // moment this stylesheet + N markers existed. composerStyleOneMarker
+        // stamps .aim-mb-nav/.aim-mb-snap on each marker instead. Tradeoff: a
+        // marker Percepto re-creates shows its native icon for ~200ms until the
+        // debounced restyle re-tags it (the old CSS matched instantly).
         st.textContent = `
-            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
-            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
-            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
-            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
+            .instruction-marker.aim-mb-nav .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker.aim-mb-snap .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker.aim-mb-nav .instruction-marker__icon img,
+            .instruction-marker.aim-mb-snap .instruction-marker__icon img { opacity:0 !important; }
             /* Number as ::after on the MARKER el (survives hover — Percepto only
                re-renders the inner icon's contents on hover, wiping a child span). */
             .instruction-marker[data-aim-num]::after { content: attr(data-aim-num); position:absolute; inset:0;
@@ -1725,10 +2185,17 @@
         `;
     }
     function composerStyleOneMarker(el, info, ll) {
-        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         el.setAttribute('data-aim-id', info.id);
         el.setAttribute('data-aim-kind', info.kind);
         el.__aimLL = ll;
+        // Flag Pole: just tag it selectable — leave the native icon + no number badge.
+        if (info.kind === 'flag') { el.removeAttribute('data-aim-num'); return; }
+        // Kind class drives the color/icon-hide CSS (v1.89: replaced :has()).
+        const kindCls = info.kind === 'nav' ? 'aim-mb-nav' : 'aim-mb-snap';
+        const otherCls = info.kind === 'nav' ? 'aim-mb-snap' : 'aim-mb-nav';
+        if (!el.classList.contains(kindCls)) el.classList.add(kindCls);
+        if (el.classList.contains(otherCls)) el.classList.remove(otherCls);
+        const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         // Color + icon-hide is CSS (:has). Number is a CSS ::after from this
         // attr on the MARKER el — survives Percepto's hover re-render of the
         // inner icon. Click/right-click handled by the window-capture listeners.
@@ -1744,11 +2211,34 @@
     function installComposerMarkerEvents() {
         if (composerMarkerEventsInstalled) return;
         composerMarkerEventsInstalled = true;
-        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id]') : null;
+        // nav/snap are .instruction-marker; the flag-pole is a generic
+        // .leaflet-marker-icon we tag with data-aim-id. Only MBT sets data-aim-id, so
+        // scoping to these two marker classes can't catch another script's markers.
+        const badge = (e) => (e.target && e.target.closest) ? e.target.closest('.instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]') : null;
+        // Is this the marker of the step currently open in the editor? That one stays
+        // fully native under Shift so you can DRAG it (e.g. move the flag pole) even
+        // when another marker overlaps.
+        const isEditedMarker = (m) => m && String(m.getAttribute('data-aim-id')) === String(getOpenStepId());
         window.addEventListener('contextmenu', (e) => {
             const m = badge(e); if (!m) return;
+            if (e.shiftKey && isEditedMarker(m)) return; // edited marker: leave native
+            // Shift while armed = stack a NAV here, IGNORING this marker. Own the event
+            // at window-capture (before Leaflet's interactive-marker handler — the flag
+            // pole is a Leaflet-interactive marker) and add here, so nothing else fires.
+            if (e.shiftKey && caArmed(e)) {
+                e.preventDefault(); e.stopImmediatePropagation();
+                try { const ll = caClickToLatLng(e); if (ll) caAddStep('nav', ll); } catch (err) { console.warn(`${TAG} [click-add] shift-stack nav failed`, err); }
+                return;
+            }
             e.preventDefault(); e.stopImmediatePropagation();
+            // Shift held but NOT armed → ignore this marker (no reorder/open).
+            if (e.shiftKey) return;
             const id = m.getAttribute('data-aim-id'), kind = m.getAttribute('data-aim-kind');
+            // Alt + right-click = DELETE this step (Ctrl+Z restores it). Otherwise
+            // the plain right-click opens the reorder editor as before.
+            if (e.altKey) { composerDeleteStep(id); return; }
+            // Flag Pole: M2 opens its editor (the nav/snap reorder popup doesn't apply).
+            if (kind === 'flag') { composerOpenStepEdit(id); return; }
             // Number lives on the marker el as data-aim-num (e.g. "N3"/"S5") —
             // the v0.99 hover fix moved it here from the inner icon's old
             // data-aim-label, so read it from `m`, not a child.
@@ -1769,10 +2259,24 @@
             if (!document.querySelector('[data-testid="btn-save-instruction"]')) return null; // no editor open
             const id = m.getAttribute('data-aim-id');
             const curId = getOpenStepId();
-            if (curId != null && String(curId) === String(id)) return null; // same step → leave native
+            // ONLY the step you're currently editing is native (drag/reposition).
+            // Every OTHER marker is a switch (save current + open it).
+            if (curId != null && String(curId) === String(id)) return null;
             return id;
         };
         const blockSwitchDown = (e) => {
+            if (e.shiftKey) {
+                const m = badge(e);
+                if (m && isEditedMarker(m)) return;   // edited marker → native (drag it)
+                // When ARMED (Ctrl held / toggle on — read live from THIS mouse event,
+                // so it's right even if key events went to another frame), block the
+                // press so Leaflet's Shift+drag box-zoom / map-drag can't start; the
+                // following click/contextmenu does the add. Also block a non-edited
+                // marker even when not armed (so it never swaps). Plain Shift on empty
+                // map when NOT armed is left alone (box-zoom still works).
+                if (caArmed(e) || m) e.stopImmediatePropagation();
+                return;
+            }
             if (e.button !== undefined && e.button !== 0) return;  // left button only (keep M2 reorder)
             if (switchTargetFor(e)) { e.preventDefault(); e.stopImmediatePropagation(); }
         };
@@ -1780,23 +2284,40 @@
         window.addEventListener('mousedown', blockSwitchDown, true);
         window.addEventListener('click', (e) => {
             const m = badge(e); if (!m) return;
-            const id = m.getAttribute('data-aim-id');
-            const switchId = switchTargetFor(e);
-            if (switchId) {
-                // Switching steps mid-edit: suppress the native move, then
-                // openInstructionEditor saves the open step + opens this one.
+            if (e.shiftKey && isEditedMarker(m)) return; // edited marker: leave native (drag/click)
+            // Shift while armed = stack a SNAPSHOT here, ignoring this marker. Own the
+            // event so the marker (esp. the Leaflet-interactive flag pole) can't grab it.
+            if (e.shiftKey && caArmed(e)) {
                 e.preventDefault(); e.stopImmediatePropagation();
-                try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
-                catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+                try { const ll = caClickToLatLng(e); if (ll) caAddStep('snap', ll); } catch (err) { console.warn(`${TAG} [click-add] shift-stack snap failed`, err); }
                 return;
             }
-            // No editor open (or the same step): native scroll + open the clicked step.
+            // Shift held but NOT armed → still IGNORE this marker (don't switch/select it).
+            // This guarantees Shift never swaps steps, even if arming wasn't detected.
+            if (e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+            const id = m.getAttribute('data-aim-id');
+            const editorOpen = !!document.querySelector('[data-testid="btn-save-instruction"]');
+            if (editorOpen) {
+                const switchId = switchTargetFor(e);
+                if (switchId) {
+                    // DIFFERENT step → suppress the native move, save current + open it.
+                    e.preventDefault(); e.stopImmediatePropagation();
+                    composerEditingStepId = String(switchId); // we're now editing this one
+                    try { openInstructionEditor(switchId, currentMissionIdFromHash()); }
+                    catch (err) { console.warn(`${TAG} [switch] open failed`, err); showToast('Could not switch steps — see console.', '#ff9800', 3500); }
+                }
+                // SAME step you're editing (or can't tell): do NOTHING — leave M1
+                // fully native so you can drag the marker without re-opening it.
+                return;
+            }
+            // No editor open → open the clicked step's editor.
             setTimeout(() => composerOpenStepEdit(id), 320);
         }, true);
     }
     function composerOpenStepEdit(id) {
         const draggable = document.querySelector(`[data-rfd-draggable-id="${id}"]`);
         if (!draggable) { showToast('Could not find that step to edit.', '#ff9800', 3000); return; }
+        composerEditingStepId = String(id); // remember which step we opened
         try {
             const ok = triggerInstructionAction(draggable, 'edit');
             if (!ok) forceOpenInstructionEdit(draggable);
@@ -1855,6 +2376,7 @@
 
     // Per-snapshot last-handled position (so we act on MOVES, not every tick).
     const liveSnapLastLoc = {};
+    let composerLastNSCount = -1; // live nav+snap count — change ⇒ native add/remove ⇒ restyle
     const genElevReqAt = {}; // throttle DEM prefetch per marker position (anti-429)
     let liveEditorTimer = null;
     function startLiveEditorSync() {
@@ -1865,30 +2387,42 @@
         if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
         const ctx = findMissionEditorCtx();
         if (!ctx) return;
+        MB_PERF.ticks++;
+        liveTickN++;
         // (1) Keep MBT's cached mission in sync with the LIVE editor state, so the
         //     compact card + map badges reflect native step-edits / drags before a
         //     mission save (fixes "sidebar shows the old altitude"). Also re-syncs
         //     locations so the lat/lng badge match stops failing after a drag.
-        let changed = false;
+        //     v1.91: location-only changes (dragging a step) no longer touch the
+        //     CARDS — a moved step's AGL updates on the next value change / mission
+        //     reload, per user preference. Markers still restyle so badges follow.
+        let valChanged = false, locChanged = false;
         if (composerMission && Array.isArray(composerMission.instructions)) {
             const byId = {}; ctx.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; });
             const cmIds = {}; composerMission.instructions.forEach(ci => { cmIds[String(ci.id)] = true; });
             composerMission.instructions.forEach(ci => {
                 const live = byId[String(ci.id)]; if (!live) return;
-                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; changed = true; }
-                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; changed = true; }
+                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; valChanged = true; }
+                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; locChanged = true; }
             });
             // ADD instructions present live but not in the cache (e.g. ➕ Stage
             // steps with client-only ids) so the compact view + N#/S# badges
             // recognize them before a save.
             ctx.instrs.forEach(live => {
-                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); changed = true; }
+                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); valChanged = true; }
             });
         }
-        if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
-        // AGL view depends on DEM that loads async — re-render cards each tick so
-        // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
-        else if (showAglInEditor && collapseEditorCards) { try { applyNativeEditorCollapse(); } catch (e) {} }
+        // Native add/remove of a nav/snap (e.g. "Add Instruction → Navigate") shows
+        // up as a live nav+snap COUNT change — force a restyle so the new marker gets
+        // its N#/S# number immediately (numbering reads the live order now).
+        const liveNS = ctx.instrs.filter(s => s && (s.type_name === 'navigate' || s.type_name === 'snapshot')).length;
+        if (liveNS !== composerLastNSCount) { composerLastNSCount = liveNS; valChanged = true; }
+        if (valChanged) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
+        else if (locChanged) { try { composerStyleNativeMarkers(); } catch (e) {} }
+        // AGL view depends on DEM that loads async — while any card still shows
+        // the MSL placeholder, re-render at a SLOW cadence (~2.8s) until all
+        // grounds are cached, then go fully idle (v1.91; was every tick).
+        else if (showAglInEditor && collapseEditorCards && cxAglPending && liveTickN % 4 === 0) { try { applyNativeEditorCollapse(); } catch (e) {} }
         // NOTE: auto-AGL is SAVE-ONLY now (applySnapAglToBodyStr) — we no longer
         // re-float snapshots on every move (it hammered the DEM endpoint into
         // 429s, and you only need it correct at save time).
@@ -1955,7 +2489,14 @@
                 const baseEnt = list.find(e => e && e.type === 8 && (e.location || (Array.isArray(e.coords) && e.coords.length)));
                 if (baseEnt) base = baseEnt.location ? { lat: baseEnt.location.lat, lng: baseEnt.location.lng } : { lat: baseEnt.coords[0].lat, lng: baseEnt.coords[0].lng };
                 if (!base && assets.length) { let la = 0, ln = 0; assets.forEach(a => { const c = genCentroid(a.ring); la += c.lat; ln += c.lng; }); base = { lat: la / assets.length, lng: ln / assets.length }; }
-                const data = { assets, ffzs, base };
+                // For the Section+Battery MERGE: flight-path entities (type 15, arcs)
+                // for the routing graph, and base candidates (type 8 installs, else
+                // type-19 GMs named /base/i) for resolveBasesMB. Kept raw — the merge
+                // routing core consumes arcs + coords directly.
+                const fps = list.filter(e => e && e.type === 15 && Array.isArray(e.arcs));
+                const baseEnts = list.filter(e => e && e.type === 8 && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+                const gmBaseEnts = list.filter(e => e && e.type === 19 && e.name && /base/i.test(e.name) && Array.isArray(e.coords) && e.coords[0] && typeof e.coords[0].lat === 'number');
+                const data = { assets, ffzs, base, fps, baseEnts: baseEnts.length ? baseEnts : gmBaseEnts };
                 genEntCache[siteID] = data; genBase = base;
                 return data;
             });
@@ -2087,7 +2628,9 @@
             if (!generatorUnlocked) {
                 const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
                 const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+                const mr = document.getElementById('aim-mb-gen-merge-btn'); if (mr) mr.remove();
                 genCloseBulkPanel();
+                try { mbCloseMergePanel(); } catch (e) {}
                 try { if (genOverlayOn) { genClearOverlay(); genOverlayOn = false; } } catch (e) {} // tear down any drawn asset overlay
             } else {
                 genEnsureButton();
@@ -2099,10 +2642,18 @@
     }
     try { const w = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window; w.__aimMBGenerator = setGeneratorUnlocked; } catch (e) {}
 
+    function genRemoveButtons() {
+        const b = document.getElementById(GEN_BTN_ID); if (b) b.remove();
+        const a = document.getElementById(GEN_ALL_BTN_ID); if (a) a.remove();
+        const mr = document.getElementById('aim-mb-gen-merge-btn'); if (mr) mr.remove();
+    }
     function genEnsureButton() {
         if (CONTEXT !== 'IFRAME') return;
         if (!generatorUnlocked) return;   // generator locked off on this install
-        const mapC = document.querySelector('.mission-bank__map-container') || document.querySelector('.pr-map-container');
+        // Generate / Merge are MISSION-BANK-only — never inject on Site Setup (the
+        // old .pr-map-container fallback matched there). Remove them if we navigated away.
+        if (!isOnMissionBank()) { genRemoveButtons(); return; }
+        const mapC = document.querySelector('.mission-bank__map-container');
         if (!mapC) return;
         if (document.getElementById(GEN_BTN_ID)) { genUpdateBtn(); return; }
         if (getComputedStyle(mapC).position === 'static') mapC.style.position = 'relative';
@@ -2123,6 +2674,17 @@
             'font:800 12px "Lato",sans-serif;border:1.5px solid #5fff5f;background:#0d2410;color:#7dff7d;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
         all.onclick = e => { e.preventDefault(); e.stopPropagation(); genOpenBulkPanel(); };
         mapC.appendChild(all);
+        // "⛟ Merge" — group solo missions into battery-tiered merged missions per
+        // section. Independent of the asset overlay (operates on missions), so it
+        // stays visible whenever the generator is unlocked.
+        const mrg = document.createElement('button');
+        mrg.id = 'aim-mb-gen-merge-btn'; mrg.type = 'button';
+        mrg.textContent = '⛟ Merge';
+        mrg.title = 'Group this site\'s solo missions into battery-tiered merged missions per section (furthest→closest from base).';
+        mrg.style.cssText = 'position:absolute;top:8px;left:118px;z-index:1100;padding:6px 11px;border-radius:6px;cursor:pointer;' +
+            'font:800 12px "Lato",sans-serif;border:1.5px solid #ffb74d;background:#241a0d;color:#ffce80;box-shadow:0 2px 8px rgba(0,0,0,0.7);';
+        mrg.onclick = e => { e.preventDefault(); e.stopPropagation(); mbOpenMergePanel(); };
+        mapC.appendChild(mrg);
         genUpdateBtn();
     }
 
@@ -2165,8 +2727,163 @@
             }
         }
         instrs.push(I(99, null, null, null, {}));                                           // returnHome
-        const name = `${genSection(aC)} - ${asset.name || ('Asset ' + asset.id)}`;
+        // Name from a template (customizable in the bulk panel). Tokens: {section}
+        // = N/E/S/W from base, {asset} = the asset's name. Default keeps the old
+        // "<section> - <asset>" format.
+        const assetName = asset.name || ('Asset ' + asset.id);
+        const tpl = (opts.nameTemplate && opts.nameTemplate.trim()) || '{section} - {asset}';
+        const name = tpl.split('{section}').join(genSection(aC)).split('{asset}').join(assetName);
         return { instructions: instrs, name, navStandoffFt: nav.standoffFt };
+    }
+
+    // ── TEMPLATE-DRIVEN GENERATION (Model B) ────────────────────────────────
+    // Capture an OPEN mission's step pattern once, save it as a named preset, then
+    // generate every asset's mission from it. The template stores the step SEQUENCE
+    // + per-step SETTINGS (type/value1/value2/extra_options) minus absolute coords;
+    // coordinates are re-derived per asset at build time (navs along the FFZ edge,
+    // each nav's snapshots/flag-poles clustered around it — never stacked).
+    const CACHE_KEY_MISSION_TEMPLATES = 'aim-mb-mission-templates';
+    // Flag pole = type 16 (verified 2026-07-06 on a real mission JSON); altitude +
+    // camera params live in extra_options (value1/value2 are null). saveApp rebuilds
+    // setmission_dict server-side, so we only carry type/location/extra_options.
+    const TPL_TYPE_BY_NAME = { takeoff: 0, navigate: 1, wait: 5, snapshot: 6, cameraselect: 7, camera: 7, gemmode: 24, gem: 24, 'flag pole': 16, flagpole: 16, flag_pole: 16, returnhome: 99 };
+    function tplLoadAll() { const o = gmGet(CACHE_KEY_MISSION_TEMPLATES, {}); return (o && typeof o === 'object') ? o : {}; }
+    function tplSaveAll(o) { try { gmSet(CACHE_KEY_MISSION_TEMPLATES, o || {}); } catch (e) { console.warn(`${TAG} [tpl] save failed`, e); } }
+    function tplTypeNum(s) {
+        if (typeof s.type === 'number') return s.type;
+        if (s.type && typeof s.type.id === 'number') return s.type.id;
+        const n = (s.type_name || '').toLowerCase();
+        return TPL_TYPE_BY_NAME[n] != null ? TPL_TYPE_BY_NAME[n] : null;
+    }
+    function tplNormStep(s) {
+        return { type: tplTypeNum(s), type_name: s.type_name || null, value1: (s.value1 === undefined ? null : s.value1), value2: (s.value2 === undefined ? null : s.value2), extra_options: s.extra_options ? JSON.parse(JSON.stringify(s.extra_options)) : {} };
+    }
+    function tplCaptureOpenMission(name) {
+        const ctx = findMissionAppCtx();
+        if (!ctx || !ctx.currentApp) { showToast('Open the mission you want to use as a template first.', '#ff9800', 4500); return null; }
+        let src = ctx.currentApp.instructions || [];
+        if (!src.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) src = lc.instrs; } catch (e) {} }
+        const body = src.map(tplNormStep).filter(s => s.type != null && s.type !== 0 && s.type !== 99); // drop takeoff + returnHome (builder re-wraps)
+        if (!body.length) { showToast('That mission has no navigate/snapshot steps to capture.', '#ff9800', 4500); return null; }
+        const tpl = { name: name, savedAt: Date.now(), srcName: (ctx.currentApp.name || ''), body: body };
+        const all = tplLoadAll(); all[name] = tpl; tplSaveAll(all);
+        console.log(`${TAG} [tpl] captured "${name}" — ${tplSummary(tpl)} (${body.length} steps)`);
+        return tpl;
+    }
+    function tplSummary(tpl) {
+        if (!tpl || !tpl.body) return '';
+        let nav = 0, snap = 0, flag = 0, other = 0;
+        tpl.body.forEach(s => { if (s.type === 1) nav++; else if (s.type === 6) snap++; else if (s.type === 16) flag++; else other++; });
+        const bits = [];
+        if (nav) bits.push(`${nav} nav`); if (flag) bits.push(`${flag} flag pole`); if (snap) bits.push(`${snap} snap`); if (other) bits.push(`${other} scan`);
+        return bits.join(' · ') || 'empty';
+    }
+    // K nav points spread along the FFZ edge (inside), fanned by bearing around the
+    // asset so multi-nav templates ring the asset instead of stacking. Falls back to
+    // a ring around the centroid when the FFZ has no valid inside-edge points.
+    function genNavPointsSpread(assetC, ffz, K) {
+        const ring = ffz.ring;
+        const lat0 = (assetC.lat || ring[0].lat) * Math.PI / 180;
+        const mLat = 111320, mLng = 111320 * Math.cos(lat0);
+        const toXY = p => ({ x: p.lng * mLng, y: p.lat * mLat });
+        const toLL = q => ({ lng: q.x / mLng, lat: q.y / mLat });
+        const cands = [];
+        for (let i = 0; i < ring.length; i++) {
+            const ax = toXY(ring[i]), bx = toXY(ring[(i + 1) % ring.length]);
+            let nx = -(bx.y - ax.y), ny = (bx.x - ax.x); const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+            for (let k = 0; k <= 6; k++) {
+                const t = k / 6, px = ax.x + (bx.x - ax.x) * t, py = ax.y + (bx.y - ax.y) * t;
+                [1, -1].forEach(sgn => {
+                    const ll = toLL({ x: px + sgn * nx * GEN_FFZ_INSET_M, y: py + sgn * ny * GEN_FFZ_INSET_M });
+                    if (!genPointInPoly(ll, ring)) return;
+                    let brg = Math.atan2(ll.lng - assetC.lng, ll.lat - assetC.lat) * 180 / Math.PI; if (brg < 0) brg += 360;
+                    cands.push({ ll, d: sopHaversineFt(assetC, ll), brg });
+                });
+            }
+        }
+        if (!cands.length) {
+            const out = [], rM = GEN_TARGET_STANDOFF_FT / 3.28084, cl = 110540, cg = 111320 * Math.cos(assetC.lat * Math.PI / 180);
+            for (let k = 0; k < K; k++) { const a = (k / K) * 2 * Math.PI; out.push({ lat: assetC.lat + (rM * Math.cos(a)) / cl, lng: assetC.lng + (rM * Math.sin(a)) / cg }); }
+            return out;
+        }
+        const pts = [], used = new Set();
+        for (let k = 0; k < K; k++) {
+            const target = (k / K) * 360; let best = -1, bestScore = Infinity;
+            for (let ci = 0; ci < cands.length; ci++) {
+                if (used.has(ci)) continue;
+                let da = Math.abs(cands[ci].brg - target); if (da > 180) da = 360 - da;
+                const score = da + Math.abs(cands[ci].d - GEN_TARGET_STANDOFF_FT) * 0.2;
+                if (score < bestScore) { bestScore = score; best = ci; }
+            }
+            if (best < 0) best = 0;
+            used.add(best); pts.push(cands[best].ll);
+        }
+        return pts;
+    }
+    // A child step's map position: fanned ~12 m out from its nav, toward the asset,
+    // 30° apart so a nav's snapshots ring it without stacking.
+    function genClusterPoint(anchor, i, count, aimAt) {
+        const R = 12, mLat = 110540, mLng = 111320 * Math.cos(anchor.lat * Math.PI / 180);
+        let base = 0;
+        if (aimAt) { const bx = (aimAt.lng - anchor.lng) * mLng, by = (aimAt.lat - anchor.lat) * mLat; base = Math.atan2(by, bx); }
+        const spread = count > 1 ? (i - (count - 1) / 2) * (Math.PI / 6) : 0;
+        const ang = base + spread;
+        return { lat: anchor.lat + (R * Math.sin(ang)) / mLat, lng: anchor.lng + (R * Math.cos(ang)) / mLng };
+    }
+    // Build one asset's mission from a captured template. navs → FFZ edge, each
+    // nav's snapshots/flag-poles clustered around it, altitudes re-derived per asset
+    // (nav = FFZ-min, snapshot = ground+AGL); flag-pole + scan-wrap steps carry the
+    // template's own settings verbatim.
+    function buildMissionFromTemplate(asset, ffzs, tpl, opts) {
+        opts = opts || {};
+        const aC = genCentroid(asset.ring);
+        const ffz = genAssetFFZ(aC, ffzs);
+        if (!ffz) return null;
+        const groundM = getElevationFromCache(aC.lat, aC.lng);
+        if (groundM == null) { if (aC.lat != null) try { fetchElevation(aC.lat, aC.lng); } catch (e) {} return null; }
+        const navAltM = ffz.minAltM != null ? ffz.minAltM : (groundM + 40);
+        const snapAltM = groundM + (defaultSnapAglFt / 3.28084);
+        const body = (tpl && tpl.body) || [];
+        const groups = []; let cur = null;
+        body.forEach(st => {
+            if (st.type === 1) { cur = { nav: st, children: [] }; groups.push(cur); }
+            else { if (!cur) { cur = { nav: null, children: [] }; groups.push(cur); } cur.children.push(st); }
+        });
+        const navGroups = groups.filter(g => g.nav);
+        const K = Math.max(1, navGroups.length);
+        const navPts = genNavPointsSpread(aC, ffz, K);
+        const mkStep = (norm, loc) => {
+            const type = norm.type, eo = norm.extra_options ? JSON.parse(JSON.stringify(norm.extra_options)) : {};
+            let v1 = norm.value1, v2 = norm.value2;
+            if (type === 1) { v1 = navAltM; if (v2 == null) v2 = 12; if (eo.shouldUseFreezoneMinAlt === undefined) eo.shouldUseFreezoneMinAlt = true; }
+            else if (type === 6) { v1 = snapAltM; v2 = 1; if (eo.pitch === undefined) eo.pitch = 1001; }
+            // flag pole (16) + scan wrap (5/7/24): keep the template's value1/value2/extra_options
+            return { type, value1: v1 == null ? null : v1, value2: v2 == null ? null : v2, location: loc || null, extra_options: eo, polygon_points: null, snapshot_points: null };
+        };
+        const instrs = [];
+        instrs.push({ type: 0, value1: 20, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }); // takeoff
+        let ni = 0;
+        groups.forEach(g => {
+            let anchor;
+            if (g.nav) { anchor = navPts[ni] || navPts[navPts.length - 1] || aC; ni++; instrs.push(mkStep(g.nav, { lat: anchor.lat, lng: anchor.lng })); }
+            else anchor = navPts[0] || aC;
+            const locKids = g.children.filter(c => c.type === 6 || c.type === 16).length;
+            let li = 0;
+            g.children.forEach(ch => {
+                const loc = (ch.type === 6 || ch.type === 16) ? genClusterPoint(anchor, li++, locKids, aC) : null;
+                instrs.push(mkStep(ch, loc));
+            });
+        });
+        instrs.push({ type: 99, value1: null, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }); // returnHome
+        const assetName = asset.name || ('Asset ' + asset.id);
+        const t = (opts.nameTemplate && opts.nameTemplate.trim()) || '{section} - {asset}';
+        const name = t.split('{section}').join(genSection(aC)).split('{asset}').join(assetName);
+        return { instructions: instrs, name };
+    }
+    // Dispatch: use a captured template if one was chosen, else the basic builder.
+    function genBuild(asset, ffzs, opts) {
+        if (opts && opts.template) return buildMissionFromTemplate(asset, ffzs, opts.template, opts);
+        return buildMissionForAsset(asset, ffzs, opts);
     }
     // Find the mission editor's app context (saveApp + setCurrentApp). Anchors on
     // stable Mission Bank DOM (works even with NO mission open in the editor).
@@ -2186,11 +2903,62 @@
         }
         return null;
     }
+    // Find Percepto's mission-LIST refetch — the zero-arg fn that re-GETs
+    // /available_app/ (the sidebar list query, projected to only:"id,name") and
+    // pushes the result into the list's setState. Found via the AIM_Mission_List_Probe:
+    // its source uniquely contains BOTH "/available_app/" and an `only:` projection,
+    // which distinguishes it from saveApp(2)/deleteApp(1). Walk the Mission Bank fiber
+    // for a 0-arg function matching that signature. Re-walk fresh each call
+    // (per-render closures).
+    function findMissionListRefetch() {
+        const anchors = ['a[href*="/mission-bank/"]', '.mission-bank__content', '.mission-bank', '.mission-bank__map-container', '[data-rfd-draggable-id]'];
+        const seen = new Set();
+        const scan = (obj) => {
+            if (!obj || typeof obj !== 'object' || seen.has(obj)) return null; seen.add(obj);
+            let keys = []; try { keys = Object.keys(obj); } catch (e) { return null; }
+            for (const k of keys) {
+                let v; try { v = obj[k]; } catch (e) { continue; }
+                if (typeof v === 'function' && v.length === 0) {
+                    let s = ''; try { s = String(v); } catch (e) {}
+                    if (/available_app/.test(s) && /only\s*:/.test(s)) return v;
+                }
+            }
+            return null;
+        };
+        for (const sel of anchors) {
+            const el = document.querySelector(sel); if (!el) continue;
+            const f0 = mbGetFiber(el);
+            for (const start of [f0, f0 && f0.alternate]) {
+                let node = start, depth = 0;
+                while (node && depth < 200) {
+                    let r = null;
+                    try { r = scan(node.memoizedProps && node.memoizedProps.value); } catch (e) {} if (r) return r;
+                    try { r = scan(node.memoizedProps); } catch (e) {} if (r) return r;
+                    try { r = scan(node.stateNode); } catch (e) {} if (r) return r;
+                    try { let h = node.memoizedState, i = 0; while (h && i < 40) { let rr = scan(h.memoizedState); if (rr) return rr; h = h.next; i++; } } catch (e) {}
+                    node = node.return; depth++;
+                }
+            }
+        }
+        return null;
+    }
+    // Refresh Percepto's sidebar mission list in place (no page reload) after a
+    // generate/bulk create. Best-effort: if the refetch fn can't be found, the new
+    // missions still exist on the server — they just need a manual reload to show.
+    function refreshMissionList() {
+        try {
+            const fn = findMissionListRefetch();
+            if (typeof fn === 'function') { fn(); console.log(`${TAG} [gen] mission list refreshed`); return true; }
+            console.warn(`${TAG} [gen] list-refetch fn not found — list may need a manual reload`);
+        } catch (e) { console.warn(`${TAG} [gen] list refresh failed`, e); }
+        return false;
+    }
+
     async function genGenerateForAsset(asset, ffzs, opts) {
         if (!generatorUnlocked) return;   // generator locked off on this install
         const ctx = findMissionAppCtx();
         if (!ctx) { showToast('Mission context not found — make sure you\'re on the Mission Bank page.', '#ff5252', 4000); return; }
-        const built = buildMissionForAsset(asset, ffzs, opts);
+        const built = genBuild(asset, ffzs, opts);
         if (!built) { showToast('Could not build mission (no FFZ near asset, or ground elevation still loading — try again).', '#ff9800', 4000); return; }
         showToast(`Creating "${built.name}"…`, '#9ad', 2500);
         try {
@@ -2199,6 +2967,7 @@
             const saved = (res && res.app) ? res.app : res;
             console.log(`${TAG} [gen] created mission "${built.name}"`, saved);
             showToast(`✓ Created "${built.name}" — opening it to adjust.`, '#5fff5f', 5000);
+            try { refreshMissionList(); } catch (e) {} // sidebar shows the new mission (no reload)
             try { ctx.setCurrentApp(saved); } catch (e) { console.warn(`${TAG} [gen] setCurrentApp failed`, e); }
             // Navigate to the new mission's editor URL so it shows without a page
             // refresh. Use THIS frame's own hash (the editor is in the react-pages
@@ -2245,6 +3014,8 @@
                 <div>Snapshot @ asset center · ground+${defaultSnapAglFt} = <b>${snapAltFt} ft</b></div>
                 <div>Navigate in FFZ · ${navAltFt != null ? 'FFZ-min <b>' + navAltFt + ' ft</b>' : 'FFZ-min n/a'} · ${Math.round(nav.standoffFt)} ft out</div>
                 ${genSkipReason(asset) ? `<div style="color:#ff7a00;margin-top:4px;">⚠ Asset state: <b>${escapeHtml(genSkipReason(asset))}</b> — bulk would SKIP this one.</div>` : ''}
+                <div style="display:flex;align-items:center;gap:6px;margin-top:9px;"><label style="white-space:nowrap;color:#cfe;">Template</label><select data-gp-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select></div>
+                <div data-gp-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
                 <label style="display:flex;align-items:center;gap:6px;margin:9px 0;cursor:pointer;"><input type="checkbox" data-gp-scan checked> Inspection scan (Thermal/GEM/Wait wrap)</label>
                 <div style="display:flex;gap:6px;justify-content:flex-end;">
                     <button class="aim-mb-tbtn" data-gp-cancel>Cancel</button>
@@ -2261,10 +3032,25 @@
         if (r.bottom > window.innerHeight - 8) pop.style.top = Math.max(8, (oe.clientY || 100) - r.height - 8) + 'px';
         pop.querySelector('[data-gp-close]').onclick = genCloseGenPopup;
         pop.querySelector('[data-gp-cancel]').onclick = genCloseGenPopup;
+        // Template picker (same presets as the bulk panel). Basic = the popup's
+        // built-in preview; a template replays a captured pattern for THIS asset.
+        const gpTpl = pop.querySelector('[data-gp-tpl]');
+        const gpSum = pop.querySelector('[data-gp-tpl-sum]');
+        const gpScan = pop.querySelector('[data-gp-scan]');
+        const gpUpdateSum = () => {
+            const t = tplLoadAll()[gpTpl.value];
+            if (gpScan) { gpScan.disabled = !!t; gpScan.parentElement.style.opacity = t ? '0.5' : ''; }
+            gpSum.textContent = t ? `${tplSummary(t)} — navs on FFZ edge, snaps clustered per nav (scan from template).` : 'Basic: 1 nav + snapshot at asset center.';
+        };
+        (() => { const all = tplLoadAll(), names = Object.keys(all).sort();
+            gpTpl.innerHTML = '<option value="">Basic — 1 nav + snapshot</option>' + names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)} · ${escapeHtml(tplSummary(all[n]))}</option>`).join('');
+            gpUpdateSum(); })();
+        gpTpl.onchange = gpUpdateSum;
         pop.querySelector('[data-gp-go]').onclick = () => {
-            const scan = pop.querySelector('[data-gp-scan]').checked;
+            const scan = gpScan.checked;
+            const template = gpTpl.value ? (tplLoadAll()[gpTpl.value] || null) : null;
             genCloseGenPopup();
-            genGenerateForAsset(asset, ffzs, { inspectionScan: scan });
+            genGenerateForAsset(asset, ffzs, { inspectionScan: scan, template });
         };
         setTimeout(() => document.addEventListener('mousedown', genPopupOutside, true), 0);
     }
@@ -2287,6 +3073,21 @@
         };
     }
     function genCloseBulkPanel() { const p = document.getElementById(GEN_BULK_PANEL_ID); if (p) p.remove(); }
+    // Edge-to-edge distance (ft) from an asset pad to its NEAREST FFZ — 0 if the FFZ
+    // overlaps/contains the pad (or vice-versa). Used by the "built areas only"
+    // filter: an asset counts as built if it has an FFZ inside or ≤ GEN_BUILT_FT of
+    // it. Reuses the merge routing core's point-to-polygon distance.
+    const GEN_BUILT_FT = 50;
+    function genAssetNearestFFZFt(asset, ffzs) {
+        if (!asset || !Array.isArray(asset.ring) || !asset.ring.length || !ffzs || !ffzs.length) return Infinity;
+        let best = Infinity;
+        for (const f of ffzs) {
+            if (!f || !Array.isArray(f.ring) || f.ring.length < 3) continue;
+            for (const c of asset.ring) { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring) * 3.28084; if (d < best) best = d; if (best === 0) return 0; }
+            for (const p of f.ring) { const d = mbPointToPolygonMeters(p.lat, p.lng, asset.ring) * 3.28084; if (d < best) best = d; if (best === 0) return 0; }
+        }
+        return best;
+    }
     // Existing mission names (lowercased) for the site — so bulk skips assets
     // that already have a mission. Always a FRESH fetch (catches ones you just made).
     function genFetchMissionNames(siteID) {
@@ -2310,8 +3111,13 @@
             const stateSkip = assets.filter(a => genSkipReason(a));
             const haveMission = assets.filter(a => !genSkipReason(a) && genHasMission(a, names));
             const valid = assets.filter(a => !genSkipReason(a) && !genHasMission(a, names));
-            const pts = valid.map(a => genCentroid(a.ring));
+            // Only fetch centroids we DON'T already have (exact or a nearby cached
+            // DEM point) — most are already cached from Asset Inspector's sampling,
+            // so this typically fetches nothing and never touches the rate limit.
+            const pts = valid.map(a => genCentroid(a.ring)).filter(p => getElevationFromCache(p.lat, p.lng) == null);
             const render = () => genRenderBulkPanel(valid, stateSkip, haveMission, ffzs);
+            if (!pts.length) { render(); return; }
+            console.log(`${TAG} [gen-bulk] fetching ${pts.length} uncached elevations (of ${valid.length} assets)`);
             try { bulkFetchElevations(pts).then(render).catch(render); } catch (e) { render(); }
         }).catch(e => { console.warn(`${TAG} [gen-bulk] load failed`, e); showToast('Generator: failed to load assets (see console).', '#ff5252', 4000); });
     }
@@ -2319,14 +3125,18 @@
         genCloseBulkPanel();
         const rows = valid.map((a, i) => {
             const info = genPreviewInfo(a, ffzs);
+            const nearFt = genAssetNearestFFZFt(a, ffzs);
+            const hasFFZ = nearFt <= GEN_BUILT_FT; // built = FFZ inside or ≤50 ft
             const dis = info.buildable ? '' : 'opacity:0.5;';
             const detail = info.buildable
                 ? `nav ${info.standoffFt} ft @ ${info.navAltFt != null ? info.navAltFt + ' ft' : 'FFZ-min'} · snap ${info.snapAltFt} ft`
                 : (info.ffz ? 'elevation not loaded' : 'no FFZ found — skip');
-            return `<label class="aim-gen-row" style="display:flex;align-items:center;gap:8px;padding:5px 4px;border-bottom:1px solid #2a2f38;${dis}">
-                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'}>
-                <span style="flex:1;color:#e6e6e6;font-weight:700;">${escapeHtml(info.name)}</span>
-                <span style="color:#9ad;font-size:10px;white-space:nowrap;">${escapeHtml(detail)}</span>
+            return `<label class="aim-gen-row" data-has-ffz="${hasFFZ ? 1 : 0}" style="display:flex;align-items:flex-start;gap:8px;padding:6px 4px;border-bottom:1px solid #2a2f38;${dis}">
+                <input type="checkbox" data-gen-row="${i}" ${info.buildable ? 'checked' : ''} ${info.buildable ? '' : 'disabled'} style="flex:0 0 auto;margin-top:2px;">
+                <div style="flex:1;min-width:0;">
+                    <div style="color:#e6e6e6;font-weight:700;font-size:12px;line-height:1.25;">${escapeHtml(info.name)}</div>
+                    <div style="color:#9ad;font-size:10px;line-height:1.2;margin-top:1px;">${escapeHtml(detail)}</div>
+                </div>
             </label>`;
         }).join('');
         const nm = a => escapeHtml(`${genSection(genCentroid(a.ring))} - ${a.name || a.id}`);
@@ -2344,6 +3154,21 @@
             <div style="padding:8px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
                 <b style="color:#7dff7d;">${valid.length}</b> to create · <b style="color:#9ad;">${haveMission.length}</b> already have missions · <b style="color:#ff8a8a;">${stateSkip.length}</b> skip-state
                 <label style="display:flex;align-items:center;gap:6px;margin-top:7px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-scan checked> Inspection scan (Thermal/GEM/Wait wrap) on every mission</label>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;"><label style="color:#cfe;white-space:nowrap;">Name</label><input data-gen-bulk-name value="{section} - {asset}" title="Tokens: {section} = N/E/S/W · {asset} = asset name" style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></div>
+                <div style="color:#789;font-size:10px;margin-top:2px;">Tokens: <b>{section}</b> = N/E/S/W · <b>{asset}</b> = asset name (e.g. <b>NNE - {asset}</b>)</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
+                    <label style="color:#cfe;white-space:nowrap;">Template</label>
+                    <select data-gen-tpl style="flex:1;min-width:0;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:2px 6px;border-radius:3px;font:inherit;font-size:11px;"></select>
+                    <button data-gen-tpl-capture class="aim-mb-tbtn" title="Capture the mission currently open in the editor as a reusable template" style="padding:2px 7px;font-size:11px;">📋</button>
+                    <button data-gen-tpl-del class="aim-mb-tbtn" title="Delete the selected template" style="padding:2px 7px;font-size:11px;">🗑</button>
+                </div>
+                <div data-gen-tpl-sum style="color:#789;font-size:10px;margin-top:2px;"></div>
+                <label style="display:flex;align-items:center;gap:6px;margin-top:5px;cursor:pointer;color:#cfe;"><input type="checkbox" data-gen-bulk-builtonly> Built areas only — assets with an FFZ inside or ≤${GEN_BUILT_FT} ft</label>
+                <div style="display:flex;align-items:center;gap:6px;margin-top:7px;">
+                    <button data-gen-selall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Select all</button>
+                    <button data-gen-deselall class="aim-mb-tbtn" style="padding:3px 9px;font-size:11px;">Deselect all</button>
+                    <span data-gen-shown style="flex:1;text-align:right;color:#789;font-size:10px;"></span>
+                </div>
             </div>
             <div style="overflow:auto;flex:1;padding:2px 10px;">${rows || '<div style="padding:12px;color:#888;">No assets to create.</div>'}
                 ${existRows ? `<div style="margin-top:8px;color:#9ad;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Already have missions</div>${existRows}` : ''}
@@ -2359,14 +3184,73 @@
         p.querySelector('[data-gen-bulk-close]').onclick = close;
         p.querySelector('[data-gen-bulk-cancel]').onclick = close;
         const goBtn = p.querySelector('[data-gen-bulk-go]');
-        const updateGo = () => { const n = p.querySelectorAll('[data-gen-row]:checked').length; goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy; };
+        const shownEl = p.querySelector('[data-gen-shown]');
+        const updateGo = () => {
+            const n = p.querySelectorAll('[data-gen-row]:checked').length;
+            goBtn.textContent = `⊕ Create ${n}`; goBtn.disabled = !n || genBulkBusy;
+            const vis = [...p.querySelectorAll('.aim-gen-row')].filter(r => r.style.display !== 'none').length;
+            if (shownEl) shownEl.textContent = `${vis} shown`;
+        };
         p.querySelectorAll('[data-gen-row]').forEach(cb => cb.onchange = updateGo);
+        // "Built areas only" filter — hide (and uncheck) assets with no FFZ within
+        // GEN_BUILT_FT. Off by default.
+        const builtOnly = p.querySelector('[data-gen-bulk-builtonly]');
+        const applyBuiltFilter = () => {
+            const on = builtOnly.checked;
+            p.querySelectorAll('.aim-gen-row').forEach(row => {
+                const has = row.getAttribute('data-has-ffz') === '1';
+                if (on && !has) { row.style.display = 'none'; const cb = row.querySelector('[data-gen-row]'); if (cb) cb.checked = false; }
+                else row.style.display = '';
+            });
+            updateGo();
+        };
+        builtOnly.onchange = applyBuiltFilter;
+        // Select all (visible + buildable only) / Deselect all.
+        p.querySelector('[data-gen-selall]').onclick = () => {
+            p.querySelectorAll('.aim-gen-row').forEach(row => { if (row.style.display === 'none') return; const cb = row.querySelector('[data-gen-row]:not(:disabled)'); if (cb) cb.checked = true; });
+            updateGo();
+        };
+        p.querySelector('[data-gen-deselall]').onclick = () => { p.querySelectorAll('[data-gen-row]').forEach(cb => cb.checked = false); updateGo(); };
         updateGo();
+        // Template picker: "Basic" (existing 1-nav builder) + saved presets. Capture
+        // 📋 grabs the mission open in the editor; 🗑 deletes the selected preset.
+        const tplSel = p.querySelector('[data-gen-tpl]');
+        const tplSum = p.querySelector('[data-gen-tpl-sum]');
+        const scanCb = p.querySelector('[data-gen-bulk-scan]');
+        const updateTplSum = () => {
+            const t = tplLoadAll()[tplSel.value];
+            if (scanCb) { scanCb.disabled = !!t; scanCb.parentElement.style.opacity = t ? '0.5' : ''; }
+            tplSum.textContent = t
+                ? `${tplSummary(t)}${t.srcName ? ' · from "' + t.srcName + '"' : ''} — navs along FFZ edge, snapshots clustered per nav (scan wrap comes from the template).`
+                : 'Basic: 1 nav at the FFZ edge + snapshot(s) at the asset center.';
+        };
+        const refreshTpls = (selectName) => {
+            const all = tplLoadAll(); const names = Object.keys(all).sort();
+            tplSel.innerHTML = '<option value="">Basic — 1 nav + snapshot</option>' + names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)} · ${escapeHtml(tplSummary(all[n]))}</option>`).join('');
+            if (selectName && all[selectName]) tplSel.value = selectName;
+            updateTplSum();
+        };
+        tplSel.onchange = updateTplSum;
+        p.querySelector('[data-gen-tpl-capture]').onclick = () => {
+            const nm = (prompt('Name this template (captures the mission currently OPEN in the editor):', '') || '').trim();
+            if (!nm) return;
+            const t = tplCaptureOpenMission(nm);
+            if (t) { refreshTpls(nm); showToast(`✓ Template "${nm}" saved — ${tplSummary(t)}.`, '#5fff5f', 5000); }
+        };
+        p.querySelector('[data-gen-tpl-del]').onclick = () => {
+            const nm = tplSel.value;
+            if (!nm) { showToast('Pick a saved template to delete (Basic can\'t be deleted).', '#9ad', 3000); return; }
+            if (!confirm(`Delete template "${nm}"?`)) return;
+            const all = tplLoadAll(); delete all[nm]; tplSaveAll(all); refreshTpls(''); showToast(`Template "${nm}" deleted.`, '#888', 2500);
+        };
+        refreshTpls('');
         goBtn.onclick = () => {
             if (genBulkBusy) return;
             const picked = [...p.querySelectorAll('[data-gen-row]:checked')].map(cb => valid[Number(cb.getAttribute('data-gen-row'))]).filter(Boolean);
-            const scan = p.querySelector('[data-gen-bulk-scan]').checked;
-            genBulkCommit(picked, ffzs, { inspectionScan: scan }, p.querySelector('[data-gen-bulk-status]'), goBtn);
+            const scan = scanCb.checked;
+            const nameTemplate = (p.querySelector('[data-gen-bulk-name]').value || '').trim() || '{section} - {asset}';
+            const template = tplSel.value ? (tplLoadAll()[tplSel.value] || null) : null;
+            genBulkCommit(picked, ffzs, { inspectionScan: scan, nameTemplate, template }, p.querySelector('[data-gen-bulk-status]'), goBtn);
         };
     }
     async function genBulkCommit(assets, ffzs, opts, statusEl, goBtn) {
@@ -2378,18 +3262,365 @@
         const setStatus = t => { if (statusEl) statusEl.textContent = t; };
         for (let i = 0; i < assets.length; i++) {
             setStatus(`Creating ${i + 1}/${assets.length}…`);
-            const built = buildMissionForAsset(assets[i], ffzs, opts);
+            const built = genBuild(assets[i], ffzs, opts);
             if (!built) { fail++; continue; }
             try { await ctx.saveApp({ id: null, type: 1, instructions: built.instructions, data_report_object_arr: [] }, built.name); ok++; }
             catch (e) { fail++; console.warn(`${TAG} [gen-bulk] failed "${built.name}"`, e); }
         }
         genBulkBusy = false;
         setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
-        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}. Refresh the mission list to see them.`, ok ? '#5fff5f' : '#ff5252', 7000);
+        // Refresh Percepto's sidebar list in place so the new missions appear now.
+        const refreshed = ok ? refreshMissionList() : false;
+        showToast(`▣ Bulk generate: created ${ok}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
         console.log(`${TAG} [gen-bulk] created ${ok}, failed ${fail}`);
-        // Soft-refresh the list so the new missions appear (iframe's own hash).
-        try { const cur = location.hash || ''; const mm = cur.match(/^(.*\/mission-bank)/); if (mm && cur !== mm[1]) location.hash = mm[1]; } catch (e) {}
         if (goBtn) goBtn.disabled = false;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SECTION + BATTERY MERGE (v1.48) — group the site's SOLO missions into
+    // battery-tiered merged missions per compass section (8-way + Central),
+    // ordered furthest→closest from base. Routing core PORTED from Asset Inspector
+    // (graph + Dijkstra + FFZ-bridging + batteryFor) so routed distances + Tattu/
+    // Tulip tiers MATCH its Battery column. Merge = ordered concatenation of the
+    // solos' bodies (strip each takeoff/returnHome, wrap ONE takeoff + ONE return);
+    // the server computes route_points/app_data (verified vs a real merged mission).
+    // Gated behind the generator unlock (it CREATES missions).
+    // ════════════════════════════════════════════════════════════════════════
+    const MB_BATTERY = { tattuMaxFt: 14000, tulipMaxFt: 18000 };
+    const MB_REACH_FFZ_FT = 70, MB_ENTRY_FFZ_FT = 25;
+    const MB_CENTRAL_FT = 750;   // asset within this straight-line of base → "Central"
+    const MB_SECTION_NAMES = { N: 'North', NE: 'Northeast', E: 'East', SE: 'Southeast', S: 'South', SW: 'Southwest', W: 'West', NW: 'Northwest', C: 'Central' };
+    const MB_SECTION_ORDER = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'C'];
+
+    function mbApproxMeters(lat1, lng1, lat2, lng2) { const R = 6371000; const p1 = lat1 * Math.PI / 180; const dp = (lat2 - lat1) * Math.PI / 180; const dl = (lng2 - lng1) * Math.PI / 180; const x = dl * Math.cos(p1), y = dp; return Math.sqrt(x * x + y * y) * R; }
+    function mbVkey(p) { return `${p.lat.toFixed(6)},${p.lng.toFixed(6)}`; }
+    function mbSimplifyPolygon(poly) { if (!poly || poly.length < 3) return poly || []; let cl = 0, cn = 0; for (const p of poly) { cl += p.lat; cn += p.lng; } cl /= poly.length; cn /= poly.length; return poly.slice().sort((a, b) => Math.atan2(a.lat - cl, a.lng - cn) - Math.atan2(b.lat - cl, b.lng - cn)); }
+    function mbPointToSegMeters(lat, lng, a, b) { const ax = a.lng, ay = a.lat, bx = b.lng, by = b.lat; const dx = bx - ax, dy = by - ay; const l2 = dx * dx + dy * dy; let t = l2 === 0 ? 0 : ((lng - ax) * dx + (lat - ay) * dy) / l2; t = Math.max(0, Math.min(1, t)); return mbApproxMeters(lat, lng, ay + t * dy, ax + t * dx); }
+    function mbPointToPolygonMeters(lat, lng, ring) { if (!ring || ring.length < 3) return Infinity; if (genPointInPoly({ lat, lng }, ring)) return 0; let best = Infinity; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const d = mbPointToSegMeters(lat, lng, ring[j], ring[i]); if (d < best) best = d; } return best; }
+    function mbBuildGraph(fps) {
+        const adj = new Map(), verts = new Map();
+        const addV = p => { const k = mbVkey(p); if (!verts.has(k)) verts.set(k, { lat: p.lat, lng: p.lng }); if (!adj.has(k)) adj.set(k, []); return k; };
+        (fps || []).forEach(e => { (e.arcs || []).forEach(arc => { if (!arc.point_a || !arc.point_b) return; if (typeof arc.point_a.lat !== 'number' || typeof arc.point_b.lat !== 'number') return; const ka = addV(arc.point_a), kb = addV(arc.point_b); if (ka === kb) return; const w = (typeof arc.distance === 'number' && arc.distance > 0) ? arc.distance : mbApproxMeters(arc.point_a.lat, arc.point_a.lng, arc.point_b.lat, arc.point_b.lng); adj.get(ka).push({ to: kb, w }); adj.get(kb).push({ to: ka, w }); }); });
+        return { adj, verts };
+    }
+    function mbDijkstra(graph, startKey) { const dist = new Map(); if (!graph.adj.has(startKey)) return dist; dist.set(startKey, 0); const vis = new Set(); const pq = [{ k: startKey, d: 0 }]; while (pq.length) { let mi = 0; for (let i = 1; i < pq.length; i++) if (pq[i].d < pq[mi].d) mi = i; const { k, d } = pq.splice(mi, 1)[0]; if (vis.has(k)) continue; vis.add(k); (graph.adj.get(k) || []).forEach(({ to, w }) => { const nd = d + w; if (nd < (dist.has(to) ? dist.get(to) : Infinity)) { dist.set(to, nd); pq.push({ k: to, d: nd }); } }); } return dist; }
+    function mbNearestVertex(graph, lat, lng) { let best = null; graph.verts.forEach((v, k) => { const d = mbApproxMeters(lat, lng, v.lat, v.lng); if (!best || d < best.dist) best = { key: k, dist: d, vert: v }; }); return best; }
+    function mbBatteryFor(routeM) { if (routeM == null) return null; const ft = routeM * 3.28084; if (ft <= MB_BATTERY.tattuMaxFt) return { label: 'Tattu', color: '#5fff5f', level: 0 }; if (ft <= MB_BATTERY.tulipMaxFt) return { label: 'Tulip', color: '#ffd54f', level: 1 }; return { label: `⚠ over ${MB_BATTERY.tulipMaxFt.toLocaleString()} ft`, color: '#ff5252', level: 2 }; }
+
+    // 8-way + Central section from base. atan2(dLat,dLng): 0=E, 90=N.
+    function mbSection(pt, base) {
+        if (!base) return 'C';
+        if (mbApproxMeters(base.lat, base.lng, pt.lat, pt.lng) * 3.28084 <= MB_CENTRAL_FT) return 'C';
+        const dLat = pt.lat - base.lat, dLng = pt.lng - base.lng;
+        let deg = Math.atan2(dLat, dLng) * 180 / Math.PI; if (deg < 0) deg += 360; // 0=E,90=N,180=W,270=S
+        const idx = Math.round(deg / 45) % 8;
+        return ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE'][idx];
+    }
+
+    // Build a router for the site: bridged FP graph + base Dijkstra maps. routeFor
+    // (a list of asset points) returns one-way routeM (base→FFZ far edge) — the
+    // EXACT Asset-Inspector algorithm. Reusable across all assets on the site.
+    function mbBuildRouter(ent) {
+        const graph = mbBuildGraph(ent.fps);
+        const ffzs = (ent.ffzs || []).map(f => ({ ring: mbSimplifyPolygon(f.ring) }));
+        const fpVerts = []; graph.verts.forEach((v, k) => fpVerts.push({ key: k, lat: v.lat, lng: v.lng }));
+        const entryM = MB_ENTRY_FFZ_FT / 3.28084;
+        ffzs.forEach(f => { const inside = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, f.ring) <= entryM); for (let i = 0; i < inside.length; i++) for (let j = i + 1; j < inside.length; j++) { const w = mbApproxMeters(inside[i].lat, inside[i].lng, inside[j].lat, inside[j].lng); graph.adj.get(inside[i].key).push({ to: inside[j].key, w }); graph.adj.get(inside[j].key).push({ to: inside[i].key, w }); } });
+        const bases = (ent.baseEnts && ent.baseEnts.length) ? ent.baseEnts.map(b => ({ lat: b.coords[0].lat, lng: b.coords[0].lng })) : (ent.base ? [ent.base] : []);
+        const baseRuns = bases.map(b => { const bv = mbNearestVertex(graph, b.lat, b.lng); if (!bv) return null; return { baseConn: bv.dist, dist: mbDijkstra(graph, bv.key) }; }).filter(Boolean);
+        const reachM = MB_REACH_FFZ_FT / 3.28084;
+        return {
+            ready: graph.verts.size > 0 && baseRuns.length > 0,
+            verts: graph.verts.size,
+            routeFor(pts) {
+                if (!pts || !pts.length) return null;
+                let ffz = null, ffzD = Infinity;
+                ffzs.forEach(f => { let best = Infinity; pts.forEach(c => { const d = mbPointToPolygonMeters(c.lat, c.lng, f.ring); if (d < best) best = d; }); if (best < ffzD) { ffzD = best; ffz = f; } });
+                if (!ffz || ffzD > reachM) return null;
+                const entries = fpVerts.filter(v => mbPointToPolygonMeters(v.lat, v.lng, ffz.ring) <= entryM);
+                if (!entries.length) return null;
+                let best = null;
+                baseRuns.forEach(br => { entries.forEach(en => { const net = br.dist.has(en.key) ? br.dist.get(en.key) : null; if (net == null) return; let far = 0; ffz.ring.forEach(p => { const dd = mbApproxMeters(en.lat, en.lng, p.lat, p.lng); if (dd > far) far = dd; }); const total = br.baseConn + net + far; if (best == null || total < best) best = total; }); });
+                return best;
+            }
+        };
+    }
+
+    // The asset point(s) a solo inspects = its snapshot (type 6) locations (asset
+    // center). Falls back to navigate (type 1) locations. Used for section + routing.
+    function mbSoloPoints(mission) {
+        const ins = (mission && mission.instructions) || [];
+        const snaps = ins.filter(i => i && i.type === 6 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+        if (snaps.length) return snaps;
+        return ins.filter(i => i && i.type === 1 && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+    }
+    // The mission "body" = everything except the leading takeoff + trailing
+    // returnHome (types 0 / 99). These get concatenated in the merge.
+    function mbMissionBody(mission) {
+        return ((mission && mission.instructions) || []).filter(i => i && i.type !== 0 && i.type !== 99);
+    }
+
+    // Compute the merge plan for a site: per-solo {mission, pts, ring, routeM,
+    // section, battery}, then grouped into battery-tiered, furthest→closest sets.
+    // `overrides` = {missionId: sectionCode} manual section reassignments.
+    function mbComputeMerge(siteID, missions, ent, overrides) {
+        const router = mbBuildRouter(ent);
+        const base = ent.base;
+        const solos = missions.map(m => {
+            const pts = mbSoloPoints(m);
+            if (!pts.length) return { mission: m, routeM: null, reason: 'no-location', section: 'C', battery: null };
+            // Match to an asset entity (pad ring contains the snapshot point) for an
+            // accurate pad-edge → FFZ distance; else route from the point itself.
+            const c = pts[0];
+            let ring = null;
+            for (const a of (ent.assets || [])) { if (genPointInPoly(c, a.ring)) { ring = a.ring; break; } }
+            const routePts = ring || pts;
+            const routeM = router.ready ? router.routeFor(routePts) : null;
+            const ov = overrides && overrides[String(m.id)];
+            const section = ov || mbSection(c, base);
+            return { mission: m, pt: c, routeM, reason: routeM == null ? (router.ready ? 'unreachable' : 'no-routing-data') : '', section, battery: mbBatteryFor(routeM) };
+        });
+        // Group by section → battery-tier sets.
+        const bySection = {};
+        solos.forEach(s => { (bySection[s.section] = bySection[s.section] || []).push(s); });
+        const groups = [];
+        MB_SECTION_ORDER.forEach(code => {
+            const list = (bySection[code] || []).slice();
+            if (!list.length) return;
+            // order furthest→closest by routeM (null routes sink to the bottom).
+            list.sort((a, b) => (b.routeM == null ? -1 : b.routeM) - (a.routeM == null ? -1 : a.routeM));
+            const routable = list.filter(s => s.routeM != null);
+            const tattu = routable.filter(s => s.battery && s.battery.level === 0);
+            const tulip = routable.filter(s => s.battery && s.battery.level === 1);
+            const over = routable.filter(s => s.battery && s.battery.level === 2);
+            const name = MB_SECTION_NAMES[code];
+            if (tulip.length) {
+                // East 1 = Tattu subset; East 2 = Tattu + Tulip (East 2 ⊇ East 1).
+                if (tattu.length) groups.push({ code, name: `${name} 1`, battery: 'Tattu', solos: tattu.slice() });
+                groups.push({ code, name: `${name} 2`, battery: 'Tulip', solos: tattu.concat(tulip) });
+            } else if (tattu.length) {
+                groups.push({ code, name: `${name} 1-2`, battery: 'Tattu/Tulip', solos: tattu.slice() });
+            }
+            // over-range + unroutable solos are surfaced in the panel but not merged.
+            if (over.length || list.some(s => s.routeM == null)) {
+                const excluded = over.concat(list.filter(s => s.routeM == null));
+                groups.push({ code, name: `${name} — excluded`, excluded });
+            }
+        });
+        return { solos, groups, routerReady: router.ready, verts: router.verts };
+    }
+
+    // ── Merge panel + commit ─────────────────────────────────────────────────
+    const MB_MERGE_PANEL_ID = 'aim-mb-merge-panel';
+    let mbMergeBusy = false;
+    function mbCloseMergePanel() { const p = document.getElementById(MB_MERGE_PANEL_ID); if (p) p.remove(); }
+    function mbCurrentSiteID() { const m = (location.hash || '').match(/#\/site\/(\d+)\//); return m ? m[1] : null; }
+    function mbFetchMissionsFull(siteID) {
+        return fetch(`/available_app/?site_id=${encodeURIComponent(siteID)}&type=1`, { credentials: 'include' })
+            .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+            .then(arr => Array.isArray(arr) ? arr : []);
+    }
+    function mbOpenMergePanel() {
+        if (!generatorUnlocked) return;
+        if (CONTEXT !== 'IFRAME') return;
+        const siteID = mbCurrentSiteID();
+        if (!siteID) { showToast('No site loaded.', '#ff9800', 3000); return; }
+        showToast('⛟ Loading missions + map for the merge…', '#9ad', 2500);
+        Promise.all([mbFetchMissionsFull(siteID), genFetchEntities(siteID)])
+            .then(([missions, ent]) => {
+                const overrides = {};
+                const rerender = () => { const data = mbComputeMerge(siteID, missions, ent, overrides); mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender); };
+                rerender();
+            })
+            .catch(e => { console.warn(`${TAG} [merge] load failed`, e); showToast('Merge: failed to load (see console).', '#ff5252', 4000); });
+    }
+    function mbRenderMergePanel(data, siteID, missions, ent, overrides, rerender) {
+        mbCloseMergePanel();
+        const ft = m => m == null ? '—' : `${Math.round(m * 3.28084).toLocaleString()} ft`;
+        const secOpts = (cur) => MB_SECTION_ORDER.map(c => `<option value="${c}" ${c === cur ? 'selected' : ''}>${MB_SECTION_NAMES[c]}</option>`).join('');
+        const mergeGroups = data.groups.filter(g => g.solos);
+        const exclGroups = data.groups.filter(g => g.excluded);
+        const chip = (b) => b ? `<span style="background:${b.color}22;color:${b.color};border:1px solid ${b.color}66;border-radius:4px;padding:0 5px;font-size:10px;font-weight:700;white-space:nowrap;">${b.label}</span>` : '';
+        const soloRow = (s) => `<div style="display:flex;align-items:center;gap:6px;padding:3px 4px;border-bottom:1px solid #20262e;">
+            <span style="flex:1;color:#e6e6e6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span>
+            <span style="color:#9ad;font-size:10px;white-space:nowrap;">${ft(s.routeM)}</span>
+            ${chip(s.battery)}
+            <select data-mb-ov="${s.mission.id}" title="Reassign section" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;padding:1px 2px;">${secOpts(s.section)}</select>
+        </div>`;
+        const groupBlock = (g) => `<div style="margin:6px 0;border:1px solid #2a3a2a;border-radius:6px;overflow:hidden;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 8px;background:rgba(95,255,95,0.08);">
+                <span style="font-weight:800;color:#7dff7d;font-size:12px;">⛟ ${escapeHtml(g.name)}</span>
+                <span style="color:#9ad;font-size:10px;">${g.solos.length} stops · ${g.battery}</span>
+            </div>
+            <div style="padding:2px 4px;">${g.solos.map(soloRow).join('')}</div>
+        </div>`;
+        const exclBlock = (g) => `<div style="margin:5px 0;padding:4px 8px;border:1px solid #3a2a2a;border-radius:6px;">
+            <div style="color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px;">${escapeHtml(g.name)}</div>
+            ${g.excluded.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:2px 2px;font-size:11px;color:#caa;"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.mission.name || ('#' + s.mission.id))}</span><span style="color:#a66;font-size:10px;">${s.reason === 'unreachable' ? 'no route' : (s.reason || (s.battery && s.battery.level === 2 ? 'over range' : ''))}</span><select data-mb-ov="${s.mission.id}" style="background:#0e1218;color:#cde;border:1px solid #2a3340;border-radius:4px;font-size:10px;">${secOpts(s.section)}</select></div>`).join('')}
+        </div>`;
+        const routable = data.solos.filter(s => s.routeM != null).length;
+        const p = document.createElement('div');
+        p.id = MB_MERGE_PANEL_ID;
+        p.style.cssText = 'position:fixed;top:60px;right:24px;width:430px;max-height:84vh;display:flex;flex-direction:column;z-index:2147483600;' +
+            'background:#161a20;border:1px solid #5fff5f;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        p.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:14px;padding:9px 12px;background:rgba(95,255,95,0.08);border-bottom:1px solid rgba(95,255,95,0.3);">
+                <span style="font-weight:800;color:#7dff7d;font-size:14px;">⛟ Merge by Section + Battery</span>
+                <button data-mb-merge-close style="background:rgba(255,255,255,0.12);border:none;color:#fff;width:22px;height:22px;border-radius:4px;cursor:pointer;">✕</button>
+            </div>
+            <div style="padding:7px 12px;font-size:11px;color:#bbb;border-bottom:1px solid #2a2f38;">
+                <b style="color:#7dff7d;">${missions.length}</b> solo missions · <b style="color:#9ad;">${routable}</b> routable · <b style="color:#7dff7d;">${mergeGroups.length}</b> merge groups${data.routerReady ? '' : ' · <b style="color:#ff8a8a;">no routing data (no FPs/base)</b>'}
+                <div style="margin-top:3px;color:#789;">Furthest→closest from base. East 1 = Tattu subset, East 2 = + Tulip. Reassign a stop's section with the dropdown.</div>
+            </div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;">
+                ${mergeGroups.length ? mergeGroups.map(groupBlock).join('') : '<div style="padding:12px;color:#888;">No mergeable groups (need routable solos).</div>'}
+                ${exclGroups.length ? `<div style="margin-top:6px;color:#ff8a8a;font-size:10px;text-transform:uppercase;letter-spacing:0.04em;">Excluded (not merged)</div>${exclGroups.map(exclBlock).join('')}` : ''}
+            </div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-mb-merge-status style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-mb-merge-go style="padding:6px 12px;background:#5fff5f;border:none;color:#04220a;border-radius:6px;cursor:pointer;font-weight:800;" ${mergeGroups.length && !mbMergeBusy ? '' : 'disabled'}>⛟ Create ${mergeGroups.length} merged</button>
+            </div>`;
+        document.body.appendChild(p);
+        p.querySelector('[data-mb-merge-close]').onclick = mbCloseMergePanel;
+        p.querySelectorAll('[data-mb-ov]').forEach(sel => sel.onchange = () => { overrides[sel.getAttribute('data-mb-ov')] = sel.value; rerender(); });
+        p.querySelector('[data-mb-merge-go]').onclick = () => mbCommitAllMerges(mergeGroups, p.querySelector('[data-mb-merge-status]'), p.querySelector('[data-mb-merge-go]'));
+    }
+    function mbMakeStep(type, value1) { return { type, value1: value1 === undefined ? null : value1, value2: null, location: null, extra_options: {}, polygon_points: null, snapshot_points: null }; }
+    async function mbCommitAllMerges(groups, statusEl, goBtn) {
+        if (!generatorUnlocked || mbMergeBusy) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        mbMergeBusy = true; if (goBtn) goBtn.disabled = true;
+        const setStatus = t => { if (statusEl) statusEl.textContent = t; };
+        let ok = 0, fail = 0;
+        for (let i = 0; i < groups.length; i++) {
+            const g = groups[i];
+            setStatus(`Creating "${g.name}" (${i + 1}/${groups.length})…`);
+            // takeoff + each solo's body (no takeoff/return) furthest→closest + returnHome
+            const body = [];
+            g.solos.forEach(s => mbMissionBody(s.mission).forEach(st => body.push(st)));
+            const instrs = [mbMakeStep(0, 20)].concat(body, [mbMakeStep(99)]);
+            try { await ctx.saveApp({ id: null, type: 1, instructions: instrs, data_report_object_arr: [] }, g.name); ok++; }
+            catch (e) { fail++; console.warn(`${TAG} [merge] failed "${g.name}"`, e); }
+        }
+        mbMergeBusy = false;
+        const refreshed = ok ? refreshMissionList() : false;
+        setStatus(`Done — created ${ok}${fail ? `, ${fail} failed` : ''}.`);
+        showToast(`⛟ Merge: created ${ok} merged mission${ok === 1 ? '' : 's'}${fail ? ` · ${fail} failed (see console)` : ''}.${ok && !refreshed ? ' Reload the list to see them.' : ''}`, ok ? '#5fff5f' : '#ff5252', 7000);
+        console.log(`${TAG} [merge] created ${ok}, failed ${fail}`);
+        if (goBtn) goBtn.disabled = false;
+    }
+
+    // ── Step presets: capture ANY configured step in the open editor (Wait,
+    // Camera Type, GEM, Camera Pitch, Flag Pole, maneuvers…) as a named preset,
+    // persisted in GM storage forever, and stage clones of it from the ➕ Stage
+    // popup. Clone-based ON PURPOSE — creating instructions from scratch trips
+    // Percepto's createInstruction type-mangling (see genStageSteps header), so
+    // a new type needs one native add+configure, once ever, then lives here.
+    // Wait + Camera Type presets get inline quick-edit controls in the popup
+    // (seconds / RGB-vs-Thermal) whose edits persist to the preset.
+    const CACHE_KEY_STEP_PRESETS = 'aim-mb-step-presets';
+    const CACHE_KEY_STAGE_LAST = 'aim-mb-stage-last';
+    function stagePresetsLoad() { const o = gmGet(CACHE_KEY_STEP_PRESETS, {}); return (o && typeof o === 'object') ? o : {}; }
+    function stagePresetsSave(o) { try { gmSet(CACHE_KEY_STEP_PRESETS, o || {}); } catch (e) { console.warn(`${TAG} [stage] preset save failed`, e); } }
+    function stagePresetDefaultName(s) {
+        const t = tplTypeNum(s);
+        if (t === 5) return `Wait ${Math.round(Number(s.value1) || 0)}s`;
+        if (t === 7) return s.value1 ? 'Camera Thermal' : 'Camera RGB';
+        if (t === 24) return Number(s.value1) === 1 ? 'GEM On' : 'GEM Off';
+        return s.type_name ? s.type_name : `type ${t}`;
+    }
+    function stageCaptureOpenStep(idOverride) {
+        const openId = (idOverride != null) ? idOverride : getOpenStepId();
+        const ctx = findMissionAppCtx();
+        let instrs = (ctx && ctx.currentApp && ctx.currentApp.instructions) || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
+        const s = (openId != null) ? instrs.find(x => x && String(x.id) === String(openId)) : null;
+        if (!s) { showToast('Click a step to open its edit form first, then capture.', '#ff9800', 4500); return false; }
+        // The default name previews WHAT got grabbed (e.g. "Wait 5s") — a wrong
+        // step is obvious before saving.
+        const name = (window.prompt('Save step preset as:', stagePresetDefaultName(s)) || '').trim();
+        if (!name) return false;
+        const instr = JSON.parse(JSON.stringify(s));
+        delete instr.id; delete instr.index_in_app;
+        const all = stagePresetsLoad();
+        // New presets append to the end of the user-ordered list.
+        const maxOrder = Object.values(all).reduce((m, p) => Math.max(m, p && p.order != null ? p.order : 0), 0);
+        all[name] = { name, savedAt: Date.now(), order: maxOrder + 10, instr };
+        stagePresetsSave(all);
+        console.log(`${TAG} [stage] captured step preset "${name}" (type ${tplTypeNum(instr)})`);
+        showToast(`Saved step preset "${name}".`, '#5fff5f', 3000);
+        return true;
+    }
+    // ── Armed capture: opening a step's edit form SWAPS the sidebar (killing
+    // the ➕ Stage row) and the click closes the popup — so capturing "the open
+    // step" directly is only possible if a form is already open. Arming solves
+    // the catch-22: 📋 with no form open closes the popup into a floating chip
+    // and captures WHICHEVER step you open next (focusedInstructionId change).
+    let stageArmPoll = null, stageArmChip = null, stageArmPick = null;
+    function stageCancelArm(silent) {
+        if (stageArmPoll) { clearInterval(stageArmPoll); stageArmPoll = null; }
+        if (stageArmChip) { stageArmChip.remove(); stageArmChip = null; }
+        if (stageArmPick) { document.removeEventListener('click', stageArmPick, true); stageArmPick = null; }
+        if (!silent) console.log(`${TAG} [stage] capture arm cleared`);
+    }
+    function stageArmCapture() {
+        stageCancelArm(true);
+        let baseline = null;
+        try { baseline = findFocusedInstrId(); } catch (e) {}
+        // PRIMARY pick path (v1.95): capture-phase click. The step CARD carries
+        // its instruction id in data-rfd-draggable-id and our map badges carry
+        // data-aim-id — no React focus read needed (focusedInstructionId proved
+        // unreadable on some routes: formOpen:true fid:null on site 1153).
+        // Swallow the click so the form doesn't even need to open.
+        stageArmPick = (e) => {
+            const hit = e.target && e.target.closest && e.target.closest('[data-rfd-draggable-id], .instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]');
+            if (!hit) return;
+            const id = hit.getAttribute('data-rfd-draggable-id') || hit.getAttribute('data-aim-id');
+            if (id == null || id === '') return;
+            e.preventDefault(); e.stopPropagation();
+            stageCancelArm(true);
+            if (stageCaptureOpenStep(id)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+        };
+        document.addEventListener('click', stageArmPick, true);
+        const chip = document.createElement('div');
+        chip.textContent = '📋 Capture armed — click the step CARD in the list (or its N#/S# map badge). Click here to cancel.';
+        chip.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:2147483600;' +
+            'background:rgba(150,180,255,0.95);color:#06223a;font:700 12px/1.3 "Lato",sans-serif;' +
+            'padding:6px 14px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);cursor:pointer;max-width:80vw;';
+        chip.onclick = () => { stageCancelArm(); showToast('Capture cancelled.', '#888', 2000); };
+        document.body.appendChild(chip);
+        stageArmChip = chip;
+        const t0 = Date.now();
+        let formSince = 0, lastDiag = 0;
+        stageArmPoll = setInterval(() => {
+            const now = Date.now();
+            if (now - t0 > 60000) { stageCancelArm(); showToast('Capture timed out.', '#888', 2500); return; }
+            let fid = null;
+            try { fid = findFocusedInstrId(); } catch (e) {}
+            const formOpen = !!document.querySelector('.edit-instruction');
+            if (formOpen && !formSince) formSince = now;
+            if (!formOpen) formSince = 0;
+            if (now - lastDiag > 3000) { lastDiag = now; console.log(`${TAG} [stage] armed — formOpen:${formOpen} fid:${fid} baseline:${baseline}`); }
+            // Trigger A (backup): a step edit form MOUNTED (.edit-instruction) and
+            // the focus id is readable. On routes where focusedInstructionId is
+            // unreadable (fid stays null) this just keeps waiting — the click-pick
+            // listener is the primary path and the 3s diag line explains state.
+            if (formOpen) {
+                if (fid == null && now - formSince < 1200) return;
+                if (fid == null) fid = getOpenStepId();
+                if (fid == null) return;
+                stageCancelArm(true);
+                if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+                return;
+            }
+            // Trigger B: focus moved to a DIFFERENT step than at arm time (card
+            // click that highlights without opening a form).
+            if (fid != null && String(fid) !== String(baseline)) {
+                stageCancelArm(true);
+                if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+            }
+        }, 300);
     }
 
     // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
@@ -2401,79 +3632,287 @@
     // h() mangles the type (number OR object → "No instruction component for type
     // [object Object]"), so we avoid it: copied steps already have valid types and
     // setCurrentApp is the same path normal edits use → renders + saves cleanly.
-    function genStageSteps(navCount, snapCount, inspectionScan) {
+    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav, presetReqs, insertMode) {
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
-        const instrs = app.instructions || [];
-        const navRef = instrs.find(s => s && s.type_name === 'navigate' && s.location && s.location.lat != null);
-        const snapRef = instrs.find(s => s && s.type_name === 'snapshot' && s.location && s.location.lat != null);
-        if ((navCount && !navRef) || (snapCount && !snapRef)) { showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return; }
-        // wrap template = the scan steps trailing the first snapshot (copied as-is)
+        // Source the instruction list from the cached app, falling back to the LIVE
+        // editor state if that's empty/stale (so Stage works even when currentApp
+        // hasn't populated yet).
+        let instrs = app.instructions || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs) && lc.instrs.length) instrs = lc.instrs; } catch (e) {} }
+        // Match by type_name OR type number — live editor steps don't always carry
+        // type_name. (navigate=1, snapshot=6, cameraSelect=7, gemMode=24, wait=5,
+        // returnHome=99.)
+        const isNav = s => s && (s.type_name === 'navigate' || s.type === 1);
+        const isSnap = s => s && (s.type_name === 'snapshot' || s.type === 6);
+        const isReturn = s => s && (s.type_name === 'returnHome' || s.type === 99);
+        const isWrap = s => s && (s.type_name === 'cameraSelect' || s.type === 7 || s.type_name === 'gemMode' || s.type === 24 || s.type_name === 'wait' || s.type === 5);
+        // Copy settings from the LAST nav/snap (you finetune the most recent one).
+        // Prefer one WITH a GPS location as the template, but fall back to ANY (an
+        // "In Place" snapshot has no location yet still works as a settings template).
+        const pickRef = (pred) => {
+            const list = instrs.filter(pred);
+            if (!list.length) return null;
+            for (let i = list.length - 1; i >= 0; i--) { if (list[i].location && list[i].location.lat != null) return list[i]; }
+            return list[list.length - 1];
+        };
+        const navRef = pickRef(isNav);
+        const snapRef = pickRef(isSnap);
+        if ((navCount && !navRef) || (snapCount && !snapRef)) {
+            console.warn(`${TAG} [stage] no template — instrs:${instrs.length} navs:${instrs.filter(isNav).length} snaps:${instrs.filter(isSnap).length} (open a mission with a Navigate + Snapshot)`);
+            showToast('Need an existing Navigate + Snapshot to copy from — generate/open a scan mission first.', '#ff9800', 4500); return;
+        }
+        // wrap template = the scan steps trailing the LAST snapshot (copied as-is)
         const wrapTpl = [];
-        const si = instrs.findIndex(s => s && s.type_name === 'snapshot');
-        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { const t = instrs[i] && instrs[i].type_name; if (t === 'cameraSelect' || t === 'gemMode' || t === 'wait') wrapTpl.push(instrs[i]); else break; }
-        const offEast = (ref, i) => ({ lat: ref.location.lat, lng: ref.location.lng + ((i + 1) * 5) / (111320 * Math.cos(ref.location.lat * Math.PI / 180)) });
+        let si = -1; for (let i = instrs.length - 1; i >= 0; i--) { if (isSnap(instrs[i])) { si = i; break; } }
+        if (si >= 0) for (let i = si + 1; i < instrs.length; i++) { if (isWrap(instrs[i])) wrapTpl.push(instrs[i]); else break; }
+        // Place new steps in the MIDDLE OF THE CURRENT MAP VIEW (so they're easy to
+        // find), fanned out in a small grid by index so multiples don't overlap.
+        // Falls back to an offset from the ref if the map center isn't available.
+        const map = getLeafletMap();
+        const ctr = (map && typeof map.getCenter === 'function') ? map.getCenter() : null;
+        const placeAt = (ref, i) => {
+            const refLoc = (ref && ref.location && ref.location.lat != null) ? ref.location : null;
+            const base = ctr ? { lat: ctr.lat, lng: ctr.lng } : refLoc;
+            if (!base) return null; // no map center + no ref GPS (In-Place ref) → leave location unset
+            const col = i % 4, row = Math.floor(i / 4);
+            const mPerLat = 110540, mPerLng = 111320 * Math.cos(base.lat * Math.PI / 180);
+            return { lat: base.lat + (row * 12) / mPerLat, lng: base.lng + (col * 12) / mPerLng };
+        };
         // copy a step (preserve type object + all fields) with a UNIQUE id —
         // Percepto uses instruction.id as the React key (id.toString()), so a
         // missing/duplicate id crashes the editor (blank screen). The save strips
         // ids (server assigns real ones), so any unique client id is fine.
         let idSeq = 9000000000 + (((Date.now ? Date.now() : 1) % 1000000) * 100);
         const copyStep = (tpl, loc) => { const c = Object.assign({}, tpl); c.id = idSeq++; if (c.extra_options) c.extra_options = Object.assign({}, c.extra_options); if (loc) c.location = { lat: loc.lat, lng: loc.lng }; return c; };
-        // Spread new steps PAST any nav/snap already in the mission (incl. ones
-        // staged earlier this session) so a 2nd Stage doesn't stack on the 1st.
-        const baseNav = instrs.filter(s => s && s.type_name === 'navigate').length;   // includes the original (1) + prior staged
-        const baseSnap = instrs.filter(s => s && s.type_name === 'snapshot').length;
         const staged = [];
-        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, offEast(navRef, (baseNav - 1) + i)));
+        let placeIdx = 0;
+        for (let i = 0; i < navCount; i++) staged.push(copyStep(navRef, placeAt(navRef, placeIdx++)));
         for (let j = 0; j < snapCount; j++) {
-            staged.push(copyStep(snapRef, offEast(snapRef, (baseSnap - 1) + j)));
+            // A staged snapshot is placed on the map + dragged into position, so it
+            // must be a proper GPS ("To GPS") snapshot even if the template was an
+            // "In Place" (yaw/tilt, no-GPS) one from a J2A mission. Force GPS mode +
+            // a real location so it shows on the map and exports/validates correctly.
+            const sc = copyStep(snapRef, placeAt(snapRef, placeIdx++));
+            sc.value2 = 1; // "To GPS" mode
+            sc.extra_options = Object.assign({}, sc.extra_options || {}, { pitch: 1001 });
+            staged.push(sc);
             if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
+        // Saved step presets: clone the captured instruction verbatim (settings
+        // travel with it); located types (e.g. Flag Pole) land in the map-center
+        // fan like navs/snaps, location-less types (Wait/Camera/GEM) stay bare.
+        (presetReqs || []).forEach(req => {
+            for (let k = 0; k < req.count; k++) {
+                const c = JSON.parse(JSON.stringify(req.preset.instr));
+                c.id = idSeq++;
+                if (c.location && c.location.lat != null) {
+                    const l = placeAt(c, placeIdx++);
+                    if (l) c.location = { lat: l.lat, lng: l.lng };
+                }
+                staged.push(c);
+            }
+        });
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
         // Rebuild the instruction list (shallow-copy existing so we don't mutate
-        // live objects), insert staged steps before returnHome, re-index.
+        // live objects), insert the staged steps, re-index.
         const newInstrs = instrs.map(s => Object.assign({}, s));
-        let rh = newInstrs.findIndex(s => s && s.type_name === 'returnHome');
-        if (rh < 0) rh = newInstrs.length;
-        newInstrs.splice(rh, 0, ...staged);
+        const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
+        // Insert position (v1.97 — group-relative, predictable):
+        //   'start' → right AFTER the Nth Navigate (top of its group)
+        //   'end'   → right BEFORE the (N+1)th Navigate (bottom of its group),
+        //             or before returnHome when N is the last group.
+        // Blank Nav # → very end (before returnHome).
+        let insertIdx;
+        const mode = insertMode === 'end' ? 'end' : 'start';
+        if (insertAtNav && insertAtNav >= 1) {
+            const navIdxs = [];
+            newInstrs.forEach((s, k) => { if (isNav(s)) navIdxs.push(k); });
+            if (insertAtNav <= navIdxs.length) {
+                insertIdx = (mode === 'end')
+                    ? ((insertAtNav < navIdxs.length) ? navIdxs[insertAtNav] : endIdx())
+                    : navIdxs[insertAtNav - 1] + 1;
+            } else {
+                insertIdx = endIdx();
+            }
+        } else {
+            insertIdx = endIdx();
+        }
+        newInstrs.splice(insertIdx, 0, ...staged);
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
+        const posMsg = (insertAtNav && insertAtNav >= 1) ? ` at ${mode} of N${insertAtNav} group` : '';
         try {
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
-            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s) — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+            const bits = [];
+            if (navCount) bits.push(`${navCount} navigate(s)`);
+            if (snapCount) bits.push(`${snapCount} snapshot(s)`);
+            (presetReqs || []).forEach(r => bits.push(`${r.count}× ${r.preset.name}`));
+            showToast(`Staged ${bits.join(' + ')}${posMsg} — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
         } catch (e) { console.warn(`${TAG} [stage] setCurrentApp failed`, e); showToast('Stage failed — see console.', '#ff5252', 4000); }
     }
     let genStagePopEl = null;
     function genStagePopup(anchorBtn) {
         if (genStagePopEl) { genStagePopEl.remove(); genStagePopEl = null; return; }
+        const last = gmGet(CACHE_KEY_STAGE_LAST, null) || {};
+        const lastNav = Number.isFinite(+last.nav) ? Math.max(0, +last.nav) : 0;
+        const lastSnap = Number.isFinite(+last.snap) ? Math.max(0, +last.snap) : 1;
+        const lastScan = (last.scan === undefined) ? true : !!last.scan;
+        const lastMode = last.insertMode === 'end' ? 'end' : 'start';
         const pop = document.createElement('div');
-        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:210px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
+        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:240px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
             'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        const numCss = 'width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;';
+        const smallNumCss = 'width:46px;background:#0f1216;border:1px solid #456;color:#fff;padding:2px 4px;border-radius:3px;';
         pop.innerHTML = `
             <div style="font-weight:800;color:#9cf;font-size:13px;margin-bottom:8px;">➕ Stage steps</div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="0" data-st-nav style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="1" data-st-snap style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
-            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan checked> Inspection scan wrap per snapshot</label>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="${lastNav}" data-st-nav style="${numCss}"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="${lastSnap}" data-st-snap style="${numCss}"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Insert at Nav #</label><input type="number" min="1" max="200" placeholder="end" data-st-at style="${numCss}"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Position</label><select data-st-mode style="background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font-size:11px;max-width:150px;">
+                <option value="start">Start of group (after nav)</option>
+                <option value="end">End of group (before next nav)</option>
+            </select></div>
+            <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank Nav # = very end. e.g. 2 + Start → right after N2; 2 + End → just before N3.</div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan ${lastScan ? 'checked' : ''}> Inspection scan wrap per snapshot</label>
+            <div data-st-presets style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
+            <button class="aim-mb-tbtn" data-st-cap style="padding:4px 8px;font-size:11px;margin-bottom:10px;width:100%;" title="If a step's edit form is open, captures it now. Otherwise arms capture: click the step you want and it saves automatically when its form opens.">📋 Capture a step as preset</button>
             <div style="display:flex;gap:6px;justify-content:flex-end;">
                 <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
                 <button data-st-add style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;">Stage</button>
             </div>`;
         document.body.appendChild(pop);
         genStagePopEl = pop;
+        pop.querySelector('[data-st-mode]').value = lastMode;
+        const rowsEl = pop.querySelector('[data-st-presets]');
+        // User-controlled order (↑/↓, persisted via preset.order) — this is ALSO
+        // the order staged clones land in the mission (genStageSteps iterates
+        // presetReqs in row order). Presets saved before order existed sort by
+        // capture time.
+        const presetOrderCmp = (all) => (a, b) => {
+            const oa = all[a].order != null ? all[a].order : (all[a].savedAt || 0);
+            const ob = all[b].order != null ? all[b].order : (all[b].savedAt || 0);
+            return oa - ob || a.localeCompare(b);
+        };
+        const movePreset = (name, dir) => {
+            const all = stagePresetsLoad();
+            const names = Object.keys(all).sort(presetOrderCmp(all));
+            const i = names.indexOf(name), j = i + dir;
+            if (i < 0 || j < 0 || j >= names.length) return;
+            const t = names[i]; names[i] = names[j]; names[j] = t;
+            names.forEach((n, k) => { all[n].order = (k + 1) * 10; });
+            stagePresetsSave(all);
+            renderPresetRows();
+        };
+        const renderPresetRows = () => {
+            // Keep typed counts across re-renders (reorder/capture/delete).
+            const keepCounts = {};
+            rowsEl.querySelectorAll('[data-st-pcount]').forEach(inp => { keepCounts[inp.getAttribute('data-st-pcount')] = inp.value; });
+            const all = stagePresetsLoad();
+            const names = Object.keys(all).sort(presetOrderCmp(all));
+            if (!names.length) {
+                rowsEl.innerHTML = '<div style="font-size:10px;color:#789;">No saved steps yet — set up a step how you want (any type), then hit 📋 below and click that step.</div>';
+                return;
+            }
+            rowsEl.innerHTML = '<div style="font-size:10px;font-weight:800;color:#9cf;margin-bottom:4px;">MY STEPS</div>' + names.map(n => {
+                const p = all[n]; const t = tplTypeNum(p.instr);
+                let ctrl = '';
+                if (t === 5) ctrl = `<span style="font-size:11px;color:#9ab;">⏱</span><input type="number" min="0" max="600" value="${Math.round(Number(p.instr.value1) || 0)}" data-st-pval="${escapeHtml(n)}" title="Wait seconds" style="${smallNumCss}">`;
+                else if (t === 7) ctrl = `<select data-st-pcam="${escapeHtml(n)}" title="Camera" style="background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;padding:2px;font-size:11px;"><option value="0"${!p.instr.value1 ? ' selected' : ''}>RGB</option><option value="1"${p.instr.value1 ? ' selected' : ''}>Thermal</option></select>`;
+                const savedCount = Math.max(0, parseInt(p.count, 10) || 0);
+                return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
+                    <span data-st-pup="${escapeHtml(n)}" title="Move up (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▲</span>
+                    <span data-st-pdn="${escapeHtml(n)}" title="Move down (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▼</span>
+                    <label style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n)}">${escapeHtml(n)}</label>
+                    <span data-st-pren="${escapeHtml(n)}" title="Rename preset" style="cursor:pointer;color:#9ab;font-size:11px;">✏️</span>${ctrl}
+                    <input type="number" min="0" max="50" value="${savedCount}" data-st-pcount="${escapeHtml(n)}" title="How many to stage (remembered)" style="${smallNumCss}">
+                    <span data-st-pdel="${escapeHtml(n)}" title="Delete preset" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
+            }).join('');
+            // Inline edits persist straight to the preset ("the way you last had it").
+            rowsEl.querySelectorAll('[data-st-pval]').forEach(inp => { inp.onchange = () => {
+                const a2 = stagePresetsLoad(); const p = a2[inp.getAttribute('data-st-pval')]; if (!p) return;
+                p.instr.value1 = Math.max(0, parseInt(inp.value, 10) || 0); stagePresetsSave(a2);
+            }; });
+            rowsEl.querySelectorAll('[data-st-pcam]').forEach(sel => { sel.onchange = () => {
+                const a2 = stagePresetsLoad(); const p = a2[sel.getAttribute('data-st-pcam')]; if (!p) return;
+                p.instr.value1 = sel.value === '1' ? 1 : 0; stagePresetsSave(a2);
+            }; });
+            rowsEl.querySelectorAll('[data-st-pdel]').forEach(d => { d.onclick = () => {
+                const n = d.getAttribute('data-st-pdel');
+                const a2 = stagePresetsLoad(); delete a2[n]; stagePresetsSave(a2);
+                console.log(`${TAG} [stage] deleted step preset "${n}"`);
+                renderPresetRows();
+            }; });
+            rowsEl.querySelectorAll('[data-st-pup]').forEach(u => { u.onclick = () => movePreset(u.getAttribute('data-st-pup'), -1); });
+            rowsEl.querySelectorAll('[data-st-pdn]').forEach(d => { d.onclick = () => movePreset(d.getAttribute('data-st-pdn'), 1); });
+            rowsEl.querySelectorAll('[data-st-pren]').forEach(r => { r.onclick = () => {
+                const oldName = r.getAttribute('data-st-pren');
+                const a2 = stagePresetsLoad(); const p = a2[oldName]; if (!p) return;
+                const nn = (window.prompt('Rename preset:', oldName) || '').trim();
+                if (!nn || nn === oldName) return;
+                if (a2[nn] && !window.confirm(`"${nn}" already exists — overwrite it?`)) return;
+                delete a2[oldName];
+                p.name = nn;
+                a2[nn] = p;
+                stagePresetsSave(a2);
+                console.log(`${TAG} [stage] renamed step preset "${oldName}" → "${nn}"`);
+                renderPresetRows();
+            }; });
+            // Counts persist ON the preset — typing a count remembers it across
+            // popup opens (navs/snaps already persist via aim-mb-stage-last).
+            rowsEl.querySelectorAll('[data-st-pcount]').forEach(inp => {
+                const kept = keepCounts[inp.getAttribute('data-st-pcount')];
+                if (kept !== undefined) inp.value = kept;
+                inp.onchange = () => {
+                    const a2 = stagePresetsLoad(); const p = a2[inp.getAttribute('data-st-pcount')]; if (!p) return;
+                    p.count = Math.max(0, parseInt(inp.value, 10) || 0);
+                    stagePresetsSave(a2);
+                };
+            });
+        };
+        renderPresetRows();
         const r = anchorBtn.getBoundingClientRect();
         pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + 'px';
         pop.style.top = (r.bottom + 4) + 'px';
         const close = () => { pop.remove(); genStagePopEl = null; document.removeEventListener('mousedown', outside, true); };
         const outside = e => { if (genStagePopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
         pop.querySelector('[data-st-cancel]').onclick = close;
+        pop.querySelector('[data-st-cap]').onclick = () => {
+            let fid = null;
+            try { fid = findFocusedInstrId(); } catch (e) {}
+            // Direct capture ONLY when a step edit form is actually mounted —
+            // focusedInstructionId can be STALE (still the last step you edited)
+            // with no form open, which must arm, not capture the stale step.
+            if (fid != null && document.querySelector('.edit-instruction')) {
+                if (stageCaptureOpenStep(fid)) renderPresetRows();
+                return;
+            }
+            // No step form open → arm: close the popup, capture the next step opened.
+            close();
+            stageArmCapture();
+        };
         pop.querySelector('[data-st-add]').onclick = () => {
             const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
             const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
             const scan = pop.querySelector('[data-st-scan]').checked;
+            const atRaw = parseInt(pop.querySelector('[data-st-at]').value, 10);
+            const at = (!isNaN(atRaw) && atRaw >= 1) ? atRaw : null; // null = end
+            const mode = pop.querySelector('[data-st-mode]').value === 'end' ? 'end' : 'start';
+            const allP = stagePresetsLoad();
+            const presetReqs = [];
+            pop.querySelectorAll('[data-st-pcount]').forEach(inp => {
+                const c = Math.max(0, parseInt(inp.value, 10) || 0);
+                const p = allP[inp.getAttribute('data-st-pcount')];
+                if (!p) return;
+                p.count = c; // persist counts even if the input's change event never fired
+                if (c > 0) presetReqs.push({ preset: p, count: c });
+            });
+            stagePresetsSave(allP);
             close();
-            if (!nav && !snap) { showToast('Set a Navigate and/or Snapshot count.', '#ff9800'); return; }
-            genStageSteps(nav, snap, scan);
+            gmSet(CACHE_KEY_STAGE_LAST, { nav, snap, scan, insertMode: mode });
+            if (!nav && !snap && !presetReqs.length) { showToast('Set a count for at least one step type.', '#ff9800'); return; }
+            genStageSteps(nav, snap, scan, at, presetReqs, mode);
         };
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
@@ -2752,7 +4191,40 @@
         showToast(`Snapshot moved to S${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
     }
 
-    // Inline number editor for a Nav (blue) or Snapshot (pink) badge.
+    // Which Nav (by N#, 1-based) a snapshot is currently attached to = the nav
+    // group whose steps include it. null if it's before the first nav.
+    function composerSnapParentNavNum(snapId) {
+        const groups = composerNavGroups(composerCurrentOrdered());
+        for (let i = 0; i < groups.length; i++) { if (groups[i].ids.includes(String(snapId))) return i + 1; }
+        return null;
+    }
+    // Re-home a snapshot (its whole block: snapshot + trailing scan steps) under a
+    // different Navigate (by N#). It lands as that nav's LAST capture. The snapshot's
+    // own GPS/alt is unchanged — only which nav the drone flies to before shooting.
+    async function composerAttachSnapToNav(snapId, navNum) {
+        if (composerBusy) return;
+        const ordered = composerCurrentOrdered();
+        const groups = composerNavGroups(ordered);
+        const block = composerSnapBlocks(ordered).find(b => b.snapId === String(snapId));
+        if (!block || !groups.length) { showToast('Couldn’t resolve the snapshot block.', '#ff9800', 3000); return; }
+        const t = Math.max(1, Math.min(groups.length, navNum)) - 1;
+        if (composerSnapParentNavNum(snapId) === t + 1) { showToast(`Snapshot is already under N${t + 1}.`, '#9ad', 2500); return; }
+        if (!composerFindReorderFn()) { showToast('Composer: reorder function not found.', '#ff5252', 4000); return; }
+        // Insert right after the target nav group's last step (so it becomes that
+        // nav's last capture). composerMoveIdsToIndex handles the up/down shift.
+        const lastId = groups[t].ids[groups[t].ids.length - 1];
+        const dest = composerIndexById(lastId) + 1;
+        if (dest <= 0) { showToast('Couldn’t locate the target nav.', '#ff9800', 3000); return; }
+        composerBusy = true;
+        try { await composerMoveIdsToIndex(block.ids, dest); }
+        catch (e) { console.warn(`${TAG} [composer] attach-to-nav failed`, e); }
+        composerBusy = false;
+        rerenderComposer();
+        showToast(`Snapshot re-homed under N${t + 1} — hit SAVE in the editor.`, stepColor('snap'), 3500);
+    }
+
+    // Inline number editor for a Nav (blue) or Snapshot (pink) badge. For a
+    // snapshot it also shows + lets you change which Nav it's attached to.
     function composerEditOrder(kind, id, currentNum, ll) {
         if (composerBusy) return;
         const map = getLeafletMap(); if (!map) return;
@@ -2761,23 +4233,38 @@
         try { pt = map.latLngToContainerPoint(ll); rect = map.getContainer().getBoundingClientRect(); }
         catch (e) { return; }
         const color = kind === 'nav' ? stepColor('nav') : stepColor('snap');
+        const navColor = stepColor('nav');
         const label = kind === 'nav' ? 'N' : 'S';
+        const parentNav = kind === 'snap' ? composerSnapParentNavNum(id) : null;
         const wrap = document.createElement('div');
         wrap.id = 'aim-cmp-num-edit';
         wrap.style.cssText = `position:fixed;left:${rect.left + pt.x}px;top:${rect.top + pt.y - 16}px;z-index:2147483640;` +
-            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:4px 6px;` +
-            'display:flex;gap:5px;align-items:center;box-shadow:0 4px 14px rgba(0,0,0,0.6)';
-        wrap.innerHTML = `<span style="color:#9ad;font-size:10px;font-family:sans-serif">${label}${currentNum}→</span>` +
-            `<input type="number" min="1" value="${currentNum}" style="width:48px;background:#1a1f27;border:1px solid ${color};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif">`;
+            `transform:translate(-50%,-100%);background:#0f1216;border:1px solid ${color};border-radius:6px;padding:5px 7px;` +
+            'display:flex;flex-direction:column;gap:5px;box-shadow:0 4px 14px rgba(0,0,0,0.6);font-family:sans-serif';
+        const inStyle = (c) => `width:48px;background:#1a1f27;border:1px solid ${c};color:#fff;border-radius:3px;padding:2px 4px;font:600 12px sans-serif`;
+        wrap.innerHTML =
+            `<div style="display:flex;gap:5px;align-items:center;"><span style="color:#9ad;font-size:10px;">${label}${currentNum}→</span>` +
+            `<input data-ord type="number" min="1" value="${currentNum}" title="Capture order" style="${inStyle(color)}"></div>` +
+            (kind === 'snap'
+                ? `<div style="display:flex;gap:5px;align-items:center;"><span style="color:#9ad;font-size:10px;white-space:nowrap;">Nav N${parentNav || '?'}→</span>` +
+                  `<input data-nav type="number" min="1" value="${parentNav || ''}" title="Attach this snapshot to a different Navigate (by N#)" style="${inStyle(navColor)}"></div>`
+                : '');
         document.body.appendChild(wrap);
-        const input = wrap.querySelector('input');
-        input.focus(); input.select();
+        const ordInput = wrap.querySelector('[data-ord]');
+        const navInput = wrap.querySelector('[data-nav]');
+        ordInput.focus(); ordInput.select();
         const commit = () => {
-            const v = parseInt(input.value, 10); wrap.remove();
-            if (!isNaN(v)) { if (kind === 'nav') composerApplyNavOrder(id, v); else composerApplySnapOrder(id, v); }
+            const ov = parseInt(ordInput.value, 10);
+            const nv = navInput ? parseInt(navInput.value, 10) : NaN;
+            wrap.remove();
+            // A nav re-home (changed) takes priority; otherwise apply capture order.
+            if (navInput && !isNaN(nv) && nv !== parentNav) { composerAttachSnapToNav(id, nv); return; }
+            if (!isNaN(ov)) { if (kind === 'nav') composerApplyNavOrder(id, ov); else composerApplySnapOrder(id, ov); }
         };
-        input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
-        input.onblur = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w) w.remove(); }, 150); };
+        const onKey = (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') { wrap.remove(); } };
+        ordInput.onkeydown = onKey; if (navInput) navInput.onkeydown = onKey;
+        const blurClose = () => { setTimeout(() => { const w = document.getElementById('aim-cmp-num-edit'); if (w && !w.contains(document.activeElement)) w.remove(); }, 150); };
+        ordInput.onblur = blurClose; if (navInput) navInput.onblur = blurClose;
     }
 
     function ensureEditorCollapseStyle(on) {
@@ -2816,7 +4303,15 @@
         if (!showAglInEditor) return msl;
         const g = stepElevM(instr);
         if (g == null) { // ground not cached yet — kick a fetch, show MSL meanwhile
-            if (instr.location && instr.location.lat != null) { try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {} }
+            cxAglPending = true;
+            if (instr.location && instr.location.lat != null) {
+                const k = elevCacheKey(Number(instr.location.lat), Number(instr.location.lng));
+                if (!elevKickAt[k] || Date.now() - elevKickAt[k] > ELEV_KICK_COOLDOWN) {
+                    elevKickAt[k] = Date.now();
+                    MB_PERF.elevKicks++;
+                    try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {}
+                }
+            }
             return msl;
         }
         return `${Math.round((m - g) * 3.28084).toLocaleString()} ft AGL`;
@@ -2838,6 +4333,22 @@
         else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }
         else { card.classList.remove('aim-mb-compact-renamed'); return; }
 
+        // v1.89 PERF: skip the DOM writes when this card already shows exactly
+        // this state. The 700ms tick re-runs this across EVERY card (to flip
+        // "MSL (loading)" → AGL as DEM arrives); unguarded style writes dirtied
+        // style every tick and forced constant recalc on large missions. The
+        // stamp lives as a JS property → clearing/re-creating the card (React)
+        // or off() naturally resets it.
+        const stamp = `${t}|${valText}|${valColor}|${renameText}|${renameColor}|${titleColor}`;
+        if (card.__aimCxStamp === stamp) {
+            // Stamp can outlive our injected node when Percepto re-renders the
+            // card's INNER DOM in place (per-step save) — verify it's still there.
+            const node = renameText != null ? titleEl.querySelector('.aim-mb-cx-name') : header.querySelector('.aim-mb-cx-val');
+            if (node) return;
+        }
+        card.__aimCxStamp = stamp;
+        MB_PERF.cardWrites++;
+
         // Color the native title name (Navigate=blue, Snapshot=pink).
         const nameEl = titleEl.querySelector('.mission-instruction-item__title__name');
         if (nameEl) nameEl.style.color = titleColor || '';
@@ -2845,7 +4356,7 @@
         if (renameText != null) {
             card.classList.add('aim-mb-compact-renamed');
             let r = titleEl.querySelector('.aim-mb-cx-name');
-            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); }
+            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); MB_PERF.cxCreates++; }
             if (r.textContent !== renameText) r.textContent = renameText;
             r.style.color = renameColor;
             const v = header.querySelector('.aim-mb-cx-val'); if (v) v.remove();
@@ -2856,6 +4367,7 @@
                 v = document.createElement('div'); v.className = 'aim-mb-cx-val';
                 const opts = header.querySelector('.mission-instruction-item__options');
                 if (opts) header.insertBefore(v, opts); else header.appendChild(v);
+                MB_PERF.cxCreates++;
             }
             if (v.textContent !== (valText || '')) v.textContent = valText || '';
             v.style.color = valColor;
@@ -2868,17 +4380,23 @@
     // when it isn't loaded yet, leave cards full (the interval re-runs once the
     // map-badge path has loaded the mission). Keeps native drag-drop intact.
     function applyNativeEditorCollapse() {
+        const t0 = performance.now();
+        MB_PERF.collapsePasses++;
+        try { applyNativeEditorCollapseCore(); } finally { MB_PERF.collapseMs += performance.now() - t0; }
+    }
+    function applyNativeEditorCollapseCore() {
         if (CONTEXT !== 'IFRAME') return;
         const cards = document.querySelectorAll('[data-rfd-draggable-id]');
         const off = () => {
             ensureEditorCollapseStyle(false);
-            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); });
+            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); delete c.__aimCxStamp; });
         };
         if (!collapseEditorCards) { off(); return; }
         if (!document.querySelector('.mission-edit__content') || !cards.length) return;
         if (!composerMission) { off(); return; } // wait for the mission to load
         ensureEditorCollapseStyle(true);
         const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        cxAglPending = false; // recomputed by compactAltDisplay during this pass
         cards.forEach(card => {
             const instr = byId[card.getAttribute('data-rfd-draggable-id')];
             if (!instr) return;
@@ -3447,17 +4965,15 @@
         body.id = 'aim-mb-body';
         panelEl.appendChild(body);
 
-        // Resize handle
-        const resize = document.createElement('div');
-        resize.className = 'aim-mb-resize';
-        panelEl.appendChild(resize);
-        makeResizable(panelEl, resize);
+        // Resize handles — all four edges + four corners (clamped to the map).
+        addResizeHandles(panelEl);
 
         document.body.appendChild(panelEl);
 
         // Re-apply a saved dock (now that the panel is in the DOM and we can
-        // measure the map), and re-fit it when the window/sidebar resizes.
+        // measure the map), else clamp the floating panel into the map region.
         if (panelGeom.snap) snapPanel(panelGeom.snap);
+        else clampPanelIntoMap();
         if (!panelResizeBound) {
             panelResizeBound = true;
             window.addEventListener('resize', () => {
@@ -3486,8 +5002,9 @@
         });
         handle.addEventListener('pointermove', (e) => {
             if (!dragging || e.pointerId !== pointerId) return;
-            el.style.left = `${startLeft + e.clientX - startX}px`;
-            el.style.top = `${startTop + e.clientY - startY}px`;
+            const c = clampToMap(startLeft + e.clientX - startX, startTop + e.clientY - startY, el.offsetWidth, el.offsetHeight);
+            el.style.left = `${c.x}px`;
+            el.style.top = `${c.y}px`;
             panelGeom.snap = null; // manual move un-docks
         });
         const stop = (e) => {
@@ -3628,6 +5145,166 @@
         container.appendChild(makeSnapButton('❐', 'Float / restore', () => { floatPanel(); savePanelGeom(); }));
     }
 
+    // Keep the panel "locked to the AIM map" — clamp a floating position/size so it
+    // stays within the map region (.leaflet-container), never wandering over the
+    // sidebar or off-screen.
+    function clampToMap(x, y, w, h) {
+        const m = getMapRect();
+        const maxX = m.left + m.width - Math.min(w, m.width);
+        const maxY = m.top + m.height - Math.min(h, m.height);
+        return { x: Math.max(m.left, Math.min(maxX, x)), y: Math.max(m.top, Math.min(maxY, y)) };
+    }
+    function clampPanelIntoMap() {
+        if (!panelEl) return;
+        const r = panelEl.getBoundingClientRect();
+        const m = getMapRect();
+        const w = Math.min(r.width, m.width), h = Math.min(r.height, m.height);
+        const c = clampToMap(r.left, r.top, w, h);
+        panelEl.style.right = 'auto';
+        panelEl.style.left = c.x + 'px'; panelEl.style.top = c.y + 'px';
+        panelEl.style.width = w + 'px'; panelEl.style.height = h + 'px';
+        panelGeom.x = Math.round(c.x); panelGeom.y = Math.round(c.y);
+        panelGeom.w = Math.round(w); panelGeom.h = Math.round(h);
+    }
+
+    // 8-way resize — all four edges + four corners, ported from the Site Setup SUM
+    // (v4.76). Each handle declares which edges it moves; the opposite edge stays
+    // anchored. Clamped to the map (min 480×300) so the panel stays locked to it.
+    function addResizeHandles(panel) {
+        const MINW = 480, MINH = 300;
+        let rz = null;
+        const onMove = (e) => {
+            if (!rz) return;
+            const m = getMapRect();
+            const dx = e.clientX - rz.startX, dy = e.clientY - rz.startY;
+            const rightX = rz.L + rz.W, bottomY = rz.T + rz.H;
+            let L = rz.L, T = rz.T, W = rz.W, H = rz.H;
+            if (rz.edges.e) W = rz.W + dx;
+            if (rz.edges.w) W = rz.W - dx;
+            if (rz.edges.s) H = rz.H + dy;
+            if (rz.edges.n) H = rz.H - dy;
+            W = Math.max(MINW, Math.min(m.width, W));
+            H = Math.max(MINH, Math.min(m.height, H));
+            if (rz.edges.w) { L = rightX - W; if (L < m.left) { L = m.left; W = rightX - m.left; } }
+            if (rz.edges.n) { T = bottomY - H; if (T < m.top) { T = m.top; H = bottomY - m.top; } }
+            if (rz.edges.e && L + W > m.left + m.width) W = m.left + m.width - L;
+            if (rz.edges.s && T + H > m.top + m.height) H = m.top + m.height - T;
+            panel.style.right = 'auto';
+            panel.style.left = L + 'px'; panel.style.top = T + 'px';
+            panel.style.width = W + 'px'; panel.style.height = H + 'px';
+            panelGeom.x = Math.round(L); panelGeom.y = Math.round(T);
+            panelGeom.w = Math.round(W); panelGeom.h = Math.round(H);
+            panelGeom.snap = null; // manual resize un-docks
+        };
+        const onUp = () => { if (rz) { rz = null; document.body.style.userSelect = ''; savePanelGeom(); } };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        const mk = (css, edges) => {
+            const h = document.createElement('div');
+            h.style.cssText = 'position:absolute;z-index:6;' + css;
+            h.addEventListener('mousedown', (e) => {
+                const r = panel.getBoundingClientRect();
+                rz = { edges, startX: e.clientX, startY: e.clientY, L: r.left, T: r.top, W: r.width, H: r.height };
+                document.body.style.userSelect = 'none';
+                e.preventDefault(); e.stopPropagation();
+            });
+            panel.appendChild(h);
+        };
+        const EDGE = 6, CRN = 14;
+        mk(`top:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { n: true });
+        mk(`bottom:0;left:${CRN}px;right:${CRN}px;height:${EDGE}px;cursor:ns-resize`, { s: true });
+        mk(`left:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { w: true });
+        mk(`right:0;top:${CRN}px;bottom:${CRN}px;width:${EDGE}px;cursor:ew-resize`, { e: true });
+        mk(`top:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nwse-resize`, { n: true, w: true });
+        mk(`top:0;right:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { n: true, e: true });
+        mk(`bottom:0;left:0;width:${CRN}px;height:${CRN}px;cursor:nesw-resize`, { s: true, w: true });
+        mk(`right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;background:linear-gradient(135deg,transparent 50%,#14d2dc 50%);border-bottom-right-radius:6px;opacity:0.6`, { s: true, e: true });
+        const prevRemove = panel.remove.bind(panel);
+        panel.remove = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); prevRemove(); };
+    }
+
+    // Representative map point for a mission = centroid of its snapshot (asset)
+    // points, falling back to nav points (reuses the merge's mbSoloPoints). Pan
+    // the AIM map there.
+    function missionLatLng(mission) {
+        try {
+            // 1) snapshot/nav points (GPS snapshots + navs)
+            let pts = mbSoloPoints(mission);
+            // 2) ANY instruction with a location (covers missions whose snapshots are
+            //    "In Place" / no-GPS but still have located navs)
+            if (!pts.length) {
+                const ins = (mission && mission.instructions) || [];
+                pts = ins.filter(i => i && i.location && typeof i.location.lat === 'number').map(i => ({ lat: i.location.lat, lng: i.location.lng }));
+            }
+            // 3) server-computed route points (last resort)
+            if (!pts.length && mission && Array.isArray(mission.route_points)) {
+                pts = mission.route_points.filter(p => p && typeof p.lat === 'number').map(p => ({ lat: p.lat, lng: p.lng }));
+            }
+            if (!pts.length) return null;
+            let la = 0, ln = 0; pts.forEach(p => { la += p.lat; ln += p.lng; });
+            la /= pts.length; ln /= pts.length;
+            if (!isFinite(la) || !isFinite(ln)) return null;
+            return { lat: la, lng: ln };
+        } catch (e) { return null; }
+    }
+    function panToMission(missionId) {
+        try {
+            const sid = getCurrentSiteID();
+            const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+            const m = ms.find(x => String(x.id) === String(missionId));
+            if (!m) { console.warn(`${TAG} [pan] mission ${missionId} not in cache (site ${sid}) — open/refresh the SUM panel`); return; }
+            const ll = missionLatLng(m);
+            if (!ll || !isFinite(ll.lat) || !isFinite(ll.lng)) { console.warn(`${TAG} [pan] mission ${missionId} has no usable GPS (all "In Place" snapshots / no located steps?)`); return; }
+            const map = getLeafletMap();
+            if (!map || typeof map.setView !== 'function') { console.warn(`${TAG} [pan] Leaflet map not found`); return; }
+            map.setView([ll.lat, ll.lng], Math.max(17, map.getZoom()));
+        } catch (e) { console.warn(`${TAG} [pan] failed`, e); }
+    }
+
+    // Spreadsheet-style multi-select on the row checkboxes (parity with the Site
+    // Setup SUM):
+    //   • plain / Ctrl(Cmd)+click → toggle just this mission (others stay selected)
+    //   • Shift+click → apply this click's NEW state to the whole range from the
+    //     last-clicked row (anchor) to here, in current display order.
+    // `rows` = the display-ordered row list; selection lives in panelState.selectedIds,
+    // the anchor in panelState._lastSelId.
+    function wireRowSelectCheckboxes(rows) {
+        if (!panelEl) return;
+        // Re-render WITHOUT losing scroll — save the table scrollTop first so
+        // renderTableView restores it (else a checkbox click jumps the list to top).
+        const rerenderKeepScroll = () => {
+            const tw = panelEl.querySelector('#aim-mb-table-wrap');
+            if (tw) panelState.tableScrollY = tw.scrollTop;
+            renderTableView();
+        };
+        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
+            cb.onclick = (e) => {
+                e.stopPropagation();
+                const id = Number(cb.dataset.row);
+                const target = cb.checked; // checkbox already flipped to its new state
+                const anchorId = panelState._lastSelId;
+                if (e.shiftKey && anchorId != null && anchorId !== id) {
+                    const ai = rows.findIndex(r => r.id === anchorId);
+                    const ci = rows.findIndex(r => r.id === id);
+                    if (ai >= 0 && ci >= 0) {
+                        const lo = Math.min(ai, ci), hi = Math.max(ai, ci);
+                        for (let i = lo; i <= hi; i++) {
+                            if (target) panelState.selectedIds.add(rows[i].id);
+                            else panelState.selectedIds.delete(rows[i].id);
+                        }
+                        panelState._lastSelId = id;
+                        rerenderKeepScroll();
+                        return;
+                    }
+                }
+                if (target) panelState.selectedIds.add(id);
+                else panelState.selectedIds.delete(id);
+                panelState._lastSelId = id;
+                rerenderKeepScroll();
+            };
+        });
+    }
+
     // ========================================================
     // Render states
     // ========================================================
@@ -3681,6 +5358,8 @@
             <div class="aim-mb-toolbar">
                 <input class="aim-mb-search" type="text" placeholder="Search by name…" value="${escapeHtml(panelState.search)}" />
                 <button class="aim-mb-tbtn" data-cols>Columns ▾</button>
+                <button class="aim-mb-tbtn" data-bulk-rename title="Find & replace text across the SELECTED missions' names (e.g. N - → NNE - )">✎ Rename ▾</button>
+                <button class="aim-mb-tbtn" data-bulk-delete title="Permanently delete the SELECTED missions from the server" style="color:#ff8a8a;">🗑 Delete</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'imperial' ? 'active' : ''}" data-unit="imperial">mi</button>
                 <button class="aim-mb-tbtn ${panelState.distanceUnit === 'metric' ? 'active' : ''}" data-unit="metric">km</button>
                 <button class="aim-mb-tbtn" data-settings title="Battery → flights thresholds">⚙</button>
@@ -3724,12 +5403,17 @@
     function renderRow(row, visibleCols, thresholds) {
         const checked = panelState.selectedIds.has(row.id) ? 'checked' : '';
         const selectedCls = panelState.selectedIds.has(row.id) ? 'selected' : '';
+        const editableName = panelState.mode !== 'log'; // rename only makes sense for missions
         const cells = visibleCols.map(col => {
             if (col.kind === 'dot') {
                 const cls = row[col.key] ? 'active' : 'inactive';
                 return `<td><span class="aim-mb-dot ${cls}" title="${row[col.key] ? 'Active' : 'Inactive'}"></span></td>`;
             }
             const v = formatCellValue(row, col, panelState.distanceUnit, thresholds);
+            if (col.id === 'name' && editableName) {
+                // Click to rename · Tab → next mission's name (server rename via saveApp).
+                return `<td class="aim-mb-name-cell" data-name-edit="${row.id}" title="Click to rename · Tab to next" style="cursor:text;">${escapeHtml(String(v))}</td>`;
+            }
             return `<td>${escapeHtml(String(v))}</td>`;
         }).join('');
         return `<tr class="${selectedCls}" data-id="${row.id}"><td><input type="checkbox" data-row="${row.id}" ${checked} /></td>${cells}</tr>`;
@@ -3739,6 +5423,181 @@
         if (rows.length === 0) return '';
         const allSelected = rows.every(r => panelState.selectedIds.has(r.id));
         return allSelected ? 'checked' : '';
+    }
+
+    // ── Inline mission rename — click a Name cell, edit, Tab to the next ───────
+    // Rename persists via saveApp (Percepto's own save; app_id preserved). Renames
+    // are SERIALIZED (one saveApp at a time) so rapid Tabbing doesn't fire dozens of
+    // concurrent POSTs, and the auto-AGL pass is suppressed so a rename never
+    // re-floats snapshots. NOTE: saveApp re-saves the whole mission (server recomputes
+    // route) — cheap + lossless for a name change.
+    let renameQueue = Promise.resolve();
+    async function renameMissionNow(missionId, newName, oldName) {
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const m = ms.find(x => String(x.id) === String(missionId));
+        if (!m) return;
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.saveApp !== 'function') { showToast('Rename: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); m.name = oldName; return; }
+        renameSuppressAutoAgl++;
+        try {
+            await ctx.saveApp(m, newName);
+            m.name = newName;
+            console.log(`${TAG} [rename] "${oldName}" → "${newName}"`);
+        } catch (e) {
+            console.warn(`${TAG} [rename] failed for ${missionId}`, e);
+            m.name = oldName;
+            showToast(`Rename failed for "${oldName}" — see console.`, '#ff5252', 4000);
+        } finally { renameSuppressAutoAgl--; }
+    }
+    function queueRename(missionId, newName, oldName) {
+        renameQueue = renameQueue.then(() => renameMissionNow(missionId, newName, oldName)).catch(() => {});
+    }
+    function startNameEdit(td, missionId) {
+        if (!td || td.querySelector('input')) return;
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const m = ms.find(x => String(x.id) === String(missionId));
+        const cur = m ? (m.name || '') : (td.textContent || '');
+        const input = document.createElement('input');
+        input.type = 'text'; input.value = cur;
+        input.style.cssText = 'width:100%;box-sizing:border-box;background:#0f1216;border:1px solid #14d2dc;color:#fff;font:inherit;padding:2px 4px;border-radius:3px;';
+        td.textContent = ''; td.appendChild(input);
+        input.focus(); input.select();
+        let done = false;
+        const finish = (commit) => {
+            if (done) return; done = true;
+            const nv = input.value.trim();
+            if (commit && nv && nv !== cur) {
+                td.textContent = nv;
+                if (m) m.name = nv;               // optimistic UI + cache
+                queueRename(missionId, nv, cur);  // serialized background saveApp
+            } else {
+                td.textContent = cur;
+            }
+        };
+        const gotoSibling = (dir) => {
+            const cells = [...panelEl.querySelectorAll('[data-name-edit]')];
+            const idx = cells.findIndex(c => c.getAttribute('data-name-edit') === String(missionId));
+            const nxt = cells[idx + dir];
+            if (nxt) { try { nxt.scrollIntoView({ block: 'nearest' }); } catch (e) {} startNameEdit(nxt, nxt.getAttribute('data-name-edit')); }
+        };
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+            else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+            else if (e.key === 'Tab') { e.preventDefault(); finish(true); gotoSibling(e.shiftKey ? -1 : 1); }
+        };
+        input.onblur = () => { setTimeout(() => finish(true), 100); };
+    }
+
+    // Bulk rename — find & replace text across the SELECTED missions' names, with a
+    // live before→after preview. Reuses the serialized rename queue.
+    function openBulkRenamePopover(anchor) {
+        try { closeOpenMenus(); } catch (e) {}
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
+        if (!selected.length) { showToast('Select missions first (row checkboxes), then ✎ Rename.', '#ff9800', 3500); return; }
+        const menu = document.createElement('div');
+        menu.className = 'aim-mb-bulk-rename-pop';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:370px;max-height:72vh;display:flex;flex-direction:column;background:#161a20;border:1px solid #14d2dc;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.innerHTML = `
+            <div style="padding:9px 12px;background:rgba(20,210,220,0.08);border-bottom:1px solid rgba(20,210,220,0.3);font-weight:800;color:#7adfe6;font-size:13px;">✎ Bulk rename · ${selected.length} selected</div>
+            <div style="padding:9px 12px;border-bottom:1px solid #2a2f38;">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><label style="width:56px;color:#9ad;font-size:12px;">Find</label><input data-br-find placeholder="N - " style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:4px 6px;border-radius:3px;font:inherit;"></div>
+                <div style="display:flex;align-items:center;gap:8px;"><label style="width:56px;color:#9ad;font-size:12px;">Replace</label><input data-br-replace placeholder="NNE - " style="flex:1;background:#0f1216;border:1px solid #2a3340;color:#fff;padding:4px 6px;border-radius:3px;font:inherit;"></div>
+                <div style="margin-top:5px;color:#789;font-size:10px;">Replaces that text everywhere it appears in each selected name.</div>
+            </div>
+            <div data-br-preview style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;"></div>
+            <div style="padding:9px 12px;border-top:1px solid #2a2f38;display:flex;align-items:center;gap:8px;">
+                <span data-br-count style="flex:1;font-size:11px;color:#9ad;"></span>
+                <button data-br-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-br-apply style="padding:5px 12px;background:#14d2dc;border:none;color:#04222a;border-radius:6px;cursor:pointer;font-weight:800;" disabled>Apply</button>
+            </div>`;
+        document.body.appendChild(menu);
+        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const findI = menu.querySelector('[data-br-find]');
+        const replI = menu.querySelector('[data-br-replace]');
+        const prev = menu.querySelector('[data-br-preview]');
+        const countEl = menu.querySelector('[data-br-count]');
+        const applyBtn = menu.querySelector('[data-br-apply]');
+        let changes = [];
+        const recompute = () => {
+            const find = findI.value;
+            const repl = replI.value;
+            changes = [];
+            if (find) selected.forEach(m => {
+                const oldN = m.name || '';
+                if (oldN.includes(find)) { const newN = oldN.split(find).join(repl); if (newN !== oldN) changes.push({ id: m.id, oldN, newN }); }
+            });
+            prev.innerHTML = changes.length
+                ? changes.slice(0, 300).map(c => `<div style="padding:2px 0;border-bottom:1px solid #20262e;"><span style="color:#a99;">${escapeHtml(c.oldN)}</span><br><span style="color:#7dff7d;">→ ${escapeHtml(c.newN)}</span></div>`).join('')
+                : `<div style="padding:10px;color:#888;">${find ? 'No selected names contain that text.' : 'Type the text to find (e.g. "N - ").'}</div>`;
+            countEl.textContent = `${changes.length} of ${selected.length} will change`;
+            applyBtn.disabled = !changes.length;
+        };
+        findI.oninput = recompute; replI.oninput = recompute;
+        recompute(); findI.focus();
+        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+        menu.querySelector('[data-br-cancel]').onclick = close;
+        applyBtn.onclick = () => {
+            const n = changes.length;
+            changes.forEach(c => { const m = ms.find(x => x.id === c.id); if (m) m.name = c.newN; queueRename(c.id, c.newN, c.oldN); });
+            close();
+            renderTableView();
+            showToast(`✎ Renaming ${n} mission${n === 1 ? '' : 's'} — saving in the background. Reload to see them in native Mission Bank.`, '#5fff5f', 6000);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
+    }
+
+    // Bulk DELETE the selected missions (permanent — via ctx.deleteApp). Serialized,
+    // with a clear confirmation listing what will be removed.
+    function openBulkDeletePopover(anchor) {
+        try { closeOpenMenus(); } catch (e) {}
+        const sid = getCurrentSiteID();
+        const ms = (missionsBySite[sid] && missionsBySite[sid].missions) || [];
+        const selected = ms.filter(m => panelState.selectedIds.has(m.id));
+        if (!selected.length) { showToast('Select missions first (row checkboxes), then 🗑 Delete.', '#ff9800', 3500); return; }
+        const ctx = findMissionAppCtx();
+        if (!ctx || typeof ctx.deleteApp !== 'function') { showToast('Delete: mission context not found — be on the Mission Bank page.', '#ff5252', 4000); return; }
+        const menu = document.createElement('div');
+        menu.className = 'aim-mb-bulk-del-pop';
+        menu.style.cssText = 'position:fixed;z-index:2147483647;width:360px;max-height:72vh;display:flex;flex-direction:column;background:#1a1113;border:1px solid #ff5252;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,0.7);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;';
+        menu.innerHTML = `
+            <div style="padding:9px 12px;background:rgba(255,82,82,0.12);border-bottom:1px solid rgba(255,82,82,0.35);font-weight:800;color:#ff9a9a;font-size:13px;">🗑 Delete missions · ${selected.length} selected</div>
+            <div style="padding:8px 12px;font-size:11px;color:#f2b8b8;border-bottom:1px solid #3a2a2a;"><b>Permanently deletes</b> these from the server — can’t be undone.</div>
+            <div style="overflow:auto;flex:1;padding:4px 10px;font-size:11px;min-height:60px;">${selected.slice(0, 400).map(m => `<div style="padding:2px 0;border-bottom:1px solid #2a1e1e;color:#e6c8c8;">${escapeHtml(m.name || ('#' + m.id))}</div>`).join('')}</div>
+            <div style="padding:9px 12px;border-top:1px solid #3a2a2a;display:flex;align-items:center;gap:8px;">
+                <span data-del-status style="flex:1;font-size:11px;color:#f2b8b8;"></span>
+                <button data-del-cancel class="aim-mb-tbtn" style="padding:5px 10px;">Cancel</button>
+                <button data-del-go style="padding:5px 12px;background:#ff5252;border:none;color:#2a0a0a;border-radius:6px;cursor:pointer;font-weight:800;">Delete ${selected.length}</button>
+            </div>`;
+        document.body.appendChild(menu);
+        try { positionFloatingMenu(menu, anchor); } catch (e) { const r = anchor.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 4) + 'px'; }
+        const close = () => { menu.remove(); document.removeEventListener('mousedown', outside, true); };
+        const outside = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+        menu.querySelector('[data-del-cancel]').onclick = close;
+        const statusEl = menu.querySelector('[data-del-status]');
+        const goBtn = menu.querySelector('[data-del-go]');
+        goBtn.onclick = async () => {
+            goBtn.disabled = true; menu.querySelector('[data-del-cancel]').disabled = true;
+            const deleted = [];
+            for (let i = 0; i < selected.length; i++) {
+                statusEl.textContent = `Deleting ${i + 1}/${selected.length}…`;
+                try { await ctx.deleteApp(selected[i].id); deleted.push(selected[i].id); panelState.selectedIds.delete(selected[i].id); }
+                catch (e) { console.warn(`${TAG} [delete] failed "${selected[i].name}"`, e); }
+            }
+            const delSet = new Set(deleted);
+            if (missionsBySite[sid]) missionsBySite[sid].missions = missionsBySite[sid].missions.filter(m => !delSet.has(m.id));
+            close();
+            renderTableView();
+            try { refreshMissionList(); } catch (e) {}
+            const fail = selected.length - deleted.length;
+            showToast(`🗑 Deleted ${deleted.length}${fail ? ` · ${fail} failed (see console)` : ''}. Reload to refresh native Mission Bank.`, deleted.length ? '#5fff5f' : '#ff5252', 6000);
+            console.log(`${TAG} [delete] removed ${deleted.length}, failed ${fail}`);
+        };
+        setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }
 
     function wireTableEvents(rows, visibleCols) {
@@ -3776,6 +5635,12 @@
         // Columns menu
         const colsBtn = panelEl.querySelector('[data-cols]');
         if (colsBtn) colsBtn.onclick = () => openColumnsMenu(colsBtn);
+        // Bulk rename (find & replace on selected)
+        const brBtn = panelEl.querySelector('[data-bulk-rename]');
+        if (brBtn) brBtn.onclick = () => openBulkRenamePopover(brBtn);
+        // Bulk delete (selected)
+        const bdBtn = panelEl.querySelector('[data-bulk-delete]');
+        if (bdBtn) bdBtn.onclick = () => openBulkDeletePopover(bdBtn);
         // Settings (thresholds)
         const settingsBtn = panelEl.querySelector('[data-settings]');
         if (settingsBtn) settingsBtn.onclick = () => openSettingsPopover(settingsBtn);
@@ -3801,22 +5666,18 @@
         panelEl.querySelectorAll('tbody tr[data-id]').forEach(tr => {
             tr.onclick = (e) => {
                 if (e.target.matches('input[type="checkbox"]')) return;
+                // Clicking the Name cell starts an inline rename — don't drill into detail.
+                const nameCell = e.target.closest && e.target.closest('[data-name-edit]');
+                if (nameCell) { e.stopPropagation(); startNameEdit(nameCell, nameCell.getAttribute('data-name-edit')); return; }
                 const id = Number(tr.dataset.id);
                 const tw = panelEl.querySelector('#aim-mb-table-wrap');
                 if (tw) panelState.tableScrollY = tw.scrollTop;
+                panToMission(id); // jump the map to the mission (checkbox-select stays put)
                 renderDetailView(id);
             };
         });
-        // Checkbox per row
-        panelEl.querySelectorAll('input[data-row]').forEach(cb => {
-            cb.onclick = (e) => {
-                e.stopPropagation();
-                const id = Number(cb.dataset.row);
-                if (cb.checked) panelState.selectedIds.add(id);
-                else panelState.selectedIds.delete(id);
-                renderTableView();
-            };
-        });
+        // Checkbox per row — Shift = contiguous range, plain/Ctrl = individual.
+        wireRowSelectCheckboxes(rows);
         // Select all
         const selAll = panelEl.querySelector('[data-select-all]');
         if (selAll) {
@@ -4283,16 +6144,21 @@
     function kickOffElevationFetch(missionId, allSteps) {
         const points = [];
         const seen = new Set();
+        const now = Date.now();
         allSteps.forEach(s => {
             if (!s || !s.location || s.location.lat == null) return;
             const lat = Number(s.location.lat), lng = Number(s.location.lng);
             const key = elevCacheKey(lat, lng);
             if (seen.has(key)) return;
             seen.add(key);
-            const cache = loadElevationCache();
-            if (cache[key] != null) return; // already cached
-            // Skip if another iteration already requested this point
-            if (elevInFlight[key]) return;
+            // Cache check MUST be bridge-aware (getElevationFromCache) — bulk routes
+            // through the OTD bridge which caches in Asset Inspector's store, not
+            // MBT's local one. Checking only the local cache made every re-render
+            // see the point as "uncached" → fetch → re-render → fetch forever (the
+            // "fetching 1 elevations" runaway).
+            if (getElevationFromCache(lat, lng) != null) return; // already cached
+            if (elevInFlight[key]) return;                       // already requested
+            if (elevFailedAt[key] && now - elevFailedAt[key] < ELEV_FAIL_COOLDOWN) return; // recently failed — don't hammer
             points.push({ lat, lng, id: key });
         });
         if (points.length === 0) return;
@@ -4301,10 +6167,18 @@
         updateElevProgressLabel();
         bulkFetchElevations(points, (done, total) => {
             if (elevFetchActive) { elevFetchActive.done = done; updateElevProgressLabel(); }
-        }).then(() => {
+        }).then((result) => {
             elevFetchActive = null;
-            // ONE re-render after everything completes
-            if (panelState && panelState.drillId === missionId) {
+            // Mark points that DIDN'T resolve so we don't re-request them every
+            // re-render (the bridge path bypasses the per-point cooldown), and only
+            // re-render if something actually resolved — otherwise a fully-
+            // unresolvable mission would render→fetch→render endlessly.
+            let resolved = 0;
+            points.forEach(p => {
+                const got = (result && result[p.id] != null) || getElevationFromCache(p.lat, p.lng) != null;
+                if (got) resolved++; else elevFailedAt[p.id] = Date.now();
+            });
+            if (resolved > 0 && panelState && panelState.drillId === missionId) {
                 renderDetailView(missionId);
             }
         });
@@ -4366,6 +6240,9 @@
             const link = document.querySelector(`a[href*="/mission-bank/${mid}"]`);
             if (link) {
                 link.click();
+                // Pan to the pad AFTER the editor finishes opening — panning during
+                // the navigation re-render hung the renderer (RESULT_CODE_HUNG).
+                setTimeout(() => { try { panToMission(mid); } catch (e) {} }, 800);
             } else {
                 showToast('Mission link not found in sidebar — try scrolling to it first', '#ff9800');
             }
@@ -5897,10 +7774,10 @@ ${snapPlacemarks}
         const body = JSON.parse(bodyStr);
         if (!body || !Array.isArray(body.instructions)) return null;
         const aglM = defaultSnapAglFt / 3.28084;
-        let set = 0, missDem = 0;
+        let set = 0, missDem = 0, noLoc = 0;
         body.instructions.forEach(bi => {
             if (!bi || bi.type !== 6) return; // 6 = snapshot
-            if (!bi.location || bi.location.lat == null) return;
+            if (!bi.location || bi.location.lat == null) { noLoc++; return; } // "In Place" (yaw/tilt) — no GPS to measure AGL from
             const groundM = getElevationFromCache(Number(bi.location.lat), Number(bi.location.lng));
             if (groundM == null) { missDem++; try { fetchElevation(bi.location.lat, bi.location.lng); } catch (e) {} return; }
             const newV = Math.round((groundM + aglM) * 100) / 100;
@@ -5908,6 +7785,12 @@ ${snapPlacemarks}
             bi.value1 = newV;
             set++;
         });
+        if (noLoc) {
+            // These are "In Place" snapshots (a J2A capture pointing by yaw/tilt) —
+            // they have no GPS/altitude, so there's nothing for auto-AGL to set.
+            console.warn(`${TAG} [auto-agl] ${noLoc} snapshot(s) are "In Place" (no GPS) — auto-AGL can't set their AGL. Switch them to "To GPS" if you want a fixed AGL.`);
+            showToast(`⚠ Auto-AGL: ${noLoc} snapshot(s) are "In Place" (no GPS) — can't set their AGL. Only "To GPS" snapshots get ground + ${defaultSnapAglFt} ft.`, '#ff7a00', 6500);
+        }
         if (missDem) {
             console.warn(`${TAG} [auto-agl] ${missDem} snapshot(s) had no DEM cached — skipped; fetching now. Re-save in a moment.`);
             showToast(`⚠ Auto-AGL: ${missDem} snapshot(s) had no ground elevation yet — re-save in a moment to fix them.`, '#ff7a00', 5000);
@@ -5922,7 +7805,7 @@ ${snapPlacemarks}
         let working = bodyStr;
         // 1. Snapshot auto-AGL pass (independent of fast-save; armed via the
         //    editor-row toggle, default OFF).
-        if (autoSnapAglEnabled) {
+        if (autoSnapAglEnabled && renameSuppressAutoAgl === 0) {
             try { const s = applySnapAglToBodyStr(working); if (s) working = s; }
             catch (e) { console.warn(`${TAG} [auto-agl] pass error — leaving snapshots unchanged:`, e); }
         }
@@ -6011,6 +7894,10 @@ ${snapPlacemarks}
     function getOpenStepId() {
         const fid = findFocusedInstrId();
         if (fid != null) return fid;
+        // Fall back to the step WE last opened (marker-click / switch) — makes the
+        // "is this the step I'm editing?" check reliable even if Percepto's
+        // focusedInstructionId can't be read, so only that one stays native.
+        if (composerEditingStepId != null) return composerEditingStepId;
         return saveNextLastOpenedId;
     }
 
@@ -6318,8 +8205,16 @@ ${snapPlacemarks}
     // Ground elevation (m) for a step's GPS, or null if no GPS / not cached yet.
     function stepElevM(s) {
         if (!s || !s.location || s.location.lat == null) return null;
-        const e = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
-        return (e == null) ? null : e;
+        const lat = Number(s.location.lat), lng = Number(s.location.lng);
+        const key = elevCacheKey(lat, lng);
+        if (stepElevMemo[key] != null) return stepElevMemo[key];
+        const now = Date.now();
+        if (stepElevMissAt[key] && now - stepElevMissAt[key] < STEP_ELEV_MISS_COOLDOWN) return null;
+        MB_PERF.elevLook++;
+        const e = getElevationFromCache(lat, lng);
+        if (e == null) { stepElevMissAt[key] = now; return null; }
+        stepElevMemo[key] = e;
+        return e;
     }
 
     // Is this step one of the redundant "scan-block" toggle/wait steps that
@@ -6583,12 +8478,13 @@ ${snapPlacemarks}
     // per-check enables + editable thresholds, and a "🚩 Run check"
     // action that lists every violation in a floating report.
     //
-    // 5 checks (per the SOP spec):
+    // 6 checks (per the SOP spec):
     //   1. navInFfz     — no Navigate is OUTSIDE an FFZ
     //   2. navAboveFfz  — no Navigate is lower than the FFZ it sits in
-    //   3. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
-    //   4. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
-    //   5. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
+    //   3. navUnderCeil — no Navigate is higher than the FFZ ceiling
+    //   4. snapAgl      — no Snapshot is below its min AGL (default 0 ft)
+    //   5. blockBalance — every Snapshot has a matching Thermal/GEM/Wait block
+    //   6. navSnapDist  — Navigate→Snapshot distance within [min,max] ft
     //
     // Presets are pluggable: add a key to MISSION_SOP_PRESETS and it
     // appears in the selector. Per-preset threshold/enable EDITS persist
@@ -6604,7 +8500,7 @@ ${snapPlacemarks}
 
     // Per-check default enables (shared across presets unless overridden).
     const MISSION_SOP_ENABLE_DEFAULTS = {
-        navInFfz: true, navAboveFfz: true, snapAgl: true, blockBalance: true, navSnapDist: true,
+        navInFfz: true, navAboveFfz: true, navUnderCeil: true, snapAgl: true, blockBalance: true, navSnapDist: true,
     };
     // Threshold defaults per preset. Upstream = the live SOP numbers.
     // Downstream / T&D start as copies (editable) until their SOPs land.
@@ -6613,6 +8509,7 @@ ${snapPlacemarks}
         navSnapMaxFt: 204,  // Navigate→Snapshot max standoff
         snapMinAglFt: 0,    // Snapshot must be at/above this AGL
         navFloorTolFt: 0,   // slack on "Navigate ≥ FFZ min alt"
+        navCeilTolFt: 0,    // slack on "Navigate ≤ FFZ max alt"
     };
     const MISSION_SOP_PRESETS = {
         upstream:   { label: 'OIL · Upstream',   thresholds: { ...UPSTREAM_THRESH } },
@@ -6670,8 +8567,31 @@ ${snapPlacemarks}
             Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
         return (2 * R * Math.asin(Math.min(1, Math.sqrt(s)))) * 3.28084;
     }
+    // " · AGL 96 ft" suffix for a step's altitude, or '' when the DEM
+    // cache has no ground for that point (never blocks the check itself).
+    function sopAglStr(s) {
+        if (!s.location || typeof s.value1 !== 'number') return '';
+        const groundM = getElevationFromCache(s.location.lat, s.location.lng);
+        if (typeof groundM !== 'number') return '';
+        return ` · AGL ${Math.round((s.value1 - groundM) * 3.28084)} ft`;
+    }
+    // Structured altitude fields for a floor/ceiling violation — feed the
+    // sortable columns in the Sheets export. AGL values are relative to
+    // the DEM ground at the NAVIGATE point (null when ground is uncached).
+    function sopBandFields(s, ffz) {
+        const groundM = s.location ? getElevationFromCache(s.location.lat, s.location.lng) : null;
+        const gFt = (typeof groundM === 'number') ? groundM * 3.28084 : null;
+        const msl = m => (typeof m === 'number') ? Math.round(m * 3.28084) : null;
+        const agl = m => (typeof m === 'number' && gFt !== null) ? Math.round(m * 3.28084 - gFt) : null;
+        return {
+            navMsl: msl(s.value1), navAgl: agl(s.value1),
+            ffzName: ffz.name || '',
+            ffzMinMsl: msl(ffz.minAltM), ffzMinAgl: agl(ffz.minAltM),
+            ffzMaxMsl: msl(ffz.maxAltM), ffzMaxAgl: agl(ffz.maxAltM),
+        };
+    }
 
-    // Fetch the site's FFZs (type 16) → [{ring, minAltM}]. Cookie auth,
+    // Fetch the site's FFZs (type 16) → [{ring, minAltM, maxAltM}]. Cookie auth,
     // same endpoint the Asset Inspector uses. Cached per site for the
     // session so repeat runs don't re-hit the network.
     const sopFfzCache = {};
@@ -6686,6 +8606,7 @@ ${snapPlacemarks}
                     .map(e => ({
                         ring: e.coords.map(c => ({ lat: c.lat, lng: c.lng })),
                         minAltM: (e.restrictions && typeof e.restrictions.minAlt === 'number') ? e.restrictions.minAlt : null,
+                        maxAltM: (e.restrictions && typeof e.restrictions.maxAlt === 'number') ? e.restrictions.maxAlt : null,
                         name: e.name || '',
                     }));
                 sopFfzCache[siteID] = ffzs;
@@ -6698,11 +8619,17 @@ ${snapPlacemarks}
         const th = effectiveSopThresholds();
         const violations = [];
 
-        // Pre-warm DEM cache for all snapshot points (AGL check).
-        if (sopEnabled.snapAgl) {
+        // Pre-warm DEM cache: snapshot points (AGL check) + navigate points
+        // (AGL readout in the floor/ceiling violation details).
+        const wantNavDem = sopEnabled.navAboveFfz || sopEnabled.navUnderCeil;
+        if (sopEnabled.snapAgl || wantNavDem) {
             const pts = [];
             missions.forEach(m => realSteps(m.instructions).forEach(s => {
-                if (s.type_name === 'snapshot' && s.location) pts.push({ lat: s.location.lat, lng: s.location.lng });
+                if (!s.location) return;
+                if ((s.type_name === 'snapshot' && sopEnabled.snapAgl) ||
+                    (s.type_name === 'navigate' && wantNavDem)) {
+                    pts.push({ lat: s.location.lat, lng: s.location.lng });
+                }
             }));
             if (pts.length) { try { await bulkFetchElevations(pts); } catch (e) { console.warn(`${TAG} SOP DEM prefetch failed`, e); } }
         }
@@ -6725,15 +8652,25 @@ ${snapPlacemarks}
                     }
                     // 2. Navigate altitude ≥ containing FFZ min alt (− tolerance).
                     if (sopEnabled.navAboveFfz && containing && typeof containing.minAltM === 'number' && typeof s.value1 === 'number') {
-                        const navFt = s.value1 * 3.28084, floorFt = containing.minAltM * 3.28084;
-                        if (Math.round(navFt) < Math.round(floorFt) - th.navFloorTolFt) {
-                            violations.push({ ...ctx, check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
-                                detail: `Navigate ${Math.round(navFt)} ft < FFZ min ${Math.round(floorFt)} ft${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                        const navFt = Math.round(s.value1 * 3.28084), floorFt = Math.round(containing.minAltM * 3.28084);
+                        if (navFt < floorFt - th.navFloorTolFt) {
+                            violations.push({ ...ctx, ...sopBandFields(s, containing), deltaFt: navFt - floorFt,
+                                check: 'Navigate below FFZ floor', stepIndex: s.index_in_app,
+                                detail: `Navigate ${navFt} ft${sopAglStr(s)} < FFZ floor ${floorFt} ft — ${floorFt - navFt} ft under${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
+                        }
+                    }
+                    // 3. Navigate altitude ≤ containing FFZ max alt (+ tolerance).
+                    if (sopEnabled.navUnderCeil && containing && typeof containing.maxAltM === 'number' && typeof s.value1 === 'number') {
+                        const navFt = Math.round(s.value1 * 3.28084), ceilFt = Math.round(containing.maxAltM * 3.28084);
+                        if (navFt > ceilFt + th.navCeilTolFt) {
+                            violations.push({ ...ctx, ...sopBandFields(s, containing), deltaFt: navFt - ceilFt,
+                                check: 'Navigate above FFZ ceiling', stepIndex: s.index_in_app,
+                                detail: `Navigate ${navFt} ft${sopAglStr(s)} > FFZ ceiling ${ceilFt} ft — ${navFt - ceilFt} ft over${containing.name ? ` (${containing.name})` : ''}`, severity: 'high' });
                         }
                     }
                 } else if (s.type_name === 'snapshot') {
                     snapN++;
-                    // 3. Snapshot AGL ≥ min (default 0 → not underground).
+                    // 4. Snapshot AGL ≥ min (default 0 → not underground).
                     if (sopEnabled.snapAgl && s.location && typeof s.value1 === 'number') {
                         const groundM = getElevationFromCache(s.location.lat, s.location.lng);
                         if (typeof groundM === 'number') {
@@ -6744,7 +8681,7 @@ ${snapPlacemarks}
                             }
                         }
                     }
-                    // 5. Navigate→Snapshot distance within band.
+                    // 6. Navigate→Snapshot distance within band.
                     if (sopEnabled.navSnapDist && lastNav && lastNav.location && s.location) {
                         const dFt = sopHaversineFt(lastNav.location, s.location);
                         if (dFt < th.navSnapMinFt || dFt > th.navSnapMaxFt) {
@@ -6761,7 +8698,7 @@ ${snapPlacemarks}
                 }
             });
 
-            // 4. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
+            // 5. Block balance — one Thermal-on/GEM-on/Wait/GEM-off/Thermal-off per Snapshot.
             if (sopEnabled.blockBalance) {
                 const parts = [];
                 if (camOn !== snapN) parts.push(`Thermal-on ${camOn}`);
@@ -6797,6 +8734,89 @@ ${snapPlacemarks}
     }
 
     // --- floating report popup -------------------------------------------
+    // Escape a violation detail and colorize the "N ft under/over" delta
+    // (under = red, over = blue) so it pops in the report + Sheets copy.
+    const SOP_UNDER_COLOR = '#ff5252', SOP_OVER_COLOR = '#4dc3ff';
+    function sopDetailHtml(detail) {
+        return escapeHtml(detail).replace(/— (\d+ ft (under|over))/g, (m, d, dir) =>
+            `— <strong style="color:${dir === 'under' ? SOP_UNDER_COLOR : SOP_OVER_COLOR}">${d}</strong>`);
+    }
+
+    // Last completed run, kept for the 📋 Sheets copy.
+    let lastSopResult = null;
+
+    // Copy the last SOP report as a rich HTML table — pasting into Google
+    // Sheets/Excel yields formatted cells. Plain-text TSV as fallback.
+    function copySopReportForSheets() {
+        const res = lastSopResult;
+        if (!res || !Array.isArray(res.violations)) { showToast('Run the SOP check first.', '#ff9800'); return; }
+        const v = res.violations;
+        const sid = getCurrentSiteID();
+        let siteName = ''; try { siteName = getCurrentSiteName() || ''; } catch (e) {}
+        const missionsWith = new Set(v.map(x => x.id)).size;
+        const title = `Mission SOP Check — Site ${sid || '?'}${siteName ? ` · ${siteName}` : ''}`;
+        const summary = `${v.length} issue${v.length === 1 ? '' : 's'} across ${missionsWith} of ${res.missionCount} missions · ` +
+            `${res.missionCount - missionsWith} clean · ${res.ffzCount} FFZs · preset ${MISSION_SOP_PRESETS[sopPreset].label} · ${new Date().toLocaleString()}`;
+        const th = 'background:#263238;color:#ffffff;font-weight:bold;border:1px solid #90a4ae;padding:4px 8px;text-align:left';
+        const td = 'border:1px solid #cfd8dc;padding:4px 8px;vertical-align:top';
+        const tdNum = `${td};text-align:right`;
+        const numCell = n => (typeof n === 'number') ? n : '';
+        // One row per violation. Floor/ceiling checks fill the structured
+        // altitude columns (numbers → sortable/filterable in Sheets); other
+        // checks keep their sentence in Detail.
+        const cols = ['Mission', 'Check', 'Step', 'Navigate MSL ft', 'Navigate AGL ft', 'FFZ Name',
+            'FFZ Min MSL ft', 'FFZ Min AGL ft', 'FFZ Max MSL ft', 'FFZ Max AGL ft', 'Ft Over (+) / Under (−)', 'Severity', 'Detail'];
+        const rowVals = x => {
+            const structured = typeof x.deltaFt === 'number';
+            return [x.name, x.check, x.stepIndex != null ? x.stepIndex : '',
+                numCell(x.navMsl), numCell(x.navAgl), x.ffzName || '',
+                numCell(x.ffzMinMsl), numCell(x.ffzMinAgl), numCell(x.ffzMaxMsl), numCell(x.ffzMaxAgl),
+                structured ? x.deltaFt : '', x.severity === 'high' ? 'HARD' : 'WARN', structured ? '' : x.detail];
+        };
+        const rowsHtml = v.map(x => {
+            const r = rowVals(x);
+            const deltaColor = (typeof x.deltaFt === 'number') ? (x.deltaFt > 0 ? SOP_OVER_COLOR : SOP_UNDER_COLOR) : '#000000';
+            const sevColor = x.severity === 'high' ? '#c62828' : '#b8860b';
+            return `<tr>
+                <td style="${td}">${escapeHtml(r[0])}</td>
+                <td style="${td}">${escapeHtml(r[1])}</td>
+                <td style="${tdNum}">${r[2]}</td>
+                <td style="${tdNum}">${r[3]}</td>
+                <td style="${tdNum}">${r[4]}</td>
+                <td style="${td}">${escapeHtml(r[5])}</td>
+                <td style="${tdNum}">${r[6]}</td>
+                <td style="${tdNum}">${r[7]}</td>
+                <td style="${tdNum}">${r[8]}</td>
+                <td style="${tdNum}">${r[9]}</td>
+                <td style="${tdNum};font-weight:bold;color:${deltaColor}">${r[10]}</td>
+                <td style="${td};font-weight:bold;color:${sevColor}">${r[11]}</td>
+                <td style="${td}">${escapeHtml(r[12])}</td>
+            </tr>`;
+        }).join('');
+        const html = `<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px">
+            <tr><td colspan="${cols.length}" style="font-weight:bold;font-size:14px;padding:4px 8px">${escapeHtml(title)}</td></tr>
+            <tr><td colspan="${cols.length}" style="color:#555555;padding:2px 8px">${escapeHtml(summary)}</td></tr>
+            <tr>${cols.map(c => `<th style="${th}">${escapeHtml(c)}</th>`).join('')}</tr>
+            ${rowsHtml || `<tr><td colspan="${cols.length}" style="${td};color:#2e7d32">No violations — all ${res.missionCount} missions pass.</td></tr>`}
+        </table>`;
+        const tsv = [title, summary, cols.join('\t')]
+            .concat(v.map(x => rowVals(x).map(c => String(c).replace(/[\t\n]/g, ' ')).join('\t')))
+            .join('\n');
+        try {
+            const item = new ClipboardItem({
+                'text/html': new Blob([html], { type: 'text/html' }),
+                'text/plain': new Blob([tsv], { type: 'text/plain' }),
+            });
+            navigator.clipboard.write([item]).then(
+                () => showToast('SOP report copied — paste into Google Sheets.', '#5fff5f'),
+                (e) => { console.warn(`${TAG} SOP rich copy failed, falling back to TSV`, e); copyToClipboard(tsv); showToast('Copied as plain text (TSV).', '#ff9800'); });
+        } catch (e) {
+            console.warn(`${TAG} ClipboardItem unavailable, falling back to TSV`, e);
+            copyToClipboard(tsv);
+            showToast('Copied as plain text (TSV).', '#ff9800');
+        }
+    }
+
     function closeSopReport() {
         const el = document.getElementById(SOP_REPORT_ID);
         if (el) el.remove();
@@ -6815,6 +8835,7 @@ ${snapPlacemarks}
         } else if (state.loading) {
             body = `<div style="padding:16px;color:#9ad">${escapeHtml(state.loading)}</div>`;
         } else {
+            lastSopResult = state;
             const v = state.violations || [];
             // Group by mission.
             const byMission = {};
@@ -6828,7 +8849,7 @@ ${snapPlacemarks}
                 const items = g.items.map(it => `
                     <div style="display:flex;gap:8px;padding:3px 0;font-size:11px;border-top:1px solid rgba(255,255,255,0.05)">
                         <span style="color:${sevColor(it.severity)};font-weight:700;flex-shrink:0">${it.severity === 'high' ? '●' : '▲'}</span>
-                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${escapeHtml(it.detail)}</span></span>
+                        <span style="flex:1">${escapeHtml(it.check)}${it.stepIndex != null ? ` <span style="color:#888">· step ${it.stepIndex}</span>` : ''}<br><span style="color:#aaa">${sopDetailHtml(it.detail)}</span></span>
                     </div>`).join('');
                 return `
                     <div class="aim-sop-mrow" data-mid="${mid}" style="padding:7px 12px;border-bottom:1px solid #1f2430;cursor:pointer">
@@ -6848,6 +8869,7 @@ ${snapPlacemarks}
         pop.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(95,255,95,0.06);border-bottom:1px solid rgba(255,255,255,0.08)">
                 <div style="flex:1;text-align:center;font-weight:700;color:#5fff5f;font-size:13px">🚩 Mission SOP Check</div>
+                <button data-sop-copy title="Copy report as a table — paste into Google Sheets" style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">📋 Sheets</button>
                 <button data-sop-rerun style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">Re-run</button>
                 <button data-sop-x style="background:rgba(95,255,95,0.12);border:1px solid rgba(95,255,95,0.4);color:#5fff5f;padding:2px 8px;font-size:11px;border-radius:3px;cursor:pointer;font-weight:600">✕</button>
             </div>
@@ -6855,6 +8877,7 @@ ${snapPlacemarks}
         document.body.appendChild(pop);
         pop.querySelector('[data-sop-x]').onclick = closeSopReport;
         pop.querySelector('[data-sop-rerun]').onclick = runMissionSopAndReport;
+        pop.querySelector('[data-sop-copy]').onclick = copySopReportForSheets;
         pop.querySelectorAll('.aim-sop-mrow').forEach(r => {
             r.onclick = () => { try { openPanelAndDrill(Number(r.dataset.mid)); } catch (e) { console.warn(`${TAG} drill failed`, e); } };
         });
@@ -6901,6 +8924,8 @@ ${snapPlacemarks}
                 { id: 'navInFfz', label: 'Check · Navigate inside an FFZ', type: 'boolean', default: sopEnabled.navInFfz },
                 { id: 'navAboveFfz', label: 'Check · Navigate ≥ FFZ floor', type: 'boolean', default: sopEnabled.navAboveFfz },
                 { id: 'navFloorTolFt', label: 'Navigate-vs-floor slack', type: 'number', min: 0, max: 100, step: 1, default: th.navFloorTolFt, unit: 'ft' },
+                { id: 'navUnderCeil', label: 'Check · Navigate ≤ FFZ ceiling', type: 'boolean', default: sopEnabled.navUnderCeil },
+                { id: 'navCeilTolFt', label: 'Navigate-vs-ceiling slack', type: 'number', min: 0, max: 100, step: 1, default: th.navCeilTolFt, unit: 'ft' },
                 { id: 'snapAgl', label: 'Check · Snapshot ≥ min AGL', type: 'boolean', default: sopEnabled.snapAgl },
                 { id: 'snapMinAglFt', label: 'Snapshot min AGL', type: 'number', min: -50, max: 200, step: 1, default: th.snapMinAglFt, unit: 'ft' },
                 { id: 'blockBalance', label: 'Check · Scan-block balance per snapshot', type: 'boolean', default: sopEnabled.blockBalance },
@@ -6944,12 +8969,21 @@ ${snapPlacemarks}
             // list mounts / virtualizes on scroll (the 4s interval is too slow
             // to feel responsive). Debounced so a burst of mutations = 1 pass.
             let collapseDebounce = null;
-            const editorObserver = new MutationObserver(() => {
+            const editorObserver = new MutationObserver((recs) => {
+                // Tile-churn guard (v1.88): pan/zoom floods childList mutations
+                // from the tile pane; nothing we style lives there, so a batch
+                // that is ONLY tile churn shouldn't cost a collapse+restyle pass.
+                if (recs.length && recs.every(r => r.target && r.target.closest && r.target.closest('.leaflet-tile-pane'))) return;
+                MB_PERF.obs++;
                 if (collapseDebounce) return;
                 collapseDebounce = setTimeout(() => {
                     collapseDebounce = null;
                     try { applyNativeEditorCollapse(); } catch (e) {}
                     try { injectEditorCollapseButton(); } catch (e) {}
+                    // Re-inject the composer button row promptly — Percepto swaps
+                    // the sidebar (step edit form / Add Instruction list) and
+                    // unmounts the row; the 4s interval read as "Stage vanished".
+                    try { injectComposerButton(); } catch (e) {}
                     // Re-stamp the N#/S# marker badges too — Percepto re-renders a
                     // step's marker after a per-step save, wiping our number until
                     // the next style pass (the "S1 vanished but the circle stayed").
@@ -6957,6 +8991,14 @@ ${snapPlacemarks}
                 }, 150);
             });
             try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+            // v1.90 perf reporter — one console line per 5s window in which the
+            // editor machinery did anything, so slowness attributes to a pathway.
+            setInterval(() => {
+                const p = MB_PERF;
+                if (!p.obs && !p.ticks && !p.collapsePasses && !p.markerPasses && !p.elevLook && !p.elevKicks) return;
+                console.log(`${TAG} [perf] 5s — obs:${p.obs} ticks:${p.ticks} | collapse ${p.collapsePasses}× ${p.collapseMs.toFixed(0)}ms writes:${p.cardWrites} creates:${p.cxCreates} | markers ${p.markerPasses}× ${p.markerMs.toFixed(0)}ms | elev looks:${p.elevLook} kicks:${p.elevKicks}`);
+                Object.keys(p).forEach(k => { p[k] = 0; });
+            }, 5000);
             installRightClickHandler();
             // READ-ONLY probe: logs + diffs each mission save vs the cached
             // original (never modifies the save). Tells us whether the form
@@ -6973,6 +9015,7 @@ ${snapPlacemarks}
                 // SAFETY: disarm snapshot auto-AGL on any navigation, so it never
                 // stays armed when you (re)enter the Mission Bank.
                 if (autoSnapAglEnabled) { autoSnapAglEnabled = false; try { updateAutoSnapAglUI(); } catch (e) {} }
+                try { stageCancelArm(true); } catch (e) {}
                 Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]); // re-baseline next mission
                 runSumInjection();
             });

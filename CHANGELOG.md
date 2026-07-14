@@ -6,6 +6,17 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — 🚀 PROMOTED TO PROD: Mission Bank Tools v1.97 (coworkers jump from v1.46) + Asset Inspector v4.164.4 hotfix
+
+**Mission Bank Tools v1.97 is now the coworker release.** Everything from the v1.47–v1.97 dev arc ships at once:
+- **Large-mission performance overhaul** — the editor no longer crawls on big missions (badge styling, card refresh, and elevation lookups all reworked; built-in `[perf]` console profiler).
+- **➕ Stage step presets** — capture ANY configured step (Wait, Camera Type, GEM, Flag Pole…) as a named, permanent preset via 📋 + click-the-card; stage clones with per-preset counts; Wait gets an inline seconds field and Camera Type an RGB/Thermal picker; ▲/▼ reorder = staging order; ✏️ rename; counts remembered.
+- **Group-relative insert** — "Insert at Nav #" + Start/End-of-group position selector.
+- **⭐ Click-to-Add editor mode** — ➕ toggle (or hold Ctrl) in the mission editor: left-click map = Snapshot, right-click = Nav, Shift = stack on an existing icon, Alt+right-click = delete, Ctrl+Z = undo; "Insert at N" targeting.
+- **N#/S# map badges** (colored, numbered nav/snap markers; new Control Panel toggle), **live mission-list refresh**, **bulk rename/delete missions**, **Flag Pole marker selectable/movable**, **compact-card + AGL view refinements**, **⬇ KML export**, and the **template-driven generator machinery (ships LOCKED OFF — unchanged for coworkers)**.
+
+**Asset Inspector v4.164.4 (prod hotfix)** — backports the two Click-to-Add compatibility bails from dev (v4.168/v4.169) so the inspector stands down during MBT's Click-to-Add right-clicks. No other changes; coworkers otherwise stay on the 4.164.x line.
+
 ## 2026-07-14 — ➕ Stage: rename presets, remembered counts, predictable group insert — Mission Bank Tools v1.97 (dev/latest)
 
 Three refinements from live use: (1) **✏️ rename** on every MY STEPS row; (2) preset **counts are remembered** across popup opens (like Navigates/Snapshots already were); (3) the insert position is now **group-relative and explicit** — a new "Position" selector chooses **Start of group** (right after Nav N) or **End of group** (just before Nav N+1, or before Return Home when N is last). Blank Nav # still means very end. The old "new nav becomes N#" semantic is gone.
