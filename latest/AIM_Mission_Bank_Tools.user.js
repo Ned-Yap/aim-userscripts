@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.91
+// @version      1.92
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.91';
+    const SCRIPT_VERSION = '1.92';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3511,6 +3511,46 @@
         if (goBtn) goBtn.disabled = false;
     }
 
+    // ── Step presets: capture ANY configured step in the open editor (Wait,
+    // Camera Type, GEM, Camera Pitch, Flag Pole, maneuvers…) as a named preset,
+    // persisted in GM storage forever, and stage clones of it from the ➕ Stage
+    // popup. Clone-based ON PURPOSE — creating instructions from scratch trips
+    // Percepto's createInstruction type-mangling (see genStageSteps header), so
+    // a new type needs one native add+configure, once ever, then lives here.
+    // Wait + Camera Type presets get inline quick-edit controls in the popup
+    // (seconds / RGB-vs-Thermal) whose edits persist to the preset.
+    const CACHE_KEY_STEP_PRESETS = 'aim-mb-step-presets';
+    const CACHE_KEY_STAGE_LAST = 'aim-mb-stage-last';
+    function stagePresetsLoad() { const o = gmGet(CACHE_KEY_STEP_PRESETS, {}); return (o && typeof o === 'object') ? o : {}; }
+    function stagePresetsSave(o) { try { gmSet(CACHE_KEY_STEP_PRESETS, o || {}); } catch (e) { console.warn(`${TAG} [stage] preset save failed`, e); } }
+    function stagePresetDefaultName(s) {
+        const t = tplTypeNum(s);
+        if (t === 5) return `Wait ${Math.round(Number(s.value1) || 0)}s`;
+        if (t === 7) return s.value1 ? 'Camera Thermal' : 'Camera RGB';
+        if (t === 24) return Number(s.value1) === 1 ? 'GEM On' : 'GEM Off';
+        return s.type_name ? s.type_name : `type ${t}`;
+    }
+    function stageCaptureOpenStep() {
+        const openId = getOpenStepId();
+        const ctx = findMissionAppCtx();
+        let instrs = (ctx && ctx.currentApp && ctx.currentApp.instructions) || [];
+        if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
+        const s = (openId != null) ? instrs.find(x => x && String(x.id) === String(openId)) : null;
+        if (!s) { showToast('Click a step to open its edit form first, then capture.', '#ff9800', 4500); return false; }
+        // The default name previews WHAT got grabbed (e.g. "Wait 5s") — a wrong
+        // step is obvious before saving.
+        const name = (window.prompt('Save step preset as:', stagePresetDefaultName(s)) || '').trim();
+        if (!name) return false;
+        const instr = JSON.parse(JSON.stringify(s));
+        delete instr.id; delete instr.index_in_app;
+        const all = stagePresetsLoad();
+        all[name] = { name, savedAt: Date.now(), instr };
+        stagePresetsSave(all);
+        console.log(`${TAG} [stage] captured step preset "${name}" (type ${tplTypeNum(instr)})`);
+        showToast(`Saved step preset "${name}".`, '#5fff5f', 3000);
+        return true;
+    }
+
     // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
     // near the existing nav/snap so you can drag them into position. Navigates
     // keep shouldUseFreezoneMinAlt (FFZ-min); snapshots auto-set to ground+AGL on
@@ -3520,7 +3560,7 @@
     // h() mangles the type (number OR object → "No instruction component for type
     // [object Object]"), so we avoid it: copied steps already have valid types and
     // setCurrentApp is the same path normal edits use → renders + saves cleanly.
-    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav) {
+    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav, presetReqs) {
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
@@ -3588,6 +3628,20 @@
             staged.push(sc);
             if (inspectionScan) wrapTpl.forEach(w => staged.push(copyStep(w, null)));
         }
+        // Saved step presets: clone the captured instruction verbatim (settings
+        // travel with it); located types (e.g. Flag Pole) land in the map-center
+        // fan like navs/snaps, location-less types (Wait/Camera/GEM) stay bare.
+        (presetReqs || []).forEach(req => {
+            for (let k = 0; k < req.count; k++) {
+                const c = JSON.parse(JSON.stringify(req.preset.instr));
+                c.id = idSeq++;
+                if (c.location && c.location.lat != null) {
+                    const l = placeAt(c, placeIdx++);
+                    if (l) c.location = { lat: l.lat, lng: l.lng };
+                }
+                staged.push(c);
+            }
+        });
         if (!staged.length) { showToast('Nothing to stage.', '#888'); return; }
         // Rebuild the instruction list (shallow-copy existing so we don't mutate
         // live objects), insert the staged steps, re-index.
@@ -3610,43 +3664,99 @@
         try {
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
-            showToast(`Staged ${navCount} navigate(s) + ${snapCount} snapshot(s)${posMsg} — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
+            const bits = [];
+            if (navCount) bits.push(`${navCount} navigate(s)`);
+            if (snapCount) bits.push(`${snapCount} snapshot(s)`);
+            (presetReqs || []).forEach(r => bits.push(`${r.count}× ${r.preset.name}`));
+            showToast(`Staged ${bits.join(' + ')}${posMsg} — drag them into place, then SAVE.${snapCount ? ' Arm 📷 Auto-AGL so snapshots auto-set elevation on drop.' : ''}`, '#5fff5f', 7000);
         } catch (e) { console.warn(`${TAG} [stage] setCurrentApp failed`, e); showToast('Stage failed — see console.', '#ff5252', 4000); }
     }
     let genStagePopEl = null;
     function genStagePopup(anchorBtn) {
         if (genStagePopEl) { genStagePopEl.remove(); genStagePopEl = null; return; }
+        const last = gmGet(CACHE_KEY_STAGE_LAST, null) || {};
+        const lastNav = Number.isFinite(+last.nav) ? Math.max(0, +last.nav) : 0;
+        const lastSnap = Number.isFinite(+last.snap) ? Math.max(0, +last.snap) : 1;
+        const lastScan = (last.scan === undefined) ? true : !!last.scan;
         const pop = document.createElement('div');
-        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:210px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
+        pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:240px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
             'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
+        const numCss = 'width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;';
+        const smallNumCss = 'width:46px;background:#0f1216;border:1px solid #456;color:#fff;padding:2px 4px;border-radius:3px;';
         pop.innerHTML = `
             <div style="font-weight:800;color:#9cf;font-size:13px;margin-bottom:8px;">➕ Stage steps</div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="0" data-st-nav style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="1" data-st-snap style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Insert at Nav #</label><input type="number" min="1" max="200" placeholder="end" data-st-at style="width:60px;background:#0f1216;border:1px solid #9cf;color:#fff;padding:3px 6px;border-radius:3px;"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="${lastNav}" data-st-nav style="${numCss}"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="${lastSnap}" data-st-snap style="${numCss}"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Insert at Nav #</label><input type="number" min="1" max="200" placeholder="end" data-st-at style="${numCss}"></div>
             <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank = end. e.g. 6 → new nav becomes N6, the rest shift down.</div>
-            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan checked> Inspection scan wrap per snapshot</label>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan ${lastScan ? 'checked' : ''}> Inspection scan wrap per snapshot</label>
+            <div data-st-presets style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
+            <button class="aim-mb-tbtn" data-st-cap style="padding:4px 8px;font-size:11px;margin-bottom:10px;width:100%;" title="Captures the step whose edit form is open (any type) with its current settings">📋 Save open step as preset</button>
             <div style="display:flex;gap:6px;justify-content:flex-end;">
                 <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
                 <button data-st-add style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;">Stage</button>
             </div>`;
         document.body.appendChild(pop);
         genStagePopEl = pop;
+        const rowsEl = pop.querySelector('[data-st-presets]');
+        const renderPresetRows = () => {
+            const all = stagePresetsLoad();
+            const names = Object.keys(all).sort((a, b) => a.localeCompare(b));
+            if (!names.length) {
+                rowsEl.innerHTML = '<div style="font-size:10px;color:#789;">No saved steps yet — open a step of any type in the editor (set it up how you want), then 📋 capture it below.</div>';
+                return;
+            }
+            rowsEl.innerHTML = '<div style="font-size:10px;font-weight:800;color:#9cf;margin-bottom:4px;">MY STEPS</div>' + names.map(n => {
+                const p = all[n]; const t = tplTypeNum(p.instr);
+                let ctrl = '';
+                if (t === 5) ctrl = `<span style="font-size:11px;color:#9ab;">⏱</span><input type="number" min="0" max="600" value="${Math.round(Number(p.instr.value1) || 0)}" data-st-pval="${escapeHtml(n)}" title="Wait seconds" style="${smallNumCss}">`;
+                else if (t === 7) ctrl = `<select data-st-pcam="${escapeHtml(n)}" title="Camera" style="background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;padding:2px;font-size:11px;"><option value="0"${!p.instr.value1 ? ' selected' : ''}>RGB</option><option value="1"${p.instr.value1 ? ' selected' : ''}>Thermal</option></select>`;
+                return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
+                    <label style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n)}">${escapeHtml(n)}</label>${ctrl}
+                    <input type="number" min="0" max="50" value="0" data-st-pcount="${escapeHtml(n)}" title="How many to stage" style="${smallNumCss}">
+                    <span data-st-pdel="${escapeHtml(n)}" title="Delete preset" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
+            }).join('');
+            // Inline edits persist straight to the preset ("the way you last had it").
+            rowsEl.querySelectorAll('[data-st-pval]').forEach(inp => { inp.onchange = () => {
+                const a2 = stagePresetsLoad(); const p = a2[inp.getAttribute('data-st-pval')]; if (!p) return;
+                p.instr.value1 = Math.max(0, parseInt(inp.value, 10) || 0); stagePresetsSave(a2);
+            }; });
+            rowsEl.querySelectorAll('[data-st-pcam]').forEach(sel => { sel.onchange = () => {
+                const a2 = stagePresetsLoad(); const p = a2[sel.getAttribute('data-st-pcam')]; if (!p) return;
+                p.instr.value1 = sel.value === '1' ? 1 : 0; stagePresetsSave(a2);
+            }; });
+            rowsEl.querySelectorAll('[data-st-pdel]').forEach(d => { d.onclick = () => {
+                const n = d.getAttribute('data-st-pdel');
+                const a2 = stagePresetsLoad(); delete a2[n]; stagePresetsSave(a2);
+                console.log(`${TAG} [stage] deleted step preset "${n}"`);
+                renderPresetRows();
+            }; });
+        };
+        renderPresetRows();
         const r = anchorBtn.getBoundingClientRect();
         pop.style.left = Math.min(r.left, window.innerWidth - pop.offsetWidth - 8) + 'px';
         pop.style.top = (r.bottom + 4) + 'px';
         const close = () => { pop.remove(); genStagePopEl = null; document.removeEventListener('mousedown', outside, true); };
         const outside = e => { if (genStagePopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
         pop.querySelector('[data-st-cancel]').onclick = close;
+        pop.querySelector('[data-st-cap]').onclick = () => { if (stageCaptureOpenStep()) renderPresetRows(); };
         pop.querySelector('[data-st-add]').onclick = () => {
             const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
             const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
             const scan = pop.querySelector('[data-st-scan]').checked;
             const atRaw = parseInt(pop.querySelector('[data-st-at]').value, 10);
             const at = (!isNaN(atRaw) && atRaw >= 1) ? atRaw : null; // null = end
+            const allP = stagePresetsLoad();
+            const presetReqs = [];
+            pop.querySelectorAll('[data-st-pcount]').forEach(inp => {
+                const c = Math.max(0, parseInt(inp.value, 10) || 0);
+                const p = allP[inp.getAttribute('data-st-pcount')];
+                if (c > 0 && p) presetReqs.push({ preset: p, count: c });
+            });
             close();
-            if (!nav && !snap) { showToast('Set a Navigate and/or Snapshot count.', '#ff9800'); return; }
-            genStageSteps(nav, snap, scan, at);
+            gmSet(CACHE_KEY_STAGE_LAST, { nav, snap, scan });
+            if (!nav && !snap && !presetReqs.length) { showToast('Set a count for at least one step type.', '#ff9800'); return; }
+            genStageSteps(nav, snap, scan, at, presetReqs);
         };
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }

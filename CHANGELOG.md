@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: custom step presets (any step type, persistent) — Mission Bank Tools v1.92 (dev/latest)
+
+The ➕ Stage popup can now stage **any step type**, not just Navigates/Snapshots, via saved presets: open a step in the editor (any type — Wait, Camera Type, GEM Mode, Camera Pitch, Flag Pole, even maneuvers), set it up how you want, then hit **📋 Save open step as preset** and name it. Presets are permanent (survive reloads/missions/sites) and appear in the popup with a count field each — staged clones carry the preset's exact settings. **Wait** presets get an inline seconds field and **Camera Type** presets an RGB/Thermal picker right in the popup; edits persist to the preset. The popup also remembers your last Navigate/Snapshot counts and scan-wrap choice. New types need one native add+configure, once ever — after capture they're one click forever.
+
 ## 2026-07-14 — Mission Bank editor: card refresh goes demand-driven — Mission Bank Tools v1.91 (dev/latest)
 
 Follow-up to the v1.90 fix (confirmed working). Dragging a step no longer re-renders the compact cards at all — a moved step's AGL updates on the next value change or mission reload instead of live (map badges still follow the marker). The "waiting for elevation" card refresh now runs every ~2.8 s only while some card still shows the MSL placeholder, then goes fully idle. Steady state with a mission open is now zero card work.
