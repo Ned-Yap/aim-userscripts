@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — Mission Bank editor perf round 2: the N#/S# badges themselves were the killer — Mission Bank Tools v1.89 (dev/latest)
+
+Live test of v1.88 pinned it precisely: the editor was fine until the N#/S# badges populated, then everything crawled. Two causes fixed: (1) the badge stylesheet used **CSS `:has()` selectors**, which make the browser re-check style invalidation across every marker on every DOM change — replaced with plain classes stamped directly on each marker (tradeoff: a marker Percepto re-creates shows its native icon for ~200 ms before re-tagging); (2) the 700 ms editor tick was **rewriting every card's inline styles every tick** even when nothing changed, forcing constant style recalc — card updates are now skipped entirely unless the displayed value actually changed.
+
 ## 2026-07-14 — Mission Bank editor perf: large missions no longer crawl on open/pan/zoom — Mission Bank Tools v1.88 (dev/latest)
 
 Opening a large mission ran the N#/S# marker restyle (React fiber walk + full map-layer sweep) **once per marker added** — O(N²) at open, and again on marker churn during pan/zoom — and the editor's DOM observer burned passes on pure map-tile churn. Three changes: (1) the map restyle is now **debounced** to one trailing pass 200 ms after a burst settles (visually identical); (2) mutation batches that are only tile churn are skipped; (3) new Control Panel toggle **"N#/S# map step badges + Click-to-Add (OFF = perf test)"** (default ON) — OFF fully disables the marker-styling path (badges, colors, Click-to-Add, M2 order editor revert to native) for perf isolation on big missions.

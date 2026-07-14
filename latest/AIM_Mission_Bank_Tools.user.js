@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.88
+// @version      1.89
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.88';
+    const SCRIPT_VERSION = '1.89';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -1590,6 +1590,7 @@
                 el.removeAttribute('data-aim-id');
                 el.removeAttribute('data-aim-kind');
                 el.removeAttribute('data-aim-num');
+                el.classList.remove('aim-mb-nav', 'aim-mb-snap');
             });
         } catch (e) { console.warn(`${TAG} [map-badges] teardown failed`, e); }
     }
@@ -2138,11 +2139,18 @@
             (document.head || document.documentElement).appendChild(st);
         }
         const navC = stepColor('nav'), snapC = stepColor('snap');
+        // v1.89 PERF: class-keyed, NOT :has(img[src*=…]) — :has() made Chrome
+        // re-evaluate ancestor invalidation on every DOM mutation in the iframe,
+        // scaling with marker count; the whole editor turned to sludge the
+        // moment this stylesheet + N markers existed. composerStyleOneMarker
+        // stamps .aim-mb-nav/.aim-mb-snap on each marker instead. Tradeoff: a
+        // marker Percepto re-creates shows its native icon for ~200ms until the
+        // debounced restyle re-tags it (the old CSS matched instantly).
         st.textContent = `
-            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
-            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
-            .instruction-marker:has(img[src*="navigate-"]) .instruction-marker__icon img,
-            .instruction-marker:has(img[src*="snapshot-"]) .instruction-marker__icon img { opacity:0 !important; }
+            .instruction-marker.aim-mb-nav .instruction-marker__icon { background:${navC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker.aim-mb-snap .instruction-marker__icon { background:${snapC} !important; border:1.5px solid #fff !important; border-radius:50% !important; position:relative; }
+            .instruction-marker.aim-mb-nav .instruction-marker__icon img,
+            .instruction-marker.aim-mb-snap .instruction-marker__icon img { opacity:0 !important; }
             /* Number as ::after on the MARKER el (survives hover — Percepto only
                re-renders the inner icon's contents on hover, wiping a child span). */
             .instruction-marker[data-aim-num]::after { content: attr(data-aim-num); position:absolute; inset:0;
@@ -2156,6 +2164,11 @@
         el.__aimLL = ll;
         // Flag Pole: just tag it selectable — leave the native icon + no number badge.
         if (info.kind === 'flag') { el.removeAttribute('data-aim-num'); return; }
+        // Kind class drives the color/icon-hide CSS (v1.89: replaced :has()).
+        const kindCls = info.kind === 'nav' ? 'aim-mb-nav' : 'aim-mb-snap';
+        const otherCls = info.kind === 'nav' ? 'aim-mb-snap' : 'aim-mb-nav';
+        if (!el.classList.contains(kindCls)) el.classList.add(kindCls);
+        if (el.classList.contains(otherCls)) el.classList.remove(otherCls);
         const label = (info.kind === 'nav' ? 'N' : 'S') + info.num;
         // Color + icon-hide is CSS (:has). Number is a CSS ::after from this
         // attr on the MARKER el — survives Percepto's hover re-render of the
@@ -4013,6 +4026,21 @@
         else if (t === 'gemMode') { const on = Number(instr.value1) === 1; renameText = on ? 'GEM On' : 'GEM Off'; renameColor = on ? stepColor('gemOn') : stepColor('gemOff'); }
         else { card.classList.remove('aim-mb-compact-renamed'); return; }
 
+        // v1.89 PERF: skip the DOM writes when this card already shows exactly
+        // this state. The 700ms tick re-runs this across EVERY card (to flip
+        // "MSL (loading)" → AGL as DEM arrives); unguarded style writes dirtied
+        // style every tick and forced constant recalc on large missions. The
+        // stamp lives as a JS property → clearing/re-creating the card (React)
+        // or off() naturally resets it.
+        const stamp = `${t}|${valText}|${valColor}|${renameText}|${renameColor}|${titleColor}`;
+        if (card.__aimCxStamp === stamp) {
+            // Stamp can outlive our injected node when Percepto re-renders the
+            // card's INNER DOM in place (per-step save) — verify it's still there.
+            const node = renameText != null ? titleEl.querySelector('.aim-mb-cx-name') : header.querySelector('.aim-mb-cx-val');
+            if (node) return;
+        }
+        card.__aimCxStamp = stamp;
+
         // Color the native title name (Navigate=blue, Snapshot=pink).
         const nameEl = titleEl.querySelector('.mission-instruction-item__title__name');
         if (nameEl) nameEl.style.color = titleColor || '';
@@ -4047,7 +4075,7 @@
         const cards = document.querySelectorAll('[data-rfd-draggable-id]');
         const off = () => {
             ensureEditorCollapseStyle(false);
-            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); });
+            cards.forEach(c => { c.classList.remove('aim-mb-compact', 'aim-mb-compact-renamed'); c.querySelectorAll('.aim-mb-cx-name,.aim-mb-cx-val').forEach(x => x.remove()); delete c.__aimCxStamp; });
         };
         if (!collapseEditorCards) { off(); return; }
         if (!document.querySelector('.mission-edit__content') || !cards.length) return;
