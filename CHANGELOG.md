@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: armed capture picks the step by clicking its CARD — Mission Bank Tools v1.95 (dev/latest)
+
+Console diagnostics showed Percepto's focused-step id is unreadable on some routes (form detected, id always null) — so armed capture no longer depends on it. While armed, **click the step's card in the list** (or its N#/S# map badge): the instruction id is read straight off the card's DOM attribute and the preset saves immediately — the click is swallowed, so the edit form doesn't even open. The old form-open trigger stays as a backup on routes where the id is readable.
+
 ## 2026-07-14 — ➕ Stage: armed capture now fires on the step-edit form itself — Mission Bank Tools v1.94 (dev/latest)
 
 v1.93's armed capture compared against Percepto's focused-step id, which stays stuck on the last step you edited — so re-capturing that same step (the usual case: you just configured it) never fired. The arm now watches for the step-edit form actually opening and captures whatever step it shows, same step or not; a card click that moves focus to a different step still captures too. Armed mode also logs a `[stage] armed…` diagnostic line every 3 s so a stuck capture is explainable from the console.

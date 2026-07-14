@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.94
+// @version      1.95
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.94';
+    const SCRIPT_VERSION = '1.95';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3555,18 +3555,34 @@
     // step" directly is only possible if a form is already open. Arming solves
     // the catch-22: 📋 with no form open closes the popup into a floating chip
     // and captures WHICHEVER step you open next (focusedInstructionId change).
-    let stageArmPoll = null, stageArmChip = null;
+    let stageArmPoll = null, stageArmChip = null, stageArmPick = null;
     function stageCancelArm(silent) {
         if (stageArmPoll) { clearInterval(stageArmPoll); stageArmPoll = null; }
         if (stageArmChip) { stageArmChip.remove(); stageArmChip = null; }
+        if (stageArmPick) { document.removeEventListener('click', stageArmPick, true); stageArmPick = null; }
         if (!silent) console.log(`${TAG} [stage] capture arm cleared`);
     }
     function stageArmCapture() {
         stageCancelArm(true);
         let baseline = null;
         try { baseline = findFocusedInstrId(); } catch (e) {}
+        // PRIMARY pick path (v1.95): capture-phase click. The step CARD carries
+        // its instruction id in data-rfd-draggable-id and our map badges carry
+        // data-aim-id — no React focus read needed (focusedInstructionId proved
+        // unreadable on some routes: formOpen:true fid:null on site 1153).
+        // Swallow the click so the form doesn't even need to open.
+        stageArmPick = (e) => {
+            const hit = e.target && e.target.closest && e.target.closest('[data-rfd-draggable-id], .instruction-marker[data-aim-id], .leaflet-marker-icon[data-aim-id]');
+            if (!hit) return;
+            const id = hit.getAttribute('data-rfd-draggable-id') || hit.getAttribute('data-aim-id');
+            if (id == null || id === '') return;
+            e.preventDefault(); e.stopPropagation();
+            stageCancelArm(true);
+            if (stageCaptureOpenStep(id)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+        };
+        document.addEventListener('click', stageArmPick, true);
         const chip = document.createElement('div');
-        chip.textContent = '📋 Capture armed — click the step you want to save (opens its edit form). Click here to cancel.';
+        chip.textContent = '📋 Capture armed — click the step CARD in the list (or its N#/S# map badge). Click here to cancel.';
         chip.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:2147483600;' +
             'background:rgba(150,180,255,0.95);color:#06223a;font:700 12px/1.3 "Lato",sans-serif;' +
             'padding:6px 14px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);cursor:pointer;max-width:80vw;';
@@ -3584,14 +3600,14 @@
             if (formOpen && !formSince) formSince = now;
             if (!formOpen) formSince = 0;
             if (now - lastDiag > 3000) { lastDiag = now; console.log(`${TAG} [stage] armed — formOpen:${formOpen} fid:${fid} baseline:${baseline}`); }
-            // Trigger A: a step edit form MOUNTED (.edit-instruction). Fires even
-            // when re-opening the step focusedInstructionId was already stuck on
-            // (the v1.93 miss: baseline == the step you just finished editing).
-            // Give React ~1.2s after mount to publish the id before failing over.
+            // Trigger A (backup): a step edit form MOUNTED (.edit-instruction) and
+            // the focus id is readable. On routes where focusedInstructionId is
+            // unreadable (fid stays null) this just keeps waiting — the click-pick
+            // listener is the primary path and the 3s diag line explains state.
             if (formOpen) {
                 if (fid == null && now - formSince < 1200) return;
                 if (fid == null) fid = getOpenStepId();
-                if (fid == null) { stageCancelArm(); showToast('Capture failed — could not identify the open step (see console).', '#ff5252', 5000); return; }
+                if (fid == null) return;
                 stageCancelArm(true);
                 if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
                 return;
