@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.96
+// @version      1.97
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.96';
+    const SCRIPT_VERSION = '1.97';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3632,7 +3632,7 @@
     // h() mangles the type (number OR object → "No instruction component for type
     // [object Object]"), so we avoid it: copied steps already have valid types and
     // setCurrentApp is the same path normal edits use → renders + saves cleanly.
-    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav, presetReqs) {
+    function genStageSteps(navCount, snapCount, inspectionScan, insertAtNav, presetReqs, insertMode) {
         const ctx = findMissionAppCtx();
         if (!ctx || typeof ctx.setCurrentApp !== 'function' || !ctx.currentApp) { showToast('Open a mission in the editor first.', '#ff9800', 4000); return; }
         const app = ctx.currentApp;
@@ -3719,20 +3719,29 @@
         // live objects), insert the staged steps, re-index.
         const newInstrs = instrs.map(s => Object.assign({}, s));
         const endIdx = () => { const rh = newInstrs.findIndex(isReturn); return rh < 0 ? newInstrs.length : rh; };
-        // Insert position: before the Nth existing Navigate (so the new nav BECOMES
-        // N#, pushing the old N#..end down by one) when insertAtNav is set; else at
-        // the end (before returnHome).
+        // Insert position (v1.97 — group-relative, predictable):
+        //   'start' → right AFTER the Nth Navigate (top of its group)
+        //   'end'   → right BEFORE the (N+1)th Navigate (bottom of its group),
+        //             or before returnHome when N is the last group.
+        // Blank Nav # → very end (before returnHome).
         let insertIdx;
+        const mode = insertMode === 'end' ? 'end' : 'start';
         if (insertAtNav && insertAtNav >= 1) {
             const navIdxs = [];
             newInstrs.forEach((s, k) => { if (isNav(s)) navIdxs.push(k); });
-            insertIdx = (insertAtNav <= navIdxs.length) ? navIdxs[insertAtNav - 1] : endIdx();
+            if (insertAtNav <= navIdxs.length) {
+                insertIdx = (mode === 'end')
+                    ? ((insertAtNav < navIdxs.length) ? navIdxs[insertAtNav] : endIdx())
+                    : navIdxs[insertAtNav - 1] + 1;
+            } else {
+                insertIdx = endIdx();
+            }
         } else {
             insertIdx = endIdx();
         }
         newInstrs.splice(insertIdx, 0, ...staged);
         newInstrs.forEach((s, k) => { if (s) s.index_in_app = k; });
-        const posMsg = (insertAtNav && insertAtNav >= 1) ? ` at N${insertAtNav}` : '';
+        const posMsg = (insertAtNav && insertAtNav >= 1) ? ` at ${mode} of N${insertAtNav} group` : '';
         try {
             ctx.setCurrentApp(Object.assign({}, app, { instructions: newInstrs }));
             try { composerStyleNativeMarkers(); } catch (e) {}
@@ -3750,6 +3759,7 @@
         const lastNav = Number.isFinite(+last.nav) ? Math.max(0, +last.nav) : 0;
         const lastSnap = Number.isFinite(+last.snap) ? Math.max(0, +last.snap) : 1;
         const lastScan = (last.scan === undefined) ? true : !!last.scan;
+        const lastMode = last.insertMode === 'end' ? 'end' : 'start';
         const pop = document.createElement('div');
         pop.style.cssText = 'position:fixed;z-index:2147483600;min-width:240px;background:#1f2228;border:1px solid #9cf;border-radius:6px;' +
             'box-shadow:0 4px 20px rgba(0,0,0,0.8);color:#e6e6e6;font-family:"Lato","Segoe UI",sans-serif;padding:10px 12px;';
@@ -3760,7 +3770,11 @@
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px;"><label style="flex:1;">Navigates</label><input type="number" min="0" max="50" value="${lastNav}" data-st-nav style="${numCss}"></div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;"><label style="flex:1;">Snapshots</label><input type="number" min="0" max="50" value="${lastSnap}" data-st-snap style="${numCss}"></div>
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Insert at Nav #</label><input type="number" min="1" max="200" placeholder="end" data-st-at style="${numCss}"></div>
-            <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank = end. e.g. 6 → new nav becomes N6, the rest shift down.</div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;"><label style="flex:1;">Position</label><select data-st-mode style="background:#0f1216;border:1px solid #9cf;color:#fff;border-radius:3px;padding:3px 4px;font-size:11px;max-width:150px;">
+                <option value="start">Start of group (after nav)</option>
+                <option value="end">End of group (before next nav)</option>
+            </select></div>
+            <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank Nav # = very end. e.g. 2 + Start → right after N2; 2 + End → just before N3.</div>
             <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan ${lastScan ? 'checked' : ''}> Inspection scan wrap per snapshot</label>
             <div data-st-presets style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
             <button class="aim-mb-tbtn" data-st-cap style="padding:4px 8px;font-size:11px;margin-bottom:10px;width:100%;" title="If a step's edit form is open, captures it now. Otherwise arms capture: click the step you want and it saves automatically when its form opens.">📋 Capture a step as preset</button>
@@ -3770,6 +3784,7 @@
             </div>`;
         document.body.appendChild(pop);
         genStagePopEl = pop;
+        pop.querySelector('[data-st-mode]').value = lastMode;
         const rowsEl = pop.querySelector('[data-st-presets]');
         // User-controlled order (↑/↓, persisted via preset.order) — this is ALSO
         // the order staged clones land in the mission (genStageSteps iterates
@@ -3805,11 +3820,13 @@
                 let ctrl = '';
                 if (t === 5) ctrl = `<span style="font-size:11px;color:#9ab;">⏱</span><input type="number" min="0" max="600" value="${Math.round(Number(p.instr.value1) || 0)}" data-st-pval="${escapeHtml(n)}" title="Wait seconds" style="${smallNumCss}">`;
                 else if (t === 7) ctrl = `<select data-st-pcam="${escapeHtml(n)}" title="Camera" style="background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;padding:2px;font-size:11px;"><option value="0"${!p.instr.value1 ? ' selected' : ''}>RGB</option><option value="1"${p.instr.value1 ? ' selected' : ''}>Thermal</option></select>`;
+                const savedCount = Math.max(0, parseInt(p.count, 10) || 0);
                 return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
                     <span data-st-pup="${escapeHtml(n)}" title="Move up (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▲</span>
                     <span data-st-pdn="${escapeHtml(n)}" title="Move down (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▼</span>
-                    <label style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n)}">${escapeHtml(n)}</label>${ctrl}
-                    <input type="number" min="0" max="50" value="0" data-st-pcount="${escapeHtml(n)}" title="How many to stage" style="${smallNumCss}">
+                    <label style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n)}">${escapeHtml(n)}</label>
+                    <span data-st-pren="${escapeHtml(n)}" title="Rename preset" style="cursor:pointer;color:#9ab;font-size:11px;">✏️</span>${ctrl}
+                    <input type="number" min="0" max="50" value="${savedCount}" data-st-pcount="${escapeHtml(n)}" title="How many to stage (remembered)" style="${smallNumCss}">
                     <span data-st-pdel="${escapeHtml(n)}" title="Delete preset" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
             }).join('');
             // Inline edits persist straight to the preset ("the way you last had it").
@@ -3829,9 +3846,29 @@
             }; });
             rowsEl.querySelectorAll('[data-st-pup]').forEach(u => { u.onclick = () => movePreset(u.getAttribute('data-st-pup'), -1); });
             rowsEl.querySelectorAll('[data-st-pdn]').forEach(d => { d.onclick = () => movePreset(d.getAttribute('data-st-pdn'), 1); });
+            rowsEl.querySelectorAll('[data-st-pren]').forEach(r => { r.onclick = () => {
+                const oldName = r.getAttribute('data-st-pren');
+                const a2 = stagePresetsLoad(); const p = a2[oldName]; if (!p) return;
+                const nn = (window.prompt('Rename preset:', oldName) || '').trim();
+                if (!nn || nn === oldName) return;
+                if (a2[nn] && !window.confirm(`"${nn}" already exists — overwrite it?`)) return;
+                delete a2[oldName];
+                p.name = nn;
+                a2[nn] = p;
+                stagePresetsSave(a2);
+                console.log(`${TAG} [stage] renamed step preset "${oldName}" → "${nn}"`);
+                renderPresetRows();
+            }; });
+            // Counts persist ON the preset — typing a count remembers it across
+            // popup opens (navs/snaps already persist via aim-mb-stage-last).
             rowsEl.querySelectorAll('[data-st-pcount]').forEach(inp => {
                 const kept = keepCounts[inp.getAttribute('data-st-pcount')];
                 if (kept !== undefined) inp.value = kept;
+                inp.onchange = () => {
+                    const a2 = stagePresetsLoad(); const p = a2[inp.getAttribute('data-st-pcount')]; if (!p) return;
+                    p.count = Math.max(0, parseInt(inp.value, 10) || 0);
+                    stagePresetsSave(a2);
+                };
             });
         };
         renderPresetRows();
@@ -3861,17 +3898,21 @@
             const scan = pop.querySelector('[data-st-scan]').checked;
             const atRaw = parseInt(pop.querySelector('[data-st-at]').value, 10);
             const at = (!isNaN(atRaw) && atRaw >= 1) ? atRaw : null; // null = end
+            const mode = pop.querySelector('[data-st-mode]').value === 'end' ? 'end' : 'start';
             const allP = stagePresetsLoad();
             const presetReqs = [];
             pop.querySelectorAll('[data-st-pcount]').forEach(inp => {
                 const c = Math.max(0, parseInt(inp.value, 10) || 0);
                 const p = allP[inp.getAttribute('data-st-pcount')];
-                if (c > 0 && p) presetReqs.push({ preset: p, count: c });
+                if (!p) return;
+                p.count = c; // persist counts even if the input's change event never fired
+                if (c > 0) presetReqs.push({ preset: p, count: c });
             });
+            stagePresetsSave(allP);
             close();
-            gmSet(CACHE_KEY_STAGE_LAST, { nav, snap, scan });
+            gmSet(CACHE_KEY_STAGE_LAST, { nav, snap, scan, insertMode: mode });
             if (!nav && !snap && !presetReqs.length) { showToast('Set a count for at least one step type.', '#ff9800'); return; }
-            genStageSteps(nav, snap, scan, at, presetReqs);
+            genStageSteps(nav, snap, scan, at, presetReqs, mode);
         };
         setTimeout(() => document.addEventListener('mousedown', outside, true), 0);
     }

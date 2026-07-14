@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: rename presets, remembered counts, predictable group insert — Mission Bank Tools v1.97 (dev/latest)
+
+Three refinements from live use: (1) **✏️ rename** on every MY STEPS row; (2) preset **counts are remembered** across popup opens (like Navigates/Snapshots already were); (3) the insert position is now **group-relative and explicit** — a new "Position" selector chooses **Start of group** (right after Nav N) or **End of group** (just before Nav N+1, or before Return Home when N is last). Blank Nav # still means very end. The old "new nav becomes N#" semantic is gone.
+
 ## 2026-07-14 — ➕ Stage: reorder step presets — Mission Bank Tools v1.96 (dev/latest)
 
 MY STEPS rows now have ▲/▼ arrows: the list order is persistent and is also the **order staged clones land in the mission** (after the Navigates/Snapshots block, at your chosen insert position). Typed counts survive reordering.
