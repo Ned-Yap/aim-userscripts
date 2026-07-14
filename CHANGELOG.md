@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: reorder step presets — Mission Bank Tools v1.96 (dev/latest)
+
+MY STEPS rows now have ▲/▼ arrows: the list order is persistent and is also the **order staged clones land in the mission** (after the Navigates/Snapshots block, at your chosen insert position). Typed counts survive reordering.
+
 ## 2026-07-14 — ➕ Stage: armed capture picks the step by clicking its CARD — Mission Bank Tools v1.95 (dev/latest)
 
 Console diagnostics showed Percepto's focused-step id is unreadable on some routes (form detected, id always null) — so armed capture no longer depends on it. While armed, **click the step's card in the list** (or its N#/S# map badge): the instruction id is read straight off the card's DOM attribute and the preset saves immediately — the click is swallowed, so the edit form doesn't even open. The old form-open trigger stays as a backup on routes where the id is readable.

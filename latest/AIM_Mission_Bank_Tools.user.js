@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.95
+// @version      1.96
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.95';
+    const SCRIPT_VERSION = '1.96';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3544,7 +3544,9 @@
         const instr = JSON.parse(JSON.stringify(s));
         delete instr.id; delete instr.index_in_app;
         const all = stagePresetsLoad();
-        all[name] = { name, savedAt: Date.now(), instr };
+        // New presets append to the end of the user-ordered list.
+        const maxOrder = Object.values(all).reduce((m, p) => Math.max(m, p && p.order != null ? p.order : 0), 0);
+        all[name] = { name, savedAt: Date.now(), order: maxOrder + 10, instr };
         stagePresetsSave(all);
         console.log(`${TAG} [stage] captured step preset "${name}" (type ${tplTypeNum(instr)})`);
         showToast(`Saved step preset "${name}".`, '#5fff5f', 3000);
@@ -3769,9 +3771,31 @@
         document.body.appendChild(pop);
         genStagePopEl = pop;
         const rowsEl = pop.querySelector('[data-st-presets]');
-        const renderPresetRows = () => {
+        // User-controlled order (↑/↓, persisted via preset.order) — this is ALSO
+        // the order staged clones land in the mission (genStageSteps iterates
+        // presetReqs in row order). Presets saved before order existed sort by
+        // capture time.
+        const presetOrderCmp = (all) => (a, b) => {
+            const oa = all[a].order != null ? all[a].order : (all[a].savedAt || 0);
+            const ob = all[b].order != null ? all[b].order : (all[b].savedAt || 0);
+            return oa - ob || a.localeCompare(b);
+        };
+        const movePreset = (name, dir) => {
             const all = stagePresetsLoad();
-            const names = Object.keys(all).sort((a, b) => a.localeCompare(b));
+            const names = Object.keys(all).sort(presetOrderCmp(all));
+            const i = names.indexOf(name), j = i + dir;
+            if (i < 0 || j < 0 || j >= names.length) return;
+            const t = names[i]; names[i] = names[j]; names[j] = t;
+            names.forEach((n, k) => { all[n].order = (k + 1) * 10; });
+            stagePresetsSave(all);
+            renderPresetRows();
+        };
+        const renderPresetRows = () => {
+            // Keep typed counts across re-renders (reorder/capture/delete).
+            const keepCounts = {};
+            rowsEl.querySelectorAll('[data-st-pcount]').forEach(inp => { keepCounts[inp.getAttribute('data-st-pcount')] = inp.value; });
+            const all = stagePresetsLoad();
+            const names = Object.keys(all).sort(presetOrderCmp(all));
             if (!names.length) {
                 rowsEl.innerHTML = '<div style="font-size:10px;color:#789;">No saved steps yet — set up a step how you want (any type), then hit 📋 below and click that step.</div>';
                 return;
@@ -3782,6 +3806,8 @@
                 if (t === 5) ctrl = `<span style="font-size:11px;color:#9ab;">⏱</span><input type="number" min="0" max="600" value="${Math.round(Number(p.instr.value1) || 0)}" data-st-pval="${escapeHtml(n)}" title="Wait seconds" style="${smallNumCss}">`;
                 else if (t === 7) ctrl = `<select data-st-pcam="${escapeHtml(n)}" title="Camera" style="background:#0f1216;border:1px solid #456;color:#fff;border-radius:3px;padding:2px;font-size:11px;"><option value="0"${!p.instr.value1 ? ' selected' : ''}>RGB</option><option value="1"${p.instr.value1 ? ' selected' : ''}>Thermal</option></select>`;
                 return `<div style="display:flex;align-items:center;gap:5px;margin-bottom:4px;font-size:12px;">
+                    <span data-st-pup="${escapeHtml(n)}" title="Move up (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▲</span>
+                    <span data-st-pdn="${escapeHtml(n)}" title="Move down (staging order)" style="cursor:pointer;color:#9cf;font-size:11px;">▼</span>
                     <label style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(n)}">${escapeHtml(n)}</label>${ctrl}
                     <input type="number" min="0" max="50" value="0" data-st-pcount="${escapeHtml(n)}" title="How many to stage" style="${smallNumCss}">
                     <span data-st-pdel="${escapeHtml(n)}" title="Delete preset" style="cursor:pointer;color:#f66;font-size:12px;">🗑</span></div>`;
@@ -3801,6 +3827,12 @@
                 console.log(`${TAG} [stage] deleted step preset "${n}"`);
                 renderPresetRows();
             }; });
+            rowsEl.querySelectorAll('[data-st-pup]').forEach(u => { u.onclick = () => movePreset(u.getAttribute('data-st-pup'), -1); });
+            rowsEl.querySelectorAll('[data-st-pdn]').forEach(d => { d.onclick = () => movePreset(d.getAttribute('data-st-pdn'), 1); });
+            rowsEl.querySelectorAll('[data-st-pcount]').forEach(inp => {
+                const kept = keepCounts[inp.getAttribute('data-st-pcount')];
+                if (kept !== undefined) inp.value = kept;
+            });
         };
         renderPresetRows();
         const r = anchorBtn.getBoundingClientRect();
