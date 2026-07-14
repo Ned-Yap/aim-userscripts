@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.90
+// @version      1.91
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.90';
+    const SCRIPT_VERSION = '1.91';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -142,6 +142,12 @@
     // in-flight, but a large mission re-kicked every uncached point every tick).
     const elevKickAt = {};
     const ELEV_KICK_COOLDOWN = 15000;
+    // v1.91: card AGL refresh is demand-driven, not per-tick. cxAglPending is
+    // recomputed on every collapse pass (true while any card still shows the
+    // MSL placeholder because its ground elevation hasn't arrived) — the tick
+    // only re-renders while it's true, at a slow cadence, then goes idle.
+    let cxAglPending = false;
+    let liveTickN = 0;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const SUM_BTN_ID = 'aim-mb-sum-btn';
@@ -2382,35 +2388,41 @@
         const ctx = findMissionEditorCtx();
         if (!ctx) return;
         MB_PERF.ticks++;
+        liveTickN++;
         // (1) Keep MBT's cached mission in sync with the LIVE editor state, so the
         //     compact card + map badges reflect native step-edits / drags before a
         //     mission save (fixes "sidebar shows the old altitude"). Also re-syncs
         //     locations so the lat/lng badge match stops failing after a drag.
-        let changed = false;
+        //     v1.91: location-only changes (dragging a step) no longer touch the
+        //     CARDS — a moved step's AGL updates on the next value change / mission
+        //     reload, per user preference. Markers still restyle so badges follow.
+        let valChanged = false, locChanged = false;
         if (composerMission && Array.isArray(composerMission.instructions)) {
             const byId = {}; ctx.instrs.forEach(s => { if (s && s.id != null) byId[String(s.id)] = s; });
             const cmIds = {}; composerMission.instructions.forEach(ci => { cmIds[String(ci.id)] = true; });
             composerMission.instructions.forEach(ci => {
                 const live = byId[String(ci.id)]; if (!live) return;
-                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; changed = true; }
-                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; changed = true; }
+                if (typeof live.value1 === 'number' && ci.value1 !== live.value1) { ci.value1 = live.value1; valChanged = true; }
+                if (live.location && ci.location && (ci.location.lat !== live.location.lat || ci.location.lng !== live.location.lng)) { ci.location = { lat: live.location.lat, lng: live.location.lng }; locChanged = true; }
             });
             // ADD instructions present live but not in the cache (e.g. ➕ Stage
             // steps with client-only ids) so the compact view + N#/S# badges
             // recognize them before a save.
             ctx.instrs.forEach(live => {
-                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); changed = true; }
+                if (live && live.id != null && !cmIds[String(live.id)]) { composerMission.instructions.push(Object.assign({}, live)); valChanged = true; }
             });
         }
         // Native add/remove of a nav/snap (e.g. "Add Instruction → Navigate") shows
         // up as a live nav+snap COUNT change — force a restyle so the new marker gets
         // its N#/S# number immediately (numbering reads the live order now).
         const liveNS = ctx.instrs.filter(s => s && (s.type_name === 'navigate' || s.type_name === 'snapshot')).length;
-        if (liveNS !== composerLastNSCount) { composerLastNSCount = liveNS; changed = true; }
-        if (changed) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
-        // AGL view depends on DEM that loads async — re-render cards each tick so
-        // the "… MSL (loading)" placeholders flip to AGL once ground is cached.
-        else if (showAglInEditor && collapseEditorCards) { try { applyNativeEditorCollapse(); } catch (e) {} }
+        if (liveNS !== composerLastNSCount) { composerLastNSCount = liveNS; valChanged = true; }
+        if (valChanged) { try { applyNativeEditorCollapse(); } catch (e) {} try { composerStyleNativeMarkers(); } catch (e) {} }
+        else if (locChanged) { try { composerStyleNativeMarkers(); } catch (e) {} }
+        // AGL view depends on DEM that loads async — while any card still shows
+        // the MSL placeholder, re-render at a SLOW cadence (~2.8s) until all
+        // grounds are cached, then go fully idle (v1.91; was every tick).
+        else if (showAglInEditor && collapseEditorCards && cxAglPending && liveTickN % 4 === 0) { try { applyNativeEditorCollapse(); } catch (e) {} }
         // NOTE: auto-AGL is SAVE-ONLY now (applySnapAglToBodyStr) — we no longer
         // re-float snapshots on every move (it hammered the DEM endpoint into
         // 429s, and you only need it correct at save time).
@@ -4025,6 +4037,7 @@
         if (!showAglInEditor) return msl;
         const g = stepElevM(instr);
         if (g == null) { // ground not cached yet — kick a fetch, show MSL meanwhile
+            cxAglPending = true;
             if (instr.location && instr.location.lat != null) {
                 const k = elevCacheKey(Number(instr.location.lat), Number(instr.location.lng));
                 if (!elevKickAt[k] || Date.now() - elevKickAt[k] > ELEV_KICK_COOLDOWN) {
@@ -4117,6 +4130,7 @@
         if (!composerMission) { off(); return; } // wait for the mission to load
         ensureEditorCollapseStyle(true);
         const byId = {}; (composerMission.instructions || []).forEach(x => { byId[String(x.id)] = x; });
+        cxAglPending = false; // recomputed by compactAltDisplay during this pass
         cards.forEach(card => {
             const instr = byId[card.getAttribute('data-rfd-draggable-id')];
             if (!instr) return;

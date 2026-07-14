@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — Mission Bank editor: card refresh goes demand-driven — Mission Bank Tools v1.91 (dev/latest)
+
+Follow-up to the v1.90 fix (confirmed working). Dragging a step no longer re-renders the compact cards at all — a moved step's AGL updates on the next value change or mission reload instead of live (map badges still follow the marker). The "waiting for elevation" card refresh now runs every ~2.8 s only while some card still shows the MSL placeholder, then goes fully idle. Steady state with a mission open is now zero card work.
+
 ## 2026-07-14 — Mission Bank editor perf round 3: Collapse-cards isolated as the culprit; elevation memo + built-in profiler — Mission Bank Tools v1.90 (dev/latest)
 
 Live testing pinned the slowdown to **"Collapse scan-block cards in the native editor"** (OFF = normal). Two fixes on that path: per-step **ground-elevation memo** (the AGL view re-hit the shared elevation cache — whose miss path is a linear nearest-point scan — for every card every 700 ms) and a **15 s per-location cooldown** on display-driven elevation fetch kicks. Also adds a lightweight **perf reporter**: one `[AIM MB TOOLS] [perf]` console line per 5 s window showing observer/tick/collapse/marker pass counts + milliseconds + elevation lookups, so any remaining slowness attributes to an exact pathway.
