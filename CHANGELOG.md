@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — Mission Bank editor perf round 3: Collapse-cards isolated as the culprit; elevation memo + built-in profiler — Mission Bank Tools v1.90 (dev/latest)
+
+Live testing pinned the slowdown to **"Collapse scan-block cards in the native editor"** (OFF = normal). Two fixes on that path: per-step **ground-elevation memo** (the AGL view re-hit the shared elevation cache — whose miss path is a linear nearest-point scan — for every card every 700 ms) and a **15 s per-location cooldown** on display-driven elevation fetch kicks. Also adds a lightweight **perf reporter**: one `[AIM MB TOOLS] [perf]` console line per 5 s window showing observer/tick/collapse/marker pass counts + milliseconds + elevation lookups, so any remaining slowness attributes to an exact pathway.
+
 ## 2026-07-14 — Mission Bank editor perf round 2: the N#/S# badges themselves were the killer — Mission Bank Tools v1.89 (dev/latest)
 
 Live test of v1.88 pinned it precisely: the editor was fine until the N#/S# badges populated, then everything crawled. Two causes fixed: (1) the badge stylesheet used **CSS `:has()` selectors**, which make the browser re-check style invalidation across every marker on every DOM change — replaced with plain classes stamped directly on each marker (tradeoff: a marker Percepto re-creates shows its native icon for ~200 ms before re-tagging); (2) the 700 ms editor tick was **rewriting every card's inline styles every tick** even when nothing changed, forcing constant style recalc — card updates are now skipped entirely unless the displayed value actually changed.

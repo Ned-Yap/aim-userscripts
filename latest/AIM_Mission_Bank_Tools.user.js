@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.89
+// @version      1.90
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,12 +121,27 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.89';
+    const SCRIPT_VERSION = '1.90';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
     const dlog = (...args) => { if (DEBUG()) console.log(...args); };
     const TAG = '[AIM MB TOOLS]';
+    // v1.90 perf instrumentation — counters reported to console every 5s while
+    // the mission editor is doing work, so live slowness can be attributed to a
+    // specific pathway (observer passes / tick passes / card writes / node
+    // re-creation ping-pong / elevation lookups) instead of guessed at.
+    const MB_PERF = { obs: 0, ticks: 0, collapsePasses: 0, collapseMs: 0, cardWrites: 0, cxCreates: 0, markerPasses: 0, markerMs: 0, elevLook: 0, elevKicks: 0 };
+    // Per-step ground memo (ground elevation for a fixed lat/lng never changes):
+    // stops the compact-card tick from re-hitting the shared elevation cache —
+    // whose miss path is a getNearest LINEAR SCAN — for every card every 700ms.
+    const stepElevMemo = {};
+    const stepElevMissAt = {};
+    const STEP_ELEV_MISS_COOLDOWN = 5000;
+    // Per-location cooldown for display-driven fetch kicks (the queue dedupes
+    // in-flight, but a large mission re-kicked every uncached point every tick).
+    const elevKickAt = {};
+    const ELEV_KICK_COOLDOWN = 15000;
     const CONTROL_CHANNEL_NAME = 'AIM_CONTROL_CHANNEL';
     const CONTEXT = window === window.top ? 'TOP' : 'IFRAME';
     const SUM_BTN_ID = 'aim-mb-sum-btn';
@@ -2071,6 +2086,11 @@
 
     // Recolor + number Percepto's native nav/snap markers in place.
     function composerStyleNativeMarkers() {
+        const t0 = performance.now();
+        MB_PERF.markerPasses++;
+        try { composerStyleNativeMarkersCore(); } finally { MB_PERF.markerMs += performance.now() - t0; }
+    }
+    function composerStyleNativeMarkersCore() {
         if (!composerMapMode || CONTEXT !== 'IFRAME' || !composerMission) return;
         const map = getLeafletMap();
         if (!map || typeof map.eachLayer !== 'function') return;
@@ -2361,6 +2381,7 @@
         if (CONTEXT !== 'IFRAME' || !document.querySelector('.mission-edit__content')) return;
         const ctx = findMissionEditorCtx();
         if (!ctx) return;
+        MB_PERF.ticks++;
         // (1) Keep MBT's cached mission in sync with the LIVE editor state, so the
         //     compact card + map badges reflect native step-edits / drags before a
         //     mission save (fixes "sidebar shows the old altitude"). Also re-syncs
@@ -4004,7 +4025,14 @@
         if (!showAglInEditor) return msl;
         const g = stepElevM(instr);
         if (g == null) { // ground not cached yet — kick a fetch, show MSL meanwhile
-            if (instr.location && instr.location.lat != null) { try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {} }
+            if (instr.location && instr.location.lat != null) {
+                const k = elevCacheKey(Number(instr.location.lat), Number(instr.location.lng));
+                if (!elevKickAt[k] || Date.now() - elevKickAt[k] > ELEV_KICK_COOLDOWN) {
+                    elevKickAt[k] = Date.now();
+                    MB_PERF.elevKicks++;
+                    try { fetchElevation(instr.location.lat, instr.location.lng); } catch (e) {}
+                }
+            }
             return msl;
         }
         return `${Math.round((m - g) * 3.28084).toLocaleString()} ft AGL`;
@@ -4040,6 +4068,7 @@
             if (node) return;
         }
         card.__aimCxStamp = stamp;
+        MB_PERF.cardWrites++;
 
         // Color the native title name (Navigate=blue, Snapshot=pink).
         const nameEl = titleEl.querySelector('.mission-instruction-item__title__name');
@@ -4048,7 +4077,7 @@
         if (renameText != null) {
             card.classList.add('aim-mb-compact-renamed');
             let r = titleEl.querySelector('.aim-mb-cx-name');
-            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); }
+            if (!r) { r = document.createElement('span'); r.className = 'aim-mb-cx-name'; titleEl.appendChild(r); MB_PERF.cxCreates++; }
             if (r.textContent !== renameText) r.textContent = renameText;
             r.style.color = renameColor;
             const v = header.querySelector('.aim-mb-cx-val'); if (v) v.remove();
@@ -4059,6 +4088,7 @@
                 v = document.createElement('div'); v.className = 'aim-mb-cx-val';
                 const opts = header.querySelector('.mission-instruction-item__options');
                 if (opts) header.insertBefore(v, opts); else header.appendChild(v);
+                MB_PERF.cxCreates++;
             }
             if (v.textContent !== (valText || '')) v.textContent = valText || '';
             v.style.color = valColor;
@@ -4071,6 +4101,11 @@
     // when it isn't loaded yet, leave cards full (the interval re-runs once the
     // map-badge path has loaded the mission). Keeps native drag-drop intact.
     function applyNativeEditorCollapse() {
+        const t0 = performance.now();
+        MB_PERF.collapsePasses++;
+        try { applyNativeEditorCollapseCore(); } finally { MB_PERF.collapseMs += performance.now() - t0; }
+    }
+    function applyNativeEditorCollapseCore() {
         if (CONTEXT !== 'IFRAME') return;
         const cards = document.querySelectorAll('[data-rfd-draggable-id]');
         const off = () => {
@@ -7890,8 +7925,16 @@ ${snapPlacemarks}
     // Ground elevation (m) for a step's GPS, or null if no GPS / not cached yet.
     function stepElevM(s) {
         if (!s || !s.location || s.location.lat == null) return null;
-        const e = getElevationFromCache(Number(s.location.lat), Number(s.location.lng));
-        return (e == null) ? null : e;
+        const lat = Number(s.location.lat), lng = Number(s.location.lng);
+        const key = elevCacheKey(lat, lng);
+        if (stepElevMemo[key] != null) return stepElevMemo[key];
+        const now = Date.now();
+        if (stepElevMissAt[key] && now - stepElevMissAt[key] < STEP_ELEV_MISS_COOLDOWN) return null;
+        MB_PERF.elevLook++;
+        const e = getElevationFromCache(lat, lng);
+        if (e == null) { stepElevMissAt[key] = now; return null; }
+        stepElevMemo[key] = e;
+        return e;
     }
 
     // Is this step one of the redundant "scan-block" toggle/wait steps that
@@ -8651,6 +8694,7 @@ ${snapPlacemarks}
                 // from the tile pane; nothing we style lives there, so a batch
                 // that is ONLY tile churn shouldn't cost a collapse+restyle pass.
                 if (recs.length && recs.every(r => r.target && r.target.closest && r.target.closest('.leaflet-tile-pane'))) return;
+                MB_PERF.obs++;
                 if (collapseDebounce) return;
                 collapseDebounce = setTimeout(() => {
                     collapseDebounce = null;
@@ -8663,6 +8707,14 @@ ${snapPlacemarks}
                 }, 150);
             });
             try { editorObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) {}
+            // v1.90 perf reporter — one console line per 5s window in which the
+            // editor machinery did anything, so slowness attributes to a pathway.
+            setInterval(() => {
+                const p = MB_PERF;
+                if (!p.obs && !p.ticks && !p.collapsePasses && !p.markerPasses && !p.elevLook && !p.elevKicks) return;
+                console.log(`${TAG} [perf] 5s — obs:${p.obs} ticks:${p.ticks} | collapse ${p.collapsePasses}× ${p.collapseMs.toFixed(0)}ms writes:${p.cardWrites} creates:${p.cxCreates} | markers ${p.markerPasses}× ${p.markerMs.toFixed(0)}ms | elev looks:${p.elevLook} kicks:${p.elevKicks}`);
+                Object.keys(p).forEach(k => { p[k] = 0; });
+            }, 5000);
             installRightClickHandler();
             // READ-ONLY probe: logs + diffs each mission save vs the cached
             // original (never modifies the save). Tells us whether the form
