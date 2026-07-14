@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: armed capture now fires on the step-edit form itself — Mission Bank Tools v1.94 (dev/latest)
+
+v1.93's armed capture compared against Percepto's focused-step id, which stays stuck on the last step you edited — so re-capturing that same step (the usual case: you just configured it) never fired. The arm now watches for the step-edit form actually opening and captures whatever step it shows, same step or not; a card click that moves focus to a different step still captures too. Armed mode also logs a `[stage] armed…` diagnostic line every 3 s so a stuck capture is explainable from the console.
+
 ## 2026-07-14 — ➕ Stage: armed capture fixes the disappearing-button catch-22 — Mission Bank Tools v1.93 (dev/latest)
 
 Opening a step's edit form swaps the sidebar, which unmounts the ➕ Stage row — so v1.92's "open the step, then capture" flow was impossible. Now **📋 Capture a step as preset** arms instead: the popup closes into a floating chip, you click the step you want, and it captures automatically the moment its edit form opens (chip click cancels; 60 s timeout). If a form is already open, 📋 still captures immediately. The button row also re-injects instantly (not after 4 s) when you return to the step list.

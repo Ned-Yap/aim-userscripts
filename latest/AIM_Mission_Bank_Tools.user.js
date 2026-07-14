@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.93
+// @version      1.94
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.93';
+    const SCRIPT_VERSION = '1.94';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3574,13 +3574,34 @@
         document.body.appendChild(chip);
         stageArmChip = chip;
         const t0 = Date.now();
+        let formSince = 0, lastDiag = 0;
         stageArmPoll = setInterval(() => {
-            if (Date.now() - t0 > 60000) { stageCancelArm(); showToast('Capture timed out.', '#888', 2500); return; }
+            const now = Date.now();
+            if (now - t0 > 60000) { stageCancelArm(); showToast('Capture timed out.', '#888', 2500); return; }
             let fid = null;
             try { fid = findFocusedInstrId(); } catch (e) {}
-            if (fid == null || String(fid) === String(baseline)) return;
-            stageCancelArm(true);
-            if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+            const formOpen = !!document.querySelector('.edit-instruction');
+            if (formOpen && !formSince) formSince = now;
+            if (!formOpen) formSince = 0;
+            if (now - lastDiag > 3000) { lastDiag = now; console.log(`${TAG} [stage] armed — formOpen:${formOpen} fid:${fid} baseline:${baseline}`); }
+            // Trigger A: a step edit form MOUNTED (.edit-instruction). Fires even
+            // when re-opening the step focusedInstructionId was already stuck on
+            // (the v1.93 miss: baseline == the step you just finished editing).
+            // Give React ~1.2s after mount to publish the id before failing over.
+            if (formOpen) {
+                if (fid == null && now - formSince < 1200) return;
+                if (fid == null) fid = getOpenStepId();
+                if (fid == null) { stageCancelArm(); showToast('Capture failed — could not identify the open step (see console).', '#ff5252', 5000); return; }
+                stageCancelArm(true);
+                if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+                return;
+            }
+            // Trigger B: focus moved to a DIFFERENT step than at arm time (card
+            // click that highlights without opening a form).
+            if (fid != null && String(fid) !== String(baseline)) {
+                stageCancelArm(true);
+                if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+            }
         }, 300);
     }
 
@@ -3775,7 +3796,13 @@
         pop.querySelector('[data-st-cap]').onclick = () => {
             let fid = null;
             try { fid = findFocusedInstrId(); } catch (e) {}
-            if (fid != null) { if (stageCaptureOpenStep(fid)) renderPresetRows(); return; }
+            // Direct capture ONLY when a step edit form is actually mounted —
+            // focusedInstructionId can be STALE (still the last step you edited)
+            // with no form open, which must arm, not capture the stale step.
+            if (fid != null && document.querySelector('.edit-instruction')) {
+                if (stageCaptureOpenStep(fid)) renderPresetRows();
+                return;
+            }
             // No step form open → arm: close the popup, capture the next step opened.
             close();
             stageArmCapture();
