@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — ➕ Stage: armed capture fixes the disappearing-button catch-22 — Mission Bank Tools v1.93 (dev/latest)
+
+Opening a step's edit form swaps the sidebar, which unmounts the ➕ Stage row — so v1.92's "open the step, then capture" flow was impossible. Now **📋 Capture a step as preset** arms instead: the popup closes into a floating chip, you click the step you want, and it captures automatically the moment its edit form opens (chip click cancels; 60 s timeout). If a form is already open, 📋 still captures immediately. The button row also re-injects instantly (not after 4 s) when you return to the step list.
+
 ## 2026-07-14 — ➕ Stage: custom step presets (any step type, persistent) — Mission Bank Tools v1.92 (dev/latest)
 
 The ➕ Stage popup can now stage **any step type**, not just Navigates/Snapshots, via saved presets: open a step in the editor (any type — Wait, Camera Type, GEM Mode, Camera Pitch, Flag Pole, even maneuvers), set it up how you want, then hit **📋 Save open step as preset** and name it. Presets are permanent (survive reloads/missions/sites) and appear in the popup with a count field each — staged clones carry the preset's exact settings. **Wait** presets get an inline seconds field and **Camera Type** presets an RGB/Thermal picker right in the popup; edits persist to the preset. The popup also remembers your last Navigate/Snapshot counts and scan-wrap choice. New types need one native add+configure, once ever — after capture they're one click forever.

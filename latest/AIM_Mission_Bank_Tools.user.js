@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.92
+// @version      1.93
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.92';
+    const SCRIPT_VERSION = '1.93';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -3530,8 +3530,8 @@
         if (t === 24) return Number(s.value1) === 1 ? 'GEM On' : 'GEM Off';
         return s.type_name ? s.type_name : `type ${t}`;
     }
-    function stageCaptureOpenStep() {
-        const openId = getOpenStepId();
+    function stageCaptureOpenStep(idOverride) {
+        const openId = (idOverride != null) ? idOverride : getOpenStepId();
         const ctx = findMissionAppCtx();
         let instrs = (ctx && ctx.currentApp && ctx.currentApp.instructions) || [];
         if (!instrs.length) { try { const lc = findMissionEditorCtx(); if (lc && Array.isArray(lc.instrs)) instrs = lc.instrs; } catch (e) {} }
@@ -3549,6 +3549,39 @@
         console.log(`${TAG} [stage] captured step preset "${name}" (type ${tplTypeNum(instr)})`);
         showToast(`Saved step preset "${name}".`, '#5fff5f', 3000);
         return true;
+    }
+    // ── Armed capture: opening a step's edit form SWAPS the sidebar (killing
+    // the ➕ Stage row) and the click closes the popup — so capturing "the open
+    // step" directly is only possible if a form is already open. Arming solves
+    // the catch-22: 📋 with no form open closes the popup into a floating chip
+    // and captures WHICHEVER step you open next (focusedInstructionId change).
+    let stageArmPoll = null, stageArmChip = null;
+    function stageCancelArm(silent) {
+        if (stageArmPoll) { clearInterval(stageArmPoll); stageArmPoll = null; }
+        if (stageArmChip) { stageArmChip.remove(); stageArmChip = null; }
+        if (!silent) console.log(`${TAG} [stage] capture arm cleared`);
+    }
+    function stageArmCapture() {
+        stageCancelArm(true);
+        let baseline = null;
+        try { baseline = findFocusedInstrId(); } catch (e) {}
+        const chip = document.createElement('div');
+        chip.textContent = '📋 Capture armed — click the step you want to save (opens its edit form). Click here to cancel.';
+        chip.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:2147483600;' +
+            'background:rgba(150,180,255,0.95);color:#06223a;font:700 12px/1.3 "Lato",sans-serif;' +
+            'padding:6px 14px;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,0.5);cursor:pointer;max-width:80vw;';
+        chip.onclick = () => { stageCancelArm(); showToast('Capture cancelled.', '#888', 2000); };
+        document.body.appendChild(chip);
+        stageArmChip = chip;
+        const t0 = Date.now();
+        stageArmPoll = setInterval(() => {
+            if (Date.now() - t0 > 60000) { stageCancelArm(); showToast('Capture timed out.', '#888', 2500); return; }
+            let fid = null;
+            try { fid = findFocusedInstrId(); } catch (e) {}
+            if (fid == null || String(fid) === String(baseline)) return;
+            stageCancelArm(true);
+            if (stageCaptureOpenStep(fid)) showToast('Preset saved — reopen ➕ Stage to use it.', '#5fff5f', 4000);
+        }, 300);
     }
 
     // ── Stage steps: add N Navigates + M Snapshots to the OPEN mission, placed
@@ -3691,7 +3724,7 @@
             <div style="font-size:10px;color:#789;margin-bottom:10px;">Blank = end. e.g. 6 → new nav becomes N6, the rest shift down.</div>
             <label style="display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:10px;cursor:pointer;"><input type="checkbox" data-st-scan ${lastScan ? 'checked' : ''}> Inspection scan wrap per snapshot</label>
             <div data-st-presets style="border-top:1px solid #34404e;padding-top:6px;margin-bottom:8px;"></div>
-            <button class="aim-mb-tbtn" data-st-cap style="padding:4px 8px;font-size:11px;margin-bottom:10px;width:100%;" title="Captures the step whose edit form is open (any type) with its current settings">📋 Save open step as preset</button>
+            <button class="aim-mb-tbtn" data-st-cap style="padding:4px 8px;font-size:11px;margin-bottom:10px;width:100%;" title="If a step's edit form is open, captures it now. Otherwise arms capture: click the step you want and it saves automatically when its form opens.">📋 Capture a step as preset</button>
             <div style="display:flex;gap:6px;justify-content:flex-end;">
                 <button class="aim-mb-tbtn" data-st-cancel style="padding:5px 10px;">Cancel</button>
                 <button data-st-add style="padding:5px 12px;background:#9cf;border:none;color:#06223a;border-radius:6px;cursor:pointer;font-weight:800;">Stage</button>
@@ -3703,7 +3736,7 @@
             const all = stagePresetsLoad();
             const names = Object.keys(all).sort((a, b) => a.localeCompare(b));
             if (!names.length) {
-                rowsEl.innerHTML = '<div style="font-size:10px;color:#789;">No saved steps yet — open a step of any type in the editor (set it up how you want), then 📋 capture it below.</div>';
+                rowsEl.innerHTML = '<div style="font-size:10px;color:#789;">No saved steps yet — set up a step how you want (any type), then hit 📋 below and click that step.</div>';
                 return;
             }
             rowsEl.innerHTML = '<div style="font-size:10px;font-weight:800;color:#9cf;margin-bottom:4px;">MY STEPS</div>' + names.map(n => {
@@ -3739,7 +3772,14 @@
         const close = () => { pop.remove(); genStagePopEl = null; document.removeEventListener('mousedown', outside, true); };
         const outside = e => { if (genStagePopEl && !pop.contains(e.target) && e.target !== anchorBtn) close(); };
         pop.querySelector('[data-st-cancel]').onclick = close;
-        pop.querySelector('[data-st-cap]').onclick = () => { if (stageCaptureOpenStep()) renderPresetRows(); };
+        pop.querySelector('[data-st-cap]').onclick = () => {
+            let fid = null;
+            try { fid = findFocusedInstrId(); } catch (e) {}
+            if (fid != null) { if (stageCaptureOpenStep(fid)) renderPresetRows(); return; }
+            // No step form open → arm: close the popup, capture the next step opened.
+            close();
+            stageArmCapture();
+        };
         pop.querySelector('[data-st-add]').onclick = () => {
             const nav = Math.max(0, parseInt(pop.querySelector('[data-st-nav]').value, 10) || 0);
             const snap = Math.max(0, parseInt(pop.querySelector('[data-st-snap]').value, 10) || 0);
@@ -8824,6 +8864,10 @@ ${snapPlacemarks}
                     collapseDebounce = null;
                     try { applyNativeEditorCollapse(); } catch (e) {}
                     try { injectEditorCollapseButton(); } catch (e) {}
+                    // Re-inject the composer button row promptly — Percepto swaps
+                    // the sidebar (step edit form / Add Instruction list) and
+                    // unmounts the row; the 4s interval read as "Stage vanished".
+                    try { injectComposerButton(); } catch (e) {}
                     // Re-stamp the N#/S# marker badges too — Percepto re-renders a
                     // step's marker after a per-step save, wiping our number until
                     // the next style pass (the "S1 vanished but the circle stayed").
@@ -8855,6 +8899,7 @@ ${snapPlacemarks}
                 // SAFETY: disarm snapshot auto-AGL on any navigation, so it never
                 // stays armed when you (re)enter the Mission Bank.
                 if (autoSnapAglEnabled) { autoSnapAglEnabled = false; try { updateAutoSnapAglUI(); } catch (e) {} }
+                try { stageCancelArm(true); } catch (e) {}
                 Object.keys(liveSnapLastLoc).forEach(k => delete liveSnapLastLoc[k]); // re-baseline next mission
                 runSumInjection();
             });
