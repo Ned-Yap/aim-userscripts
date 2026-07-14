@@ -6,6 +6,10 @@ Newest entries on top. Each entry calls out the script + version + a one-line su
 
 ---
 
+## 2026-07-14 — Mission Bank editor perf: large missions no longer crawl on open/pan/zoom — Mission Bank Tools v1.88 (dev/latest)
+
+Opening a large mission ran the N#/S# marker restyle (React fiber walk + full map-layer sweep) **once per marker added** — O(N²) at open, and again on marker churn during pan/zoom — and the editor's DOM observer burned passes on pure map-tile churn. Three changes: (1) the map restyle is now **debounced** to one trailing pass 200 ms after a burst settles (visually identical); (2) mutation batches that are only tile churn are skipped; (3) new Control Panel toggle **"N#/S# map step badges + Click-to-Add (OFF = perf test)"** (default ON) — OFF fully disables the marker-styling path (badges, colors, Click-to-Add, M2 order editor revert to native) for perf isolation on big missions.
+
 ## 2026-07-11 — Advanced Draw: ↩ Unmerge no longer eats earlier pads — Asset Inspector v4.164.3 (PROD) / v4.182 (dev/latest)
 
 **PROD hotfix — same fix as v4.182 below, applied to the prod script so coworkers get it on their next Tampermonkey update.** If you use ✦ Advanced Draw: before this fix, pressing ↩ Unmerge after more than one 🔗 Merge could silently discard every pad from the earlier merges. Update ASAP; until then, avoid ↩ Unmerge if you've pressed 🔗 Merge more than once in a session.

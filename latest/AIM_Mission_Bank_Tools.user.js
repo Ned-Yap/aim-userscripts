@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Latest - AIM Mission Bank Tools
 // @namespace    http://tampermonkey.net/
-// @version      1.87
+// @version      1.88
 // @updateURL    https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @downloadURL  https://raw.githubusercontent.com/Ned-Yap/aim-userscripts/main/latest/AIM_Mission_Bank_Tools.user.js
 // @description  Mission Bank Tools — SUM button opens an all-missions Summary panel with per-mission stats, sortable columns, drill-down detail view, CSV/TSV/JSON/HTML export. First feature: Mission Summary panel.
@@ -121,7 +121,7 @@
     } catch (e) {}
 
     const SCRIPT_ID = 'aim-mission-bank-tools';
-    const SCRIPT_VERSION = '1.87';
+    const SCRIPT_VERSION = '1.88';
     // Debug flag — set window.__AIM_MB_DEBUG = true in DevTools to enable
     // verbose [edit], [queue], [fiber] logs. Off by default for speed.
     const DEBUG = () => !!(window.__AIM_MB_DEBUG || (window.top && window.top.__AIM_MB_DEBUG));
@@ -298,6 +298,16 @@
                             try { updateEditorCollapseBtn(); } catch (e) {}
                         }
                     }
+                } else if (msg.toggleId === 'map-step-badges') {
+                    const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
+                    if (v !== composerMapMode) {
+                        composerMapMode = v;
+                        gmSet(CACHE_KEY_MAP_BADGES, composerMapMode);
+                        if (CONTEXT === 'IFRAME') {
+                            if (composerMapMode) { try { composerEnsureMapModeIfNeeded(); } catch (e) {} }
+                            else { try { composerBadgesTeardown(); } catch (e) {} }
+                        }
+                    }
                 } else if (msg.toggleId === 'hide-flagpole-overlay') {
                     const v = !!(msg.value !== undefined ? msg.value : msg.enabled);
                     if (v !== hideFlagPoleOverlay) {
@@ -349,6 +359,7 @@
                 { id: 'master', label: 'Enable', type: 'boolean', default: true, master: true },
                 { id: 'hide-scan-icons', label: 'Hide scan-block map icons (GEM/Thermal/Wait)', type: 'boolean', default: true },
                 { id: 'collapse-editor-cards', label: 'Collapse scan-block cards in the native editor', type: 'boolean', default: true },
+                { id: 'map-step-badges', label: 'N#/S# map step badges + Click-to-Add (OFF = perf test)', type: 'boolean', default: true },
                 { id: 'hide-flagpole-overlay', label: 'Hide Flag Pole scan overlay (blue cone)', type: 'boolean', default: false },
                 { id: 'default-snap-agl', label: 'Default snapshot AGL (auto-AGL toggle)', type: 'number', min: -50, max: 500, step: 1, default: 10, unit: 'ft' },
                 { id: 'colors-header', label: 'Step colors (editor cards + map badges)', type: 'header' },
@@ -1561,10 +1572,27 @@
     // Map order badges: restyle Percepto's OWN navigate/snapshot markers IN
     // PLACE — recolor (nav=blue / snap=pink) + stamp the N#/S# number on each,
     // same spot+size. Left-click (M1) stays native (opens the step); right-click
-    // (M2) opens our order editor. Always on; no toggle button.
-    let composerMapMode = true;
+    // (M2) opens our order editor. CP toggle 'map-step-badges' (default ON);
+    // OFF also disables Click-to-Add + the M2 order editor (they ride the same
+    // marker tagging) — primarily a perf isolation switch for large missions.
+    const CACHE_KEY_MAP_BADGES = 'aim-mb-map-step-badges';
+    let composerMapMode = gmGet(CACHE_KEY_MAP_BADGES, true);
     let composerMapEventsBound = false;
     let loggedNoMarkers = false;
+    // Full visual + interaction teardown for the badges toggle: drop the badge
+    // CSS (colors/numbers revert to native icons) and untag every marker so the
+    // window-capture M1/M2 handlers stop matching them.
+    function composerBadgesTeardown() {
+        try {
+            const st = document.getElementById('aim-mb-badge-css');
+            if (st) st.remove();
+            document.querySelectorAll('[data-aim-id]').forEach(el => {
+                el.removeAttribute('data-aim-id');
+                el.removeAttribute('data-aim-kind');
+                el.removeAttribute('data-aim-num');
+            });
+        } catch (e) { console.warn(`${TAG} [map-badges] teardown failed`, e); }
+    }
 
     // ONE compact button row (Compact-view toggle + a small 🔄 Resync), side by
     // side, inserted right under "Add instruction" — keeps the top of the
@@ -2024,7 +2052,19 @@
         if (composerMapEventsBound) return;
         const map = getLeafletMap();
         if (!map || typeof map.on !== 'function') return;
-        map.on('zoomend moveend layeradd', () => { try { composerStyleNativeMarkers(); } catch (e) {} });
+        // DEBOUNCED (v1.88): 'layeradd' fires once PER MARKER — opening a large
+        // mission added N markers and ran a full restyle (fiber walk + eachLayer
+        // over every layer) N times back-to-back, O(N²) at open and again on
+        // every pan/zoom marker churn. One trailing pass 200ms after the burst
+        // settles is visually identical.
+        let restyleT = null;
+        map.on('zoomend moveend layeradd', () => {
+            if (restyleT) return;
+            restyleT = setTimeout(() => {
+                restyleT = null;
+                try { composerStyleNativeMarkers(); } catch (e) {}
+            }, 200);
+        });
         composerMapEventsBound = true;
     }
 
@@ -8578,7 +8618,11 @@ ${snapPlacemarks}
             // list mounts / virtualizes on scroll (the 4s interval is too slow
             // to feel responsive). Debounced so a burst of mutations = 1 pass.
             let collapseDebounce = null;
-            const editorObserver = new MutationObserver(() => {
+            const editorObserver = new MutationObserver((recs) => {
+                // Tile-churn guard (v1.88): pan/zoom floods childList mutations
+                // from the tile pane; nothing we style lives there, so a batch
+                // that is ONLY tile churn shouldn't cost a collapse+restyle pass.
+                if (recs.length && recs.every(r => r.target && r.target.closest && r.target.closest('.leaflet-tile-pane'))) return;
                 if (collapseDebounce) return;
                 collapseDebounce = setTimeout(() => {
                     collapseDebounce = null;
